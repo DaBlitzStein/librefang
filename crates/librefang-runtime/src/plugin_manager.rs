@@ -3916,9 +3916,13 @@ after_turn = "hooks/after_turn.py"
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("hooks/ingest.py".to_string()),
                 after_turn: Some("hooks/after_turn.py".to_string()), // missing
-                runtime: None,
+                ..Default::default()
             },
             requirements: None,
+            env: Default::default(),
+            integrity: Default::default(),
+            librefang_min_version: None,
+            plugin_depends: Default::default(),
         };
 
         assert!(!check_hooks_exist(&plugin_dir, &manifest));
@@ -3935,10 +3939,13 @@ after_turn = "hooks/after_turn.py"
             author: None,
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("../../etc/passwd".to_string()),
-                after_turn: None,
-                runtime: None,
+                ..Default::default()
             },
             requirements: None,
+            env: Default::default(),
+            integrity: Default::default(),
+            librefang_min_version: None,
+            plugin_depends: Default::default(),
         };
         assert!(!check_hooks_exist(&plugin_dir, &manifest_escape));
     }

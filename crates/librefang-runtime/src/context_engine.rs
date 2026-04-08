@@ -4230,7 +4230,7 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
 
         let traces = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let hook_schemas = std::collections::HashMap::new();
-        let output = ScriptableContextEngine::run_hook(
+        let (output, _elapsed) = ScriptableContextEngine::run_hook(
             "ingest",
             script_path.to_str().unwrap(),
             crate::plugin_runtime::PluginRuntime::Python,
@@ -4249,7 +4249,9 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
             &hook_schemas,
             None,
             None,
-            "",
+            "test",
+            "test-correlation-id",
+            false,
         )
         .await
         .unwrap();
