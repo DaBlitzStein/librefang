@@ -293,7 +293,8 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     let status = if db_ok { "ok" } else { "degraded" };
 
-    let embedding_ok = state.kernel.embedding().is_some();
+    let fts_only = state.kernel.config_ref().memory.fts_only == Some(true);
+    let embedding_ok = state.kernel.embedding().is_some() || fts_only;
 
     Json(serde_json::json!({
         "status": status,

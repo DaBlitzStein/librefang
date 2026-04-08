@@ -624,7 +624,10 @@ pub fn run_doctor() -> DoctorReport {
         .map(|info| {
             let runtime_kind = PluginRuntime::from_tag(info.manifest.hooks.runtime.as_deref());
             let tag = runtime_kind.label();
-            let (available, hint) = availability.get(tag.as_ref()).copied().unwrap_or((false, ""));
+            let (available, hint) = availability
+                .get(tag.as_ref())
+                .copied()
+                .unwrap_or((false, ""));
             PluginDoctorEntry {
                 name: info.manifest.name,
                 runtime: tag.to_string(),
@@ -1030,7 +1033,7 @@ pub fn scaffold_plugin(
 
     // Each runtime declares its own hook filenames + template body so the
     // manifest + files stay in sync.
-    let files = hook_templates(runtime_kind);
+    let files = hook_templates(runtime_kind.clone());
     let (ingest_file, ingest_body) = files.ingest;
     let (after_file, after_body) = files.after_turn;
     let (assemble_file, assemble_body) = files.assemble;
@@ -1157,7 +1160,7 @@ after_turn = "hooks/{after_file}"
 
     info!(
         plugin = name,
-        runtime = runtime_tag,
+        runtime = runtime_tag.as_ref(),
         "Scaffolded new plugin"
     );
     Ok(plugin_dir)
@@ -2611,18 +2614,29 @@ pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
         return Ok("No requirements.txt found — nothing to install".to_string());
     }
 
+    // When running inside a virtualenv, --user is forbidden (PEP 668).
+    // Detect venv via VIRTUAL_ENV env var and omit --user accordingly.
+    let in_venv = std::env::var("VIRTUAL_ENV").is_ok();
+    let pip_cmd = if in_venv { "pip" } else { "pip3" };
+    let mut args = vec!["install"];
+    if !in_venv {
+        args.push("--user");
+    }
+    args.push("-r");
+
     warn!(
         plugin = plugin_name,
         requirements = %requirements.display(),
-        "Installing Python requirements with pip3 --user"
+        venv = in_venv,
+        "Installing Python requirements"
     );
 
-    let output = tokio::process::Command::new("pip3")
-        .args(["install", "--user", "-r"])
+    let output = tokio::process::Command::new(pip_cmd)
+        .args(&args)
         .arg(&requirements)
         .output()
         .await
-        .map_err(|e| format!("Failed to run pip3: {e}"))?;
+        .map_err(|e| format!("Failed to run {pip_cmd}: {e}"))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
