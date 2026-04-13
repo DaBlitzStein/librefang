@@ -182,9 +182,10 @@ fn safe_trim_messages(
     session_messages: &mut Vec<Message>,
     agent_name: &str,
     user_message: &str,
-) {
+) -> crate::session_repair::RepairStats {
     // Trim the persistent session messages first so the truncated version is
     // saved back to the database, preventing reload-OOM on next boot.
+    let mut trim_repair_stats = crate::session_repair::RepairStats::default();
     if session_messages.len() > MAX_HISTORY_MESSAGES {
         let desired = session_messages.len() - MAX_HISTORY_MESSAGES;
         let trim_point = crate::session_repair::find_safe_trim_point(session_messages, desired)
@@ -199,10 +200,17 @@ fn safe_trim_messages(
         );
 
         session_messages.drain(..trim_point);
+
+        // Re-repair the persistent session after drain: the new head may have
+        // orphaned ToolResult or dangling ToolUse blocks.
+        let (repaired, stats) =
+            crate::session_repair::validate_and_repair_with_stats(session_messages);
+        *session_messages = repaired;
+        trim_repair_stats = stats;
     }
 
     if messages.len() <= MAX_HISTORY_MESSAGES {
-        return;
+        return trim_repair_stats;
     }
 
     let desired_trim = messages.len() - MAX_HISTORY_MESSAGES;
@@ -242,6 +250,7 @@ fn safe_trim_messages(
         *messages = system_msgs;
         messages.push(Message::user(user_message));
     }
+    trim_repair_stats
 }
 
 /// Strip base64 data from image blocks in session messages that the LLM has
@@ -1713,7 +1722,7 @@ fn prepare_llm_messages(
     // this pass, every load of the session would re-pay the same repair cost
     // and `Session repair applied fixes` would fire indefinitely (tracer
     // evidence on the RPi: five identical repair log lines in ten minutes).
-    let (repaired_persistent, persistent_repair_stats) =
+    let (repaired_persistent, mut persistent_repair_stats) =
         crate::session_repair::validate_and_repair_with_stats(&session.messages);
     if persistent_repair_stats != crate::session_repair::RepairStats::default() {
         session.messages = repaired_persistent;
@@ -1747,12 +1756,23 @@ fn prepare_llm_messages(
         );
     }
 
-    safe_trim_messages(
+    let trim_stats = safe_trim_messages(
         &mut messages,
         &mut session.messages,
         &manifest.name,
         user_message,
     );
+    // Merge post-trim repair stats so the persist-site log reflects any
+    // orphaned blocks fixed after the session drain.
+    persistent_repair_stats.orphaned_results_removed += trim_stats.orphaned_results_removed;
+    persistent_repair_stats.empty_messages_removed += trim_stats.empty_messages_removed;
+    persistent_repair_stats.messages_merged += trim_stats.messages_merged;
+    persistent_repair_stats.results_reordered += trim_stats.results_reordered;
+    persistent_repair_stats.synthetic_results_inserted += trim_stats.synthetic_results_inserted;
+    persistent_repair_stats.duplicates_removed += trim_stats.duplicates_removed;
+    persistent_repair_stats.positional_synthetic_inserted +=
+        trim_stats.positional_synthetic_inserted;
+    persistent_repair_stats.misplaced_results_ignored += trim_stats.misplaced_results_ignored;
     let new_messages_start = session.messages.len().saturating_sub(1);
     strip_prior_image_data(&mut messages);
     strip_prior_image_data(&mut session.messages);
@@ -5048,7 +5068,7 @@ mod tests {
         assert!(session_messages.len() > MAX_HISTORY_MESSAGES);
 
         let mut llm_messages = session_messages.clone();
-        safe_trim_messages(
+        let _ = safe_trim_messages(
             &mut llm_messages,
             &mut session_messages,
             "test-agent",

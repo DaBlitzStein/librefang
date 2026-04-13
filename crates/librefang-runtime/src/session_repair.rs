@@ -206,21 +206,35 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
 /// For each user message containing ToolResults, checks if the previous message is
 /// the correct assistant message. If not, moves the ToolResult to the correct position.
 fn reorder_tool_results(messages: &mut Vec<Message>) -> usize {
-    // Build map: tool_use_id → index of the assistant message containing it
-    let mut tool_use_index: HashMap<String, usize> = HashMap::new();
+    // Build map: tool_use_id → index of the assistant message containing it.
+    // Ids that appear in more than one assistant turn are collision ids
+    // (e.g. Moonshot/Kimi reuses per-completion counters like `memory_store:6`
+    // across turns). Reordering by a collision id would move a result from one
+    // turn to follow a different turn's ToolUse, corrupting the session.
+    // Those ids are excluded from the index so Phase 2b leaves their results
+    // in place (the existing `tool_use_index.get(id)` → None branch).
+    // Phase 2d uses an identical guard pattern (see `deduplicate_tool_results`).
+    let mut tool_use_turn_count: HashMap<String, usize> = HashMap::new();
+    let mut first_idx: HashMap<String, usize> = HashMap::new();
     for (idx, msg) in messages.iter().enumerate() {
         if msg.role == Role::Assistant {
             if let MessageContent::Blocks(blocks) = &msg.content {
                 for block in blocks {
                     if let ContentBlock::ToolUse { id, .. } = block {
-                        // Use first occurrence: duplicate ids across turns should
-                        // map to their earliest assistant position.
-                        tool_use_index.entry(id.clone()).or_insert(idx);
+                        *tool_use_turn_count.entry(id.clone()).or_insert(0) += 1;
+                        first_idx.entry(id.clone()).or_insert(idx);
                     }
                 }
             }
         }
     }
+    // Only ids with exactly ONE producing assistant message are safe to reorder by.
+    // Colliding ids (driver reuse across turns, e.g. Moonshot/Kimi) stay where
+    // Phase 2a1 placed them.
+    let tool_use_index: HashMap<String, usize> = first_idx
+        .into_iter()
+        .filter(|(id, _)| tool_use_turn_count.get(id).copied().unwrap_or(0) == 1)
+        .collect();
 
     // Collect misplaced ToolResult blocks that need to move.
     // Track (msg_idx, tool_use_id, block, target_assistant_idx).
@@ -2237,5 +2251,165 @@ mod tests {
             "Plain text user messages should still merge"
         );
         assert_eq!(stats.messages_merged, 1);
+    }
+
+    /// Regression test for the Phase 2b global-index bug with reused tool_call_ids.
+    ///
+    /// When a driver (e.g. Moonshot/Kimi) reuses a numeric `tool_call_id` like
+    /// `"memory_store:6"` across turns, Phase 2a1 correctly inserts a synthetic
+    /// ToolResult adjacent to the SECOND assistant that owns the orphaned call.
+    ///
+    /// Phase 2b currently builds a global `HashMap<tool_use_id, first_assistant_idx>`.
+    /// Because both assistants share the same id, `tool_use_index["memory_store:6"] = 0`
+    /// (first occurrence).  Phase 2b then sees the Phase-2a1 synthetic at position 5
+    /// (adjacent to the second assistant at position 4), computes
+    /// `expected_position = 0 + 1 = 1`, determines the synthetic is "misplaced",
+    /// removes it from position 5, and attempts to re-insert it next to the first
+    /// assistant.  This is a spurious reorder — `results_reordered` must be 0 for a
+    /// history where every ToolResult already sits in the correct adjacent position.
+    ///
+    /// Sequence under test:
+    ///   msg 0: assistant  ToolUse "memory_store:6"             (first use)
+    ///   msg 1: user       ToolResult "memory_store:6" "first"  (satisfied — adjacent)
+    ///   msg 2: assistant  Text "ack"
+    ///   msg 3: user       Text "next question"
+    ///   msg 4: assistant  ToolUse "memory_store:6"             (second use — ORPHANED)
+    ///   msg 5: user       Text "no result yet"                 (no ToolResult)
+    ///
+    /// After Phase 2a1: msg 5 gains a synthetic ToolResult for "memory_store:6".
+    /// Phase 2b must recognise that the synthetic at position 5 is ALREADY adjacent
+    /// to the assistant at position 4 that owns "memory_store:6" in this turn, and
+    /// must NOT move it.  The correct fix is for Phase 2b to skip ToolResults that
+    /// are already correctly positioned relative to the nearest prior assistant that
+    /// carries the same id, rather than using the globally-first assistant index.
+    #[test]
+    fn reorder_preserves_per_turn_synthetic_when_tool_id_collides_across_turns() {
+        let messages = vec![
+            // msg 0: first assistant emits ToolUse "memory_store:6"
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![tool_use_block("memory_store:6")]),
+                pinned: false,
+            },
+            // msg 1: user answers with the real ToolResult — already adjacent
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![tool_result_block("memory_store:6", "first")]),
+                pinned: false,
+            },
+            // msg 2: assistant sends plain text
+            Message::assistant("ack"),
+            // msg 3: user sends plain text
+            Message::user("next question"),
+            // msg 4: second assistant reuses the same id — this is the orphan
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![tool_use_block("memory_store:6")]),
+                pinned: false,
+            },
+            // msg 5: user plain text — no ToolResult present (orphan trigger)
+            Message::user("no result yet"),
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+
+        // (a) Phase 2a1 must have inserted exactly one synthetic.
+        assert_eq!(
+            stats.positional_synthetic_inserted, 1,
+            "Phase 2a1 should insert exactly one synthetic for the orphaned second \
+             memory_store:6"
+        );
+
+        // (b) Phase 2b must NOT treat the Phase-2a1 synthetic as misplaced.
+        //     The synthetic is already in the correct adjacent position (msg 5 → asst msg 4).
+        //     A non-zero reorder count is the observable symptom of the global-index bug.
+        assert_eq!(
+            stats.results_reordered, 0,
+            "Phase 2b must not spuriously reorder a ToolResult that is already adjacent \
+             to the correct assistant turn (global-index bug: both assistants share \
+             'memory_store:6' so the global map points to the FIRST assistant, causing \
+             the synthetic placed adjacent to the SECOND to be classified as misplaced)"
+        );
+
+        // Collect indices of all assistant messages that carry ToolUse "memory_store:6".
+        let asst_positions_with_id: Vec<usize> = repaired
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, m)| {
+                if m.role == Role::Assistant {
+                    if let MessageContent::Blocks(bs) = &m.content {
+                        if bs.iter().any(|b| {
+                            matches!(b, ContentBlock::ToolUse { id, .. } if id == "memory_store:6")
+                        }) {
+                            return Some(idx);
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+
+        assert_eq!(
+            asst_positions_with_id.len(),
+            2,
+            "both assistant turns with memory_store:6 must survive repair"
+        );
+
+        let first_asst_idx = asst_positions_with_id[0];
+        let second_asst_idx = asst_positions_with_id[1];
+
+        // (c) The SECOND assistant's immediately-following user must hold the synthetic.
+        let after_second = repaired
+            .get(second_asst_idx + 1)
+            .expect("user message must follow the second memory_store:6 assistant");
+        assert!(
+            has_synthetic_result_for(after_second, "memory_store:6"),
+            "the user message after the SECOND memory_store:6 assistant must hold the \
+             synthetic (Phase 2b must not move it to the first turn's adjacent user)"
+        );
+
+        // (d) The FIRST assistant's immediately-following user must hold exactly ONE
+        //     ToolResult — the original real one — and must NOT carry a duplicate or
+        //     a synthetic error appended by Phase 2b.
+        let after_first = repaired
+            .get(first_asst_idx + 1)
+            .expect("user message must follow the first memory_store:6 assistant");
+
+        let first_results: Vec<&ContentBlock> = match &after_first.content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::ToolResult { tool_use_id, .. }
+                        if tool_use_id == "memory_store:6"
+                    )
+                })
+                .collect(),
+            _ => vec![],
+        };
+
+        assert_eq!(
+            first_results.len(),
+            1,
+            "the first assistant's adjacent user must have exactly ONE ToolResult for \
+             memory_store:6 — Phase 2b must not append a second copy"
+        );
+
+        match first_results[0] {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
+                assert!(
+                    !is_error,
+                    "the preserved result for the first turn must not be a synthetic error"
+                );
+                assert_eq!(
+                    content, "first",
+                    "the preserved result content must be the original 'first'"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 }
