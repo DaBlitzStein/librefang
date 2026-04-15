@@ -264,9 +264,15 @@
   "hotPaths": [
     {
       "path": "crates/librefang-runtime/src/agent_loop.rs",
-      "accessCount": 90,
-      "lastAccessed": 1776245396826,
+      "accessCount": 95,
+      "lastAccessed": 1776266070562,
       "type": "directory"
+    },
+    {
+      "path": "crates/librefang-channels/src/bridge.rs",
+      "accessCount": 73,
+      "lastAccessed": 1776266052014,
+      "type": "file"
     },
     {
       "path": "crates/librefang-runtime/src/session_repair.rs",
@@ -275,9 +281,9 @@
       "type": "file"
     },
     {
-      "path": "crates/librefang-channels/src/bridge.rs",
-      "accessCount": 57,
-      "lastAccessed": 1776246918041,
+      "path": "crates/librefang-api/src/channel_bridge.rs",
+      "accessCount": 53,
+      "lastAccessed": 1776266124148,
       "type": "file"
     },
     {
@@ -287,15 +293,15 @@
       "type": "directory"
     },
     {
-      "path": "crates/librefang-channels/src/roster.rs",
-      "accessCount": 16,
-      "lastAccessed": 1776245582694,
+      "path": "crates/librefang-kernel/src/kernel/mod.rs",
+      "accessCount": 19,
+      "lastAccessed": 1776262242545,
       "type": "file"
     },
     {
-      "path": "crates/librefang-api/src/channel_bridge.rs",
+      "path": "crates/librefang-channels/src/roster.rs",
       "accessCount": 16,
-      "lastAccessed": 1776246907530,
+      "lastAccessed": 1776245582694,
       "type": "file"
     },
     {
@@ -306,15 +312,21 @@
     },
     {
       "path": "crates/librefang-runtime/src",
-      "accessCount": 10,
-      "lastAccessed": 1776122660708,
+      "accessCount": 12,
+      "lastAccessed": 1776262145646,
       "type": "directory"
     },
     {
-      "path": "crates/librefang-kernel/src/kernel/mod.rs",
+      "path": "crates/librefang-channels/src/telegram.rs",
       "accessCount": 9,
-      "lastAccessed": 1776246143692,
-      "type": "file"
+      "lastAccessed": 1776259275305,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-kernel/src",
+      "accessCount": 4,
+      "lastAccessed": 1776262123003,
+      "type": "directory"
     },
     {
       "path": "crates/librefang-kernel/src/kernel.rs",
@@ -326,6 +338,12 @@
       "path": "crates",
       "accessCount": 3,
       "lastAccessed": 1776122603204,
+      "type": "directory"
+    },
+    {
+      "path": "",
+      "accessCount": 3,
+      "lastAccessed": 1776259650424,
       "type": "directory"
     },
     {
@@ -347,12 +365,6 @@
       "type": "directory"
     },
     {
-      "path": "crates/librefang-kernel/src",
-      "accessCount": 2,
-      "lastAccessed": 1776112503252,
-      "type": "directory"
-    },
-    {
       "path": "crates/librefang-channels",
       "accessCount": 2,
       "lastAccessed": 1776245819833,
@@ -365,9 +377,9 @@
       "type": "file"
     },
     {
-      "path": "",
+      "path": "crates/librefang-api",
       "accessCount": 2,
-      "lastAccessed": 1776246223360,
+      "lastAccessed": 1776259367606,
       "type": "directory"
     },
     {
@@ -401,9 +413,15 @@
       "type": "directory"
     },
     {
-      "path": "crates/librefang-api",
+      "path": "Cross.toml",
       "accessCount": 1,
-      "lastAccessed": 1776246218835,
+      "lastAccessed": 1776256749521,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-kernel/src/kernel",
+      "accessCount": 1,
+      "lastAccessed": 1776259647477,
       "type": "directory"
     }
   ],
