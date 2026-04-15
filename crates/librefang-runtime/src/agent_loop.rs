@@ -145,6 +145,12 @@ fn safe_trim_messages(
         );
 
         session_messages.drain(..trim_point);
+
+        // Re-repair the persisted session after trimming. The trim boundary can
+        // fall inside a tool-call chain, creating new orphaned tool_use/tool_result
+        // pairs at the head of session_messages. Repair here so the on-disk session
+        // is always consistent before the next persist() call.
+        *session_messages = crate::session_repair::validate_and_repair(session_messages);
     }
 
     if messages.len() <= MAX_HISTORY_MESSAGES {
@@ -550,6 +556,7 @@ struct ToolExecutionContext<'a> {
     process_manager: Option<&'a crate::process_manager::ProcessManager>,
     sender_user_id: Option<&'a str>,
     sender_channel: Option<&'a str>,
+    sender_chat_id: Option<&'a str>,
     context_budget: &'a ContextBudget,
     context_engine: Option<&'a dyn ContextEngine>,
     context_window_tokens: usize,
@@ -686,6 +693,7 @@ async fn execute_single_tool_call(
             ctx.process_manager,
             ctx.sender_user_id,
             ctx.sender_channel,
+            ctx.sender_chat_id,
         ),
     )
     .await
@@ -2130,6 +2138,11 @@ pub async fn run_agent_loop(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .map(String::from);
+    let sender_chat_id: Option<String> = manifest
+        .metadata
+        .get("sender_chat_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -2537,6 +2550,7 @@ pub async fn run_agent_loop(
                         process_manager,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
+                        sender_chat_id: sender_chat_id.as_deref(),
                         context_budget: &context_budget,
                         context_engine,
                         context_window_tokens: ctx_window,
@@ -3067,6 +3081,11 @@ pub async fn run_agent_loop_streaming(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .map(String::from);
+    let sender_chat_id: Option<String> = manifest
+        .metadata
+        .get("sender_chat_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -3530,6 +3549,7 @@ pub async fn run_agent_loop_streaming(
                         process_manager,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
+                        sender_chat_id: sender_chat_id.as_deref(),
                         context_budget: &context_budget,
                         context_engine,
                         context_window_tokens: ctx_window,
