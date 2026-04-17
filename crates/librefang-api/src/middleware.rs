@@ -272,6 +272,40 @@ pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response
     response
 }
 
+/// Normalize an incoming request path for consistent ACL matching.
+///
+/// Three steps are applied in order:
+/// 1. **Version-prefix stripping** — `/api/v1/foo` → `/api/foo`; exact
+///    `/api/v1` → `/api`.
+/// 2. **Multi-trailing-slash collapse** — `trim_end_matches('/')` removes
+///    every trailing `/` so `/api/agents///` → `/api/agents`.
+/// 3. **Root preservation** — if trimming yields an empty string the path
+///    was all slashes (e.g. `///`); return `"/"` so root comparisons work.
+pub(crate) fn normalize_path(raw_path: &str) -> String {
+    // Step 1: strip /api/v1 version prefix.
+    // "/api/v1/foo" → "/api/foo": keep the "/api" prefix and skip "/v1" (4 chars).
+    // raw_path[4..] on "/api/v1/foo" = "/v1/foo"; we want "/api" + "/foo" = "/api" + raw_path[7..].
+    let after_version: String = if raw_path.starts_with("/api/v1/") {
+        // Indices: /api = [0..4], /v1 = [4..7], rest starts at 7.
+        // Result: "/api" + raw_path[7..] = "/api/foo"
+        format!("/api{}", &raw_path[7..])
+    } else if raw_path == "/api/v1" || raw_path == "/api/v1/" {
+        "/api".to_string()
+    } else {
+        raw_path.to_string()
+    };
+
+    // Step 2: collapse all trailing slashes.
+    let trimmed = after_version.trim_end_matches('/');
+
+    // Step 3: restore root when the whole path was slashes (e.g. "///").
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Bearer token authentication middleware.
 ///
 /// When `api_key` is non-empty (after trimming), requests to non-public
@@ -294,24 +328,8 @@ pub async fn auth(
     // Normalize versioned paths: /api/v1/foo → /api/foo so public endpoint
     // checks work identically for both /api/ and /api/v1/ prefixes.
     let raw_path = request.uri().path().to_string();
-    // Normalize: strip version prefix and trailing slashes so ACL checks
-    // work consistently (e.g. "/api/v1/agents/" → "/api/agents").
-    let after_version: String = if raw_path.starts_with("/api/v1/") {
-        format!("/api{}", &raw_path[7..])
-    } else if raw_path == "/api/v1" {
-        "/api".to_string()
-    } else {
-        raw_path.clone()
-    };
-    // Strip a trailing slash for consistent ACL matching, but preserve the
-    // root path "/" itself — otherwise stripping turns it into the empty
-    // string, and `is_public` checks that compare against "/" (e.g. for the
-    // dashboard HTML) silently miss, returning 401 for GET /.
-    let path: &str = if after_version == "/" {
-        "/"
-    } else {
-        after_version.strip_suffix('/').unwrap_or(&after_version)
-    };
+    let normalized = normalize_path(&raw_path);
+    let path: &str = normalized.as_str();
     if path == "/api/shutdown" {
         let is_loopback = request
             .extensions()
@@ -1369,5 +1387,91 @@ mod tests {
             "flag must not block unauthenticated reads when no auth is configured — \
              the startup warning handles operator feedback"
         );
+    }
+
+    mod normalize_path_tests {
+        use super::normalize_path;
+
+        #[test]
+        fn root_is_preserved() {
+            assert_eq!(normalize_path("/"), "/");
+        }
+
+        #[test]
+        fn double_slash_collapses_to_root() {
+            // "//" trimmed is empty → must return "/" not "".
+            assert_eq!(normalize_path("//"), "/");
+        }
+
+        #[test]
+        fn triple_slash_collapses_to_root() {
+            // "///" trimmed is empty → must return "/".
+            assert_eq!(normalize_path("///"), "/");
+        }
+
+        #[test]
+        fn plain_api_path_unchanged() {
+            assert_eq!(normalize_path("/api/agents"), "/api/agents");
+        }
+
+        #[test]
+        fn single_trailing_slash_stripped() {
+            assert_eq!(normalize_path("/api/agents/"), "/api/agents");
+        }
+
+        #[test]
+        fn double_trailing_slash_stripped() {
+            // strip_suffix only removes one slash; trim_end_matches removes all.
+            assert_eq!(normalize_path("/api/agents//"), "/api/agents");
+        }
+
+        #[test]
+        fn triple_trailing_slash_stripped() {
+            assert_eq!(normalize_path("/api/agents///"), "/api/agents");
+        }
+
+        #[test]
+        fn v1_prefix_stripped() {
+            assert_eq!(normalize_path("/api/v1/agents"), "/api/agents");
+        }
+
+        #[test]
+        fn v1_prefix_with_trailing_slash_stripped() {
+            assert_eq!(normalize_path("/api/v1/agents/"), "/api/agents");
+        }
+
+        #[test]
+        fn v1_prefix_with_double_trailing_slash_stripped() {
+            assert_eq!(normalize_path("/api/v1/agents//"), "/api/agents");
+        }
+
+        #[test]
+        fn v1_exact_becomes_api() {
+            assert_eq!(normalize_path("/api/v1"), "/api");
+        }
+
+        #[test]
+        fn v1_exact_with_slash_becomes_api() {
+            // "/api/v1/" hits the starts_with("/api/v1/") branch → "/api" + "" → "/api".
+            assert_eq!(normalize_path("/api/v1/"), "/api");
+        }
+
+        #[test]
+        fn non_api_path_untouched() {
+            // Paths that don't start with /api/v1 must pass through unchanged.
+            assert_eq!(normalize_path("/dashboard/login"), "/dashboard/login");
+        }
+
+        #[test]
+        fn v1_exact_not_over_stripped() {
+            // Guard: "/api/v1" must become "/api", not "/ap" or "".
+            assert_eq!(normalize_path("/api/v1"), "/api");
+        }
+
+        #[test]
+        fn empty_input_becomes_root() {
+            // An empty path has no trailing slashes to trim; treat as root.
+            assert_eq!(normalize_path(""), "/");
+        }
     }
 }
