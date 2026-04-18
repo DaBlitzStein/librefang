@@ -105,7 +105,9 @@ pub(super) fn apply_thinking_override(
         Some(false) => {
             manifest.thinking = None;
         }
-        None => {}
+        // Some(true) when thinking is already set — keep the existing budget
+        // — and None when no override is requested are both no-ops.
+        _ => {}
     }
 }
 

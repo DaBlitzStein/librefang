@@ -1,3 +1,5 @@
+import { ApiError } from "./lib/http/errors";
+
 export interface HealthCheck {
   name: string;
   status: string;
@@ -156,6 +158,66 @@ export interface SkillItem {
 export interface SkillsResponse {
   skills?: SkillItem[];
   total?: number;
+  categories?: string[];
+}
+
+// Skill evolution types
+export interface SkillVersionEntry {
+  version: string;
+  timestamp: string;
+  changelog: string;
+  content_hash: string;
+  author?: string | null;
+}
+
+export interface SkillEvolutionMeta {
+  versions: SkillVersionEntry[];
+  use_count: number;
+  /** Total version entries written, incl. initial creation. */
+  evolution_count: number;
+  /** Mutations after creation (update/patch/rollback). 0 on fresh skill. */
+  mutation_count: number;
+}
+
+export interface SkillToolInfo {
+  name: string;
+  description: string;
+}
+
+export interface SkillDetail {
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  license: string;
+  tags: string[];
+  runtime: string;
+  tools: SkillToolInfo[];
+  has_prompt_context: boolean;
+  prompt_context_length: number;
+  prompt_context?: string | null;
+  source: any;
+  enabled: boolean;
+  path: string;
+  linked_files: Record<string, string[]>;
+  evolution: SkillEvolutionMeta;
+}
+
+export interface EvolutionResult {
+  success: boolean;
+  message: string;
+  skill_name: string;
+  version?: string;
+  /** Set only on patch ops: which fuzzy strategy matched. */
+  match_strategy?: "Exact" | "WhitespaceStripped" | "LineTrimmed" | "WhitespaceNormalized" | "IndentFlexible" | "BlockAnchor";
+  /** Set only on patch ops: replaced occurrence count. */
+  match_count?: number;
+  /** Post-op version-history size (includes initial creation). */
+  evolution_count?: number;
+  /** Post-op mutation counter (post-create edits only — 0 on fresh create). */
+  mutation_count?: number;
+  /** Post-op usage counter. */
+  use_count?: number;
 }
 
 export interface ProvidersResponse {
@@ -623,7 +685,7 @@ export function buildAuthenticatedWebSocketUrl(path: string): string {
   return url.toString();
 }
 
-async function parseError(response: Response): Promise<Error> {
+async function parseError(response: Response): Promise<ApiError> {
   // If 401, trigger global logout (only once to prevent infinite loop)
   if (response.status === 401 && _onUnauthorized && !_unauthorizedFired) {
     _unauthorizedFired = true;
@@ -632,18 +694,20 @@ async function parseError(response: Response): Promise<Error> {
   }
   const text = await response.text();
   let message = response.statusText;
+  let code = `HTTP_${response.status}`;
   try {
     const json = JSON.parse(text) as Json;
     // Prefer the human-readable `detail` field over the machine-code `error` field
-    if (typeof (json as any).detail === "string") {
-      message = (json as any).detail;
+    if (typeof json.detail === "string") {
+      message = json.detail;
     } else if (typeof json.error === "string") {
       message = json.error;
+      code = json.error;
     }
   } catch {
     // ignore parse errors
   }
-  return new Error(message || `HTTP ${response.status}`);
+  return new ApiError(response.status, code, message || `HTTP ${response.status}`);
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -1101,6 +1165,71 @@ export async function installSkill(name: string, hand?: string): Promise<ApiActi
 
 export async function uninstallSkill(name: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/skills/uninstall", { name });
+}
+
+// Skill evolution APIs
+export async function getSkillDetail(name: string): Promise<SkillDetail> {
+  return get<SkillDetail>(`/api/skills/${encodeURIComponent(name)}`);
+}
+
+export async function createSkill(params: {
+  name: string;
+  description: string;
+  prompt_context: string;
+  tags?: string[];
+}): Promise<EvolutionResult> {
+  return post<EvolutionResult>("/api/skills/create", params);
+}
+
+export async function reloadSkills(): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/skills/reload", {});
+}
+
+// Skill evolution mutation APIs (dashboard Update/Patch/Rollback/Files flow)
+export async function evolveUpdateSkill(name: string, params: {
+  prompt_context: string;
+  changelog: string;
+}): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/update`, params);
+}
+
+export async function evolvePatchSkill(name: string, params: {
+  old_string: string;
+  new_string: string;
+  changelog: string;
+  replace_all?: boolean;
+}): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/patch`, params);
+}
+
+export async function evolveRollbackSkill(name: string): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/rollback`, {});
+}
+
+export async function evolveDeleteSkill(name: string): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/delete`, {});
+}
+
+export async function evolveWriteFile(name: string, params: {
+  path: string;
+  content: string;
+}): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/file`, params);
+}
+
+export async function evolveRemoveFile(name: string, path: string): Promise<EvolutionResult> {
+  return del<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/file?path=${encodeURIComponent(path)}`);
+}
+
+export interface SupportingFileContents {
+  name: string;
+  path: string;
+  content: string;
+  truncated: boolean;
+}
+
+export async function getSupportingFile(name: string, path: string): Promise<SupportingFileContents> {
+  return get<SupportingFileContents>(`/api/skills/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`);
 }
 
 // ClawHub types
@@ -1942,6 +2071,14 @@ export async function listHands(): Promise<HandDefinitionItem[]> {
   return data.hands ?? [];
 }
 
+export async function getHandManifestToml(handId: string): Promise<string> {
+  return getText(`/api/hands/${encodeURIComponent(handId)}/manifest`);
+}
+
+export async function getRawConfigToml(): Promise<string> {
+  return getText("/api/config/export");
+}
+
 export async function listActiveHands(): Promise<HandInstanceItem[]> {
   const data = await get<{ instances?: HandInstanceItem[]; total?: number }>("/api/hands/active");
   return data.instances ?? [];
@@ -2502,8 +2639,13 @@ export async function createRegistryContent(
 // ---------------------------------------------------------------------------
 
 // ── MCP Servers API ─────────────────────────────────────────────────────
+//
+// The MCP API is unified under `/api/mcp/*` — both raw-configured servers
+// (from `config.toml`) and catalog-installed servers live in the same
+// `/api/mcp/servers` collection. `template_id` tracks provenance when a
+// server was installed from a catalog entry.
 
-export interface McpServerTransport {
+export interface McpTransport {
   type: "stdio" | "sse" | "http";
   command?: string;
   args?: string[];
@@ -2511,11 +2653,15 @@ export interface McpServerTransport {
 }
 
 export interface McpServerConfigured {
+  /** Stable identifier; falls back to `name` when the backend omits it. */
+  id?: string;
   name: string;
-  transport: McpServerTransport;
+  transport: McpTransport;
   timeout_secs?: number;
   env?: string[];
   headers?: string[];
+  /** Catalog template this server was installed from, when applicable. */
+  template_id?: string;
   auth_state?: { state: string; auth_url?: string; message?: string };
 }
 
@@ -2537,9 +2683,13 @@ export async function listMcpServers(): Promise<McpServersResponse> {
   return get<McpServersResponse>("/api/mcp/servers");
 }
 
-// ── Registry Integrations (available MCP server templates) ────────
+export async function getMcpServer(id: string): Promise<McpServerConfigured> {
+  return get<McpServerConfigured>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
 
-export interface IntegrationRequiredEnv {
+// ── MCP Catalog (read-only browse of registry templates) ────────
+
+export interface McpCatalogRequiredEnv {
   name: string;
   label: string;
   help?: string;
@@ -2547,14 +2697,7 @@ export interface IntegrationRequiredEnv {
   get_url?: string;
 }
 
-export interface IntegrationTransport {
-  type: "stdio" | "sse" | "http";
-  command?: string;
-  args?: string[];
-  url?: string;
-}
-
-export interface IntegrationTemplate {
+export interface McpCatalogEntry {
   id: string;
   name: string;
   description: string;
@@ -2562,34 +2705,91 @@ export interface IntegrationTemplate {
   category?: string;
   installed: boolean;
   tags?: string[];
-  transport?: IntegrationTransport;
-  required_env?: IntegrationRequiredEnv[];
+  transport?: McpTransport;
+  required_env?: McpCatalogRequiredEnv[];
   has_oauth?: boolean;
   setup_instructions?: string;
 }
 
-export interface AvailableIntegrationsResponse {
-  integrations: IntegrationTemplate[];
+export interface McpCatalogResponse {
+  entries: McpCatalogEntry[];
   count: number;
 }
 
-export async function listAvailableIntegrations(): Promise<AvailableIntegrationsResponse> {
-  return get<AvailableIntegrationsResponse>("/api/integrations/available");
+export async function listMcpCatalog(): Promise<McpCatalogResponse> {
+  return get<McpCatalogResponse>("/api/mcp/catalog");
 }
 
-export async function addMcpServer(server: Omit<McpServerConfigured, "name"> & { name: string }): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/mcp/servers", server);
+export async function getMcpCatalogEntry(id: string): Promise<McpCatalogEntry> {
+  return get<McpCatalogEntry>(`/api/mcp/catalog/${encodeURIComponent(id)}`);
 }
 
-export async function updateMcpServer(name: string, server: Partial<McpServerConfigured>): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`, server);
+// ── MCP Server mutations ────────────────────────────────────────────────
+
+/** Install a server from a catalog template with the supplied credentials. */
+export type AddMcpServerFromTemplate = {
+  template_id: string;
+  credentials?: Record<string, string>;
+};
+
+/** Create a server from a raw spec (same shape as a configured entry). */
+export type AddMcpServerSpec = Omit<McpServerConfigured, "id"> & { name: string };
+
+/**
+ * Body is either `{ template_id, credentials }` to install a catalog entry,
+ * or a raw `McpServerConfigured` spec. The backend disambiguates by the
+ * presence of `template_id`.
+ */
+export async function addMcpServer(
+  body: AddMcpServerFromTemplate | AddMcpServerSpec,
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/servers", body);
 }
 
-export async function deleteMcpServer(name: string): Promise<ApiActionResponse> {
-  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`);
+export async function updateMcpServer(
+  id: string,
+  server: Partial<McpServerConfigured>,
+): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`, server);
 }
 
-// MCP OAuth Auth
+export async function deleteMcpServer(id: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
+
+export async function reconnectMcpServer(id: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/reconnect`, {});
+}
+
+// ── MCP Health & Reload ────────────────────────────────────────────────
+
+export interface McpHealthEntry {
+  id: string;
+  status: string;
+  tool_count?: number;
+  last_ok?: string | null;
+  last_error?: string | null;
+  consecutive_failures?: number;
+  reconnecting?: boolean;
+  reconnect_attempts?: number;
+  connected_since?: string | null;
+}
+
+export interface McpHealthResponse {
+  health: McpHealthEntry[];
+  count: number;
+}
+
+export async function getMcpHealth(): Promise<McpHealthResponse> {
+  return get<McpHealthResponse>("/api/mcp/health");
+}
+
+export async function reloadMcp(): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/reload", {});
+}
+
+// ── MCP OAuth Auth ──────────────────────────────────────────────────────
+
 export interface McpAuthStatusResponse {
   server: string;
   auth: { state: string; auth_url?: string; message?: string };
@@ -2600,16 +2800,16 @@ export interface McpAuthStartResponse {
   server: string;
 }
 
-export async function getMcpAuthStatus(name: string): Promise<McpAuthStatusResponse> {
-  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/status`);
+export async function getMcpAuthStatus(id: string): Promise<McpAuthStatusResponse> {
+  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/status`);
 }
 
-export async function startMcpAuth(name: string): Promise<McpAuthStartResponse> {
-  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/start`, {});
+export async function startMcpAuth(id: string): Promise<McpAuthStartResponse> {
+  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/start`, {});
 }
 
-export async function revokeMcpAuth(name: string): Promise<{ server: string; state: string }> {
-  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/revoke`);
+export async function revokeMcpAuth(id: string): Promise<{ server: string; state: string }> {
+  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/revoke`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2627,4 +2827,53 @@ export async function changePassword(
       ...(newUsername ? { new_username: newUsername } : {}),
     },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Terminal (tmux windows)
+// ---------------------------------------------------------------------------
+
+export interface TerminalWindow {
+  id: string;
+  index: number;
+  name: string;
+  active: boolean;
+}
+
+export async function listTerminalWindows(): Promise<TerminalWindow[]> {
+  const response = await fetch("/api/terminal/windows", {
+    headers: buildHeaders(),
+  });
+  if (!response.ok) throw await parseError(response);
+  const data = (await response.json()) as { windows?: TerminalWindow[] } | TerminalWindow[];
+  return Array.isArray(data) ? data : (data.windows ?? []);
+}
+
+export async function createTerminalWindow(body: { name?: string } = {}): Promise<void> {
+  const response = await fetch("/api/terminal/windows", {
+    method: "POST",
+    headers: buildHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw await parseError(response);
+}
+
+export async function renameTerminalWindow(windowId: string, name: string): Promise<void> {
+  const response = await fetch(
+    `/api/terminal/windows/${encodeURIComponent(windowId)}`,
+    {
+      method: "PATCH",
+      headers: buildHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name }),
+    },
+  );
+  if (!response.ok) throw await parseError(response);
+}
+
+export async function deleteTerminalWindow(windowId: string): Promise<void> {
+  const response = await fetch(
+    `/api/terminal/windows/${encodeURIComponent(windowId)}`,
+    { method: "DELETE", headers: buildHeaders() },
+  );
+  if (!response.ok) throw await parseError(response);
 }

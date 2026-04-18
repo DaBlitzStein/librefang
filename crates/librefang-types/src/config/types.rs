@@ -948,9 +948,15 @@ pub struct SkillsConfig {
     /// Whether user-installed skills from the skills directory are loaded. Default: true.
     pub load_user: bool,
     /// Extra skill directories to scan in addition to `~/.librefang/skills/`.
-    /// Each entry must be an absolute path.
+    /// Each entry must be an absolute path. Scanned read-only after the
+    /// primary skills dir; local skills with the same name win.
     #[serde(default)]
     pub extra_dirs: Vec<std::path::PathBuf>,
+    /// Names of skills to skip at load time. Useful for quickly disabling
+    /// a skill (agent-evolved or marketplace-installed) without deleting
+    /// its directory. Matching is case-sensitive on the skill manifest name.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 impl Default for SkillsConfig {
@@ -958,6 +964,7 @@ impl Default for SkillsConfig {
         Self {
             load_user: true,
             extra_dirs: Vec::new(),
+            disabled: Vec::new(),
         }
     }
 }
@@ -3277,6 +3284,18 @@ fn default_prompt_caching() -> bool {
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
+    /// Catalog template this server was installed from, if any.
+    ///
+    /// Set when the user installs a server via `POST /api/mcp/servers` with
+    /// `{template_id, credentials}` or the CLI `librefang mcp add <id>` flow.
+    /// Stays `None` for manually-authored entries. Used by the dashboard to
+    /// render the catalog badge and by the migrator.
+    // `skip_serializing_if = "Option::is_none"` mirrors the `oauth` field —
+    // `upsert_mcp_server_config` round-trips through serde_json → TOML and
+    // null values would serialize as `template_id = ""`, which fails to
+    // deserialize back into `Option<String>` on reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<String>,
     /// Transport configuration. Optional — entries without transport are skipped at boot.
     pub transport: Option<McpTransportEntry>,
     /// Request timeout in seconds.

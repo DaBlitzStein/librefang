@@ -68,10 +68,22 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str
 
     // Pre-install core content users need out of the box.
     // Skills and plugins stay in registry — users install via dashboard.
-    for &dir_name in &["providers", "integrations", "channels"] {
+    for &dir_name in &["providers", "channels"] {
         let src_dir = registry_cache.join(dir_name);
         if src_dir.exists() {
             sync_flat_files(&src_dir, &home_dir.join(dir_name), dir_name);
+        }
+    }
+    // MCP catalog templates: upstream publishes them under `mcp/`;
+    // on disk they live as the read-only catalog at `mcp/catalog/`.
+    {
+        let src_dir = registry_cache.join("mcp");
+        if src_dir.exists() {
+            sync_flat_files(
+                &src_dir,
+                &home_dir.join("mcp").join("catalog"),
+                "mcp/catalog",
+            );
         }
     }
 

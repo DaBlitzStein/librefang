@@ -192,7 +192,7 @@ impl MemoryState {
             KeyCode::Char('d') if self.kv_list_state.selected().is_some() => {
                 self.confirm_delete = true;
             }
-            KeyCode::Char('r') => {
+            KeyCode::Char('r') if self.selected_agent.is_some() => {
                 if let Some(agent) = &self.selected_agent {
                     self.loading = true;
                     return MemoryAction::LoadKv(agent.id.clone());
