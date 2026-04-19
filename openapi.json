@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.4.15-beta22"
+    "version": "2026.4.19-beta25"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -2192,6 +2192,133 @@
           },
           "401": {
             "description": "Not authenticated"
+          }
+        }
+      }
+    },
+    "/api/auto-dream/agents/{id}/abort": {
+      "post": {
+        "tags": [
+          "auto_dream"
+        ],
+        "operationId": "auto_dream_abort",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Abort outcome",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          }
+        }
+      }
+    },
+    "/api/auto-dream/agents/{id}/enabled": {
+      "put": {
+        "tags": [
+          "auto_dream"
+        ],
+        "operationId": "auto_dream_set_enabled",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetEnabledRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Opt-in toggled",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
+    "/api/auto-dream/agents/{id}/trigger": {
+      "post": {
+        "tags": [
+          "auto_dream"
+        ],
+        "operationId": "auto_dream_trigger",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trigger outcome",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          }
+        }
+      }
+    },
+    "/api/auto-dream/status": {
+      "get": {
+        "tags": [
+          "auto_dream"
+        ],
+        "operationId": "auto_dream_status",
+        "responses": {
+          "200": {
+            "description": "Auto-dream status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
           }
         }
       }
@@ -7601,6 +7728,17 @@
         "properties": {
           "content": {
             "type": "string"
+          }
+        }
+      },
+      "SetEnabledRequest": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
           }
         }
       },
