@@ -28,7 +28,7 @@ pub struct OpenAIDriver {
     url_query: Option<String>,
     /// Cache of uploaded file IDs for Moonshot/Kimi (hash of bytes → file_id).
     /// Avoids re-uploading the same file across agent loop iterations.
-    moonshot_file_cache: std::sync::Arc<tokio::sync::Mutex<HashMap<u64, String>>>,
+    moonshot_file_cache: std::sync::Arc<tokio::sync::Mutex<HashMap<[u8; 32], String>>>,
 }
 
 impl OpenAIDriver {
@@ -155,7 +155,7 @@ impl OpenAIDriver {
         request: &mut CompletionRequest,
     ) -> Result<(), LlmError> {
         use base64::Engine;
-        use std::hash::{Hash, Hasher};
+        use sha2::{Digest, Sha256};
 
         for msg in &mut request.messages {
             let blocks = match &mut msg.content {
@@ -170,10 +170,22 @@ impl OpenAIDriver {
                         let decoded = base64::engine::general_purpose::STANDARD
                             .decode(data)
                             .map_err(|e| LlmError::Http(format!("base64 decode: {e}")))?;
-                        (decoded, media_type.clone(), "image.jpg".to_string())
+                        let ext = match media_type.as_str() {
+                            "image/jpeg" => "jpg",
+                            "image/png" => "png",
+                            "image/webp" => "webp",
+                            "image/gif" => "gif",
+                            "application/pdf" => "pdf",
+                            "audio/ogg" => "ogg",
+                            "audio/mpeg" => "mp3",
+                            "video/mp4" => "mp4",
+                            _ => "bin",
+                        };
+                        (decoded, media_type.clone(), format!("file.{ext}"))
                     }
                     ContentBlock::ImageFile { media_type, path } => {
-                        let bytes = std::fs::read(path)
+                        let bytes = tokio::fs::read(path)
+                            .await
                             .map_err(|e| LlmError::Http(format!("Read {path}: {e}")))?;
                         let fname = std::path::Path::new(path)
                             .file_name()
@@ -188,11 +200,8 @@ impl OpenAIDriver {
                     }
                 };
 
-                // Hash bytes to check cache
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                bytes.len().hash(&mut hasher);
-                bytes.get(..256.min(bytes.len())).hash(&mut hasher);
-                let hash = hasher.finish();
+                // Hash full file content with SHA-256 for cache key
+                let hash: [u8; 32] = Sha256::digest(&bytes).into();
 
                 let file_id = {
                     let mut cache = self.moonshot_file_cache.lock().await;
@@ -203,6 +212,10 @@ impl OpenAIDriver {
                             .upload_file_to_moonshot(&bytes, &filename, &mime)
                             .await?;
                         debug!(file_id = %id, filename = %filename, "Uploaded file to Moonshot");
+                        // Simple LRU cap: clear when cache exceeds 256 entries
+                        if cache.len() > 256 {
+                            cache.clear();
+                        }
                         cache.insert(hash, id.clone());
                         id
                     }
