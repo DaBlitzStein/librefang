@@ -1126,6 +1126,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     },
                     delivery: librefang_types::scheduler::CronDelivery::None,
                     session_mode: None,
+                    peer_id: None,
                     created_at: chrono::Utc::now(),
                     last_run: None,
                     next_run: None,

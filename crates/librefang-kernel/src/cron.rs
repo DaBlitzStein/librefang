@@ -562,6 +562,7 @@ mod tests {
             },
             delivery: CronDelivery::None,
             session_mode: None,
+            peer_id: None,
             created_at: Utc::now(),
             last_run: None,
             next_run: None,
