@@ -143,6 +143,9 @@ impl CronScheduler {
     /// `one_shot` controls whether the job is removed after a single
     /// successful execution.
     pub fn add_job(&self, mut job: CronJob, one_shot: bool) -> LibreFangResult<CronJobId> {
+        // At schedules are inherently one-shot — force the flag so callers
+        // (including LLMs) don't need to remember to pass it.
+        let one_shot = one_shot || matches!(job.schedule, CronSchedule::At { .. });
         // Global limit
         let max_jobs = self.max_total_jobs.load(Ordering::Relaxed);
         if self.jobs.len() >= max_jobs {

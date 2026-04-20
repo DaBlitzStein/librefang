@@ -2519,6 +2519,19 @@ fn tool_memory_store(
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
     let value = input.get("value").ok_or("Missing 'value' parameter")?;
+    // Guard against values that exceed typical LLM output token limits.
+    // Moonshot caps at 8192 output tokens — a 16K+ value will always
+    // arrive truncated (triggering __args_truncated), so reject early
+    // with a helpful message so the LLM can split into smaller calls.
+    let value_len = value
+        .as_str()
+        .map(|s| s.len())
+        .unwrap_or_else(|| value.to_string().len());
+    if value_len > 16_000 {
+        return Err(format!(
+            "Value too large ({value_len} chars, max 16000). Split into multiple memory_store calls with smaller values."
+        ));
+    }
     kh.memory_store(key, value.clone(), peer_id)?;
     Ok(format!("Stored value under key '{key}'."))
 }

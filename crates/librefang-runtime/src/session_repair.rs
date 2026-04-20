@@ -816,35 +816,16 @@ fn should_replace_kept_tool_result(
 /// that is followed by a user message with ToolResults is considered aborted.
 /// This handles cases where the LLM was interrupted mid-tool-use.
 fn remove_aborted_assistant_messages(messages: Vec<Message>) -> Vec<Message> {
-    if messages.len() < 2 {
-        return messages;
-    }
-
     let mut result = Vec::with_capacity(messages.len());
-    let mut skip_next = false;
-    let msg_len = messages.len();
 
     for (i, msg) in messages.into_iter().enumerate() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-
         if msg.role == Role::Assistant && is_empty_or_blank_content(&msg.content) {
-            // Check if next message is a user message with ToolResults
-            // We cannot peek ahead in an owned iterator, so we use index tracking.
-            // Since we consumed the message, we check if we should skip.
-            if i + 1 < msg_len {
-                // We'll handle this by not pushing the message and letting the
-                // next iteration handle the ToolResult user message normally.
-                // The ToolResult will become orphaned and get cleaned in a
-                // subsequent repair pass, but for now we just remove the empty assistant.
-                debug!(
-                    index = i,
-                    "Removing aborted assistant message with empty content"
-                );
-                continue;
-            }
+            // Empty assistant messages are never valid — providers like Moonshot
+            // reject them with 400. Remove unconditionally, whether mid-session
+            // or trailing. Orphaned ToolResults from the next message (if any)
+            // get cleaned by subsequent repair phases.
+            debug!(index = i, "Removing empty assistant message");
+            continue;
         }
 
         result.push(msg);
