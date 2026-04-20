@@ -1255,7 +1255,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         timeout_secs: None,
                     },
                     delivery: librefang_types::scheduler::CronDelivery::None,
-                    peer_id: None,
                     created_at: chrono::Utc::now(),
                     last_run: None,
                     next_run: None,
@@ -1637,12 +1636,31 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let sanitized = sanitize(message_text, 500);
         let safe_sender = sanitize(sender_name, 64);
 
-        // Build bot identity section for the prompt
+        // Build bot identity section for the prompt.
+        // bot_aliases may come from group_trigger_patterns (which contains regex
+        // strings like `(?i)\bfoo\b`). Strip regex metacharacters so only
+        // plain human-readable names are injected into the LLM prompt.
+        let sanitize_alias = |s: &str| -> Option<String> {
+            let plain: String = s
+                .chars()
+                .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-'))
+                .collect();
+            let trimmed = plain.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        };
         let identity = if let Some(name) = bot_name {
-            let aliases_str = if bot_aliases.is_empty() {
+            let clean_aliases: Vec<String> = bot_aliases
+                .iter()
+                .filter_map(|a| sanitize_alias(a))
+                .collect();
+            let aliases_str = if clean_aliases.is_empty() {
                 String::new()
             } else {
-                format!(" (also known as: {})", bot_aliases.join(", "))
+                format!(" (also known as: {})", clean_aliases.join(", "))
             };
             format!("The bot's name is \"{name}\"{aliases_str}.\n")
         } else {
@@ -1699,7 +1717,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 if greetings.iter().any(|g| lower.starts_with(g)) {
                     true
                 } else {
-                    true // final fail-open default
+                    false // stay silent for unrecognized messages
                 }
             }
         }
