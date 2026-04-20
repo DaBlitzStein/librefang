@@ -205,6 +205,7 @@ pub trait ChannelBridgeHandle: Send + Sync {
         _message_text: &str,
         _sender_name: &str,
         _model: Option<&str>,
+        _bot_name: Option<&str>,
     ) -> bool {
         true
     }
@@ -2139,7 +2140,17 @@ async fn dispatch_message(
                 let text = text_content(message).unwrap_or("");
                 let sender = &message.sender.display_name;
                 let model = ov.reply_precheck_model.as_deref();
-                if !handle.classify_reply_intent(text, sender, model).await {
+                let precheck_channel_key =
+                    match message.metadata.get("account_id").and_then(|v| v.as_str()) {
+                        Some(aid) => format!("{:?}:{}", message.channel, aid),
+                        None => format!("{:?}", message.channel),
+                    };
+                let bot_name_owned = router.channel_default_name(&precheck_channel_key);
+                let bot_name = bot_name_owned.as_deref();
+                if !handle
+                    .classify_reply_intent(text, sender, model, bot_name)
+                    .await
+                {
                     debug!(
                         channel = ct_str,
                         sender = %sender,

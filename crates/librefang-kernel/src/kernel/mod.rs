@@ -8032,6 +8032,23 @@ system_prompt = "You are a helpful assistant."
     /// Uses the default driver with low max_tokens and 0 temperature.
     /// Returns `Err` on LLM error or timeout (caller should fail-open).
     pub async fn one_shot_llm_call(&self, model: &str, prompt: &str) -> Result<String, String> {
+        self.one_shot_llm_call_with_system(model, None, prompt)
+            .await
+    }
+
+    /// One-shot LLM call with optional system message separation.
+    ///
+    /// When `system` is Some, the classification instructions go in the system
+    /// message and `prompt` is the user content. This prevents reasoning-model
+    /// thinking synthesis from poisoning the classification output (Kimi k2.5
+    /// returns reasoning_content with content=null when thinking is "disabled";
+    /// the driver synthesizes text from reasoning which can contain stray tokens).
+    pub async fn one_shot_llm_call_with_system(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        prompt: &str,
+    ) -> Result<String, String> {
         use librefang_runtime::llm_driver::CompletionRequest;
         use librefang_types::message::Message;
 
@@ -8039,9 +8056,9 @@ system_prompt = "You are a helpful assistant."
             model: model.to_string(),
             messages: vec![Message::user(prompt.to_string())],
             tools: vec![],
-            max_tokens: 10,
+            max_tokens: 16,
             temperature: 0.0,
-            system: None,
+            system: system.map(|s| s.to_string()),
             thinking: None,
             prompt_caching: false,
             response_format: None,
@@ -8051,17 +8068,30 @@ system_prompt = "You are a helpful assistant."
         };
 
         let result = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(10),
             self.default_driver.complete(request),
         )
         .await
         {
             Ok(Ok(resp)) => resp,
             Ok(Err(e)) => return Err(format!("LLM call failed: {e}")),
-            Err(_) => return Err("LLM call timed out (5s)".to_string()),
+            Err(_) => return Err("LLM call timed out (10s)".to_string()),
         };
 
-        Ok(result.text())
+        // Strip Thinking blocks — for classification calls only the Text output
+        // matters. This prevents reasoning-model synthesis (extract_thinking_summary)
+        // from leaking stray classification tokens into the result.
+        use librefang_types::message::ContentBlock;
+        let text = result
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        Ok(text)
     }
 
     /// Publish an event to the bus and evaluate triggers.
@@ -12368,7 +12398,8 @@ impl KernelHandle for LibreFangKernel {
             } else {
                 None
             };
-        let one_shot = job_json["one_shot"].as_bool().unwrap_or(false);
+        let is_at_schedule = matches!(schedule, CronSchedule::At { .. });
+        let one_shot = job_json["one_shot"].as_bool().unwrap_or(is_at_schedule);
 
         let aid = librefang_types::agent::AgentId(
             uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?,
