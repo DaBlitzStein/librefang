@@ -2,31 +2,43 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 
 // ── Mock API layer ──
-const { mockListApprovals, mockFetchApprovalCount } = vi.hoisted(() => ({
+const { mockListApprovals, mockListPendingApprovals, mockFetchApprovalCount } = vi.hoisted(() => ({
   mockListApprovals: vi.fn(),
+  mockListPendingApprovals: vi.fn(),
   mockFetchApprovalCount: vi.fn(),
 }));
 const { mockListPluginRegistries } = vi.hoisted(() => ({
   mockListPluginRegistries: vi.fn(),
 }));
+const { mockGetTerminalHealth } = vi.hoisted(() => ({
+  mockGetTerminalHealth: vi.fn(),
+}));
 
 vi.mock("../../api", async () => {
   const actual = await vi.importActual("../../api");
-  return { ...actual, listApprovals: mockListApprovals, fetchApprovalCount: mockFetchApprovalCount };
+  return {
+    ...actual,
+    listApprovals: mockListApprovals,
+    listPendingApprovals: mockListPendingApprovals,
+    fetchApprovalCount: mockFetchApprovalCount,
+  };
 });
 
 vi.mock("../http/client", async () => {
   const actual = await vi.importActual("../http/client");
-  return {
-    ...actual,
-    listPluginRegistries: mockListPluginRegistries,
-  };
+    return {
+      ...actual,
+      listPluginRegistries: mockListPluginRegistries,
+      getTerminalHealth: mockGetTerminalHealth,
+    };
 });
 
 // ── Import hooks after mocks are set up ──
-import { useApprovals, useApprovalCount } from "./approvals";
+import { useApprovals, useApprovalCount, usePendingApprovals } from "./approvals";
 import { usePluginRegistries } from "./plugins";
+import { useTerminalHealth } from "./terminal";
 import { approvalKeys, pluginKeys } from "./keys";
+import { terminalKeys } from "./keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 beforeEach(() => {
@@ -48,6 +60,8 @@ describe("useApprovals", () => {
   });
 
   it("should fetch by default when enabled is undefined", async () => {
+    mockListApprovals.mockResolvedValue([]);
+
     renderHook(() => useApprovals(), {
       wrapper: createQueryClientWrapper().wrapper,
     });
@@ -103,6 +117,8 @@ describe("usePluginRegistries", () => {
   });
 
   it("should fetch by default when enabled is undefined", async () => {
+    mockListPluginRegistries.mockResolvedValue({ registries: [] });
+
     renderHook(() => usePluginRegistries(undefined), {
       wrapper: createQueryClientWrapper().wrapper,
     });
@@ -196,6 +212,99 @@ describe("useApprovalCount", () => {
 
     await vi.waitFor(() => {
       expect(queryClient.getQueryData(approvalKeys.count())).toEqual(mockData);
+    });
+  });
+});
+
+describe("usePendingApprovals", () => {
+  it("should not fetch when agentId is undefined", async () => {
+    const { result } = renderHook(() => usePendingApprovals(undefined), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(mockListPendingApprovals).not.toHaveBeenCalled();
+  });
+
+  it("should not fetch when enabled is false", async () => {
+    const { result } = renderHook(() => usePendingApprovals("agent-1", { enabled: false }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(mockListPendingApprovals).not.toHaveBeenCalled();
+  });
+
+  it("should use default refetchInterval when not provided", async () => {
+    mockListPendingApprovals.mockResolvedValue([]);
+
+    const { wrapper, queryClient } = createQueryClientWrapper();
+    renderHook(() => usePendingApprovals("agent-1"), { wrapper });
+
+    await vi.waitFor(() => {
+      const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.pending("agent-1") });
+      expect(query).toBeDefined();
+    });
+
+    const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.pending("agent-1") });
+    expect(query).toBeDefined();
+    expect((query?.options as { refetchInterval?: number }).refetchInterval).toBe(5_000);
+  });
+
+  it("should override refetchInterval when provided", async () => {
+    mockListPendingApprovals.mockResolvedValue([]);
+
+    const { wrapper, queryClient } = createQueryClientWrapper();
+    renderHook(() => usePendingApprovals("agent-1", { refetchInterval: 12_000 }), { wrapper });
+
+    await vi.waitFor(() => {
+      const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.pending("agent-1") });
+      expect(query).toBeDefined();
+    });
+
+    const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.pending("agent-1") });
+    expect(query).toBeDefined();
+    expect((query?.options as { refetchInterval?: number }).refetchInterval).toBe(12_000);
+  });
+});
+
+describe("useTerminalHealth", () => {
+  it("should not fetch when enabled is false", async () => {
+    const { result } = renderHook(() => useTerminalHealth({ enabled: false }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(mockGetTerminalHealth).not.toHaveBeenCalled();
+  });
+
+  it("should fetch terminal health when enabled is true", async () => {
+    const mockData = { tmux: true, max_windows: 16, os: "linux" };
+    mockGetTerminalHealth.mockResolvedValue(mockData);
+
+    const { result } = renderHook(() => useTerminalHealth({ enabled: true }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    await waitFor(() => expect(result.current.data).toEqual(mockData));
+    expect(mockGetTerminalHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it("should use terminalKeys.health() as queryKey", async () => {
+    const mockData = { tmux: true, max_windows: 16, os: "macos" };
+    mockGetTerminalHealth.mockResolvedValue(mockData);
+
+    const { wrapper, queryClient } = createQueryClientWrapper();
+    renderHook(() => useTerminalHealth({ enabled: true }), { wrapper });
+
+    await waitFor(() => {
+      expect(queryClient.getQueryData(terminalKeys.health())).toEqual(mockData);
     });
   });
 });

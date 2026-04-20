@@ -6,11 +6,15 @@ import {
   setProviderUrl,
   setDefaultProvider,
 } from "../../api";
-import { providerKeys, runtimeKeys } from "../queries/keys";
+import { modelKeys, providerKeys, runtimeKeys } from "../queries/keys";
 
 export function useTestProvider() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: testProvider,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: providerKeys.all });
+    },
   });
 }
 
@@ -21,6 +25,7 @@ export function useSetProviderKey() {
       setProviderKey(id, key),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: providerKeys.all });
+      queryClient.invalidateQueries({ queryKey: modelKeys.lists() });
     },
   });
 }
@@ -31,6 +36,7 @@ export function useDeleteProviderKey() {
     mutationFn: (id: string) => deleteProviderKey(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: providerKeys.all });
+      queryClient.invalidateQueries({ queryKey: modelKeys.lists() });
     },
   });
 }
@@ -49,6 +55,7 @@ export function useSetProviderUrl() {
     }) => setProviderUrl(id, baseUrl, proxyUrl),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: providerKeys.all });
+      queryClient.invalidateQueries({ queryKey: modelKeys.lists() });
     },
   });
 }
@@ -60,6 +67,7 @@ export function useSetDefaultProvider() {
       setDefaultProvider(id, model),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: providerKeys.all });
+      queryClient.invalidateQueries({ queryKey: modelKeys.lists() });
       queryClient.invalidateQueries({ queryKey: runtimeKeys.status() });
     },
   });

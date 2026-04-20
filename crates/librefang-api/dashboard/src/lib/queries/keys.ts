@@ -67,6 +67,10 @@ export const skillKeys = {
   lists: () => [...skillKeys.all, "list"] as const,
   details: () => [...skillKeys.all, "detail"] as const,
   detail: (name: string) => [...skillKeys.details(), name] as const,
+  supportingFiles: (name: string) =>
+    [...skillKeys.detail(name), "supportingFile"] as const,
+  supportingFile: (name: string, path: string) =>
+    [...skillKeys.supportingFiles(name), path] as const,
 };
 
 export const clawhubKeys = {
@@ -253,12 +257,22 @@ export const auditKeys = {
 export const mediaKeys = {
   all: ["media"] as const,
   providers: () => [...mediaKeys.all, "providers"] as const,
+  videoTasks: () => [...mediaKeys.all, "videoTasks"] as const,
+  videoTask: (taskId: string, provider: string) =>
+    [...mediaKeys.videoTasks(), taskId, provider] as const,
+  // Stable key for the disabled state of useVideoTask — paired with skipToken
+  // so every not-yet-submitted render shares the same (unused) cache slot.
+  // Shape mirrors `videoTask(taskId, provider)` (4 segments) so both branches
+  // of the query are type-compatible under useQuery's generic inference.
+  videoTaskDisabled: () =>
+    [...mediaKeys.videoTasks(), "__disabled__", "__disabled__"] as const,
 };
 
 export const mcpKeys = {
   all: ["mcp"] as const,
   servers: () => [...mcpKeys.all, "servers"] as const,
   server: (id: string) => [...mcpKeys.servers(), id] as const,
+  authStatus: (id: string) => [...mcpKeys.all, "authStatus", id] as const,
   catalog: () => [...mcpKeys.all, "catalog"] as const,
   catalogEntry: (id: string) => [...mcpKeys.catalog(), id] as const,
   health: () => [...mcpKeys.all, "health"] as const,
@@ -283,12 +297,13 @@ export const registryKeys = {
     [...registryKeys.all, "schema", contentType] as const,
 };
 
-export const metricsKeys = {
-  all: ["metrics"] as const,
-  text: () => [...metricsKeys.all, "text"] as const,
+export const telemetryKeys = {
+  all: ["telemetry"] as const,
+  metrics: () => [...telemetryKeys.all, "metrics"] as const,
 };
 
 export const terminalKeys = {
   all: ["terminal"] as const,
+  health: () => [...terminalKeys.all, "health"] as const,
   windows: () => [...terminalKeys.all, "windows"] as const,
 };

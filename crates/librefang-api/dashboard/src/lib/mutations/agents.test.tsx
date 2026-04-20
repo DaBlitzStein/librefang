@@ -3,6 +3,7 @@ import { renderHook } from "@testing-library/react";
 import {
   useSwitchAgentSession,
   useDeleteAgentSession,
+  usePatchAgent,
   usePatchAgentConfig,
   useSpawnAgent,
   useCloneAgent,
@@ -18,6 +19,7 @@ import { createQueryClientWrapper } from "../test/query-client";
 vi.mock("../http/client", () => ({
   switchAgentSession: vi.fn().mockResolvedValue({}),
   deleteSession: vi.fn().mockResolvedValue({}),
+  patchAgent: vi.fn().mockResolvedValue({}),
   patchAgentConfig: vi.fn().mockResolvedValue({}),
   spawnAgent: vi.fn().mockResolvedValue({}),
   cloneAgent: vi.fn().mockResolvedValue({}),
@@ -96,6 +98,27 @@ describe("useDeleteAgentSession", () => {
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: sessionKeys.lists(),
+    });
+  });
+});
+
+describe("usePatchAgent", () => {
+  it("invalidates agent lists and agent detail on rename", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => usePatchAgent(), { wrapper });
+
+    await result.current.mutateAsync({
+      agentId: "agent-1",
+      body: { name: "renamed-agent" },
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.detail("agent-1"),
     });
   });
 });

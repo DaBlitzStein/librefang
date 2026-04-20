@@ -7,7 +7,9 @@ import {
   useCreateWorkflow,
   useUpdateWorkflow,
   useInstantiateTemplate,
+  useSaveWorkflowAsTemplate,
 } from "./workflows";
+import * as httpClient from "../http/client";
 import { workflowKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
@@ -22,7 +24,9 @@ vi.mock("../http/client", () => ({
 }));
 
 describe("useRunWorkflow", () => {
-  it("invalidates workflow runs, lists, and detail for the workflow", async () => {
+  it("invalidates workflow runs, lists, and returned run detail", async () => {
+    vi.mocked(httpClient.runWorkflow).mockResolvedValueOnce({ status: "ok", run_id: "run-1" });
+
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -37,8 +41,30 @@ describe("useRunWorkflow", () => {
       queryKey: workflowKeys.lists(),
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: workflowKeys.detail("wf-1"),
+      queryKey: workflowKeys.runDetail("run-1"),
     });
+  });
+
+  it("does not invalidate run detail queries when response has no run id", async () => {
+    vi.mocked(httpClient.runWorkflow).mockResolvedValueOnce({ status: "ok" });
+
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useRunWorkflow(), { wrapper });
+
+    await result.current.mutateAsync({ workflowId: "wf-1", input: "hello" });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: workflowKeys.runs("wf-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: workflowKeys.lists(),
+    });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
+      queryKey: workflowKeys.runDetails(),
+    });
+    expect(invalidateSpy.mock.calls).toHaveLength(2);
   });
 });
 
@@ -56,24 +82,38 @@ describe("useDryRunWorkflow", () => {
 });
 
 describe.each([
-  { name: "useDeleteWorkflow", hook: useDeleteWorkflow, arg: "wf-1" },
+  {
+    name: "useDeleteWorkflow",
+    hook: useDeleteWorkflow,
+    arg: "wf-1",
+    expectedKeys: [workflowKeys.lists(), workflowKeys.detail("wf-1"), workflowKeys.runs("wf-1")],
+  },
   {
     name: "useCreateWorkflow",
     hook: useCreateWorkflow,
     arg: { name: "New workflow", steps: [] },
+    expectedKeys: [workflowKeys.lists()],
   },
   {
     name: "useUpdateWorkflow",
     hook: useUpdateWorkflow,
     arg: { workflowId: "wf-1", payload: { name: "Updated workflow" } },
+    expectedKeys: [workflowKeys.lists(), workflowKeys.detail("wf-1"), workflowKeys.runs("wf-1")],
   },
   {
     name: "useInstantiateTemplate",
     hook: useInstantiateTemplate,
     arg: { id: "tmpl-1", params: {} },
+    expectedKeys: [workflowKeys.lists()],
   },
-])("$name", ({ hook, arg }) => {
-  it("invalidates workflowKeys.all", async () => {
+  {
+    name: "useSaveWorkflowAsTemplate",
+    hook: useSaveWorkflowAsTemplate,
+    arg: "wf-1",
+    expectedKeys: [workflowKeys.templates()],
+  },
+])("$name", ({ hook, arg, expectedKeys }) => {
+  it("invalidates the expected workflow keys", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -81,6 +121,8 @@ describe.each([
 
     await result.current.mutateAsync(arg as never);
 
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workflowKeys.all });
+    for (const queryKey of expectedKeys) {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey });
+    }
   });
 });
