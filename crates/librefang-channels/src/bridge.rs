@@ -1020,15 +1020,24 @@ impl BridgeManager {
                                         message.sender.platform_id
                                     );
 
-                                    let image_blocks = if let ChannelContent::Image {
-                                        ref url, ref caption, ref mime_type
-                                    } = message.content {
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
-                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
-                                            _ => None,
+                                    let image_blocks = match &message.content {
+                                        ChannelContent::Image {
+                                            ref url, ref caption, ref mime_type
+                                        } => {
+                                            match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
+                                                blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
+                                                _ => None,
+                                            }
                                         }
-                                    } else {
-                                        None
+                                        ChannelContent::File { ref url, ref filename } => {
+                                            let blocks = download_file_to_blocks(url, filename).await;
+                                            if blocks.iter().any(|b| matches!(b, ContentBlock::ImageFile { .. })) {
+                                                Some(blocks)
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
                                     };
 
                                     let pending = PendingMessage { message, image_blocks };
@@ -2360,18 +2369,35 @@ async fn dispatch_message(
         }
     }
 
-    // For files: download content so the agent can see it directly.
-    // Telegram (and other) URLs are temporary and require auth, so the LLM
-    // cannot fetch them directly.
-    let file_content = if let ChannelContent::File {
+    // For files: download and send as content blocks (same pipeline as images).
+    // The LLM driver base64-encodes the file and sends it natively.
+    if let ChannelContent::File {
         ref url,
         ref filename,
     } = message.content
     {
-        download_file_content(url, filename).await
-    } else {
-        None
-    };
+        let blocks = download_file_to_blocks(url, filename).await;
+        if blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ImageFile { .. }))
+        {
+            dispatch_with_blocks(
+                blocks,
+                message,
+                handle,
+                router,
+                adapter,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                journal,
+            )
+            .await;
+            return;
+        }
+        // Download failed — fall through to text description below
+    }
 
     let text = match &message.content {
         ChannelContent::Text(t) => t.clone(),
@@ -2388,13 +2414,11 @@ async fn dispatch_message(
             }
         }
         ChannelContent::File {
-            ref filename,
             ref url,
-        } => match &file_content {
-            Some(content) => {
-                format!("[User sent a file: {filename}]\n\n{content}")
-            }
-            None => format!("[User sent a file ({filename}): {url}]"),
+            ref filename,
+        } => {
+            // Fallback when file download failed
+            format!("[User sent a file ({filename}): {url}]")
         },
         ChannelContent::Voice {
             ref url,
@@ -3227,80 +3251,111 @@ async fn download_image_to_blocks(
     blocks
 }
 
-/// Download a file from a URL (e.g. Telegram temporary link) and return its
-/// text content directly.  For text-readable files (UTF-8) the content is
-/// returned as `Some(content_string)` (truncated to ~100 KB to protect
-/// context windows).  For binary files (PDFs, images, archives) returns
-/// `Some("[Binary file: {filename} ({size} KB) — …]")` so the agent
-/// knows what was received even though the raw bytes cannot be inlined.
-async fn download_file_content(url: &str, filename: &str) -> Option<String> {
+/// Download any file from a URL and return it as content blocks, using the
+/// same `ContentBlock::ImageFile` mechanism that images use.  The LLM driver
+/// reads the file from disk, base64-encodes it, and sends it natively — this
+/// works for PDFs on Gemini (`inlineData` is MIME-agnostic) and on
+/// OpenAI-compatible APIs (Moonshot/Kimi accept `data:{mime};base64,…`).
+async fn download_file_to_blocks(url: &str, filename: &str) -> Vec<ContentBlock> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(120))
         .build()
-        .ok()?;
+        .unwrap_or_default();
     let resp = match client.get(url).send().await {
         Ok(r) => r,
         Err(e) => {
             warn!("File download failed for {filename}: {e}");
-            return None;
+            return vec![ContentBlock::Text {
+                text: format!("[File download failed: {filename}]"),
+                provider_metadata: None,
+            }];
         }
     };
     if !resp.status().is_success() {
-        warn!(
-            "File download returned HTTP {} for {filename}",
-            resp.status()
-        );
-        return None;
+        warn!("File download HTTP {} for {filename}", resp.status());
+        return vec![ContentBlock::Text {
+            text: format!("[File download failed: {filename}]"),
+            provider_metadata: None,
+        }];
     }
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
             warn!("Failed to read file bytes for {filename}: {e}");
-            return None;
+            return vec![ContentBlock::Text {
+                text: format!("[File download failed: {filename}]"),
+                provider_metadata: None,
+            }];
         }
     };
 
-    let size_kb = bytes.len() / 1024;
-    tracing::debug!(
-        filename = filename,
-        size_kb = size_kb,
-        "Downloaded channel file"
-    );
+    // Detect MIME type from extension
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let media_type = match ext.as_str() {
+        "pdf" => "application/pdf",
+        "txt" | "text" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "html" | "htm" => "text/html",
+        "md" | "markdown" => "text/markdown",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        _ => "application/octet-stream",
+    }
+    .to_string();
 
-    // Try to decode as UTF-8 text
-    const MAX_TEXT_BYTES: usize = 100 * 1024; // 100 KB cap
-    match String::from_utf8(bytes.to_vec()) {
-        Ok(text) => {
-            if text.len() > MAX_TEXT_BYTES {
-                let truncated = &text[..text.floor_char_boundary(MAX_TEXT_BYTES)];
-                Some(format!(
-                    "{truncated}\n\n[… truncated — file is {size_kb} KB total]"
-                ))
-            } else {
-                Some(text)
-            }
+    // Save to disk — the LLM driver reads from path and base64-encodes
+    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    if let Err(e) = tokio::fs::create_dir_all(&upload_dir).await {
+        warn!("Failed to create upload dir: {e}");
+        return vec![ContentBlock::Text {
+            text: format!("[File save failed: {filename}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    let unique_name = format!(
+        "{}.{}",
+        uuid::Uuid::new_v4(),
+        if ext.is_empty() { "bin" } else { &ext }
+    );
+    let file_path = upload_dir.join(&unique_name);
+
+    match tokio::fs::write(&file_path, &bytes).await {
+        Ok(()) => {
+            tracing::debug!(
+                path = %file_path.display(),
+                filename = filename,
+                media_type = %media_type,
+                size_kb = bytes.len() / 1024,
+                "Saved channel file to disk"
+            );
+            let mut blocks = vec![ContentBlock::Text {
+                text: format!("[User sent a file: {filename}]"),
+                provider_metadata: None,
+            }];
+            blocks.push(ContentBlock::ImageFile {
+                media_type,
+                path: file_path.to_string_lossy().into_owned(),
+            });
+            blocks
         }
-        Err(_) => {
-            // Binary file — save to disk for potential shell_exec access
-            let upload_dir = std::env::temp_dir().join("librefang_uploads");
-            let _ = tokio::fs::create_dir_all(&upload_dir).await;
-            let ext = std::path::Path::new(filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("bin");
-            let unique_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
-            let file_path = upload_dir.join(&unique_name);
-            if let Err(e) = tokio::fs::write(&file_path, &bytes).await {
-                warn!(
-                    "Failed to write binary file to {}: {e}",
-                    file_path.display()
-                );
-            }
-            Some(format!(
-                "[Binary file ({size_kb} KB) saved at {}. \
-                 Use shell_exec with appropriate tools (e.g. pdftotext for PDFs) to extract content.]",
-                file_path.display()
-            ))
+        Err(e) => {
+            warn!("Failed to write file to {}: {e}", file_path.display());
+            vec![ContentBlock::Text {
+                text: format!("[File save failed: {filename}]"),
+                provider_metadata: None,
+            }]
         }
     }
 }
