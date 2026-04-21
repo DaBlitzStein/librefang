@@ -1036,7 +1036,7 @@ fn trigger_to_json(t: &Trigger) -> serde_json::Value {
         "max_fires": t.max_fires,
         "created_at": t.created_at.to_rfc3339(),
         "cooldown_secs": t.cooldown_secs,
-        "session_mode": serde_json::to_value(&t.session_mode).unwrap_or(serde_json::Value::Null),
+        "session_mode": serde_json::to_value(t.session_mode).unwrap_or(serde_json::Value::Null),
     });
     if let Some(target) = &t.target_agent {
         v["target_agent_id"] = serde_json::json!(target.to_string());
@@ -1442,6 +1442,9 @@ pub async fn create_schedule(
         action,
         delivery: librefang_types::scheduler::CronDelivery::None,
         peer_id: None,
+        session_mode: req["session_mode"]
+            .as_str()
+            .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok()),
         created_at: chrono::Utc::now(),
         last_run: None,
         next_run: None,

@@ -102,7 +102,7 @@ const AFTER_HELP: &str = "\
                   40 channels \u{00b7} 60 skills \u{00b7} 50+ models \u{00b7} infinite possibilities.",
     after_help = AFTER_HELP,
 )]
-struct Cli {
+pub(crate) struct Cli {
     /// Path to config file.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
@@ -6016,6 +6016,7 @@ fn cmd_trigger_get(trigger_id: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_trigger_update(
     trigger_id: &str,
     pattern: Option<&str>,
