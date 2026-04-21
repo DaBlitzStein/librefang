@@ -744,7 +744,11 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
     }
     out.push_str(
         "\nYou can communicate with them using `agent_send` (by name) and see all agents with `agent_list`. \
-         Delegate tasks to specialized agents when appropriate.",
+         Delegate tasks to specialized agents when appropriate.\n\
+         \n\
+         When you receive a response from `agent_send`, treat it as completed work. Do not redo tasks \
+         that another agent has already completed and reported back to you. If the response contains \
+         the information you need, use it directly.",
     );
     out
 }
