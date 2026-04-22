@@ -1647,18 +1647,24 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
         // Build bot identity section for the prompt.
         // bot_aliases may come from group_trigger_patterns (which contains regex
-        // strings like `(?i)\bfoo\b`). Strip regex metacharacters so only
-        // plain human-readable names are injected into the LLM prompt.
+        // strings like `(?i)\bfoo\b`). Extract the literal word between \b anchors
+        // so only plain human-readable names are injected into the LLM prompt.
+        // Stripping non-alphanumeric chars is wrong: `(?i)\brodelo\b` → `irodelob`.
         let sanitize_alias = |s: &str| -> Option<String> {
-            let plain: String = s
-                .chars()
-                .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-'))
-                .collect();
-            let trimmed = plain.trim().to_string();
+            // Try to extract the literal from a word-boundary regex pattern of
+            // the form produced by `aliases_to_trigger_patterns`: `(?i)\bWORD\b`.
+            let literal = if let Some(inner) = s.strip_prefix("(?i)\\b").and_then(|t| t.strip_suffix("\\b")) {
+                inner
+            } else if let Some(inner) = s.strip_prefix("(?i)\\b").and_then(|t| t.strip_suffix("\\B")) {
+                inner
+            } else {
+                s
+            };
+            let trimmed = literal.trim();
             if trimmed.is_empty() {
                 None
             } else {
-                Some(trimmed)
+                Some(trimmed.to_string())
             }
         };
         let identity = if let Some(name) = bot_name {
@@ -3195,10 +3201,13 @@ pub async fn start_channel_bridge_with_config(
                 },
             };
             if let Some(agent_id) = agent_id {
-                // Use account_id-qualified channel key for multi-bot routing
+                // Use account_id-qualified channel key for multi-bot routing.
+                // Use the stable lowercase string (channel_type_to_str) rather
+                // than Debug format (`{:?}`) which is not stable API.
+                let ct = adapter.channel_type();
                 let channel_key = match account_id {
-                    Some(aid) => format!("{:?}:{}", adapter.channel_type(), aid),
-                    None => format!("{:?}", adapter.channel_type()),
+                    Some(aid) => format!("{}:{}", librefang_channels::router::channel_type_to_str(&ct), aid),
+                    None => librefang_channels::router::channel_type_to_str(&ct).to_string(),
                 };
                 info!(
                     "{} default agent: {name} ({agent_id}) [channel: {channel_key}]",

@@ -2086,8 +2086,8 @@ async fn dispatch_message(
                 // only populated in tests; production path uses the router).
                 let precheck_channel_key =
                     match message.metadata.get("account_id").and_then(|v| v.as_str()) {
-                        Some(aid) => format!("{:?}:{}", message.channel, aid),
-                        None => format!("{:?}", message.channel),
+                        Some(aid) => format!("{}:{}", channel_type_str(&message.channel), aid),
+                        None => channel_type_str(&message.channel).to_string(),
                     };
                 let bot_name_owned = router.channel_default_name(&precheck_channel_key);
                 let bot_name = bot_name_owned.as_deref();
