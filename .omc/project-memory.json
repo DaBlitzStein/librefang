@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1776241592600,
+  "lastScanned": 1776864883017,
   "projectRoot": "/home/blitz/development/agents/librefang",
   "techStack": {
     "languages": [
@@ -52,21 +52,11 @@
   },
   "customNotes": [],
   "directoryMap": {
-    "api-docs": {
-      "path": "api-docs",
-      "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1776241592589,
-      "keyFiles": [
-        "index.html",
-        "openapi.json"
-      ]
-    },
     "articles": {
       "path": "articles",
       "purpose": null,
       "fileCount": 16,
-      "lastAccessed": 1776241592592,
+      "lastAccessed": 1776864883009,
       "keyFiles": [
         "hello-librefang.md",
         "new-website-launch.md",
@@ -79,14 +69,14 @@
       "path": "crates",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1776241592593,
+      "lastAccessed": 1776864883010,
       "keyFiles": []
     },
     "deploy": {
       "path": "deploy",
       "purpose": null,
       "fileCount": 7,
-      "lastAccessed": 1776241592594,
+      "lastAccessed": 1776864883010,
       "keyFiles": [
         "Dockerfile",
         "OBSERVABILITY.md",
@@ -99,7 +89,7 @@
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 11,
-      "lastAccessed": 1776241592594,
+      "lastAccessed": 1776864883011,
       "keyFiles": [
         "README.md",
         "cli-profile-rotation.md",
@@ -112,14 +102,14 @@
       "path": "examples",
       "purpose": "Example code",
       "fileCount": 0,
-      "lastAccessed": 1776241592594,
+      "lastAccessed": 1776864883011,
       "keyFiles": []
     },
     "i18n": {
       "path": "i18n",
       "purpose": null,
       "fileCount": 11,
-      "lastAccessed": 1776241592595,
+      "lastAccessed": 1776864883012,
       "keyFiles": [
         "README.de.md",
         "README.es.md",
@@ -132,21 +122,21 @@
       "path": "packages",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1776241592595,
+      "lastAccessed": 1776864883012,
       "keyFiles": []
     },
     "public": {
       "path": "public",
       "purpose": "Public files",
       "fileCount": 0,
-      "lastAccessed": 1776241592595,
+      "lastAccessed": 1776864883012,
       "keyFiles": []
     },
     "rodela": {
       "path": "rodela",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1776241592595,
+      "lastAccessed": 1776864883012,
       "keyFiles": [
         "Dockerfile.k8s",
         "docker-entrypoint.sh"
@@ -156,7 +146,7 @@
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 1,
-      "lastAccessed": 1776241592596,
+      "lastAccessed": 1776864883012,
       "keyFiles": [
         "read_email.py"
       ]
@@ -165,14 +155,14 @@
       "path": "sdk",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1776241592596,
+      "lastAccessed": 1776864883012,
       "keyFiles": []
     },
     "target": {
       "path": "target",
       "purpose": null,
       "fileCount": 3,
-      "lastAccessed": 1776241592596,
+      "lastAccessed": 1776864883012,
       "keyFiles": [
         "CACHEDIR.TAG"
       ]
@@ -180,21 +170,21 @@
     "web": {
       "path": "web",
       "purpose": null,
-      "fileCount": 12,
-      "lastAccessed": 1776241592596,
+      "fileCount": 15,
+      "lastAccessed": 1776864883013,
       "keyFiles": [
         "README.md",
         "eslint.config.js",
         "index.html",
-        "package.json",
-        "pnpm-lock.yaml"
+        "lighthouserc.json",
+        "package.json"
       ]
     },
     "xtask": {
       "path": "xtask",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1776241592596,
+      "lastAccessed": 1776864883013,
       "keyFiles": [
         "Cargo.toml",
         "README.md"
@@ -204,7 +194,7 @@
       "path": "docs/public",
       "purpose": "Public files",
       "fileCount": 1,
-      "lastAccessed": 1776241592598,
+      "lastAccessed": 1776864883014,
       "keyFiles": [
         "_redirects"
       ]
@@ -213,7 +203,7 @@
       "path": "public/assets",
       "purpose": "Static assets",
       "fileCount": 5,
-      "lastAccessed": 1776241592599,
+      "lastAccessed": 1776864883015,
       "keyFiles": [
         "contributors.svg",
         "dashboard.png",
@@ -223,37 +213,18 @@
     "scripts/tests": {
       "path": "scripts/tests",
       "purpose": "Test files",
-      "fileCount": 1,
-      "lastAccessed": 1776241592599,
+      "fileCount": 2,
+      "lastAccessed": 1776864883015,
       "keyFiles": [
+        "channel_progress_smoke.sh",
         "install_sh_test.sh"
-      ]
-    },
-    "web/public": {
-      "path": "web/public",
-      "purpose": "Public files",
-      "fileCount": 15,
-      "lastAccessed": 1776241592599,
-      "keyFiles": [
-        "404.html",
-        "_worker.js",
-        "favicon.svg"
-      ]
-    },
-    "web/scripts": {
-      "path": "web/scripts",
-      "purpose": "Build/utility scripts",
-      "fileCount": 1,
-      "lastAccessed": 1776241592600,
-      "keyFiles": [
-        "fetch-registry.ts"
       ]
     },
     "xtask/src": {
       "path": "xtask/src",
       "purpose": "Source code",
       "fileCount": 32,
-      "lastAccessed": 1776241592600,
+      "lastAccessed": 1776864883017,
       "keyFiles": [
         "api_docs.rs",
         "bench.rs",
@@ -264,8 +235,8 @@
   "hotPaths": [
     {
       "path": "crates/librefang-runtime/src/agent_loop.rs",
-      "accessCount": 90,
-      "lastAccessed": 1776245396826,
+      "accessCount": 92,
+      "lastAccessed": 1776864955561,
       "type": "directory"
     },
     {
@@ -282,21 +253,21 @@
     },
     {
       "path": "crates/librefang-runtime/src/tool_runner.rs",
-      "accessCount": 36,
-      "lastAccessed": 1776287689528,
+      "accessCount": 41,
+      "lastAccessed": 1776866592796,
       "type": "directory"
+    },
+    {
+      "path": "crates/librefang-kernel/src/kernel/mod.rs",
+      "accessCount": 34,
+      "lastAccessed": 1776865082479,
+      "type": "file"
     },
     {
       "path": "crates/librefang-channels/src/types.rs",
       "accessCount": 28,
       "lastAccessed": 1776843729406,
       "type": "directory"
-    },
-    {
-      "path": "crates/librefang-kernel/src/kernel/mod.rs",
-      "accessCount": 21,
-      "lastAccessed": 1776281993128,
-      "type": "file"
     },
     {
       "path": "crates/librefang-api/src/channel_bridge.rs",
@@ -312,9 +283,15 @@
     },
     {
       "path": "crates/librefang-runtime/src",
-      "accessCount": 14,
-      "lastAccessed": 1776270226635,
+      "accessCount": 16,
+      "lastAccessed": 1776866592867,
       "type": "directory"
+    },
+    {
+      "path": "crates/librefang-llm-drivers/src/drivers/openai.rs",
+      "accessCount": 13,
+      "lastAccessed": 1776874008270,
+      "type": "file"
     },
     {
       "path": "crates/librefang-types/src/config/types.rs",
@@ -324,8 +301,14 @@
     },
     {
       "path": "crates/librefang-types/src/scheduler.rs",
-      "accessCount": 7,
-      "lastAccessed": 1776842233621,
+      "accessCount": 8,
+      "lastAccessed": 1776864963403,
+      "type": "directory"
+    },
+    {
+      "path": "",
+      "accessCount": 6,
+      "lastAccessed": 1776866601516,
       "type": "directory"
     },
     {
@@ -335,16 +318,22 @@
       "type": "directory"
     },
     {
+      "path": "crates",
+      "accessCount": 4,
+      "lastAccessed": 1776864928734,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-llm-drivers/src/drivers/anthropic.rs",
+      "accessCount": 4,
+      "lastAccessed": 1776873976438,
+      "type": "file"
+    },
+    {
       "path": "crates/librefang-kernel/src/kernel.rs",
       "accessCount": 3,
       "lastAccessed": 1776112848602,
       "type": "file"
-    },
-    {
-      "path": "crates",
-      "accessCount": 3,
-      "lastAccessed": 1776122603204,
-      "type": "directory"
     },
     {
       "path": "crates/librefang-runtime/src/context_engine.rs",
@@ -375,12 +364,6 @@
       "accessCount": 2,
       "lastAccessed": 1776246214744,
       "type": "file"
-    },
-    {
-      "path": "",
-      "accessCount": 2,
-      "lastAccessed": 1776246223360,
-      "type": "directory"
     },
     {
       "path": "crates/librefang-kernel/src/cron.rs",
