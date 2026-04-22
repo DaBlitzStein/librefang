@@ -748,7 +748,8 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
          \n\
          When you receive a response from `agent_send`, treat it as completed work. Do not redo tasks \
          that another agent has already completed and reported back to you. If the response contains \
-         the information you need, use it directly.",
+         the information you need, use it directly. \
+         If the delegated agent returns an error or incomplete result, you may retry or handle the failure appropriately.",
     );
     out
 }
