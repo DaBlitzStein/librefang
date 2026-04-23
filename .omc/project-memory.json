@@ -465,6 +465,18 @@
       "accessCount": 1,
       "lastAccessed": 1776282004046,
       "type": "directory"
+    },
+    {
+      "path": "crates/librefang-kernel",
+      "accessCount": 1,
+      "lastAccessed": 1776935501348,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-kernel/src/registry.rs",
+      "accessCount": 1,
+      "lastAccessed": 1776935505554,
+      "type": "directory"
     }
   ],
   "userDirectives": []
