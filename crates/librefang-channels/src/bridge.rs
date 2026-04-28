@@ -9,7 +9,7 @@ use crate::router::AgentRouter;
 use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
     default_phase_emoji, truncate_utf8, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage,
-    ChannelUser, InteractiveButton, LifecycleReaction, ParticipantRef, SenderContext,
+    ChannelUser, GroupMember, InteractiveButton, LifecycleReaction, ParticipantRef, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -239,6 +239,22 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Returns `None` if the agent has no per-agent overrides configured.
     async fn agent_channel_overrides(&self, _agent_id: AgentId) -> Option<ChannelOverrides> {
         None
+    }
+
+    /// Get routing aliases for an agent (fork-exclusive).
+    async fn get_agent_aliases(&self, _agent_id: AgentId) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Upsert a group roster entry (fork-exclusive).
+    async fn roster_upsert(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) {
     }
 
     /// Lightweight LLM classification: should the bot reply to this group message?
@@ -1457,6 +1473,22 @@ fn text_content(message: &ChannelMessage) -> Option<&str> {
     }
 }
 
+/// Convert plain alias strings into case-insensitive word-boundary regex patterns
+/// suitable for use in `group_trigger_patterns`.
+///
+/// This lets operators avoid manually translating agent aliases into regex syntax:
+/// `aliases_to_trigger_patterns(&["fandango", "oye fandango"])` produces
+/// `["(?i)\\bfandango\\b", "(?i)\\boye fandango\\b"]`.
+pub fn aliases_to_trigger_patterns(aliases: &[String]) -> Vec<String> {
+    aliases
+        .iter()
+        .map(|alias| {
+            let escaped = regex::escape(alias);
+            format!("(?i)\\b{escaped}\\b")
+        })
+        .collect()
+}
+
 fn matches_group_trigger_pattern(
     ct_str: &str,
     message: &ChannelMessage,
@@ -1750,6 +1782,17 @@ fn should_process_group_message(
 /// (populated gateway-side by `sock.groupMetadata`). Returns empty when the
 /// channel doesn't supply a roster — the addressee guard then becomes a no-op
 /// (cannot fire false positives).
+/// Read `group_members` from the inbound message metadata payload
+/// (populated gateway-side by the channel adapter). Returns empty when the
+/// channel doesn't supply member info.
+fn extract_group_members(message: &ChannelMessage) -> Vec<GroupMember> {
+    message
+        .metadata
+        .get("group_members")
+        .and_then(|v| serde_json::from_value::<Vec<GroupMember>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
 fn extract_group_participants(message: &ChannelMessage) -> Vec<ParticipantRef> {
     message
         .metadata
@@ -1823,6 +1866,20 @@ fn build_sender_context(
         auto_route_confidence_threshold,
         auto_route_sticky_bonus,
         auto_route_divergence_count,
+        // Bot's own @username (e.g. "@rodelo_bot"), if available from metadata.
+        bot_username: message
+            .metadata
+            .get("bot_username")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        // Sender's @handle on the platform, when available.
+        sender_username: message
+            .metadata
+            .get("sender_username")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        // Known group members from the inbound payload (empty for DMs).
+        group_members: extract_group_members(message),
         // §C: forward roster from inbound payload (gateway populates via
         // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
         // guard then becomes a no-op (BC-01).
@@ -5219,6 +5276,28 @@ mod tests {
                 "telegram", &overrides, &message
             ));
         });
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_produces_word_boundary_regex() {
+        let aliases = vec!["fandango".to_string(), "oye fandango".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0], r"(?i)\bfandango\b");
+        assert_eq!(patterns[1], r"(?i)\boye fandango\b");
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_escapes_special_chars() {
+        let aliases = vec!["bot.v2".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns[0], r"(?i)\bbot\.v2\b");
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_empty() {
+        let patterns = aliases_to_trigger_patterns(&[]);
+        assert!(patterns.is_empty());
     }
 
     #[test]

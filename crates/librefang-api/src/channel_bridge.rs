@@ -856,6 +856,41 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(agent_id)
     }
 
+    async fn get_agent_aliases(&self, agent_id: AgentId) -> Vec<String> {
+        self.kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|entry| {
+                entry
+                    .manifest
+                    .metadata
+                    .get("routing")
+                    .and_then(|r| r.get("aliases"))
+                    .and_then(|a| a.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn roster_upsert(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) {
+        use librefang_runtime::kernel_handle::KernelHandle;
+        let _ = self
+            .kernel
+            .roster_upsert(channel, chat_id, user_id, display_name, username);
+    }
+
     async fn uptime_info(&self) -> String {
         let uptime = self.started_at.elapsed();
         let agents = self.list_agents().await.unwrap_or_default();

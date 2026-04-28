@@ -1958,6 +1958,8 @@ mod tests {
             engine.get_trigger(tid).unwrap().session_mode,
             None,
             "patching session_mode = Some(None) must clear the per-trigger override"
+        );
+    }
 
     // ── PR #3913 cooldown tests ──
     // -- cooldown persistence across restarts (#3779) -------------------------

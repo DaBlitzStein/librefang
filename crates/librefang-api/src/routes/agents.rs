@@ -3681,22 +3681,8 @@ pub async fn update_agent(
         }
     };
 
-<<<<<<< HEAD
     drop(t);
 
-    match state.kernel.update_manifest(agent_id, manifest) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "agent_id": id,
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-=======
     // Apply the new manifest to the in-memory registry (preserves runtime-only
     // fields like workspace path and tags).
     if let Err(e) = state
@@ -3706,9 +3692,7 @@ pub async fn update_agent(
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": e.to_string()})),
         );
     }
 
@@ -3735,9 +3719,8 @@ pub async fn update_agent(
     } else {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": t.t("api-error-agent-vanished")})),
+            Json(serde_json::json!({"error": "Agent vanished after update"})),
         )
->>>>>>> b9c55db9 (fix(api): channel body limit, remove ?token= from non-WS routes, implement PUT agents, deduplicate operationIds)
     }
 }
 
