@@ -324,6 +324,20 @@ pub(super) async fn authorize_terminal_request(
         return Err(axum::http::StatusCode::FORBIDDEN.into_response());
     }
 
+    // SECURITY (#3610): Reject any caller still putting the bearer token in
+    // the URL query string. The legacy `?token=` form leaks the credential
+    // into proxy access logs and browser history; modern clients use the
+    // `Sec-WebSocket-Protocol: bearer.<token>` sub-protocol or the
+    // `Authorization` header instead.
+    if crate::ws::ws_query_param(uri, "token").is_some() {
+        warn!(
+            ip = %locality.source_ip,
+            "Terminal WebSocket rejected: ?token= query param removed in #3610 — \
+             use the Sec-WebSocket-Protocol bearer.<token> sub-protocol instead"
+        );
+        return Err(axum::http::StatusCode::UNAUTHORIZED.into_response());
+    }
+
     // Warn if terminal is enabled without any authentication configured.
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
     let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
@@ -726,7 +740,22 @@ pub async fn terminal_ws(
         }
     }
 
-    let ip = addr.ip();
+    // SECURITY: Mirror the `agent_ws` per-IP slot key fix. Behind a
+    // trusted reverse proxy, `addr.ip()` is the proxy and every
+    // terminal collapses onto one shared slot — `max_ws_per_ip` then
+    // traps the whole org. Resolve the real client IP from forwarding
+    // headers, gated on `trust_forwarded_for` AND a peer match in
+    // `trusted_proxies`. The compiled allowlist + master switch live
+    // on `AppState` (built once at boot in `server.rs`) so this upgrade
+    // path never re-parses the raw config strings. Untrusted peers fall
+    // through to `addr.ip()` — a spoofed XFF from the open internet
+    // still hits the per-IP cap on its real source.
+    let ip = crate::client_ip::resolve_real_client_ip(
+        addr.ip(),
+        &headers,
+        &state.trusted_proxies,
+        state.trust_forwarded_for,
+    );
     let max_ws_per_ip = state.kernel.config_ref().rate_limit.max_ws_per_ip;
     let initial_cols = initial_terminal_dimension(&uri, "cols", MAX_COLS);
     let initial_rows = initial_terminal_dimension(&uri, "rows", MAX_ROWS);

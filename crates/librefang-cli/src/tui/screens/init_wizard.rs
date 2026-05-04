@@ -511,15 +511,11 @@ impl State {
 
         for m in &models {
             match m.tier {
-                ModelTier::Fast | ModelTier::Local | ModelTier::Custom => {
-                    if fast.is_none() {
-                        fast = Some(&m.id);
-                    }
+                ModelTier::Fast | ModelTier::Local | ModelTier::Custom if fast.is_none() => {
+                    fast = Some(&m.id);
                 }
-                ModelTier::Balanced => {
-                    if balanced.is_none() {
-                        balanced = Some(&m.id);
-                    }
+                ModelTier::Balanced if balanced.is_none() => {
+                    balanced = Some(&m.id);
                 }
                 ModelTier::Smart => {
                     // Smart is a good balanced pick; also good frontier if no frontier exists
@@ -530,11 +526,10 @@ impl State {
                         frontier = Some(&m.id);
                     }
                 }
-                ModelTier::Frontier => {
-                    if frontier.is_none() {
-                        frontier = Some(&m.id);
-                    }
+                ModelTier::Frontier if frontier.is_none() => {
+                    frontier = Some(&m.id);
                 }
+                _ => {}
             }
         }
 
@@ -565,6 +560,7 @@ fn tier_label(tier: ModelTier) -> &'static str {
         ModelTier::Fast => "fast",
         ModelTier::Local => "local",
         ModelTier::Custom => "custom",
+        _ => "unknown",
     }
 }
 
@@ -587,6 +583,50 @@ fn default_model_for_provider(provider: &str, model_catalog: &ModelCatalog) -> S
         .unwrap_or_else(|| "local-model".to_string())
 }
 
+/// Build the `[default_routing]` TOML section emitted into `config.toml`.
+///
+/// Pure helper extracted from `save_config` (#3582) so the formatting can be
+/// unit-tested without touching the filesystem or the wizard `State`. When
+/// `enabled` is `false`, the wizard writes no routing section at all and we
+/// must return an empty string (callers concat this directly into the
+/// rendered template).
+///
+/// Issue #4466: this previously emitted `[routing]`, which is not a known
+/// `KernelConfig` field — strict-config mode warned and the kernel silently
+/// ignored the user's Smart Router selection. The kernel now reads
+/// `[default_routing]` as a fallback for any agent without its own per-agent
+/// `routing` block, so the wizard emits that exact key here.
+fn build_routing_section(enabled: bool, models: &[String; 3]) -> String {
+    if !enabled {
+        return String::new();
+    }
+    format!(
+        r#"
+[default_routing]
+simple_model = "{fast}"
+medium_model = "{balanced}"
+complex_model = "{frontier}"
+simple_threshold = 100
+complex_threshold = 500
+"#,
+        fast = models[0],
+        balanced = models[1],
+        frontier = models[2],
+    )
+}
+
+/// Build the `api_key_env = "..."` line for providers that read their key
+/// from an environment variable. Returns an empty string for providers that
+/// don't need a key (e.g. `claude-code`, `local`) so the rendered template
+/// has no dangling assignment.
+fn build_api_key_line(env_var: &str) -> String {
+    if env_var.is_empty() {
+        String::new()
+    } else {
+        format!("api_key_env = \"{env_var}\"")
+    }
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 pub fn run() -> InitResult {
@@ -604,6 +644,15 @@ pub fn run() -> InitResult {
     }));
 
     let mut terminal = ratatui::init();
+
+    // Enable bracketed paste so multi-character pastes (e.g. an API key) arrive
+    // as a single `Paste` event instead of thousands of synthesized Key events
+    // (#3638). We disable it again before `ratatui::restore()`.
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::EnableBracketedPaste
+    );
+
     let mut state = State::new();
 
     let (test_tx, test_rx) = std::sync::mpsc::channel::<bool>();
@@ -747,7 +796,24 @@ pub fn run() -> InitResult {
         }
 
         if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-            if let Ok(CtEvent::Key(key)) = event::read() {
+            // Resize falls through to the next loop iteration so the next
+            // `terminal.draw(...)` picks up the new size automatically (#3638).
+            let read = event::read();
+            // Handle bracketed paste — pasting an API key during Step::ApiKey
+            // must arrive as a single string, not synthesized Key events.
+            if let Ok(CtEvent::Paste(text)) = &read {
+                if state.step == Step::ApiKey && state.key_test == KeyTestState::Idle {
+                    // Strip newlines/tabs/control chars; API keys never contain them
+                    // and terminals occasionally append a stray \r.
+                    for c in text.chars() {
+                        if !c.is_control() {
+                            state.api_key_input.push(c);
+                        }
+                    }
+                }
+                continue;
+            }
+            if let Ok(CtEvent::Key(key)) = read {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
@@ -999,6 +1065,10 @@ pub fn run() -> InitResult {
         }
     };
 
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::DisableBracketedPaste
+    );
     ratatui::restore();
     result
 }
@@ -1190,30 +1260,10 @@ fn save_config(state: &mut State) {
         &state.model_input
     };
 
-    let routing_section = if state.routing_enabled {
-        format!(
-            r#"
-[routing]
-simple_model = "{fast}"
-medium_model = "{balanced}"
-complex_model = "{frontier}"
-simple_threshold = 100
-complex_threshold = 500
-"#,
-            fast = state.routing_models[0],
-            balanced = state.routing_models[1],
-            frontier = state.routing_models[2],
-        )
-    } else {
-        String::new()
-    };
+    let routing_section = build_routing_section(state.routing_enabled, &state.routing_models);
 
     let config_path = librefang_dir.join("config.toml");
-    let api_key_line = if p.env_var.is_empty() {
-        String::new()
-    } else {
-        format!("api_key_env = \"{}\"", p.env_var)
-    };
+    let api_key_line = build_api_key_line(p.env_var);
 
     let config = render_init_wizard_config(p.name, model, &api_key_line, &routing_section);
 
@@ -2493,5 +2543,306 @@ mod tests {
             !matches!(s, KeyTestState::Ok | KeyTestState::Warn),
             "SaveFailed must NOT match the auto-advance arm"
         );
+    }
+
+    // ── #3582: pure-helper coverage for the wizard's config-emission path ──
+
+    fn models(fast: &str, balanced: &str, frontier: &str) -> [String; 3] {
+        [fast.to_string(), balanced.to_string(), frontier.to_string()]
+    }
+
+    #[test]
+    fn routing_section_disabled_is_empty() {
+        // When the user picks "No" in the routing prompt the wizard must emit
+        // no `[default_routing]` block at all — an empty section, not a stub.
+        let out = build_routing_section(false, &models("a", "b", "c"));
+        assert!(out.is_empty(), "expected empty section, got {out:?}");
+    }
+
+    #[test]
+    fn routing_section_uses_default_routing_key_not_legacy_routing() {
+        // Regression for issue #4466: the wizard previously emitted `[routing]`
+        // which is NOT a recognised KernelConfig field, so the user's Smart
+        // Router selection was silently ignored. The kernel reads
+        // `[default_routing]` as the agent-fallback Smart Router config.
+        let out = build_routing_section(true, &models("a", "b", "c"));
+        assert!(
+            out.contains("[default_routing]"),
+            "expected `[default_routing]` header, got {out:?}"
+        );
+        assert!(
+            !out.contains("[routing]"),
+            "wizard must not emit the dead `[routing]` key, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn routing_section_enabled_contains_all_three_tiers() {
+        let out =
+            build_routing_section(true, &models("llama-3-8b", "llama-3-70b", "claude-opus-4"));
+        assert!(out.contains("simple_model = \"llama-3-8b\""));
+        assert!(out.contains("medium_model = \"llama-3-70b\""));
+        assert!(out.contains("complex_model = \"claude-opus-4\""));
+    }
+
+    #[test]
+    fn routing_section_includes_threshold_defaults() {
+        // Threshold values are wizard policy, not user-tunable in the TUI;
+        // a regression that drops them would leave routing inert.
+        let out = build_routing_section(true, &models("f", "b", "x"));
+        assert!(out.contains("simple_threshold = 100"));
+        assert!(out.contains("complex_threshold = 500"));
+    }
+
+    #[test]
+    fn routing_section_starts_with_blank_line_for_template_concat() {
+        // The section is concatenated directly after the rendered base config;
+        // a leading newline keeps `[routing]` on its own line.
+        let out = build_routing_section(true, &models("a", "b", "c"));
+        assert!(
+            out.starts_with('\n'),
+            "expected leading newline, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn api_key_line_empty_for_keyless_provider() {
+        // claude-code / local providers have no env_var; the rendered template
+        // must not contain a dangling `api_key_env = ""`.
+        assert_eq!(build_api_key_line(""), "");
+    }
+
+    #[test]
+    fn api_key_line_quotes_env_var_name() {
+        assert_eq!(
+            build_api_key_line("GROQ_API_KEY"),
+            "api_key_env = \"GROQ_API_KEY\""
+        );
+    }
+
+    #[test]
+    fn render_init_wizard_config_substitutes_all_placeholders() {
+        // If a placeholder survives substitution the user's config.toml is
+        // unparseable and the daemon refuses to start. Guard against drift
+        // between the template file and the renderer.
+        let rendered = render_init_wizard_config(
+            "groq",
+            "llama-3-70b",
+            &build_api_key_line("GROQ_API_KEY"),
+            &build_routing_section(false, &models("", "", "")),
+        );
+        assert!(!rendered.contains("{{provider}}"));
+        assert!(!rendered.contains("{{model}}"));
+        assert!(!rendered.contains("{{api_key_line}}"));
+        assert!(!rendered.contains("{{routing_section}}"));
+        assert!(rendered.contains("groq"));
+        assert!(rendered.contains("llama-3-70b"));
+    }
+
+    #[test]
+    fn render_init_wizard_config_inlines_enabled_routing_section() {
+        let rendered = render_init_wizard_config(
+            "anthropic",
+            "claude-opus-4",
+            &build_api_key_line("ANTHROPIC_API_KEY"),
+            &build_routing_section(true, &models("haiku", "sonnet", "opus")),
+        );
+        assert!(rendered.contains("[default_routing]"));
+        assert!(rendered.contains("simple_model = \"haiku\""));
+        assert!(rendered.contains("complex_model = \"opus\""));
+    }
+
+    #[test]
+    fn default_model_for_unknown_provider_falls_back_to_local() {
+        // The catalog lookup may return None for providers that ship no
+        // bundled defaults; the wizard must still produce a non-empty model
+        // string so the rendered template is valid TOML.
+        let catalog = ModelCatalog::default();
+        let m = default_model_for_provider("definitely-not-a-provider", &catalog);
+        assert!(!m.is_empty());
+    }
+
+    #[test]
+    fn tier_label_is_total_over_known_tiers() {
+        // tier_label is called from the model-list renderer for every catalog
+        // entry; a missing arm would surface as "unknown" badges next to real
+        // models. Lock the mapping for the tiers the wizard actually displays.
+        assert_eq!(tier_label(ModelTier::Frontier), "frontier");
+        assert_eq!(tier_label(ModelTier::Smart), "smart");
+        assert_eq!(tier_label(ModelTier::Balanced), "balanced");
+        assert_eq!(tier_label(ModelTier::Fast), "fast");
+        assert_eq!(tier_label(ModelTier::Local), "local");
+        assert_eq!(tier_label(ModelTier::Custom), "custom");
+    }
+
+    // ── #3582: reducer-style coverage for handle_routing_key ────────────────
+    //
+    // The maintainer asked for an `Event → State → State` table-test on the
+    // wizard's reducer. `handle_routing_key` is the closest the codebase has
+    // to a pure reducer today (the migration handler has thread-spawning side
+    // effects, the api-key handler does file I/O). We exercise navigation
+    // arms only: `Enter` arms call `save_config`, which writes
+    // `~/.librefang/config.toml` and would touch the user's filesystem
+    // outside a tempdir, so they're deliberately out of scope here.
+
+    /// Construct a minimal `State` for routing-step navigation tests.
+    /// Pre-loads three fake model entries so `PickTier` arrow-key cycling
+    /// has something to wrap around.
+    fn routing_state_with_models(entries: usize) -> State {
+        let mut s = State::new();
+        s.step = Step::Routing;
+        s.routing_phase = RoutingPhase::Choice;
+        s.routing_choice_list.select(Some(0));
+        s.routing_tier_list.select(Some(0));
+        s.model_entries.clear();
+        for i in 0..entries {
+            s.model_entries.push(ModelEntry {
+                id: format!("model-{i}"),
+                display_name: format!("Model {i}"),
+                tier: "fast",
+                cost: String::new(),
+            });
+        }
+        s
+    }
+
+    #[test]
+    fn routing_choice_down_toggles_to_no() {
+        let mut s = routing_state_with_models(3);
+        // Selection starts at 0 (Yes); Down/j flips to 1 (No).
+        handle_routing_key(&mut s, KeyCode::Down);
+        assert_eq!(s.routing_choice_list.selected(), Some(1));
+    }
+
+    #[test]
+    fn routing_choice_up_toggles_back_to_yes() {
+        let mut s = routing_state_with_models(3);
+        s.routing_choice_list.select(Some(1));
+        handle_routing_key(&mut s, KeyCode::Up);
+        assert_eq!(s.routing_choice_list.selected(), Some(0));
+    }
+
+    #[test]
+    fn routing_choice_j_and_k_match_arrow_keys() {
+        // Vim-style bindings must mirror the arrow keys exactly — a regression
+        // here would create a confusing two-modes-of-input UX.
+        let mut s = routing_state_with_models(3);
+        s.routing_choice_list.select(Some(0));
+        handle_routing_key(&mut s, KeyCode::Char('j'));
+        assert_eq!(s.routing_choice_list.selected(), Some(1));
+        handle_routing_key(&mut s, KeyCode::Char('k'));
+        assert_eq!(s.routing_choice_list.selected(), Some(0));
+    }
+
+    #[test]
+    fn routing_choice_esc_returns_to_model_step() {
+        // Esc on the first routing screen should let the user back out into
+        // the model-picker step, not silently swallow the input.
+        let mut s = routing_state_with_models(3);
+        s.step = Step::Routing;
+        handle_routing_key(&mut s, KeyCode::Esc);
+        assert!(
+            matches!(s.step, Step::Model),
+            "Esc on routing/Choice must go back to Model step"
+        );
+    }
+
+    #[test]
+    fn routing_choice_ignores_unrelated_keys() {
+        // Random keys must NOT auto-advance or reset selection.
+        let mut s = routing_state_with_models(3);
+        s.routing_choice_list.select(Some(1));
+        handle_routing_key(&mut s, KeyCode::Char('z'));
+        handle_routing_key(&mut s, KeyCode::Tab);
+        assert_eq!(s.routing_choice_list.selected(), Some(1));
+        assert!(matches!(s.step, Step::Routing));
+        assert!(matches!(s.routing_phase, RoutingPhase::Choice));
+    }
+
+    #[test]
+    fn routing_pick_tier0_esc_returns_to_choice() {
+        // Esc on the first tier rolls all the way back to the Yes/No screen.
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(0);
+        handle_routing_key(&mut s, KeyCode::Esc);
+        assert!(matches!(s.routing_phase, RoutingPhase::Choice));
+    }
+
+    #[test]
+    fn routing_pick_tier1_esc_returns_to_tier0() {
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(1);
+        handle_routing_key(&mut s, KeyCode::Esc);
+        assert!(matches!(s.routing_phase, RoutingPhase::PickTier(0)));
+    }
+
+    #[test]
+    fn routing_pick_tier2_esc_returns_to_tier1() {
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(2);
+        handle_routing_key(&mut s, KeyCode::Esc);
+        assert!(matches!(s.routing_phase, RoutingPhase::PickTier(1)));
+    }
+
+    #[test]
+    fn routing_pick_tier_down_cycles_through_models() {
+        // Down/j must wrap from the last entry back to 0, otherwise users on
+        // small model lists get stuck at the bottom with no way around.
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(0);
+        s.routing_tier_list.select(Some(0));
+
+        handle_routing_key(&mut s, KeyCode::Down);
+        assert_eq!(s.routing_tier_list.selected(), Some(1));
+        handle_routing_key(&mut s, KeyCode::Down);
+        assert_eq!(s.routing_tier_list.selected(), Some(2));
+        handle_routing_key(&mut s, KeyCode::Down);
+        assert_eq!(s.routing_tier_list.selected(), Some(0), "must wrap");
+    }
+
+    #[test]
+    fn routing_pick_tier_up_wraps_from_zero_to_last() {
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(0);
+        s.routing_tier_list.select(Some(0));
+
+        handle_routing_key(&mut s, KeyCode::Up);
+        assert_eq!(
+            s.routing_tier_list.selected(),
+            Some(2),
+            "up at index 0 must wrap to the last entry"
+        );
+    }
+
+    // ── #3582: step_label / step_index lock-in ──────────────────────────────
+
+    #[test]
+    fn step_label_matches_step_index_progression() {
+        // The header shows "N of 7"; index and label must stay aligned. A
+        // mismatch means the user sees a wrong-step indicator without any
+        // compile-time signal.
+        let pairs: [(Step, &str, usize, &str); 7] = [
+            (Step::Welcome, "1 of 7", 0, "Welcome"),
+            (Step::Migration, "2 of 7", 1, "Migration"),
+            (Step::Provider, "3 of 7", 2, "Provider"),
+            (Step::ApiKey, "4 of 7", 3, "ApiKey"),
+            (Step::Model, "5 of 7", 4, "Model"),
+            (Step::Routing, "6 of 7", 5, "Routing"),
+            (Step::Complete, "7 of 7", 6, "Complete"),
+        ];
+        for (step, label, idx, name) in pairs {
+            let mut s = State::new();
+            s.step = step;
+            assert_eq!(s.step_label(), label, "label drift for {name}");
+            assert_eq!(s.step_index(), idx, "index drift for {name}");
+        }
+    }
+
+    #[test]
+    fn routing_tier_constants_are_three_wide() {
+        // The PickTier sub-state is indexed 0..=2; the parallel display
+        // arrays must match that or `draw_routing_pick` panics on indexing.
+        assert_eq!(ROUTING_TIER_NAMES.len(), 3);
+        assert_eq!(ROUTING_TIER_DESC.len(), 3);
     }
 }

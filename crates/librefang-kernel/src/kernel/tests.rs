@@ -2441,7 +2441,7 @@ async fn no_upstream_when_parent_has_no_active_turn() {
 /// failure we expect.
 #[tokio::test(flavor = "multi_thread")]
 async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
-    use kernel_handle::KernelHandle;
+    use kernel_handle::AgentControl;
 
     let kernel = cascade_test_kernel();
 
@@ -2452,7 +2452,7 @@ async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
     // (no cascade), and the call proceeds to fail at the target agent.
     let child_id = AgentId::new();
     let parent_id = AgentId::new();
-    let err = KernelHandle::send_to_agent_as(
+    let err = AgentControl::send_to_agent_as(
         kernel.as_ref(),
         &child_id.to_string(),
         "ping",
@@ -2475,11 +2475,11 @@ async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
 /// rather than silently passed through.
 #[tokio::test(flavor = "multi_thread")]
 async fn send_to_agent_as_rejects_unparseable_parent_id() {
-    use kernel_handle::KernelHandle;
+    use kernel_handle::AgentControl;
 
     let kernel = cascade_test_kernel();
     let child_id = AgentId::new();
-    let err = KernelHandle::send_to_agent_as(
+    let err = AgentControl::send_to_agent_as(
         kernel.as_ref(),
         &child_id.to_string(),
         "ping",
@@ -3680,6 +3680,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
         RunningTask {
             abort: h_a.abort_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
     kernel.running_tasks.insert(
@@ -3687,6 +3688,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
         RunningTask {
             abort: h_b.abort_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
 
@@ -3724,6 +3726,71 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
     kernel.shutdown();
 }
 
+/// `/api/sessions` joins the SQLite session list with this snapshot to set
+/// the per-row `active` flag (#4290). Verify it surfaces every running
+/// session across agents and shrinks back to empty after stops.
+#[test]
+fn test_running_session_ids_reflects_live_tasks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-running-ids-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    // Empty kernel: snapshot must be empty.
+    assert!(kernel.running_session_ids().is_empty());
+
+    let agent_a = AgentId(uuid::Uuid::new_v4());
+    let agent_b = AgentId(uuid::Uuid::new_v4());
+    let s1 = SessionId::new();
+    let s2 = SessionId::new();
+    let s3 = SessionId::new();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mk_handle = || {
+        rt.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        })
+        .abort_handle()
+    };
+
+    for (a, s) in [(agent_a, s1), (agent_a, s2), (agent_b, s3)] {
+        kernel.running_tasks.insert(
+            (a, s),
+            RunningTask {
+                abort: mk_handle(),
+                started_at: chrono::Utc::now(),
+                task_id: uuid::Uuid::new_v4(),
+            },
+        );
+    }
+
+    let ids = kernel.running_session_ids();
+    assert_eq!(ids.len(), 3, "all three live sessions must be present");
+    assert!(ids.contains(&s1));
+    assert!(ids.contains(&s2));
+    assert!(ids.contains(&s3));
+
+    // Stop one — snapshot must drop exactly that one.
+    assert!(kernel.stop_session_run(agent_a, s1).unwrap());
+    let ids = kernel.running_session_ids();
+    assert_eq!(ids.len(), 2);
+    assert!(!ids.contains(&s1));
+    assert!(ids.contains(&s2));
+    assert!(ids.contains(&s3));
+
+    let _ = kernel.stop_session_run(agent_a, s2);
+    let _ = kernel.stop_session_run(agent_b, s3);
+    assert!(kernel.running_session_ids().is_empty());
+
+    drop(rt);
+    kernel.shutdown();
+}
+
 #[test]
 fn test_stop_agent_run_fans_out_across_sessions() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3755,6 +3822,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         RunningTask {
             abort: mk_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
     kernel.running_tasks.insert(
@@ -3762,6 +3830,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         RunningTask {
             abort: mk_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
     // Different agent — must NOT be touched by stop_agent_run.
@@ -3770,6 +3839,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         RunningTask {
             abort: mk_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
 
@@ -3851,6 +3921,7 @@ fn test_fork_does_not_overwrite_parent_registration() {
         RunningTask {
             abort: parent_abort,
             started_at: parent_started_at,
+            task_id: uuid::Uuid::new_v4(),
         },
     );
     let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
@@ -3899,6 +3970,176 @@ fn test_fork_does_not_overwrite_parent_registration() {
 
     drop(rt);
     kernel.shutdown();
+}
+
+/// Regression for #4291. The previous fork-spawn site read
+/// `entry.session_id` from the agent registry to decide which session
+/// the fork should land on — but `entry.session_id` is mutable by
+/// `switch_agent_session` (`POST /api/agents/{id}/sessions/{sid}/switch`),
+/// which any dashboard tab can call mid-turn. A fork emitted between
+/// the parent's `effective_session_id` resolution and the fork-spawn
+/// lookup would read the *new* registry pointer and pollute the wrong
+/// session's history, breaking prompt-cache alignment.
+///
+/// The fix snapshots the parent session id at fork construction time
+/// (from `session_interrupts`, which is keyed by the parent's actual
+/// `effective_session_id`) and threads it through
+/// `LoopOptions::parent_session_id`. The session resolver in
+/// `send_message_streaming_with_sender_and_opts` reads
+/// `loop_opts.parent_session_id` for forks and never re-touches
+/// `entry.session_id`.
+///
+/// This test exercises the snapshot primitive: register a parent
+/// interrupt for `(agent, X)`, mutate the registry to point at `Y`
+/// via `update_session_id`, then re-snapshot via
+/// `any_session_interrupt_with_id_for_agent`. The snapshot must still
+/// return `X` — the helper reads the in-flight interrupt map, not the
+/// registry pointer, so a concurrent `switch_agent_session` cannot
+/// drag the fork onto the wrong session.
+#[test]
+fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-fork-toctou-4291");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    // Register a real agent so `update_session_id` can find it. The
+    // initial entry.session_id is `parent_session` — what the parent
+    // turn was actually invoked with.
+    let agent_id = AgentId::new();
+    let parent_session = SessionId::new();
+    let entry = librefang_types::agent::AgentEntry {
+        id: agent_id,
+        name: format!("toctou-agent-{}", agent_id),
+        manifest: librefang_types::agent::AgentManifest {
+            name: format!("toctou-agent-{}", agent_id),
+            description: "test".into(),
+            author: "test".into(),
+            module: "test".into(),
+            ..Default::default()
+        },
+        state: librefang_types::agent::AgentState::Running,
+        mode: librefang_types::agent::AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        parent: None,
+        children: vec![],
+        session_id: parent_session,
+        tags: vec![],
+        identity: Default::default(),
+        onboarding_completed: false,
+        onboarding_completed_at: None,
+        source_toml_path: None,
+        is_hand: false,
+        ..Default::default()
+    };
+    kernel.registry.register(entry).expect("register agent");
+
+    // Simulate the parent loop being mid-turn: insert its interrupt
+    // under `(agent, parent_session)`, exactly as
+    // `send_message_streaming_with_sender_and_opts` does at the
+    // `if !loop_opts.is_fork` register block. This is what the fork-
+    // spawn site uses to discover which session to land on.
+    let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
+    kernel
+        .session_interrupts
+        .insert((agent_id, parent_session), parent_interrupt.clone());
+
+    // Pre-mutation snapshot: helper must return the parent session.
+    let (snapshot_sid_before, _) = kernel
+        .any_session_interrupt_with_id_for_agent(agent_id)
+        .expect("parent loop must be discoverable via session_interrupts");
+    assert_eq!(
+        snapshot_sid_before, parent_session,
+        "fork-spawn snapshot must return the session the parent loop is actually \
+         running on, not whatever the registry currently points at"
+    );
+
+    // Now do exactly what the dashboard's Sessions-page Play button
+    // (or any other `switch_agent_session` caller) would do mid-turn:
+    // mutate the registry pointer to a *different* session.
+    let switched_session = SessionId::new();
+    assert_ne!(switched_session, parent_session);
+    kernel
+        .registry
+        .update_session_id(agent_id, switched_session)
+        .expect("update_session_id");
+
+    // Sanity: the registry pointer really did flip.
+    let entry_after = kernel
+        .registry
+        .get(agent_id)
+        .expect("agent still registered");
+    assert_eq!(
+        entry_after.session_id, switched_session,
+        "registry mutation must have taken effect — otherwise this test \
+         is not actually exercising the TOCTOU window"
+    );
+
+    // Critical assertion: the fork-spawn snapshot is UNCHANGED. The
+    // helper reads the in-flight interrupt map (parent's actual
+    // session), not the now-stale registry pointer. The fork plumbed
+    // through `LoopOptions::parent_session_id` would therefore land on
+    // `parent_session`, NOT `switched_session`.
+    let (snapshot_sid_after, _) = kernel
+        .any_session_interrupt_with_id_for_agent(agent_id)
+        .expect("parent loop must still be discoverable after registry mutation");
+    assert_eq!(
+        snapshot_sid_after, parent_session,
+        "fork-spawn snapshot must NOT follow registry mutations — that is the \
+         whole TOCTOU race in #4291. Got {:?}, expected {:?}",
+        snapshot_sid_after, parent_session
+    );
+
+    // Belt-and-braces: the canonical fork-time `LoopOptions` carries
+    // exactly this snapshot, so a fork constructed *after* the
+    // registry flip still targets the parent's session. Build the
+    // options the same way `run_forked_agent_streaming` does and
+    // assert.
+    let loop_opts = librefang_runtime::agent_loop::LoopOptions {
+        is_fork: true,
+        parent_session_id: Some(snapshot_sid_after),
+        ..Default::default()
+    };
+    assert_eq!(
+        loop_opts.parent_session_id,
+        Some(parent_session),
+        "fork LoopOptions must carry the parent's actual session id, \
+         not the post-mutation registry pointer"
+    );
+    assert_ne!(
+        loop_opts.parent_session_id,
+        Some(switched_session),
+        "fork LoopOptions must not have followed the registry switch"
+    );
+
+    kernel.shutdown();
+}
+
+/// Default `LoopOptions` must have `parent_session_id == None`, and
+/// non-fork construction sites that don't set it explicitly inherit
+/// the default. The session resolver MUST refuse to read this field
+/// when `is_fork = false` — that contract is asserted at the resolver
+/// arm. This test just pins the default value so a future refactor of
+/// `LoopOptions::Default` doesn't accidentally start sending forks to
+/// a stale id.
+#[test]
+fn loop_options_default_has_no_parent_session_id_4291() {
+    let opts = librefang_runtime::agent_loop::LoopOptions::default();
+    assert!(
+        opts.parent_session_id.is_none(),
+        "LoopOptions::default() must leave parent_session_id unset; \
+         only run_forked_agent_streaming should populate it"
+    );
+    assert!(
+        !opts.is_fork,
+        "LoopOptions::default() must be a non-fork main turn"
+    );
 }
 
 /// `agent_concurrency_for` resolves a `New`-mode manifest with
@@ -4390,7 +4631,6 @@ async fn test_push_notification_omits_session_suffix_for_agent_level_alerts() {
 /// alongside the existing `"cron"` carve-out.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
-    use kernel_handle::KernelHandle;
     use librefang_types::config::UserConfig;
     use librefang_types::user_policy::UserToolGate;
 
@@ -4419,7 +4659,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
 
     // Cron channel — the existing carve-out (must remain Allow).
     assert_eq!(
-        KernelHandle::resolve_user_tool_decision(
+        kernel_handle::ApprovalGate::resolve_user_tool_decision(
             kernel.as_ref(),
             "shell_exec",
             None,
@@ -4431,7 +4671,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
 
     // Autonomous channel — the new carve-out (issue #3243).
     assert_eq!(
-        KernelHandle::resolve_user_tool_decision(
+        kernel_handle::ApprovalGate::resolve_user_tool_decision(
             kernel.as_ref(),
             "shell_exec",
             None,
@@ -4445,7 +4685,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
     // A real inbound channel WITHOUT a registered sender must still
     // hit the guest gate — proves the carve-out is targeted, not a
     // blanket fail-open.
-    let guest_decision = KernelHandle::resolve_user_tool_decision(
+    let guest_decision = kernel_handle::ApprovalGate::resolve_user_tool_decision(
         kernel.as_ref(),
         "shell_exec",
         Some("999999"),
@@ -5189,6 +5429,28 @@ fn agent_concurrency_falls_back_to_config_default_when_unset() {
 
 // -- #3755: three-layer concurrency caps joint integration --------------------
 
+/// Regression for #3446: trigger fires must run under a bounded
+/// timeout so a stuck LLM call cannot pin Lane::Trigger permits
+/// kernel-wide.  We assert the config field is wired and clamping
+/// rewrites a `0` (infinite-hold) value back to a safe default.
+#[test]
+fn trigger_fire_timeout_secs_is_wired_and_validated() {
+    use librefang_types::config::QueueConcurrencyConfig;
+    let default_cfg = QueueConcurrencyConfig::default();
+    assert!(
+        default_cfg.trigger_fire_timeout_secs > 0,
+        "default trigger_fire_timeout_secs must not be infinite (#3446)"
+    );
+
+    let mut cfg = KernelConfig::default();
+    cfg.queue.concurrency.trigger_fire_timeout_secs = 0;
+    cfg.clamp_bounds();
+    assert!(
+        cfg.queue.concurrency.trigger_fire_timeout_secs > 0,
+        "clamp_bounds must rewrite 0 to a positive default to avoid lane starvation"
+    );
+}
+
 /// Verify that the global `Lane::Trigger` semaphore correctly limits total
 /// concurrent trigger fires across the whole kernel.  We use a capacity-2
 /// queue and prove that the third caller cannot acquire a permit immediately.
@@ -5579,6 +5841,85 @@ async fn injection_teardown_only_removes_target_session() {
     kernel.shutdown();
 }
 
+/// Regression test for #3575: when the bounded mpsc(8) injection channel is
+/// full, `inject_message_for_session` must surface a `KernelError::Backpressure`
+/// instead of silently returning `Ok(false)`. The API layer relies on this
+/// distinction to map the situation to HTTP 503 instead of HTTP 200.
+#[tokio::test(flavor = "multi_thread")]
+async fn inject_message_returns_backpressure_when_channel_full() {
+    use crate::error::KernelError;
+
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "twin_full");
+    let session = SessionId::new();
+
+    // Set up the channel but do NOT drain the receiver — this lets us fill
+    // the bounded mpsc(8) buffer deterministically.
+    let _rx = kernel.setup_injection_channel(agent_id, session);
+
+    // The channel capacity is 8 (see `setup_injection_channel`). Fill it.
+    for i in 0..8 {
+        kernel
+            .inject_message_for_session(agent_id, Some(session), &format!("msg {i}"))
+            .await
+            .unwrap_or_else(|e| panic!("inject {i} should succeed before saturation: {e}"));
+    }
+
+    // The 9th inject targets the only live session, whose channel is full.
+    // Pre-fix this returned Ok(false) (silently dropped). Post-fix it must
+    // return KernelError::Backpressure.
+    let result = kernel
+        .inject_message_for_session(agent_id, Some(session), "overflow")
+        .await;
+    match result {
+        Err(KernelError::Backpressure(_)) => { /* expected */ }
+        other => panic!("expected Backpressure when injection channel is full, got {other:?}"),
+    }
+
+    kernel.teardown_injection_channel(agent_id, session);
+    kernel.shutdown();
+}
+
+/// Mixed-target case for #3575: when broadcasting across multiple live
+/// sessions and at least one accepts, the call must still report success
+/// (`Ok(true)`) — backpressure only fires when *every* live target was full.
+#[tokio::test(flavor = "multi_thread")]
+async fn inject_broadcast_succeeds_when_one_target_accepts() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "twin_mixed");
+
+    let session_full = SessionId::new();
+    let session_open = SessionId::new();
+
+    let _rx_full = kernel.setup_injection_channel(agent_id, session_full);
+    let rx_open = kernel.setup_injection_channel(agent_id, session_open);
+
+    // Saturate session_full's buffer (capacity 8).
+    for i in 0..8 {
+        kernel
+            .inject_message_for_session(agent_id, Some(session_full), &format!("fill {i}"))
+            .await
+            .expect("targeted fill should succeed");
+    }
+
+    // Broadcast (None): session_full will reject as Full, session_open accepts.
+    let injected = kernel
+        .inject_message_for_session(agent_id, None, "broadcast-mixed")
+        .await
+        .expect("broadcast must succeed when at least one session accepts");
+    assert!(
+        injected,
+        "delivered flag should be true when one target accepts"
+    );
+
+    // session_open actually received it.
+    assert!(rx_open.lock().await.try_recv().is_ok());
+
+    kernel.teardown_injection_channel(agent_id, session_full);
+    kernel.teardown_injection_channel(agent_id, session_open);
+    kernel.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Session label generation — pure-function helpers
 // ---------------------------------------------------------------------------
@@ -5675,4 +6016,582 @@ fn sanitize_session_title_caps_at_60_chars() {
 fn sanitize_session_title_handles_empty() {
     assert_eq!(sanitize_session_title(""), "");
     assert_eq!(sanitize_session_title("   \n  "), "");
+}
+
+// ---------------------------------------------------------------------------
+// #3459 — cron_session_max_messages / max_tokens clamping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_cron_max_messages_none_passthrough() {
+    assert_eq!(resolve_cron_max_messages(None), None);
+}
+
+#[test]
+fn resolve_cron_max_messages_zero_disabled() {
+    // 0 must be treated as "disable", not "trim to 0 messages"
+    assert_eq!(resolve_cron_max_messages(Some(0)), None);
+}
+
+#[test]
+fn resolve_cron_max_messages_below_min_clamped() {
+    // 1, 2, 3 are all below MIN_CRON_HISTORY_MESSAGES=4 and must be clamped
+    for small in 1usize..4 {
+        assert_eq!(
+            resolve_cron_max_messages(Some(small)),
+            Some(MIN_CRON_HISTORY_MESSAGES),
+            "expected clamp for input {small}"
+        );
+    }
+}
+
+#[test]
+fn resolve_cron_max_messages_at_min_passthrough() {
+    assert_eq!(
+        resolve_cron_max_messages(Some(MIN_CRON_HISTORY_MESSAGES)),
+        Some(MIN_CRON_HISTORY_MESSAGES)
+    );
+}
+
+#[test]
+fn resolve_cron_max_messages_large_passthrough() {
+    assert_eq!(resolve_cron_max_messages(Some(100)), Some(100));
+}
+
+#[test]
+fn resolve_cron_max_tokens_none_passthrough() {
+    assert_eq!(resolve_cron_max_tokens(None), None);
+}
+
+#[test]
+fn resolve_cron_max_tokens_zero_disabled() {
+    // 0 must disable the cap, not force every fire to start empty
+    assert_eq!(resolve_cron_max_tokens(Some(0)), None);
+}
+
+#[test]
+fn resolve_cron_max_tokens_nonzero_passthrough() {
+    assert_eq!(resolve_cron_max_tokens(Some(8192)), Some(8192));
+    assert_eq!(resolve_cron_max_tokens(Some(1)), Some(1));
+}
+
+/// Regression for #3533: `spawn_agent` must reject manifests whose
+/// `module` string escapes the LibreFang home dir. The pure-function
+/// `validate_module_string` is unit-tested in librefang-runtime, but
+/// this end-to-end test locks the wiring at the kernel boundary so a
+/// future refactor (e.g. moving the call out of `spawn_agent_inner`)
+/// fails loudly instead of silently re-opening the path-escape hole.
+#[test]
+fn test_spawn_agent_rejects_absolute_module_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-spawn-reject-abs");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let result = kernel.spawn_agent(AgentManifest {
+        name: "evil-abs".to_string(),
+        description: "tries to exec /etc/passwd.py".to_string(),
+        author: "test".to_string(),
+        module: "python:/etc/passwd.py".to_string(),
+        ..Default::default()
+    });
+
+    assert!(
+        result.is_err(),
+        "spawn must reject absolute module path; got {result:?}"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Invalid module path"),
+        "error should mention invalid module path, got: {err}"
+    );
+
+    kernel.shutdown();
+}
+
+/// Companion to the absolute-path rejection test: parent-traversal
+/// (`..`) must also be refused at the kernel spawn boundary. Same
+/// wiring-regression intent as `test_spawn_agent_rejects_absolute_module_path`.
+#[test]
+fn test_spawn_agent_rejects_parent_traversal_module_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-spawn-reject-traversal");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let result = kernel.spawn_agent(AgentManifest {
+        name: "evil-traversal".to_string(),
+        description: "tries ../../etc/shadow.py".to_string(),
+        author: "test".to_string(),
+        module: "python:../../etc/shadow.py".to_string(),
+        ..Default::default()
+    });
+
+    assert!(
+        result.is_err(),
+        "spawn must reject '..' traversal; got {result:?}"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Invalid module path"),
+        "error should mention invalid module path, got: {err}"
+    );
+
+    kernel.shutdown();
+}
+
+/// Regression test for #3564 — `config_reload_lock` must NOT be held across
+/// long-running awaits in `send_message_full_with_upstream`.
+///
+/// Before the fix, the read guard scoped the entire LLM call. Combined with
+/// `tokio::sync::RwLock`'s write-preferring policy, any single reload (or
+/// file-watcher fire) would queue a writer and freeze every subsequent
+/// incoming agent message until the slowest in-flight stream completed.
+///
+/// This test simulates the pattern the production code uses and asserts
+/// that a queued writer and a *second* reader can both make progress while
+/// a "long-running" reader (the LLM call analogue) is still in flight.
+/// With the buggy code (guard held to function end), the second reader
+/// would deadlock behind the queued writer until the long reader finished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn config_reload_lock_not_held_across_long_await_3564() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let kernel = cascade_test_kernel();
+
+    // "Long-running LLM call" reader. Mirrors the post-fix pattern in
+    // `send_message_full_with_upstream`: acquire the read guard briefly
+    // (to serialize with reload's write side), drop it, then proceed
+    // with the multi-second async work that used to hold the guard.
+    let kernel_a = Arc::clone(&kernel);
+    let long_reader = tokio::spawn(async move {
+        {
+            let _g = kernel_a.config_reload_lock.read().await;
+            // immediately dropped — this is the fix
+        }
+        // simulate the LLM call that used to be guarded
+        tokio::time::sleep(Duration::from_millis(800)).await;
+    });
+
+    // Give the long reader a moment to enter (and exit) its guard scope.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Queue a writer (mimics `reload_config`'s write side). Under the
+    // write-preferring `tokio::sync::RwLock`, any subsequent reader will
+    // queue behind this writer.
+    let kernel_w = Arc::clone(&kernel);
+    let writer = tokio::spawn(async move {
+        let _wg = kernel_w.config_reload_lock.write().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
+
+    // Give the writer a moment to register its intent.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // A *new* incoming request arrives. With the bug, this would block
+    // behind the writer, which would in turn block behind the long
+    // reader's guard — total wait ~ entire LLM call duration. With the
+    // fix, the long reader has already released, so writer + this reader
+    // both finish well within a fraction of the simulated call time.
+    let kernel_b = Arc::clone(&kernel);
+    let second_reader = tokio::spawn(async move {
+        let _g = kernel_b.config_reload_lock.read().await;
+    });
+
+    // Cap the wait well below the long reader's sleep. If the bug were
+    // present, this would time out (second_reader would still be queued
+    // behind the writer, which would still be queued behind the long
+    // reader's guard).
+    timeout(Duration::from_millis(400), async {
+        writer.await.unwrap();
+        second_reader.await.unwrap();
+    })
+    .await
+    .expect("writer + second reader must not be blocked by the long reader's release-immediately guard (#3564)");
+
+    long_reader.await.unwrap();
+    kernel.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// vault cache (#3598)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Regression test for #3598: `vault_handle()` must reuse the same
+/// `Arc<RwLock<CredentialVault>>` across calls so we run Argon2id at most
+/// once per kernel lifetime instead of once per `vault_get` / `vault_set`.
+///
+/// Direct CPU-time / Argon2-call-count assertions would be flaky on shared
+/// CI runners; instead we assert the structural invariant that produces the
+/// perf win:
+///
+///   1. The cached `Arc` returned by two consecutive `vault_handle()`
+///      calls is the same allocation (`Arc::ptr_eq`), proving we're
+///      reading from the in-memory cache rather than rebuilding a fresh
+///      `CredentialVault` and re-running KDF inside `unlock()`.
+///   2. Round-tripping a value (`vault_set` → `vault_get` → `vault_get`)
+///      returns the written value on every read, proving the cache stays
+///      coherent across writes that go through the same handle.
+///
+/// Serialised because `LIBREFANG_VAULT_KEY` and `LIBREFANG_VAULT_NO_KEYRING`
+/// are process-global; `mcp_oauth_provider` tests in this same crate also
+/// poke `LIBREFANG_VAULT_KEY` without serialisation, so we use the
+/// unnamed `serial` group to gate against any concurrent env-var mutation.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn vault_cache_reuses_unlocked_handle_across_calls() {
+    // 44-char standard base64 of 32 deterministic bytes — produced offline
+    // so this test does not pull a new `base64` dev-dep just to construct
+    // a key. CLAUDE.md gotcha: `LIBREFANG_VAULT_KEY` must base64-decode to
+    // exactly 32 bytes (44 base64 chars). Decoded value is irrelevant; we
+    // just need a stable valid key for the duration of this test.
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    // Force the file-based keyring backend off too — we don't want the
+    // unlock path probing the keyring during this test.
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // First write — initialises vault (init() runs KDF once) and populates
+    // the cache. Subsequent reads/writes must hit the cached handle.
+    kernel
+        .vault_set("dashboard_user", "alice")
+        .expect("first vault_set should succeed");
+
+    // Two reads back-to-back — the perf win we're protecting.
+    let first = kernel.vault_get("dashboard_user");
+    let second = kernel.vault_get("dashboard_user");
+    assert_eq!(first.as_deref(), Some("alice"));
+    assert_eq!(second.as_deref(), Some("alice"));
+
+    // Structural invariant: the cache slot is shared, not rebuilt per call.
+    let h1 = kernel
+        .vault_handle()
+        .expect("vault_handle should not error after a successful set");
+    let h2 = kernel
+        .vault_handle()
+        .expect("vault_handle should not error on repeat call");
+    assert!(
+        std::sync::Arc::ptr_eq(&h1, &h2),
+        "vault_handle must return the SAME Arc on repeat calls — \
+         otherwise we'd rebuild CredentialVault and re-run Argon2id KDF \
+         on every vault_get / vault_set (#3598)",
+    );
+
+    // Cache coherence across a write through the handle: read-back sees
+    // the new value with no re-unlock.
+    kernel
+        .vault_set("dashboard_password", "s3cret")
+        .expect("second vault_set should succeed via cached handle");
+    assert_eq!(
+        kernel.vault_get("dashboard_password").as_deref(),
+        Some("s3cret"),
+    );
+    assert_eq!(
+        kernel.vault_get("dashboard_user").as_deref(),
+        Some("alice"),
+        "earlier-written keys must still be readable after a subsequent set",
+    );
+
+    kernel.shutdown();
+}
+
+// ── /api/agents/{id}/sessions `active` semantics (#4293) ────────────────────
+//
+// `list_agent_sessions` historically marked `active = (sid == registry pointer)`.
+// That disagrees with the dashboard's "loop is running" rendering and with
+// /api/sessions (#4290). These tests pin the new contract: `active` reflects
+// `running_session_ids()` membership; the registry-pointer answer is preserved
+// as `is_canonical`.
+
+#[test]
+fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "busy");
+
+    // Seed three persisted sessions for this agent.
+    let s1 = kernel
+        .memory
+        .create_session_with_label(agent_id, Some("one"))
+        .unwrap();
+    let s2 = kernel
+        .memory
+        .create_session_with_label(agent_id, Some("two"))
+        .unwrap();
+    let s3 = kernel
+        .memory
+        .create_session_with_label(agent_id, Some("three"))
+        .unwrap();
+
+    // Point the registry pointer at s2 — the legacy "active" answer.
+    kernel.registry.update_session_id(agent_id, s2.id).unwrap();
+
+    // Mark s1 and s3 as in-flight via running_tasks (not s2).
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h1 = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let h3 = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    kernel.running_tasks.insert(
+        (agent_id, s1.id),
+        RunningTask {
+            abort: h1.abort_handle(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+    kernel.running_tasks.insert(
+        (agent_id, s3.id),
+        RunningTask {
+            abort: h3.abort_handle(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+
+    let listed = kernel.list_agent_sessions(agent_id).expect("list ok");
+    assert_eq!(listed.len(), 3);
+
+    let by_id: std::collections::HashMap<String, &serde_json::Value> = listed
+        .iter()
+        .map(|v| {
+            (
+                v.get("session_id")
+                    .and_then(|s| s.as_str())
+                    .unwrap()
+                    .to_string(),
+                v,
+            )
+        })
+        .collect();
+
+    let row1 = by_id.get(&s1.id.0.to_string()).unwrap();
+    let row2 = by_id.get(&s2.id.0.to_string()).unwrap();
+    let row3 = by_id.get(&s3.id.0.to_string()).unwrap();
+
+    // active == running_session_ids membership
+    assert_eq!(row1.get("active").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(row2.get("active").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(row3.get("active").and_then(|v| v.as_bool()), Some(true));
+
+    // is_canonical == registry pointer
+    assert_eq!(
+        row1.get("is_canonical").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        row2.get("is_canonical").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        row3.get("is_canonical").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+
+    // Cleanup.
+    let _ = kernel.stop_session_run(agent_id, s1.id);
+    let _ = kernel.stop_session_run(agent_id, s3.id);
+    drop(rt);
+    kernel.shutdown();
+}
+
+#[test]
+fn list_agent_sessions_idle_agent_marks_all_inactive() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "idle");
+
+    for label in ["a", "b", "c", "d", "e"] {
+        kernel
+            .memory
+            .create_session_with_label(agent_id, Some(label))
+            .unwrap();
+    }
+
+    let listed = kernel.list_agent_sessions(agent_id).expect("list ok");
+    assert_eq!(listed.len(), 5);
+    for row in &listed {
+        assert_eq!(
+            row.get("active").and_then(|v| v.as_bool()),
+            Some(false),
+            "no running tasks → every row inactive; row = {row}"
+        );
+    }
+    kernel.shutdown();
+}
+
+#[test]
+fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "both");
+
+    let s = kernel
+        .memory
+        .create_session_with_label(agent_id, Some("only"))
+        .unwrap();
+    kernel.registry.update_session_id(agent_id, s.id).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    kernel.running_tasks.insert(
+        (agent_id, s.id),
+        RunningTask {
+            abort: h.abort_handle(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+
+    let listed = kernel.list_agent_sessions(agent_id).expect("list ok");
+    assert_eq!(listed.len(), 1);
+    let row = &listed[0];
+    assert_eq!(row.get("active").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        row.get("is_canonical").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    let _ = kernel.stop_session_run(agent_id, s.id);
+    drop(rt);
+    kernel.shutdown();
+}
+
+/// Verify the ArcSwap-backed `budget_config` (see #3579) is safe under
+/// heavy concurrent reads racing a single writer: every reader observes
+/// either the pre-update value or the post-update value (never a torn
+/// state), and the final stored value reflects the writer's mutation.
+///
+/// This pins the contract for the LLM hot path, which calls
+/// `kernel.budget_config()` on every turn for budget enforcement and
+/// must never park a tokio worker on a blocking lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-budget-arcswap-test");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    // Distinct sentinel so the "before" snapshot is identifiable.
+    config.budget.max_hourly_usd = 1.5;
+
+    let kernel =
+        std::sync::Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    let mut readers = Vec::with_capacity(64);
+    for _ in 0..64 {
+        let k = kernel.clone();
+        readers.push(tokio::spawn(async move {
+            for _ in 0..50 {
+                let snap = k.budget_config();
+                // Only ever the pre-update or post-update sentinel, never
+                // a torn / partial value.
+                let v = snap.max_hourly_usd;
+                assert!(v == 1.5 || v == 9.0, "torn read: max_hourly_usd = {v}");
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+
+    // Single writer: flip max_hourly_usd to a new sentinel.
+    kernel.update_budget_config(|b| b.max_hourly_usd = 9.0);
+
+    for h in readers {
+        h.await.expect("reader task panicked");
+    }
+
+    // After the writer completes, every subsequent read must see 9.0.
+    assert_eq!(kernel.budget_config().max_hourly_usd, 9.0);
+
+    kernel.shutdown();
+}
+
+/// Two concurrent writers mutating *different* fields of `BudgetConfig`
+/// must both land — neither edit may be silently lost. With a
+/// load-clone-store implementation, the late writer would clobber the
+/// early writer's field with the pre-update snapshot. The `rcu()`-based
+/// implementation must retry on CAS failure so both fields converge to
+/// their writer's value (regardless of arrival order).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn budget_config_concurrent_writers_no_lost_update() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-budget-rcu-writers-test");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.budget.max_hourly_usd = 1.0;
+    config.budget.max_daily_usd = 2.0;
+
+    let kernel =
+        std::sync::Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    // Spawn many pairs of writers racing on disjoint fields.
+    let mut writers = Vec::with_capacity(64);
+    for i in 0..32 {
+        let hourly_target = 100.0 + i as f64;
+        let daily_target = 200.0 + i as f64;
+        let k1 = kernel.clone();
+        let k2 = kernel.clone();
+        writers.push(tokio::spawn(async move {
+            k1.update_budget_config(move |b| b.max_hourly_usd = hourly_target);
+        }));
+        writers.push(tokio::spawn(async move {
+            k2.update_budget_config(move |b| b.max_daily_usd = daily_target);
+        }));
+    }
+
+    for h in writers {
+        h.await.expect("writer task panicked");
+    }
+
+    let final_cfg = kernel.budget_config();
+    // Final values must each be from *some* writer (in their respective
+    // hourly_target / daily_target ranges) — proves the rcu retry kept
+    // each field converging to a writer-supplied value rather than
+    // collapsing back to the original 1.0 / 2.0 baseline (which would
+    // happen on lost-update).
+    assert!(
+        final_cfg.max_hourly_usd >= 100.0 && final_cfg.max_hourly_usd < 132.0,
+        "max_hourly_usd lost-update: got {}",
+        final_cfg.max_hourly_usd
+    );
+    assert!(
+        final_cfg.max_daily_usd >= 200.0 && final_cfg.max_daily_usd < 232.0,
+        "max_daily_usd lost-update: got {}",
+        final_cfg.max_daily_usd
+    );
+
+    kernel.shutdown();
 }

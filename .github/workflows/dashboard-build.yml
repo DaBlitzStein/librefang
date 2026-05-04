@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to upload dashboard asset to (e.g. v2026.4.5-beta14)'
+        description: 'Release tag to upload dashboard asset to (e.g. v2026.4.5-beta.14)'
         required: true
         type: string
 
@@ -39,7 +39,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
+      - uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6
         with:
           version: 10
 

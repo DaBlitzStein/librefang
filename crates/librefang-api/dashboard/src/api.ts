@@ -141,6 +141,11 @@ export interface ChannelItem {
   fields?: ChannelField[];
   /** Webhook endpoint path on the shared server (e.g. "/channels/feishu/webhook"). */
   webhook_endpoint?: string;
+  /** Messages exchanged through this channel in the last 24 hours.
+   *  Computed via a single grouped query on `usage_events` keyed by
+   *  the `channel` column. Surfaced as the `kind · N msgs/24h`
+   *  meta-line on the Channels page card. */
+  msgs_24h?: number;
 }
 
 export interface SkillItem {
@@ -160,8 +165,10 @@ export interface SkillItem {
 }
 
 export interface SkillsResponse {
-  skills?: SkillItem[];
+  items?: SkillItem[];
   total?: number;
+  offset?: number;
+  limit?: number | null;
   categories?: string[];
 }
 
@@ -233,8 +240,11 @@ export interface ProvidersResponse {
 }
 
 export interface ChannelsResponse {
-  channels?: ChannelItem[];
+  // Canonical PaginatedResponse envelope (#3842).
+  items?: ChannelItem[];
   total?: number;
+  offset?: number;
+  limit?: number | null;
   configured_count?: number;
 }
 
@@ -255,6 +265,15 @@ export interface AgentIdentity {
   color?: string;
 }
 
+/** Reason for the most recent automatic session reset.
+ *  Mirrors `librefang_types::config::SessionResetReason` — wire form is the
+ *  snake_case variant name. */
+export type SessionResetReason =
+  | "idle"
+  | "daily"
+  | "suspended"
+  | "manual";
+
 export interface AgentItem {
   id: string;
   name: string;
@@ -269,17 +288,49 @@ export interface AgentItem {
   supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
+  /** Human-readable schedule summary: "manual" for reactive agents,
+   *  the cron expression for periodic agents, "proactive", or
+   *  "continuous · Ns" for continuous agents. */
+  schedule?: string;
+  /** Sessions whose `created_at` is within the last 24 hours. Computed
+   *  in a single grouped SQL pass on the list endpoint so row UIs can
+   *  render KPI without a global /api/sessions aggregation. */
+  sessions_24h?: number;
+  /** Sum of `usage_events.cost_usd` for the agent in the last 24 hours. */
+  cost_24h?: number;
   identity?: AgentIdentity;
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
-  /** UUID of the parent agent that spawned this one, if any. */
-  parent_agent_id?: string;
-  /** UUIDs of child agents spawned by this agent. */
+  /** UUID of the parent agent that spawned this one, if any.
+   *  Wire field emitted by `GET /api/agents` is `parent_agent_id`; the raw
+   *  `AgentEntry` serde form is `parent`. Both are accepted so the type is
+   *  forward-compatible with endpoints that return the struct directly. */
+  parent_agent_id?: string | null;
+  /** Raw serde field from `AgentEntry::parent` — present on endpoints that
+   *  serialize the kernel struct directly. */
+  parent?: string | null;
+  /** UUIDs of child agents spawned by this agent (fork tree). */
   children?: string[];
   /** Active session UUID. */
   session_id?: string;
   /** Categorisation tags. */
   tags?: string[];
+  /** Whether onboarding (bootstrap) has been completed. */
+  onboarding_completed?: boolean;
+  /** RFC3339 timestamp of when onboarding completed, if any. */
+  onboarding_completed_at?: string | null;
+  /** When `true`, the next dispatch will hard-reset (wipe) the session
+   *  history before processing. Set by operator action or stuck-loop
+   *  recovery. */
+  force_session_wipe?: boolean;
+  /** When `true`, the agent was interrupted by restart/shutdown but
+   *  recovery is expected; the existing `session_id` is preserved. */
+  resume_pending?: boolean;
+  /** Reason for the most recent automatic session reset, if any. */
+  reset_reason?: SessionResetReason | null;
+  /** Sticky flag: `true` once the agent has processed at least one real
+   *  inbound message, channel event, or autonomous tick. */
+  has_processed_message?: boolean;
 }
 
 export interface PaginatedResponse<T> {
@@ -389,6 +440,13 @@ export interface WorkflowStep {
   depends_on?: string[];
 }
 
+export interface WorkflowLastRunSummary {
+  /** Run state: "pending" | "running" | "paused" | "completed" | "failed". */
+  state: string;
+  started_at: string;
+  completed_at: string | null;
+}
+
 export interface WorkflowItem {
   id: string;
   name: string;
@@ -396,6 +454,11 @@ export interface WorkflowItem {
   steps?: number | WorkflowStep[];
   created_at?: string;
   layout?: unknown;
+  /** Most recent run summary, null when the workflow has never been run. */
+  last_run?: WorkflowLastRunSummary | null;
+  /** Completed / (completed + failed) over terminal runs only.
+   * `null` until at least one run reaches a terminal state. */
+  success_rate?: number | null;
 }
 
 export interface WorkflowRunItem {
@@ -563,8 +626,12 @@ export interface AuditEntry {
 }
 
 export interface AuditRecentResponse {
+  items?: AuditEntry[];
+  /** @deprecated #3842 — use `items`. Populated by older daemons only. */
   entries?: AuditEntry[];
   total?: number;
+  offset?: number;
+  limit?: number;
   tip_hash?: string;
 }
 
@@ -574,6 +641,12 @@ export interface AuditVerifyResponse {
   tip_hash?: string;
   warning?: string;
   error?: string;
+  // External tip-anchor (#3339): "ok" — anchor matches DB tip;
+  // "diverged" — anchor disagrees with DB tip (forgery suspected);
+  // "none" — no anchor configured (chain is self-consistent only).
+  anchor_status?: "ok" | "diverged" | "none";
+  anchor_enabled?: boolean;
+  anchor_path?: string | null;
 }
 
 export interface ApprovalItem {
@@ -877,16 +950,6 @@ export function buildAuthenticatedWebSocket(path: string): {
   return { url, protocols };
 }
 
-/**
- * @deprecated Use `buildAuthenticatedWebSocket()` to avoid leaking the token
- * via the URL. This shim returns the URL without the token; callers must
- * supply the bearer protocol separately.
- */
-export function buildAuthenticatedWebSocketUrl(path: string): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}${path}`;
-}
-
 async function parseError(response: Response): Promise<ApiError> {
   // If 401, trigger global logout (only once to prevent infinite loop)
   if (response.status === 401 && _onUnauthorized && !_unauthorizedFired) {
@@ -924,9 +987,22 @@ async function get<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-async function post<T>(path: string, body: unknown, timeout = DEFAULT_POST_TIMEOUT_MS): Promise<T> {
+async function post<T>(
+  path: string,
+  body: unknown,
+  timeout = DEFAULT_POST_TIMEOUT_MS,
+  externalSignal?: AbortSignal,
+): Promise<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  // Forward external aborts (e.g. component unmount) into our controller so
+  // the fetch is actually cancelled, not just the awaited promise.
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
 
   try {
     const response = await fetch(path, {
@@ -944,10 +1020,18 @@ async function post<T>(path: string, body: unknown, timeout = DEFAULT_POST_TIMEO
     return (await response.json()) as T;
   } catch (error) {
     clearTimeout(timeoutId);
+    if (externalSignal?.aborted) {
+      // Re-throw as DOMException so callers can identify caller-initiated aborts.
+      throw new DOMException("Aborted", "AbortError");
+    }
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error(`Request timeout after ${Math.round(timeout / 1000)}s - operation may still be running`);
     }
     throw error;
+  } finally {
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
   }
 }
 
@@ -1045,6 +1129,16 @@ export interface AgentDetail {
   system_prompt?: string;
   capabilities?: { tools?: boolean; network?: boolean };
   skills?: string[];
+  /** Skill assignment mode derived by the backend:
+   *  - 'all' — manifest doesn't pin an allowlist (the default).
+   *  - 'allowlist' — manifest pinned the list in `skills`.
+   *  - 'none' — skills_disabled = true. */
+  skills_mode?: "all" | "allowlist" | "none";
+  /** Human-readable schedule summary derived from manifest.schedule:
+   *  'manual' for reactive, the cron expression, 'proactive', or
+   *  'continuous · Ns'. Matches what `enrich_agent_json` puts on the
+   *  list endpoint. */
+  schedule?: string;
   tags?: string[];
   mode?: string;
   thinking?: { budget_tokens?: number; stream_thinking?: boolean };
@@ -1054,6 +1148,52 @@ export interface AgentDetail {
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
+}
+
+/** 24-hour KPI rollup for one agent — backs the AgentsPage detail-panel
+ *  KPI tiles. See `GET /api/agents/{id}/stats`. */
+export interface AgentStats24h {
+  sessions_24h: number;
+  cost_24h: number;
+  p95_latency_ms: number;
+  active_now: number;
+  samples: number;
+  /** Same window-scoped fields, aggregated over the prior 24h (24-48h
+   *  ago). Optional so older backends that don't ship the field don't
+   *  break the type at runtime — the dashboard already gates on
+   *  `live?.prev` and falls back to non-delta subtext. */
+  prev?: {
+    sessions_24h: number;
+    cost_24h: number;
+    p95_latency_ms: number;
+  };
+}
+
+export async function getAgentStats(agentId: string): Promise<AgentStats24h> {
+  return get<AgentStats24h>(`/api/agents/${encodeURIComponent(agentId)}/stats`);
+}
+
+/** Per-agent turn-level events row from `usage_events`, surfaced via
+ *  `GET /api/agents/{id}/events`. Powers the agent-detail Logs tab. */
+export interface AgentEventRow {
+  timestamp: string;
+  model: string;
+  provider: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  tool_calls: number;
+  latency_ms: number;
+}
+
+export async function listAgentEvents(
+  agentId: string,
+  limit = 30,
+): Promise<AgentEventRow[]> {
+  const data = await get<{ events?: AgentEventRow[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/events?limit=${limit}`,
+  );
+  return data.events ?? [];
 }
 
 export async function patchAgentConfig(
@@ -1175,8 +1315,8 @@ export async function getAgentTools(agentId: string): Promise<AgentToolsResponse
   return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
 }
 
-export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
+export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<AgentToolsResponse> {
+  return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
 }
 
 export async function listAgents(
@@ -1328,8 +1468,8 @@ export async function getModelOverrides(modelKey: string): Promise<ModelOverride
   return get<ModelOverrides>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
 }
 
-export async function updateModelOverrides(modelKey: string, overrides: ModelOverrides): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`, overrides);
+export async function updateModelOverrides(modelKey: string, overrides: ModelOverrides): Promise<ModelOverrides> {
+  return put<ModelOverrides>(`/api/models/overrides/${encodeURIComponent(modelKey)}`, overrides);
 }
 
 export async function deleteModelOverrides(modelKey: string): Promise<ApiActionResponse> {
@@ -1436,7 +1576,7 @@ export async function generateMusic(req: { prompt?: string; lyrics?: string; pro
 
 export async function listChannels(): Promise<ChannelItem[]> {
   const data = await get<ChannelsResponse>("/api/channels");
-  return data.channels ?? [];
+  return data.items ?? [];
 }
 
 export async function testChannel(channelName: string): Promise<ApiActionResponse> {
@@ -1483,7 +1623,7 @@ export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse
 
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
-  return data.skills ?? [];
+  return data.items ?? [];
 }
 
 export async function listTools(): Promise<ToolDefinition[]> {
@@ -1505,13 +1645,16 @@ export async function getSkillDetail(name: string): Promise<SkillDetail> {
   return get<SkillDetail>(`/api/skills/${encodeURIComponent(name)}`);
 }
 
-export async function createSkill(params: {
-  name: string;
-  description: string;
-  prompt_context: string;
-  tags?: string[];
-}): Promise<EvolutionResult> {
-  return post<EvolutionResult>("/api/skills/create", params);
+export async function createSkill(
+  params: {
+    name: string;
+    description: string;
+    prompt_context: string;
+    tags?: string[];
+  },
+  signal?: AbortSignal,
+): Promise<EvolutionResult> {
+  return post<EvolutionResult>("/api/skills/create", params, undefined, signal);
 }
 
 export async function reloadSkills(): Promise<ApiActionResponse> {
@@ -1736,8 +1879,8 @@ export async function instantiateTemplate(id: string, params: Record<string, unk
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
-  const data = await get<{ workflows?: WorkflowItem[] }>("/api/workflows");
-  return data.workflows ?? [];
+  const data = await get<PaginatedResponse<WorkflowItem>>("/api/workflows");
+  return data.items ?? [];
 }
 
 export async function createWorkflow(payload: {
@@ -1783,8 +1926,8 @@ export async function updateWorkflow(workflowId: string, payload: {
     timeout_secs?: number;
   }>;
   layout?: unknown;
-}): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
+}): Promise<WorkflowItem> {
+  return put<WorkflowItem>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
 }
 
 export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunItem[]> {
@@ -1856,8 +1999,8 @@ export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiAct
 }
 
 export async function listSchedules(): Promise<ScheduleItem[]> {
-  const data = await get<{ schedules?: ScheduleItem[]; total?: number }>("/api/schedules");
-  return data.schedules ?? [];
+  const data = await get<PaginatedResponse<ScheduleItem>>("/api/schedules");
+  return data.items ?? [];
 }
 
 export async function createSchedule(payload: {
@@ -1902,8 +2045,11 @@ export async function runSchedule(scheduleId: string): Promise<ApiActionResponse
   return post<ApiActionResponse>(`/api/schedules/${encodeURIComponent(scheduleId)}/run`, {});
 }
 
-export async function listTriggers(): Promise<TriggerItem[]> {
-  const data = await get<{ triggers?: TriggerItem[] }>("/api/triggers");
+export async function listTriggers(agentId?: string): Promise<TriggerItem[]> {
+  const url = agentId
+    ? `/api/triggers?agent_id=${encodeURIComponent(agentId)}`
+    : "/api/triggers";
+  const data = await get<{ triggers?: TriggerItem[] }>(url);
   return data.triggers ?? [];
 }
 
@@ -2031,6 +2177,13 @@ export interface MemoryConfigResponse {
     extraction_model?: string;
     max_retrieve?: number;
   };
+  /**
+   * Set on the response of `PATCH /api/memory/config` to flag that the
+   * persisted values won't take effect until the daemon restarts. Absent on
+   * GET responses (where the live `KernelConfig` is authoritative).
+   * See issue #3832.
+   */
+  restart_required?: boolean;
 }
 
 export async function getMemoryConfig(): Promise<MemoryConfigResponse> {
@@ -2049,8 +2202,10 @@ export async function updateMemoryConfig(payload: {
     extraction_model?: string;
     max_retrieve?: number;
   };
-}): Promise<ApiActionResponse> {
-  return patch<ApiActionResponse>("/api/memory/config", payload);
+}): Promise<MemoryConfigResponse> {
+  // Returns the canonical post-mutation entity (issue #3832) so the mutation
+  // hook can `setQueryData` instead of forcing a refetch round-trip.
+  return patch<MemoryConfigResponse>("/api/memory/config", payload);
 }
 
 export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
@@ -2327,7 +2482,14 @@ export async function queryApprovalAudit(params: {
   offset?: number;
   agent_id?: string;
   tool_name?: string;
-}): Promise<{ entries: ApprovalAuditEntry[]; total: number }> {
+}): Promise<{
+  items?: ApprovalAuditEntry[];
+  /** @deprecated #3842 — older daemons populated this; prefer `items`. */
+  entries?: ApprovalAuditEntry[];
+  total: number;
+  offset?: number;
+  limit?: number;
+}> {
   const query = new URLSearchParams();
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));
@@ -2361,8 +2523,13 @@ export async function createAgentSession(
 }
 
 export async function listSessions(): Promise<SessionListItem[]> {
-  const data = await get<{ sessions?: SessionListItem[] }>("/api/sessions");
-  return data.sessions ?? [];
+  // Bumped past the server's default page size (50) so SessionsPage doesn't
+  // silently clip the global list. Per-agent KPI rollups read from
+  // `GET /api/agents/{id}/stats`; AgentsPage row aggregates read the
+  // `sessions_24h` / `cost_24h` fields embedded on each AgentItem by
+  // `enrich_agent_json`, so this endpoint is no longer used for that path.
+  const data = await get<PaginatedResponse<SessionListItem>>("/api/sessions?limit=500");
+  return data.items ?? [];
 }
 
 export async function getSessionDetails(sessionId: string): Promise<SessionDetailResponse> {
@@ -2463,8 +2630,8 @@ export async function decayMemories(): Promise<ApiActionResponse> {
 }
 
 export async function listUsageByAgent(): Promise<UsageByAgentItem[]> {
-  const data = await get<{ agents?: UsageByAgentItem[] }>("/api/usage");
-  return data.agents ?? [];
+  const data = await get<PaginatedResponse<UsageByAgentItem>>("/api/usage");
+  return data.items ?? [];
 }
 
 export async function getUsageSummary(): Promise<UsageSummaryResponse> {
@@ -2524,7 +2691,10 @@ export async function getCommsTopology(): Promise<CommsTopology> {
 
 export async function listCommsEvents(limit = 200): Promise<CommsEventItem[]> {
   const n = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.floor(limit))) : 200;
-  return get<CommsEventItem[]>(`/api/comms/events?limit=${encodeURIComponent(String(n))}`);
+  const data = await get<PaginatedResponse<CommsEventItem>>(
+    `/api/comms/events?limit=${encodeURIComponent(String(n))}`,
+  );
+  return data.items ?? [];
 }
 
 export async function sendCommsMessage(payload: {
@@ -2544,8 +2714,8 @@ export async function postCommsTask(payload: {
 }
 
 export async function listHands(): Promise<HandDefinitionItem[]> {
-  const data = await get<{ hands?: HandDefinitionItem[]; total?: number }>("/api/hands");
-  return data.hands ?? [];
+  const data = await get<PaginatedResponse<HandDefinitionItem>>("/api/hands");
+  return data.items ?? [];
 }
 
 export async function getHandManifestToml(handId: string): Promise<string> {
@@ -2557,8 +2727,8 @@ export async function getRawConfigToml(): Promise<string> {
 }
 
 export async function listActiveHands(): Promise<HandInstanceItem[]> {
-  const data = await get<{ instances?: HandInstanceItem[]; total?: number }>("/api/hands/active");
-  return data.instances ?? [];
+  const data = await get<PaginatedResponse<HandInstanceItem>>("/api/hands/active");
+  return data.items ?? [];
 }
 
 export async function activateHand(
@@ -2570,12 +2740,14 @@ export async function activateHand(
   });
 }
 
-export async function pauseHand(instanceId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/pause`, {});
+// #3832: pause/resume return the post-mutation HandInstanceItem so the
+// dashboard can setQueryData on the live instance without a follow-up GET.
+export async function pauseHand(instanceId: string): Promise<HandInstanceItem> {
+  return post<HandInstanceItem>(`/api/hands/instances/${encodeURIComponent(instanceId)}/pause`, {});
 }
 
-export async function resumeHand(instanceId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/resume`, {});
+export async function resumeHand(instanceId: string): Promise<HandInstanceItem> {
+  return post<HandInstanceItem>(`/api/hands/instances/${encodeURIComponent(instanceId)}/resume`, {});
 }
 
 export async function deactivateHand(instanceId: string): Promise<ApiActionResponse> {
@@ -2692,8 +2864,8 @@ export async function getHandInstanceStatus(instanceId: string): Promise<HandIns
 }
 
 export async function listGoals(): Promise<GoalItem[]> {
-  const data = await get<{ goals?: GoalItem[]; total?: number }>("/api/goals");
-  return data.goals ?? [];
+  const data = await get<PaginatedResponse<GoalItem>>("/api/goals");
+  return data.items ?? [];
 }
 
 export interface GoalTemplate {
@@ -2730,8 +2902,10 @@ export async function updateGoal(
     parent_id?: string | null;
     agent_id?: string | null;
   }
-): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/goals/${encodeURIComponent(goalId)}`, payload);
+): Promise<GoalItem> {
+  // Issue #3832: handler now returns the mutated GoalItem instead of an ack
+  // envelope, so callers can `setQueryData` directly without a follow-up GET.
+  return put<GoalItem>(`/api/goals/${encodeURIComponent(goalId)}`, payload);
 }
 
 export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
@@ -2746,7 +2920,18 @@ export interface NetworkStatusResponse {
   protocol_version?: string;
   listen_addr?: string;
   peer_count?: number;
+  // SECURITY (#3873): null when this node has no Ed25519 identity
+  // (HMAC-only legacy mode); operators should treat that as "new defense
+  // is dormant" and investigate.
+  identity_fingerprint?: string | null;
+  pinned_peers?: number;
   [key: string]: unknown;
+}
+
+export interface TrustedPeerItem {
+  node_id: string;
+  public_key: string;
+  fingerprint: string;
 }
 
 export interface PeerItem {
@@ -2765,8 +2950,15 @@ export async function getNetworkStatus(): Promise<NetworkStatusResponse> {
 }
 
 export async function listPeers(): Promise<PeerItem[]> {
-  const data = await get<{ peers?: PeerItem[] }>("/api/peers");
-  return data.peers ?? [];
+  const data = await get<PaginatedResponse<PeerItem>>("/api/peers");
+  return data.items ?? [];
+}
+
+export async function listTrustedPeers(): Promise<TrustedPeerItem[]> {
+  const data = await get<PaginatedResponse<TrustedPeerItem>>(
+    "/api/network/trusted-peers",
+  );
+  return data.items ?? [];
 }
 
 export async function getPeerDetail(peerId: string): Promise<PeerItem> {
@@ -2797,8 +2989,17 @@ export interface A2ATaskStatus {
 }
 
 export async function listA2AAgents(): Promise<A2AAgentItem[]> {
-  const data = await get<{ agents?: A2AAgentItem[] }>("/api/a2a/agents");
-  return data.agents ?? [];
+  // #3842: backend now returns the canonical PaginatedResponse envelope
+  // (`items`/`total`/`offset`/`limit`). The legacy `agents` fallback below
+  // exists only so a freshly-shipped dashboard can talk to a daemon still
+  // running a pre-#3842 build during rolling upgrade. Remove the fallback
+  // (and the `agents?: ...` field in the response type) one daemon release
+  // after #3842 ships — by then no in-support daemon emits the old shape.
+  const data = await get<{
+    items?: A2AAgentItem[];
+    agents?: A2AAgentItem[];
+  }>("/api/a2a/agents");
+  return data.items ?? data.agents ?? [];
 }
 
 export async function discoverA2AAgent(url: string): Promise<ApiActionResponse> {
@@ -2924,7 +3125,13 @@ export async function getMetricsText(): Promise<string> {
 // ── Plugins ──────────────────────────────────────────
 
 export interface PluginItem {
+  // Canonical identifier — used as the path segment for
+  // /plugins/{name}/{enable,disable,reload,install-deps,uninstall}.
+  // Must NOT be the localized label.
   name: string;
+  // Localized display label resolved from `[i18n.<lang>]` on the
+  // plugin manifest. Falls back to `name` when no override is set.
+  display_name?: string;
   version: string;
   description?: string;
   author?: string;
@@ -2935,7 +3142,11 @@ export interface PluginItem {
 }
 
 export interface RegistryPluginListing {
+  // Canonical identifier sent back to POST /api/plugins/install — must
+  // match the directory name on the GitHub registry. Localized labels
+  // go on `display_name`.
   name: string;
+  display_name?: string;
   installed: boolean;
   version?: string | null;
   description?: string | null;
@@ -2950,8 +3161,9 @@ export interface RegistryEntry {
   plugins: RegistryPluginListing[];
 }
 
-export async function listPlugins(): Promise<{ plugins: PluginItem[]; total: number; plugins_dir: string }> {
-  return get<{ plugins: PluginItem[]; total: number; plugins_dir: string }>("/api/plugins");
+export async function listPlugins(): Promise<PluginItem[]> {
+  const data = await get<PaginatedResponse<PluginItem>>("/api/plugins");
+  return data.items ?? [];
 }
 
 export async function getPlugin(name: string): Promise<PluginItem> {
@@ -3038,7 +3250,10 @@ export interface ExperimentVariantMetrics {
 }
 
 export async function listPromptVersions(agentId: string): Promise<PromptVersion[]> {
-  return get<PromptVersion[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/versions`);
+  const data = await get<PaginatedResponse<PromptVersion>>(
+    `/api/agents/${encodeURIComponent(agentId)}/prompts/versions`,
+  );
+  return data.items ?? [];
 }
 
 export async function createPromptVersion(agentId: string, version: Omit<PromptVersion, "id" | "agent_id" | "created_at" | "is_active">): Promise<PromptVersion> {
@@ -3049,28 +3264,33 @@ export async function deletePromptVersion(versionId: string): Promise<ApiActionR
   return del<ApiActionResponse>(`/api/prompts/versions/${encodeURIComponent(versionId)}`);
 }
 
-export async function activatePromptVersion(versionId: string, agentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/versions/${encodeURIComponent(versionId)}/activate`, { agent_id: agentId });
+export async function activatePromptVersion(versionId: string, agentId: string): Promise<PromptVersion> {
+  return post<PromptVersion>(`/api/prompts/versions/${encodeURIComponent(versionId)}/activate`, { agent_id: agentId });
 }
 
 export async function listExperiments(agentId: string): Promise<PromptExperiment[]> {
-  return get<PromptExperiment[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`);
+  const data = await get<PaginatedResponse<PromptExperiment>>(
+    `/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`,
+  );
+  return data.items ?? [];
 }
 
 export async function createExperiment(agentId: string, experiment: Omit<PromptExperiment, "id" | "agent_id" | "created_at">): Promise<PromptExperiment> {
   return post<PromptExperiment>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`, experiment);
 }
 
-export async function startExperiment(experimentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/start`, {});
+// Status-transition endpoints now return the post-mutation `PromptExperiment`
+// so callers can `setQueryData` directly without a follow-up GET. See #3832.
+export async function startExperiment(experimentId: string): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/start`, {});
 }
 
-export async function pauseExperiment(experimentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/pause`, {});
+export async function pauseExperiment(experimentId: string): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/pause`, {});
 }
 
-export async function completeExperiment(experimentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/complete`, {});
+export async function completeExperiment(experimentId: string): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/complete`, {});
 }
 
 export async function getExperimentMetrics(experimentId: string): Promise<ExperimentVariantMetrics[]> {

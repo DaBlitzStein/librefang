@@ -186,7 +186,7 @@ impl ClaudeCodeDriver {
             parts.push(format!("[System]\n{sys}"));
         }
 
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             let role_label = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
@@ -522,6 +522,7 @@ fn detect_cli_error_in_text(text: &str) -> Option<LlmError> {
         return Some(LlmError::Api {
             status: 401,
             message: text.to_string(),
+            code: None,
         });
     }
     // Rate-limit / quota exhaustion
@@ -541,6 +542,11 @@ fn detect_cli_error_in_text(text: &str) -> Option<LlmError> {
 
 #[async_trait]
 impl LlmDriver for ClaudeCodeDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "claude_code", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         // Issue #2314: LibreFang tools are bridged to the spawned Claude CLI
         // via its native `--mcp-config` MCP-client support. When `tools` is
@@ -714,6 +720,7 @@ impl LlmDriver for ClaudeCodeDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 
@@ -743,6 +750,7 @@ impl LlmDriver for ClaudeCodeDriver {
                 return Err(LlmError::Api {
                     status: 1,
                     message: text,
+                    code: None,
                 });
             }
 
@@ -790,6 +798,11 @@ impl LlmDriver for ClaudeCodeDriver {
         })
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "claude_code", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,
@@ -970,12 +983,22 @@ impl LlmDriver for ClaudeCodeDriver {
                                 "content" | "text" | "assistant" | "content_block_delta" => {
                                     if let Some(ref content) = event.content {
                                         full_text.push_str(content);
-                                        if !should_suppress(content) {
-                                            let _ = tx
+                                        if !should_suppress(content)
+                                            && tx
                                                 .send(StreamEvent::TextDelta {
                                                     text: content.clone(),
                                                 })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                        {
+                                            // Receiver dropped — stop streaming events.
+                                            // The CLI subprocess will be killed below
+                                            // when the loop ends (#3769).
+                                            tracing::debug!(
+                                                "streaming receiver dropped; cancelling Claude Code CLI stream"
+                                            );
+                                            let _ = child.kill().await;
+                                            break None;
                                         }
                                     }
                                 }
@@ -986,12 +1009,16 @@ impl LlmDriver for ClaudeCodeDriver {
                                             // Don't stream error results to the user —
                                             // they will be caught after the loop and
                                             // converted to LlmError for rotation.
-                                            if !event.is_error && !should_suppress(result) {
-                                                let _ = tx
+                                            if !event.is_error
+                                                && !should_suppress(result)
+                                                && tx
                                                     .send(StreamEvent::TextDelta {
                                                         text: result.clone(),
                                                     })
-                                                    .await;
+                                                    .await
+                                                    .is_err()
+                                            {
+                                                break None;
                                             }
                                         }
                                     }
@@ -1006,12 +1033,15 @@ impl LlmDriver for ClaudeCodeDriver {
                                 _ => {
                                     if let Some(ref content) = event.content {
                                         full_text.push_str(content);
-                                        if !should_suppress(content) {
-                                            let _ = tx
+                                        if !should_suppress(content)
+                                            && tx
                                                 .send(StreamEvent::TextDelta {
                                                     text: content.clone(),
                                                 })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                        {
+                                            break None;
                                         }
                                     }
                                 }
@@ -1020,8 +1050,13 @@ impl LlmDriver for ClaudeCodeDriver {
                         Err(e) => {
                             warn!(line = %line, error = %e, "Non-JSON line from Claude CLI");
                             full_text.push_str(&line);
-                            if !should_suppress(&line) {
-                                let _ = tx.send(StreamEvent::TextDelta { text: line }).await;
+                            if !should_suppress(&line)
+                                && tx
+                                    .send(StreamEvent::TextDelta { text: line })
+                                    .await
+                                    .is_err()
+                            {
+                                break None;
                             }
                         }
                     }
@@ -1056,10 +1091,17 @@ impl LlmDriver for ClaudeCodeDriver {
                             "Claude CLI streaming timed out due to inactivity, killing process"
                         );
                         let _ = child.kill().await;
+                        let partial_body: std::sync::Arc<str> =
+                            std::sync::Arc::from(std::mem::take(&mut full_text));
                         break Some(LlmError::TimedOut {
                             inactivity_secs: kill_secs,
                             partial_text_len: partial_len,
-                            partial_text: std::mem::take(&mut full_text),
+                            // #3552: Arc-shared so error clone / stringify is O(1).
+                            partial_text: if partial_body.is_empty() {
+                                None
+                            } else {
+                                Some(partial_body)
+                            },
                             last_activity: last_activity.clone(),
                         });
                     }
@@ -1122,6 +1164,7 @@ impl LlmDriver for ClaudeCodeDriver {
                         stderr_text.trim()
                     }
                 ),
+                code: None,
             });
         }
 
@@ -1215,13 +1258,13 @@ mod tests {
 
         let request = CompletionRequest {
             model: "claude-code/sonnet".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::text("Hello"),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: vec![],
+            }]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: Some("You are helpful.".to_string()),
@@ -1251,7 +1294,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "claude-code/sonnet".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Text {
@@ -1265,8 +1308,8 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: vec![],
+            }]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1313,7 +1356,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "claude-code/sonnet".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Text {
@@ -1327,8 +1370,8 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: vec![],
+            }]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1391,7 +1434,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "claude-code/sonnet".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Image {
@@ -1405,8 +1448,8 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: vec![],
+            }]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,

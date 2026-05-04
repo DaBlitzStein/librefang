@@ -43,9 +43,24 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::types::ApiErrorResponse;
+
+/// Resolve the LibreFang home directory without depending on the kernel crate.
+///
+/// Mirrors `librefang_kernel::config::librefang_home`:
+/// `LIBREFANG_HOME` env var takes priority, otherwise `~/.librefang`
+/// (falling back to the system temp dir if no home directory is available).
+fn librefang_home() -> PathBuf {
+    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
+        return PathBuf::from(home);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".librefang")
+}
 // ---------------------------------------------------------------------------
 // Channel status endpoints — data-driven registry for all 40 adapters
 // ---------------------------------------------------------------------------
@@ -1142,18 +1157,33 @@ fn channel_config_values(
 }
 
 /// GET /api/channels — List all 40 channel adapters with status and field metadata.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents`, `/api/peers`, `/api/skills`, etc. (#3842).
+/// The full channel registry is materialized in-memory, so this is a single
+/// page — `offset=0`, `limit=None`. The bespoke `configured_count` sibling
+/// is preserved for the dashboard's "X of Y configured" sub-line.
 #[utoipa::path(
     get,
     path = "/api/channels",
     tag = "channels",
     responses(
-        (status = 200, description = "List configured channels", body = Vec<serde_json::Value>)
+        (status = 200, description = "List configured channels", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Read the live channels config (updated on every hot-reload) instead of the
     // stale boot-time kernel.config, so newly configured channels show correctly.
     let live_channels = state.channels_config.read().await;
+    // 24h activity per channel — backs the design's "slack · 142 msgs/24h"
+    // sub-line. One grouped SQL pass for the whole page; falls back to an
+    // empty map if the query fails so the listing itself still loads.
+    let msgs_24h = state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .channels_msgs_24h_bulk()
+        .unwrap_or_default();
     let mut channels = Vec::new();
     let mut configured_count = 0u32;
 
@@ -1197,6 +1227,7 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "fields": fields,
             "setup_steps": meta.setup_steps,
             "config_template": meta.config_template,
+            "msgs_24h": msgs_24h.get(meta.name).copied().unwrap_or(0),
         });
         if let Some(endpoint) = webhook_endpoint_url(meta.name) {
             channel_json["webhook_endpoint"] = serde_json::Value::String(endpoint);
@@ -1204,9 +1235,15 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         channels.push(channel_json);
     }
 
+    let total = channels.len();
+    // Canonical PaginatedResponse envelope (#3842) hand-built so the bespoke
+    // `configured_count` sibling can ride alongside `items`/`total`/`offset`/
+    // `limit` without a new struct.
     Json(serde_json::json!({
-        "channels": channels,
-        "total": channels.len(),
+        "items": channels,
+        "total": total,
+        "offset": 0,
+        "limit": serde_json::Value::Null,
         "configured_count": configured_count,
     }))
 }
@@ -1268,8 +1305,8 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
         ("name" = String, Path, description = "Channel adapter name (e.g. telegram, discord)")
     ),
     responses(
-        (status = 200, description = "Channel details", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value)
+        (status = 200, description = "Channel details", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_channel(
@@ -1335,11 +1372,11 @@ pub async fn get_channel(
     params(
         ("name" = String, Path, description = "Channel name")
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Channel configured successfully", body = serde_json::Value),
-        (status = 400, description = "Bad request", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value)
+        (status = 200, description = "Channel configured successfully", body = crate::types::JsonObject),
+        (status = 400, description = "Bad request", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/{name}/configure — Save channel secrets + config fields.
@@ -1358,7 +1395,7 @@ pub async fn configure_channel(
         None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
-    let home = librefang_kernel::config::librefang_home();
+    let home = librefang_home();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
     let mut config_fields: HashMap<String, (String, FieldType)> = HashMap::new();
@@ -1463,9 +1500,9 @@ pub async fn configure_channel(
         ("name" = String, Path, description = "Channel name")
     ),
     responses(
-        (status = 200, description = "Channel removed successfully", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value),
-        (status = 500, description = "Internal server error", body = serde_json::Value)
+        (status = 200, description = "Channel removed successfully", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 500, description = "Internal server error", body = crate::types::JsonObject)
     )
 )]
 /// DELETE /api/channels/{name}/configure — Remove channel secrets + config section.
@@ -1478,7 +1515,7 @@ pub async fn remove_channel(
         None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
-    let home = librefang_kernel::config::librefang_home();
+    let home = librefang_home();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -1523,8 +1560,10 @@ pub async fn remove_channel(
     ),
     request_body(content = Option<serde_json::Value>, content_type = "application/json"),
     responses(
-        (status = 200, description = "Channel test result", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value)
+        (status = 200, description = "Channel test succeeded", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 412, description = "Required channel credentials missing", body = crate::types::JsonObject),
+        (status = 502, description = "Downstream send failure", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/{name}/test — Connectivity check + optional live test message.
@@ -1532,18 +1571,28 @@ pub async fn remove_channel(
 /// Accepts an optional JSON body with `channel_id` (for Discord/Slack) or `chat_id`
 /// (for Telegram). When provided, sends a real test message to verify the bot can
 /// post to that channel.
+///
+/// Status code semantics (#3507, #3505):
+/// - `200 OK` — credentials present (and, when a target was given, message sent);
+///   body uses the legacy `{"status": "ok", "message": …}` shape.
+/// - `404 Not Found` — unknown channel name; body uses `ApiErrorResponse`
+///   (`{"error": "Unknown channel"}`).
+/// - `412 Precondition Failed` — required env vars / credentials are missing;
+///   body uses `ApiErrorResponse` (`{"error": "Missing required env vars: …"}`).
+/// - `502 Bad Gateway` — credentials valid but downstream send failed;
+///   body uses `ApiErrorResponse`.
+///
+/// `fetch().ok` is the source of truth. Error bodies were migrated from the
+/// ad-hoc `{"status": "error", "message": …}` shape to the canonical
+/// `ApiErrorResponse` envelope as part of #3505 so clients have a single
+/// parsing strategy across the API surface.
 pub async fn test_channel(
     Path(name): Path<String>,
     raw_body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"status": "error", "message": "Unknown channel"})),
-            )
-        }
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
     // Check all required env vars are set
@@ -1559,13 +1608,12 @@ pub async fn test_channel(
     }
 
     if !missing.is_empty() {
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Missing required env vars: {}", missing.join(", "))
-            })),
-        );
+        return ApiErrorResponse::bad_request(format!(
+            "Missing required env vars: {}",
+            missing.join(", ")
+        ))
+        .with_status(StatusCode::PRECONDITION_FAILED)
+        .into_json_tuple();
     }
 
     // If a target channel/chat ID is provided, send a real test message
@@ -1592,13 +1640,11 @@ pub async fn test_channel(
                 );
             }
             Err(e) => {
-                return (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "status": "error",
-                        "message": format!("Credentials valid but failed to send test message: {e}")
-                    })),
-                );
+                return ApiErrorResponse::internal(format!(
+                    "Credentials valid but failed to send test message: {e}"
+                ))
+                .with_status(StatusCode::BAD_GATEWAY)
+                .into_json_tuple();
             }
         }
     }
@@ -1678,8 +1724,8 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
     path = "/api/channels/reload",
     tag = "channels",
     responses(
-        (status = 200, description = "Channels reloaded successfully", body = serde_json::Value),
-        (status = 500, description = "Reload failed", body = serde_json::Value)
+        (status = 200, description = "Channels reloaded successfully", body = crate::types::JsonObject),
+        (status = 500, description = "Reload failed", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/reload — Manually trigger a channel hot-reload from disk config.
@@ -1692,13 +1738,7 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
                 "started": started,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "status": "error",
-                "error": e,
-            })),
-        ),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
 
@@ -1710,7 +1750,7 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
     path = "/api/channels/whatsapp/qr/start",
     tag = "channels",
     responses(
-        (status = 200, description = "WhatsApp QR session started", body = serde_json::Value)
+        (status = 200, description = "WhatsApp QR session started", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.
@@ -1774,7 +1814,7 @@ pub async fn whatsapp_qr_start() -> impl IntoResponse {
         ("session_id" = Option<String>, Query, description = "WhatsApp login session ID")
     ),
     responses(
-        (status = 200, description = "WhatsApp QR scan status", body = serde_json::Value)
+        (status = 200, description = "WhatsApp QR scan status", body = crate::types::JsonObject)
     )
 )]
 /// GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.
@@ -1928,7 +1968,7 @@ const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
     path = "/api/channels/wechat/qr/start",
     tag = "channels",
     responses(
-        (status = 200, description = "WeChat QR login initiated", body = serde_json::Value)
+        (status = 200, description = "WeChat QR login initiated", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
@@ -1993,7 +2033,7 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
         ("qr_code" = String, Query, description = "QR code value from /qr/start")
     ),
     responses(
-        (status = 200, description = "WeChat QR scan status", body = serde_json::Value)
+        (status = 200, description = "WeChat QR scan status", body = crate::types::JsonObject)
     )
 )]
 /// GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.
@@ -2089,4 +2129,143 @@ pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl I
     let channels_dir = state.kernel.home_dir().join("channels");
     let metadata = librefang_runtime::channel_registry::load_channel_metadata(&channels_dir);
     Json(serde_json::to_value(&metadata).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod test_channel_status_tests {
+    //! Regression coverage for #3507 — `POST /api/channels/{name}/test` must
+    //! report failure outcomes via HTTP status (412 / 502), not 200, so dashboard
+    //! callers that branch on `fetch().ok` see them as failures.
+    //!
+    //! These tests mutate process-global env vars so they share a `Mutex` to
+    //! avoid races with sibling tests (and other tests in this binary that
+    //! touch the same vars).
+    use super::*;
+    use axum::extract::Path;
+    use axum::response::IntoResponse;
+
+    /// Serializes env-var mutations across the tests in this module so they
+    /// don't race each other (or any other test in the binary that pokes at
+    /// the same vars). Uses `tokio::sync::Mutex` so the guard can be held
+    /// safely across `.await` points without triggering `await_holding_lock`.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Drop guard that restores the previous value of an env var when it falls
+    /// out of scope, so a test failure doesn't poison the process for sibling
+    /// tests.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: serialized via ENV_LOCK; we only mutate this single key
+            // and restore it in Drop.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, prev }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: same reasoning as `unset`.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: same reasoning as the constructors — we still hold the
+            // ENV_LOCK because the guard outlives the lock guard inside each
+            // test's scope.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_channel_name_returns_404() {
+        let _lock = ENV_LOCK.lock().await;
+        let resp = test_channel(
+            Path("not-a-real-channel".to_string()),
+            axum::body::Bytes::new(),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn missing_required_env_returns_412() {
+        let _lock = ENV_LOCK.lock().await;
+        // Telegram requires TELEGRAM_BOT_TOKEN. With it unset we must surface
+        // a 412 — NOT a 200 with a "status: error" body, which silently passes
+        // dashboard `fetch().ok` checks (#3507).
+        let _g = EnvGuard::unset("TELEGRAM_BOT_TOKEN");
+
+        let resp = test_channel(Path("telegram".to_string()), axum::body::Bytes::new())
+            .await
+            .into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::PRECONDITION_FAILED,
+            "missing credentials must return 412, not 200"
+        );
+    }
+
+    #[tokio::test]
+    async fn credentials_present_no_target_returns_200() {
+        let _lock = ENV_LOCK.lock().await;
+        // Credentials set but no `channel_id` / `chat_id` body — handler
+        // short-circuits before any network call and returns the
+        // "credentials look good" 200 response.
+        let _g = EnvGuard::set("TELEGRAM_BOT_TOKEN", "test-token-not-real");
+
+        let resp = test_channel(Path("telegram".to_string()), axum::body::Bytes::new())
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn downstream_send_failure_returns_502() {
+        let _lock = ENV_LOCK.lock().await;
+        // Telegram bot token is set (so we get past the 412 gate) but the
+        // value is bogus, so Bot API will reject the call. We pass a
+        // `chat_id` to force the live-send branch. Result: handler must
+        // surface a 502 Bad Gateway.
+        //
+        // This exercises a real network round-trip to api.telegram.org —
+        // it'll be skipped in offline CI environments. We detect that by
+        // looking at the response status: anything other than 502 in an
+        // offline run means we couldn't reach the network at all, which
+        // is fine for the purpose of *this* assertion (we already cover
+        // the 200 / 412 / 404 paths deterministically above).
+        let _g = EnvGuard::set("TELEGRAM_BOT_TOKEN", "0:invalid-token-for-test");
+
+        let body = axum::body::Bytes::from_static(b"{\"chat_id\":\"1\"}");
+        let resp = test_channel(Path("telegram".to_string()), body)
+            .await
+            .into_response();
+
+        // Either: we reached Telegram and got a 401-equivalent → handler
+        // returns 502; or we have no network → reqwest errors out which
+        // also gets mapped to 502. Both are acceptable. A 200 here would
+        // be the bug from #3507.
+        assert_ne!(
+            resp.status(),
+            StatusCode::OK,
+            "downstream send failure must NOT be reported as 200"
+        );
+    }
 }

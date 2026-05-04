@@ -65,12 +65,17 @@ impl MemorySubstrate {
         run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let shared = Arc::new(Mutex::new(conn));
 
+        let sessions = SessionStore::new(Arc::clone(&shared));
+        // Repair any sessions/sessions_fts drift left over from #3451
+        // before save_session became transactional.
+        sessions.reconcile_fts_index();
+
         Ok(Self {
             conn: Arc::clone(&shared),
             structured: StructuredStore::new(Arc::clone(&shared)),
             semantic: SemanticStore::new(Arc::clone(&shared)),
             knowledge: KnowledgeStore::new(Arc::clone(&shared)),
-            sessions: SessionStore::new(Arc::clone(&shared)),
+            sessions,
             usage: UsageStore::new(Arc::clone(&shared)),
             roster: RosterStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
@@ -171,20 +176,27 @@ impl MemorySubstrate {
         self.structured.load_agent(agent_id)
     }
 
-    /// Remove an agent from persistent storage and cascade-delete sessions.
+    /// Remove an agent and cascade-delete every agent-scoped row in a
+    /// single transaction.
+    ///
+    /// Pre-fix (#3501) sessions and structured rows were deleted in
+    /// independent locks/transactions: a failure between the two would
+    /// orphan whichever side had not run yet. Now all DELETEs — including
+    /// `sessions_fts` — share one `unchecked_transaction` so a partial
+    /// cascade rolls back to the pre-call state.
+    ///
+    /// `sessions_fts` cannot be left outside the rollback path: it stores
+    /// session content (`snippet(...)` returns it on any FTS hit) and
+    /// `search_sessions` reads from it without joining the `sessions`
+    /// table. A `sessions` row removed without its FTS twin would leave
+    /// the deleted agent's content searchable, which is a privacy
+    /// regression rather than a recoverable hygiene issue.
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        // Delete associated sessions first. Log on failure rather than
-        // silently swallowing — the agent row will still be removed, but
-        // the caller should know about the orphaned session rows so the
-        // inconsistency is at least observable.
-        if let Err(e) = self.sessions.delete_agent_sessions(agent_id) {
-            tracing::warn!(
-                %agent_id,
-                error = %e,
-                "Failed to cascade-delete sessions for agent; session rows may be orphaned",
-            );
-        }
-        self.structured.remove_agent(agent_id)
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        remove_agent_inner(&conn, agent_id)
     }
 
     /// Load all agent entries from persistent storage.
@@ -266,6 +278,37 @@ impl MemorySubstrate {
     /// List all sessions with metadata.
     pub fn list_sessions(&self) -> LibreFangResult<Vec<serde_json::Value>> {
         self.sessions.list_sessions()
+    }
+
+    /// Paginated session listing — pushes LIMIT/OFFSET into SQLite (#3485).
+    pub fn list_sessions_paginated(
+        &self,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> LibreFangResult<Vec<serde_json::Value>> {
+        self.sessions.list_sessions_paginated(limit, offset)
+    }
+
+    /// Total number of sessions stored.
+    pub fn count_sessions(&self) -> LibreFangResult<usize> {
+        self.sessions.count_sessions()
+    }
+
+    /// 24-hour KPI rollup for an individual agent — see
+    /// [`crate::session::SessionStore::agent_stats_24h`].
+    pub fn agent_stats_24h(
+        &self,
+        agent_id: &str,
+    ) -> LibreFangResult<crate::session::AgentStats24h> {
+        self.sessions.agent_stats_24h(agent_id)
+    }
+
+    /// Bulk `(sessions_24h, cost_24h)` per agent. See
+    /// [`crate::session::SessionStore::agents_stats_24h_bulk`].
+    pub fn agents_stats_24h_bulk(
+        &self,
+    ) -> LibreFangResult<std::collections::HashMap<String, (u64, f64)>> {
+        self.sessions.agents_stats_24h_bulk()
     }
 
     /// Delete a session by ID.
@@ -383,14 +426,7 @@ impl MemorySubstrate {
             .conn
             .lock()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        // Flush WAL frames to the main DB file first so VACUUM has less work.
-        if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-            tracing::warn!(error = %e, "WAL checkpoint before VACUUM failed; continuing");
-        }
-        tracing::info!(pruned_count, "Running VACUUM after session prune");
-        if let Err(e) = conn.execute_batch("VACUUM;") {
-            tracing::warn!(error = %e, "VACUUM after session prune failed");
-        }
+        vacuum_inner(&conn, pruned_count);
         Ok(())
     }
 
@@ -401,6 +437,22 @@ impl MemorySubstrate {
         agent_id: Option<&AgentId>,
     ) -> LibreFangResult<Vec<crate::session::SessionSearchResult>> {
         self.sessions.search_sessions(query, agent_id)
+    }
+
+    /// Full-text search with SQL-side pagination (#3691).
+    ///
+    /// Prefer this over `search_sessions` for any caller exposed to the
+    /// network: untrusted clients must not be able to ask the substrate
+    /// for an unbounded result set.
+    pub fn search_sessions_paginated(
+        &self,
+        query: &str,
+        agent_id: Option<&AgentId>,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> LibreFangResult<Vec<crate::session::SessionSearchResult>> {
+        self.sessions
+            .search_sessions_paginated(query, agent_id, limit, offset)
     }
 
     /// Load canonical session context for cross-channel memory.
@@ -1146,6 +1198,184 @@ impl MemorySubstrate {
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
+
+    // -----------------------------------------------------------------
+    // Async wrappers for sync substrate methods invoked from tokio tasks.
+    //
+    // Each wrapper here moves the std::Mutex<Connection> acquisition onto
+    // tokio's blocking thread pool (#3378). Without it, slow INSERTs
+    // (FTS5 tokenization, transactional cascades, large UPDATE plans) would
+    // park whichever tokio worker thread was running the future, stalling
+    // every other future scheduled on that worker until the blocking I/O
+    // completed. The underlying sync methods are kept verbatim — they are
+    // still used by tests, migrations, and other non-async paths.
+    // -----------------------------------------------------------------
+
+    /// Async wrapper for [`Self::save_agent`].
+    pub async fn save_agent_async(&self, entry: &AgentEntry) -> LibreFangResult<()> {
+        let store = self.structured.clone();
+        let entry = entry.clone();
+        tokio::task::spawn_blocking(move || store.save_agent(&entry))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::load_all_agents`].
+    pub async fn load_all_agents_async(&self) -> LibreFangResult<Vec<AgentEntry>> {
+        let store = self.structured.clone();
+        tokio::task::spawn_blocking(move || store.load_all_agents())
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::remove_agent`]. Body is shared via
+    /// [`remove_agent_inner`] so a future change to the agent-deletion
+    /// strategy (e.g. adding a new per-agent table) only has to land in
+    /// one place — the sync method and this wrapper both delegate.
+    pub async fn remove_agent_async(&self, agent_id: AgentId) -> LibreFangResult<()> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            remove_agent_inner(&conn, agent_id)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::structured_get`].
+    ///
+    /// No in-tree caller yet — staged for #3378 part 2 (kernel-side
+    /// migration of the remaining sync substrate calls). Keep alongside
+    /// the other `_async` wrappers so a future dead-code sweep doesn't
+    /// remove it before its caller lands.
+    pub async fn structured_get_async(
+        &self,
+        agent_id: AgentId,
+        key: &str,
+    ) -> LibreFangResult<Option<serde_json::Value>> {
+        let store = self.structured.clone();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || store.get(agent_id, &key))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::get_session`].
+    pub async fn get_session_async(
+        &self,
+        session_id: SessionId,
+    ) -> LibreFangResult<Option<Session>> {
+        let store = self.sessions.clone();
+        tokio::task::spawn_blocking(move || store.get_session(session_id))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::get_agent_session_ids`].
+    ///
+    /// No in-tree caller yet — staged for #3378 part 2 (kernel-side
+    /// migration of the remaining sync substrate calls). Keep alongside
+    /// the other `_async` wrappers so a future dead-code sweep doesn't
+    /// remove it before its caller lands.
+    pub async fn get_agent_session_ids_async(
+        &self,
+        agent_id: AgentId,
+    ) -> LibreFangResult<Vec<SessionId>> {
+        let store = self.sessions.clone();
+        tokio::task::spawn_blocking(move || store.get_agent_session_ids(agent_id))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::delete_canonical_session`].
+    ///
+    /// No in-tree caller yet — staged for #3378 part 2 (kernel-side
+    /// migration of the remaining sync substrate calls). Keep alongside
+    /// the other `_async` wrappers so a future dead-code sweep doesn't
+    /// remove it before its caller lands.
+    pub async fn delete_canonical_session_async(&self, agent_id: AgentId) -> LibreFangResult<()> {
+        let store = self.sessions.clone();
+        tokio::task::spawn_blocking(move || store.delete_canonical_session(agent_id))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::append_canonical`].
+    pub async fn append_canonical_async(
+        &self,
+        agent_id: AgentId,
+        messages: &[librefang_types::message::Message],
+        compaction_threshold: Option<usize>,
+        session_id: Option<SessionId>,
+    ) -> LibreFangResult<()> {
+        let store = self.sessions.clone();
+        let messages = messages.to_vec();
+        tokio::task::spawn_blocking(move || {
+            store.append_canonical(agent_id, &messages, compaction_threshold, session_id)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::vacuum_if_shrank`]. VACUUM rewrites the
+    /// whole DB file and can take seconds — keeping it on the blocking
+    /// pool is even more important than for the small CRUD wrappers above.
+    /// Body is shared via [`vacuum_inner`] so the sync path and this
+    /// wrapper stay in lockstep.
+    pub async fn vacuum_if_shrank_async(&self, pruned_count: usize) -> LibreFangResult<()> {
+        if pruned_count == 0 {
+            return Ok(());
+        }
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || -> LibreFangResult<()> {
+            let conn = conn
+                .lock()
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            vacuum_inner(&conn, pruned_count);
+            Ok(())
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+}
+
+/// Shared body for [`MemorySubstrate::remove_agent`] and its async sibling.
+/// Both helpers share their canonical DELETE list with the standalone
+/// `*_agent` methods on the individual stores so a new agent-scoped table
+/// only has to be added in one place.
+///
+/// Caller is responsible for taking the connection mutex; this function
+/// only owns the transaction lifecycle.
+fn remove_agent_inner(conn: &Connection, agent_id: AgentId) -> LibreFangResult<()> {
+    let id = agent_id.0.to_string();
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    crate::session::execute_session_agent_deletes(&tx, &id)?;
+    crate::structured::execute_structured_agent_deletes(&tx, &id)?;
+    tx.commit()
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    Ok(())
+}
+
+/// Shared body for [`MemorySubstrate::vacuum_if_shrank`] and its async
+/// sibling. Errors are logged as warnings rather than propagated — a
+/// failed VACUUM is not fatal.
+///
+/// Caller is responsible for the `pruned_count == 0` short-circuit and
+/// for taking the connection mutex.
+fn vacuum_inner(conn: &Connection, pruned_count: usize) {
+    // Flush WAL frames to the main DB file first so VACUUM has less work.
+    if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+        tracing::warn!(error = %e, "WAL checkpoint before VACUUM failed; continuing");
+    }
+    tracing::info!(pruned_count, "Running VACUUM after session prune");
+    if let Err(e) = conn.execute_batch("VACUUM;") {
+        tracing::warn!(error = %e, "VACUUM after session prune failed");
+    }
 }
 
 #[async_trait]
@@ -1750,5 +1980,221 @@ mod tests {
             finished_at.is_none(),
             "reset to pending must clear finished_at"
         );
+    }
+
+    /// #3501: `remove_agent` cascade-deletes sessions, memories, and the
+    /// agent row in a single transaction. Pre-fix the cascade ran across
+    /// multiple independent locks: a partial failure between the two
+    /// could orphan sessions whose agent had already been removed.
+    #[tokio::test]
+    async fn test_remove_agent_cascades_sessions_and_memories() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent_id = AgentId::new();
+
+        // Seed: a session and a memory under this agent.
+        let session = substrate.create_session(agent_id).unwrap();
+        substrate
+            .remember(
+                agent_id,
+                "remember me",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // Sanity: both rows exist.
+        assert!(substrate.get_session(session.id).unwrap().is_some());
+        let pre_count: i64 = substrate
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE agent_id = ?1 AND deleted = 0",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre_count, 1);
+
+        substrate.remove_agent(agent_id).unwrap();
+
+        // Sessions, memories, and the agent row must all be gone.
+        let conn = substrate.conn.lock().unwrap();
+        let session_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_count, 0, "sessions must cascade-delete");
+
+        let memory_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE agent_id = ?1",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(memory_count, 0, "memories must cascade-delete");
+    }
+
+    /// `remove_agent` must also wipe the `sessions_fts` index inside the
+    /// cascade transaction. `search_sessions` reads FTS rows directly
+    /// (no JOIN to `sessions`), so an orphan FTS row would let the
+    /// removed agent's session content remain full-text searchable —
+    /// a privacy regression, not a hygiene issue.
+    #[tokio::test]
+    async fn test_remove_agent_clears_sessions_fts() {
+        use librefang_types::message::Message;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent_id = AgentId::new();
+
+        // Seed a session whose content lands in the FTS index.
+        let mut session = substrate.create_session(agent_id).unwrap();
+        let needle = "removalprivacynonceabc123";
+        session.messages.push(Message::user(needle));
+        substrate.save_session(&session).unwrap();
+
+        // Sanity: FTS sees it.
+        let pre = substrate.search_sessions(needle, Some(&agent_id)).unwrap();
+        assert!(!pre.is_empty(), "FTS must index the seeded content");
+
+        substrate.remove_agent(agent_id).unwrap();
+
+        // After remove_agent, the FTS row must be gone. If it survived
+        // outside the tx, search_sessions would still surface a snippet
+        // of the deleted agent's content.
+        let post = substrate.search_sessions(needle, Some(&agent_id)).unwrap();
+        assert!(
+            post.is_empty(),
+            "sessions_fts must be cleared inside remove_agent's tx"
+        );
+
+        // Also assert at the row level — search_sessions could in principle
+        // filter by JOIN in the future; the underlying table must be empty.
+        let conn = substrate.conn.lock().unwrap();
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE agent_id = ?1",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 0, "sessions_fts must cascade-delete");
+    }
+
+    /// #3378: each `_async` substrate wrapper must offload its
+    /// `std::sync::Mutex<Connection>` acquisition to tokio's blocking
+    /// pool. This test holds the connection mutex from a non-tokio OS
+    /// thread, then drives a wrapper from a `current_thread` runtime.
+    /// If the wrapper took the lock on the runtime worker (the pre-fix
+    /// kernel pattern), the spawned task would block for the full hold
+    /// time AND a concurrently-scheduled tokio future on the same
+    /// runtime would never make progress — the runtime has only one
+    /// worker thread, the test thread itself. Putting the lock behind
+    /// `spawn_blocking` lets the worker pump other futures while the
+    /// DB I/O runs on a dedicated thread.
+    ///
+    /// The proof is **ordering**, not wall-clock: a tokio task captures
+    /// `tick_at` after a short sleep, the blocker thread captures
+    /// `released_at` immediately after dropping the lock guard, and we
+    /// assert `tick_at < released_at`. In the correct (offloaded) case
+    /// the tick fires *during* the lock hold, so it wins. In the broken
+    /// case the runtime is parked until the lock is released, so the
+    /// blocker captures `released_at` before the runtime can resume the
+    /// tick task. No timing threshold — the test stays decisive even
+    /// under heavy CI jitter (Windows / llvm-cov).
+    #[test]
+    fn async_wrappers_do_not_park_current_thread_runtime() {
+        use std::sync::Mutex as StdMutex;
+        use std::time::Instant;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+            let entry = AgentEntry {
+                id: AgentId::new(),
+                name: "starvation-test".to_string(),
+                session_id: SessionId::new(),
+                ..Default::default()
+            };
+
+            // Round-trip through save_agent_async + load_all_agents_async
+            // first to confirm the wrappers persist correctly before we
+            // assert on scheduling behaviour.
+            substrate.save_agent_async(&entry).await.unwrap();
+            let loaded = substrate.load_all_agents_async().await.unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].name, "starvation-test");
+
+            // Both timestamps are captured under their own mutex so the
+            // assertion can read them after both threads have settled.
+            let tick_at: Arc<StdMutex<Option<Instant>>> = Arc::new(StdMutex::new(None));
+            let released_at: Arc<StdMutex<Option<Instant>>> = Arc::new(StdMutex::new(None));
+
+            // Saturate the connection mutex from outside tokio. The
+            // 100 ms hold is well above any plausible scheduler jitter
+            // (Windows / coverage runners ~50 ms) so the in-hold tick
+            // window is unambiguous.
+            let conn = Arc::clone(&substrate.conn);
+            let blocker_holds = Arc::new(std::sync::Barrier::new(2));
+            let blocker_holds_inner = Arc::clone(&blocker_holds);
+            let released_at_for_blocker = Arc::clone(&released_at);
+            let blocker = std::thread::spawn(move || {
+                let g = conn.lock().expect("conn mutex");
+                blocker_holds_inner.wait();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                drop(g);
+                // Capture the release timestamp the instant the guard
+                // is gone, before any runtime worker can resume.
+                *released_at_for_blocker.lock().unwrap() = Some(Instant::now());
+            });
+            blocker_holds.wait();
+
+            // While the mutex is held, kick off a wrapper that wants
+            // it. With spawn_blocking it parks on the blocking pool,
+            // not the runtime. The runtime stays free to drive the
+            // tick task below.
+            let s = Arc::clone(&substrate);
+            let mut entry2 = entry.clone();
+            entry2.id = AgentId::new();
+            entry2.name = "starvation-test-2".to_string();
+            let pending = tokio::spawn(async move { s.save_agent_async(&entry2).await });
+
+            // Tick task: sleeps for a fraction of the blocker hold,
+            // then stamps `tick_at`. In the correct case this stamp
+            // lands during the hold (tick_at < released_at). In the
+            // broken case the runtime is parked, the sleep can't tick
+            // until the worker is free, and `tick_at` lands after
+            // `released_at`.
+            let tick_at_for_task = Arc::clone(&tick_at);
+            let ticker = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                *tick_at_for_task.lock().unwrap() = Some(Instant::now());
+            });
+
+            ticker.await.unwrap();
+            pending.await.unwrap().unwrap();
+            blocker.join().unwrap();
+
+            let tick = tick_at.lock().unwrap().expect("tick task ran");
+            let released = released_at.lock().unwrap().expect("blocker ran");
+            assert!(
+                tick < released,
+                "runtime parked on the connection mutex (#3378): \
+                 tick task ({tick:?}) fired after blocker released \
+                 the lock ({released:?}), meaning the worker was \
+                 stuck in std::sync::Mutex::lock instead of being \
+                 driven by spawn_blocking"
+            );
+        });
     }
 }

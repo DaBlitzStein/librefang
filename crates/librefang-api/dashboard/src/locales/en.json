@@ -48,11 +48,15 @@
     "expand_sidebar": "Expand sidebar",
     "collapse_sidebar": "Collapse sidebar",
     "open_menu": "Open navigation menu",
-    "skip_to_content": "Skip to content"
+    "skip_to_content": "Skip to content",
+    "more": "More",
+    "mobile_tabs": "Bottom navigation"
   },
   "common": {
     "copied": "Copied",
     "copy_failed": "Copy failed",
+    "show": "Show",
+    "hide": "Hide",
     "refresh": "Refresh",
     "status": "Status",
     "daemon_online": "Daemon Online",
@@ -98,6 +102,8 @@
     "resume": "Resume",
     "close": "Close",
     "clear_search": "Clear search",
+    "select": "Select",
+    "deselect": "Deselect",
     "yes": "Yes",
     "no": "No",
     "details": "Details",
@@ -315,6 +321,15 @@
     "create_failed": "Failed to create agent",
     "manifest_toml": "Agent Manifest (TOML)",
     "thinking_toml_hint": "Add a [thinking] section in TOML to enable extended thinking",
+    "schedule_manual": "manual",
+    "kpi": {
+      "sessions": "Sessions · 24h",
+      "sessions_idle": "idle",
+      "cost": "Cost · 24h",
+      "p95": "P95 latency",
+      "samples": "{{count}} samples",
+      "tools": "Tools"
+    },
     "form": {
       "basics": "Basics",
       "model": "Model",
@@ -764,7 +779,14 @@
     "qr_failed": "Failed to get QR code",
     "login_success": "Login successful! Saving configuration...",
     "config_failed": "Configuration failed",
-    "config_success": "Configuration saved"
+    "config_success": "Configuration saved",
+    "add": "Add",
+    "all_configured": "All channels configured",
+    "msgs_24h": "msgs/24h",
+    "empty_title": "No channels yet",
+    "empty_body": "Connect Slack, Discord, email, SMS, or any of the bundled bridges so agents can post and receive messages.",
+    "connect_first": "Connect a channel",
+    "picker_title": "Add channel"
   },
   "skills": {
     "title": "Skills",
@@ -1641,6 +1663,8 @@
     "totp_scan": "Scan the QR code or enter the secret in your authenticator app:",
     "totp_confirm": "Confirm",
     "totp_recovery_title": "Recovery Codes (save these somewhere safe):",
+    "totp_recovery_reveal": "Reveal codes",
+    "totp_recovery_hide": "Hide codes",
     "totp_reset_placeholder": "Current TOTP or recovery code",
     "totp_verify_reset": "Verify & Reset",
     "totp_revoke_placeholder": "TOTP or recovery code",
@@ -2129,6 +2153,7 @@
     "info_provider": "Provider",
     "info_state": "State",
     "ws_not_connected": "WebSocket not connected. Please refresh the page.",
+    "command_timeout": "Command timed out or connection dropped — please try again.",
     "delete_session": "Delete session",
     "export": "Export",
     "export_markdown": "Export as Markdown",
@@ -2180,7 +2205,8 @@
     "help": "Sessions are the live and historical conversation contexts of every agent. Each session is a thread of messages + tool calls bound to one agent and one origin (channel, cron, A2A peer, or manual). This page lets you browse them, label them, and clean up.\n\nHow to use this page:\n\n1. Search & filter. Type to search by agent, label, or recent message text. Active vs. idle is auto-derived from last activity.\n\n2. Label. \"Set label\" tags a session so it's easier to find later — useful for long-running threads.\n\n3. Delete. Remove old sessions you don't need. The agent's full message history for that thread goes with it.\n\nTypical scenarios:\n\n  · Finding the session where the agent and a user worked through a specific problem.\n  · Pruning channel sessions that have piled up after a busy week.\n  · Confirming an agent has the session you expect for a given (channel, chat) pair before debugging.\n\nThings to know:\n\n  · Channel messages always use a canonical session id — `(agent, \"<channel>:<chat>\")` — so a user always lands in the same thread.\n  · Cron fires share a single per-agent session; that's by design (prompt cache reuse) but it does mean cron history can grow.\n  · Deleting a session is irreversible. Memory entries the session created stay (Memory page is separate).",
     "set_label": "Set label",
     "no_label": "add label",
-    "label_placeholder": "Label..."
+    "label_placeholder": "Label...",
+    "open_in_chat": "Open this session in the chat page"
   },
   "approvals": {
     "title": "Approvals",
@@ -2228,7 +2254,48 @@
     "batch_disabled_totp": "Batch approve disabled when TOTP is enforced",
     "goToAgent": "Go to Agent",
     "totpPlaceholder": "000000 / 0000-0000",
-    "totpLabel": "TOTP"
+    "totpLabel": "TOTP",
+    "tabHistory": "History",
+    "pendingCount": "{{count}} pending",
+    "filter": "Filter",
+    "filterPlaceholder": "Filter by agent, tool, or action…",
+    "noFilterMatch": "No requests match this filter.",
+    "autoRules": "Auto-rules",
+    "requestedAgo": "requested {{ago}} ago",
+    "approveWithTotp": "Approve with TOTP",
+    "editApprove": "Edit & approve",
+    "editApproveTitle": "Edit and approve",
+    "editApproveSubmit": "Submit & approve",
+    "deny": "Deny",
+    "risk": {
+      "high": "high risk",
+      "medium": "medium risk",
+      "low": "low risk"
+    },
+    "history": {
+      "empty": "No history yet",
+      "emptyDesc": "Resolved approvals will appear here.",
+      "decisions": {
+        "approved": "Approved",
+        "denied": "Denied",
+        "edited": "Edited"
+      },
+      "cols": {
+        "decision": "Decision",
+        "agent": "Agent",
+        "action": "Action",
+        "risk": "Risk",
+        "resolvedBy": "Resolved by",
+        "when": "When"
+      }
+    },
+    "totp": {
+      "modalTitle": "Confirm with TOTP",
+      "modalSubtitle": "High-risk action requires 2FA",
+      "modalContext": "wants to run: {{action}}. Enter the 6-digit code from your authenticator (or a 8-digit recovery code).",
+      "expiresHint": "Codes refresh every 30 seconds.",
+      "confirm": "Confirm & approve"
+    }
   },
   "wizard": {
     "welcome": "Welcome to LibreFang",
@@ -2465,6 +2532,14 @@
     "connected": "connected",
     "no_peers": "No peers connected",
     "no_peers_desc": "No OFP peers are currently connected to this node.",
+    "identity_fingerprint": "Identity fingerprint",
+    "identity_fingerprint_hint": "Compare with the remote operator out-of-band before pinning.",
+    "identity_missing": "No Ed25519 identity loaded. OFP is running in HMAC-only legacy mode; per-peer impersonation defense (#3873) is dormant.",
+    "pinned_peers_count_one": "{{count}} TOFU-pinned peer",
+    "pinned_peers_count_other": "{{count}} TOFU-pinned peers",
+    "trusted_peers": "Trusted peers",
+    "trusted_peers_pinned": "{{count}} pinned",
+    "trusted_peer_fingerprint_hint": "SHA-256 fingerprint of the pinned Ed25519 public key. Compare OOB.",
     "help": "Network shows this instance's status in the Open Federation Protocol (OFP) — peer LibreFang nodes you've discovered or been discovered by, your own node identity, and the OFP version in use. OFP is the layer below A2A: it's how nodes find each other; A2A is what they say once connected.\n\nHow to use this page:\n\n1. Identity. The node-id and protocol version identify this LibreFang instance to the federation.\n\n2. Peers. Shows every connected peer with online / offline status. Empty list means you're not federating with anyone yet.\n\n3. Status. Online means OFP is reachable and your node is announcing itself.\n\nWhen to use it (vs. A2A):\n\n  · Network — node-level federation: who's out there, who's connected.\n  · A2A — agent-level talk: what agents on those nodes can do for each other.\n\nTypical scenarios:\n\n  · Confirming two LibreFang instances actually see each other before debugging A2A.\n  · Reading off your node-id to share with a peer for direct connection.\n\nThings to know:\n\n  · Federation is opt-in and config-gated. If \"no peers\" looks empty by default, that's expected unless you've configured peers.\n  · Network status is a live read — refresh polls, no caching."
   },
   "a2a": {
@@ -2679,6 +2754,25 @@
     "url_hint": "URL must start with http:// or https://",
     "env_setup_title": "Configure {{name}}",
     "env_setup_desc": "Enter the required API keys and environment variables to complete the installation.",
+    "requires_env_count_one": "{{count}} key",
+    "requires_env_count_other": "{{count}} keys",
+    "wizard": {
+      "eyebrow": "install · mcp server",
+      "step_permissions": "Overview",
+      "step_configure": "Configure",
+      "step_installing": "Installing",
+      "step_done": "Done",
+      "requires": "Requires",
+      "get_credential": "Get credential",
+      "review_notice": "After install, the server's tools start gated by the approval policy — destructive calls require human sign-off until you scope them down.",
+      "confirm_review": "I've reviewed what this server can do.",
+      "creds_note": "Credentials are encrypted in the local vault and only released to this server's process at connect-time.",
+      "installing": "Installing {{name}}…",
+      "installing_sub": "Persisting config, registering with the runtime.",
+      "done_title": "Installed",
+      "done_body": "{{name}} is connected and exposing its tools to your agents.",
+      "view_servers": "View servers"
+    },
     "edit_taint_policy": "Taint policy",
     "taint_policy_short": "Taint",
     "taint_policy_title": "Taint policy — {{name}}",
@@ -3135,5 +3229,39 @@
     "error_disabled_body": "Enable pairing in <link>Config → Security</link> (<code>pairing.enabled = true</code>).",
     "error_generic_title": "Failed to generate pairing code",
     "btn_try_again": "Try again"
+  },
+  "shortcuts_help": {
+    "title": "Keyboard shortcuts",
+    "general_heading": "General",
+    "nav_heading_prefix": "Navigate (press",
+    "nav_heading_suffix": "then…)",
+    "general": {
+      "cmd_k": "Open command palette",
+      "focus_search": "Focus search on current page",
+      "create_new": "Create new (agent / workflow / plugin, page-aware)",
+      "show_help": "Show this cheat sheet",
+      "close_dialog": "Close dialog / modal"
+    },
+    "nav": {
+      "overview": "Overview",
+      "chat": "Chat",
+      "agents": "Agents",
+      "hands": "Hands",
+      "skills": "Skills",
+      "workflows": "Workflows",
+      "models": "Models",
+      "providers": "Providers",
+      "channels": "Channels (Network)",
+      "goals": "Goals",
+      "logs": "Logs",
+      "runtime": "Runtime",
+      "memory": "Memory",
+      "analytics": "Analytics",
+      "settings": "Settings",
+      "plugins": "Plugins",
+      "scheduler": "Scheduler",
+      "approvals": "Approvals (reView)",
+      "sessions": "Sessions"
+    }
   }
 }

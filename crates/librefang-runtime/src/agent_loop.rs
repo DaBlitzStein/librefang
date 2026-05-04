@@ -9,7 +9,7 @@ use crate::context_budget::{apply_context_guard, truncate_tool_result_dynamic, C
 use crate::context_engine::ContextEngine;
 use crate::context_overflow::{recover_from_overflow, RecoveryStage};
 use crate::embedding::EmbeddingDriver;
-use crate::kernel_handle::KernelHandle;
+use crate::kernel_handle::prelude::*;
 use crate::llm_driver::{
     CompletionRequest, LlmDriver, LlmError, StreamEvent, PHASE_RESPONSE_COMPLETE,
 };
@@ -208,7 +208,8 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
             "Session repair applied before save"
         );
     }
-    session.messages = repaired;
+    session.set_messages(repaired);
+    session.last_repaired_generation = Some(session.messages_generation);
 }
 
 /// Maximum consecutive iterations where every executed tool failed before
@@ -259,6 +260,62 @@ fn resolve_request_tools(
         }
     }
     out
+}
+
+/// Per-loop cache for the resolved tool list passed into `CompletionRequest`.
+///
+/// Before #3586 the agent loop called `resolve_request_tools` (which cloned
+/// every `ToolDefinition` via `available_tools.to_vec()`) on every iteration,
+/// even though the granted-tool set is constant for the duration of a turn
+/// and the lazy-mode fallback only grows when the LLM successfully invokes
+/// `tool_load`.  This cache hands out a shared `Arc<Vec<ToolDefinition>>` and
+/// only rebuilds when the lazy-mode `session_loaded_tools` vector grew since
+/// the last iteration — turning the per-iteration cost from a deep clone of
+/// the entire tool catalog into a refcount bump.
+struct ResolvedToolsCache {
+    cached: std::sync::Arc<Vec<ToolDefinition>>,
+    /// Snapshot of `session_loaded_tools.len()` at the time `cached` was
+    /// built.  Length-only is sufficient because `session_loaded_tools` is
+    /// only ever mutated via `push()` in the loop — never reordered or
+    /// removed — so a stable length implies stable content.
+    cached_loaded_len: usize,
+    lazy_mode: bool,
+}
+
+impl ResolvedToolsCache {
+    fn new(
+        available_tools: &[ToolDefinition],
+        session_loaded: &[ToolDefinition],
+        lazy_mode: bool,
+    ) -> Self {
+        Self {
+            cached: std::sync::Arc::new(resolve_request_tools(
+                available_tools,
+                session_loaded,
+                lazy_mode,
+            )),
+            cached_loaded_len: session_loaded.len(),
+            lazy_mode,
+        }
+    }
+
+    /// Return a cheap `Arc` clone of the resolved tool list, rebuilding only
+    /// when the lazy-mode loaded-tool set has grown since the last call.
+    fn get(
+        &mut self,
+        available_tools: &[ToolDefinition],
+        session_loaded: &[ToolDefinition],
+    ) -> std::sync::Arc<Vec<ToolDefinition>> {
+        if self.lazy_mode && session_loaded.len() != self.cached_loaded_len {
+            self.cached = std::sync::Arc::new(resolve_request_tools(
+                available_tools,
+                session_loaded,
+                self.lazy_mode,
+            ));
+            self.cached_loaded_len = session_loaded.len();
+        }
+        std::sync::Arc::clone(&self.cached)
+    }
 }
 
 /// Notify the stream consumer that the LLM has finished producing text for
@@ -355,7 +412,10 @@ fn safe_trim_messages(
     agent_name: &str,
     user_message: &str,
     max_history: usize,
-) {
+) -> (bool, bool) {
+    let mut working_mutated = false;
+    let mut session_mutated = false;
+
     // Trim the persistent session messages first so the truncated version is
     // saved back to the database, preventing reload-OOM on next boot.
     if session_messages.len() > max_history {
@@ -379,6 +439,7 @@ fn safe_trim_messages(
         );
 
         session_messages.drain(..trim_point);
+        session_mutated = true;
 
         for (i, msg) in rescued.into_iter().enumerate() {
             session_messages.insert(i, msg);
@@ -386,8 +447,10 @@ fn safe_trim_messages(
     }
 
     if messages.len() <= max_history {
-        return;
+        return (working_mutated, session_mutated);
     }
+
+    working_mutated = true;
 
     let desired_trim = messages.len() - max_history;
 
@@ -445,6 +508,8 @@ fn safe_trim_messages(
         *messages = system_msgs;
         messages.push(Message::user(user_message));
     }
+
+    (working_mutated, session_mutated)
 }
 
 /// Strip base64 data from image blocks in session messages that the LLM has
@@ -452,10 +517,14 @@ fn safe_trim_messages(
 ///
 /// Each image block (~56K tokens of base64) is replaced with a small text
 /// note so the conversation context is preserved without token bloat.
-fn strip_processed_image_data(messages: &mut [Message]) {
+fn strip_processed_image_data(messages: &mut [Message]) -> bool {
+    let mut mutated = false;
+
     for msg in messages.iter_mut() {
-        msg.content.strip_images();
+        mutated |= msg.content.strip_images();
     }
+
+    mutated
 }
 
 fn accumulate_token_usage(total_usage: &mut TokenUsage, usage: &TokenUsage) {
@@ -475,6 +544,29 @@ fn tool_use_blocks_from_calls(tool_calls: &[ToolCall]) -> Vec<ContentBlock> {
             provider_metadata: None,
         })
         .collect()
+}
+
+/// Sanitize a tool name into a bounded, low-cardinality metric label.
+///
+/// Strips control chars and caps the length so an LLM that hallucinates
+/// a wild tool name can't blow up the metric registry. The set of real
+/// tool names is bounded (builtins + skill tools + MCP tools), so this
+/// label dimension stays tractable in steady state.
+fn sanitize_tool_label(name: &str) -> String {
+    name.chars().filter(|c| !c.is_control()).take(64).collect()
+}
+
+/// Record a tool-call outcome for observability (#3495). `outcome` is
+/// one of `"success"` / `"failure"`; we never push raw error text into
+/// metric labels.
+fn record_tool_call_metric(tool_name: &str, is_error: bool) {
+    let outcome = if is_error { "failure" } else { "success" };
+    metrics::counter!(
+        "librefang_tool_call_total",
+        "tool" => sanitize_tool_label(tool_name),
+        "outcome" => outcome,
+    )
+    .increment(1);
 }
 
 fn append_tool_result_guidance_blocks(tool_result_blocks: &mut Vec<ContentBlock>) {
@@ -722,7 +814,7 @@ impl StagedToolUseTurn {
         self.committed = true;
 
         // Step 1: push the assistant message carrying the tool_use blocks.
-        session.messages.push(self.assistant_msg.clone());
+        session.push_message(self.assistant_msg.clone());
         messages.push(self.assistant_msg.clone());
 
         // Step 2: degenerate-case short-circuit — if no result blocks
@@ -842,7 +934,22 @@ struct ToolExecutionContext<'a> {
         tool.id = %tool_call.id,
     ),
 )]
+/// Thin wrapper around `execute_single_tool_call_inner` that guarantees
+/// `record_tool_call_metric` is called on **every** return path — both `Ok`
+/// (success or is_error tool result) and `Err` (e.g. circuit-break).
 async fn execute_single_tool_call(
+    ctx: &mut ToolExecutionContext<'_>,
+    tool_call: &ToolCall,
+) -> Result<ExecutedToolCall, LibreFangError> {
+    let result = execute_single_tool_call_inner(ctx, tool_call).await;
+    match &result {
+        Ok(executed) => record_tool_call_metric(&tool_call.name, executed.result.is_error),
+        Err(_) => record_tool_call_metric(&tool_call.name, true),
+    }
+    result
+}
+
+async fn execute_single_tool_call_inner(
     ctx: &mut ToolExecutionContext<'_>,
     tool_call: &ToolCall,
 ) -> Result<ExecutedToolCall, LibreFangError> {
@@ -1221,7 +1328,7 @@ fn handle_mid_turn_signal(
     };
     if let Some(text) = injected_text {
         let inject_msg = Message::user(&text);
-        session.messages.push(inject_msg.clone());
+        session.push_message(inject_msg.clone());
         messages.push(inject_msg);
     }
     Some(flushed_outcomes)
@@ -1358,7 +1465,7 @@ fn finalize_tool_use_results(
         pinned: pin_this,
         timestamp: Some(chrono::Utc::now()),
     };
-    session.messages.push(tool_results_msg.clone());
+    session.push_message(tool_results_msg.clone());
     messages.push(tool_results_msg);
 
     outcome_summary
@@ -1416,7 +1523,7 @@ fn apply_approval_resolution_signal(
         false
     }
 
-    let mut matched = false;
+    let mut session_matched = false;
     for msg in session.messages.iter_mut().rev() {
         if patch_message_blocks(
             msg,
@@ -1425,10 +1532,14 @@ fn apply_approval_resolution_signal(
             result_is_error,
             result_status,
         ) {
-            matched = true;
+            session_matched = true;
             break;
         }
     }
+    if session_matched {
+        session.mark_messages_mutated();
+    }
+    let mut matched = session_matched;
     for msg in messages.iter_mut().rev() {
         if patch_message_blocks(
             msg,
@@ -1450,11 +1561,13 @@ fn apply_approval_resolution_signal(
 /// previous turns (e.g. images that survived a crash or session reload).
 /// The last user message is preserved so the LLM can see any freshly
 /// attached image on the current turn.
-fn strip_prior_image_data(messages: &mut [Message]) {
+fn strip_prior_image_data(messages: &mut [Message]) -> bool {
     // Find the index of the last user message
     let last_user_idx = messages
         .iter()
         .rposition(|m| m.role == Role::User && m.content.has_images());
+
+    let mut mutated = false;
 
     for (i, msg) in messages.iter_mut().enumerate() {
         // Skip the last user message that contains images — it hasn't been
@@ -1462,8 +1575,10 @@ fn strip_prior_image_data(messages: &mut [Message]) {
         if Some(i) == last_user_idx {
             continue;
         }
-        msg.content.strip_images();
+        mutated |= msg.content.strip_images();
     }
+
+    mutated
 }
 
 /// Strip a provider prefix from a model ID before sending to the API.
@@ -1567,8 +1682,24 @@ fn normalize_bare_model_id(bare_model: &str) -> Option<String> {
     Some(qualified)
 }
 
-/// Default context window size (tokens) for token-based trimming.
+/// Default context window size (tokens) for token-based trimming when the
+/// model is in the catalog but its `context_window` was unset. Referenced by
+/// `docs/architecture/message-history-trimming.md` and
+/// `docs/src/app/configuration/core/page.mdx` so kept as the authoritative
+/// value even when no runtime path currently reads it.
+#[allow(dead_code)]
 const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
+
+/// Conservative fallback for **unknown** models — i.e. the catalog had no
+/// entry for this model name. 200K silently assumes a Claude-class window;
+/// for a small open-source model that actually supports 8K, an oversized
+/// prompt only fails at the provider with HTTP 400 *after* tokens are
+/// already metered. 8192 is the smallest window any modern provider ships
+/// (gpt-3.5, llama-2-base, …), so this errs on the side of trimming early
+/// rather than burning tokens (#3349). Operators with larger windows must
+/// set `agent.toml: model.context_window` (or the equivalent provider
+/// catalog entry) explicitly.
+const UNKNOWN_MODEL_CONTEXT_WINDOW: usize = 8192;
 
 /// Agent lifecycle phase within the execution loop.
 /// Used for UX indicators (typing, reactions) without coupling to channel types.
@@ -1668,6 +1799,20 @@ pub struct LoopOptions {
     /// Kernel populates this from the boot-time-built [`AuxClient`].
     /// Tests typically leave it as `None`.
     pub aux_client: Option<std::sync::Arc<crate::aux_client::AuxClient>>,
+    /// When `is_fork = true`, the session id the *parent* turn was actually
+    /// invoked on (i.e. the parent's resolved `effective_session_id`, NOT
+    /// the registry's mutable `entry.session_id` pointer). The kernel's
+    /// session resolver consumes this to land the fork on the parent's
+    /// session for prompt-cache alignment, regardless of whether the
+    /// agent registry pointer has since been re-pointed by
+    /// `switch_agent_session` / `update_session_id`.
+    ///
+    /// MUST be `Some(parent_session)` whenever `is_fork = true`. The
+    /// kernel surfaces a hard error if `is_fork && parent_session_id ==
+    /// None`, because reading `entry.session_id` at fork-spawn time is a
+    /// TOCTOU race against `switch_agent_session` (#4291). For
+    /// non-fork loops this field is ignored and should be left `None`.
+    pub parent_session_id: Option<librefang_types::agent::SessionId>,
 }
 
 /// Result of an agent loop execution.
@@ -1909,9 +2054,7 @@ fn push_filtered_user_message(
                 );
             }
         }
-        session
-            .messages
-            .push(Message::user_with_blocks(filtered_blocks));
+        session.push_message(Message::user_with_blocks(filtered_blocks));
     } else {
         let filtered_message = pii_filter.filter_message(user_message, &privacy_config.mode);
         let final_message = if prefix.is_empty() {
@@ -1919,7 +2062,7 @@ fn push_filtered_user_message(
         } else {
             format!("{prefix}{filtered_message}")
         };
-        session.messages.push(Message::user(&final_message));
+        session.push_message(Message::user(&final_message));
     }
 }
 
@@ -2428,12 +2571,17 @@ fn prepare_llm_messages(
     memory_context_msg: Option<String>,
     max_history: usize,
 ) -> PreparedMessages {
-    let llm_messages: Vec<Message> = session
-        .messages
-        .iter()
-        .filter(|m| m.role != Role::System)
-        .cloned()
-        .collect();
+    let has_system_messages = session.messages.iter().any(|m| m.role == Role::System);
+    let llm_messages: Vec<Message> = if has_system_messages {
+        session
+            .messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .cloned()
+            .collect()
+    } else {
+        session.messages.clone()
+    };
 
     debug!(
         agent = %manifest.name,
@@ -2443,8 +2591,15 @@ fn prepare_llm_messages(
         "Pre-repair message snapshot (prepare_llm_messages)"
     );
 
-    let (mut messages, repair_stats) =
-        crate::session_repair::validate_and_repair_with_stats(&llm_messages);
+    let (mut messages, repair_stats) = if session.last_repaired_generation
+        == Some(session.messages_generation)
+    {
+        (llm_messages, crate::session_repair::RepairStats::default())
+    } else {
+        let (msgs, stats) = crate::session_repair::validate_and_repair_with_stats(&llm_messages);
+        session.last_repaired_generation = Some(session.messages_generation);
+        (msgs, stats)
+    };
 
     if let Some(cc_msg) = manifest
         .metadata
@@ -2465,7 +2620,7 @@ fn prepare_llm_messages(
         );
     }
 
-    safe_trim_messages(
+    let (_working_trimmed, session_trimmed) = safe_trim_messages(
         &mut messages,
         &mut session.messages,
         &manifest.name,
@@ -2473,8 +2628,11 @@ fn prepare_llm_messages(
         max_history,
     );
     let new_messages_start = session.messages.len().saturating_sub(1);
-    strip_prior_image_data(&mut messages);
-    strip_prior_image_data(&mut session.messages);
+    let _working_stripped = strip_prior_image_data(&mut messages);
+    let session_stripped = strip_prior_image_data(&mut session.messages);
+    if session_trimmed || session_stripped {
+        session.mark_messages_mutated();
+    }
 
     PreparedMessages {
         messages,
@@ -2576,8 +2734,10 @@ async fn generate_search_queries(
 
     let request = CompletionRequest {
         model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
-        messages: vec![Message::user(format!("{history}\nUser: {user_message}"))],
-        tools: vec![],
+        messages: std::sync::Arc::new(vec![Message::user(format!(
+            "{history}\nUser: {user_message}"
+        ))]),
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: 200,
         temperature: 0.0,
         system: Some(system),
@@ -2818,8 +2978,7 @@ async fn finalize_successful_end_turn(
     mut end_turn: FinalizeEndTurnResultData,
 ) -> LibreFangResult<AgentLoopResult> {
     ctx.session
-        .messages
-        .push(Message::assistant(end_turn.final_response.clone()));
+        .push_message(Message::assistant(end_turn.final_response.clone()));
 
     let keep_recent = ctx
         .manifest
@@ -2827,7 +2986,11 @@ async fn finalize_successful_end_turn(
         .as_ref()
         .and_then(|a| a.heartbeat_keep_recent)
         .unwrap_or(10);
+    let before_prune_len = ctx.session.messages.len();
     crate::session_repair::prune_heartbeat_turns(&mut ctx.session.messages, keep_recent);
+    if ctx.session.messages.len() != before_prune_len {
+        ctx.session.mark_messages_mutated();
+    }
 
     // Fork turns are ephemeral — skip the persist so the parent agent's
     // canonical session history isn't polluted by derivative calls like
@@ -3251,8 +3414,19 @@ pub async fn run_agent_loop(
         crate::dangerous_command::DangerousCommandChecker::default(),
     ));
 
-    // Build context budget from model's actual context window (or fallback to default)
-    let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    // Build context budget from model's actual context window. If the model
+    // wasn't in the catalog (`None`), pick a conservative 8K fallback — a
+    // 200K assumption silently bills the user for prompts the provider then
+    // rejects with HTTP 400 (#3349).
+    let ctx_window = context_window_tokens.unwrap_or_else(|| {
+        tracing::warn!(
+            model = %manifest.model.model,
+            fallback = UNKNOWN_MODEL_CONTEXT_WINDOW,
+            "Model not in catalog — falling back to conservative context window. \
+             Set `model.context_window` in agent.toml to silence this warning."
+        );
+        UNKNOWN_MODEL_CONTEXT_WINDOW
+    });
     let context_budget = ContextBudget::new(ctx_window);
     // Context compressor — triggers LLM-based summarisation when token usage
     // exceeds 80% of the context window, before falling back to brute-force trim.
@@ -3287,6 +3461,11 @@ pub async fn run_agent_loop(
     // than potentially going through Arc/mutex indirection on the original source.
     // This is a minor but measurable improvement for long autonomous runs.
     let system_prompt_snapshot = system_prompt.clone();
+
+    // Resolve tool list once before the loop and reuse via Arc on every
+    // iteration.  See `ResolvedToolsCache` for rationale (#3586).
+    let mut tools_cache =
+        ResolvedToolsCache::new(available_tools, &session_loaded_tools, lazy_tools);
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
@@ -3413,39 +3592,26 @@ pub async fn run_agent_loop(
                     opts.aux_client.as_deref(),
                 )
                 .await;
-            if !compression_events.is_empty() {
+
+            let had_soft_compression = !compression_events.is_empty();
+            let mut hard_trimmed = false;
+
+            if had_soft_compression {
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
-                // Ensure history starts with a user turn after soft compression.
                 messages = crate::session_repair::ensure_starts_with_user(messages);
-                // Keep session.messages in sync with the compressed LLM working copy
-                // so subsequent turns don't re-read the uncompressed history.
-                session.messages = messages.clone();
-                // Re-estimate after soft compression; only invoke hard trim if still
-                // above the 70% threshold used by recover_from_overflow.
-                let remaining_tokens = crate::compactor::estimate_token_count(
-                    &messages,
-                    Some(&system_prompt),
-                    Some(available_tools),
-                );
-                let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
-                if remaining_tokens > hard_trim_threshold {
-                    let recovery = recover_from_overflow(
-                        &mut messages,
-                        &system_prompt,
-                        available_tools,
-                        ctx_window,
-                    );
-                    if recovery == RecoveryStage::FinalError {
-                        warn!("Context overflow unrecoverable — suggest /reset or /compact");
-                    }
-                    if recovery != RecoveryStage::None {
-                        messages = crate::session_repair::validate_and_repair(&messages);
-                        // Ensure history starts with a user turn after overflow recovery.
-                        messages = crate::session_repair::ensure_starts_with_user(messages);
-                    }
-                }
-            } else {
+            }
+
+            // Hard-trim only if still above threshold after soft compression
+            // and repair. Keep the pre-existing ordering so token estimation
+            // and recovery boundaries are computed on provider-valid history.
+            let remaining_tokens = crate::compactor::estimate_token_count(
+                &messages,
+                Some(&system_prompt),
+                Some(available_tools),
+            );
+            let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
+            if remaining_tokens > hard_trim_threshold {
                 let recovery = recover_from_overflow(
                     &mut messages,
                     &system_prompt,
@@ -3455,11 +3621,17 @@ pub async fn run_agent_loop(
                 if recovery == RecoveryStage::FinalError {
                     warn!("Context overflow unrecoverable — suggest /reset or /compact");
                 }
-                if recovery != RecoveryStage::None {
-                    messages = crate::session_repair::validate_and_repair(&messages);
-                    // Ensure history starts with a user turn after overflow recovery.
-                    messages = crate::session_repair::ensure_starts_with_user(messages);
-                }
+                hard_trimmed = recovery != RecoveryStage::None;
+            }
+
+            // Repair again only if hard trim ran; trimming can cut across a
+            // tool-call boundary even when the pre-trim history was valid.
+            if hard_trimmed {
+                messages = crate::session_repair::validate_and_repair(&messages);
+                messages = crate::session_repair::ensure_starts_with_user(messages);
+            }
+            if had_soft_compression {
+                session.set_messages(messages.clone());
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
         }
@@ -3488,10 +3660,12 @@ pub async fn run_agent_loop(
                 }
             });
 
+        // Wrap messages once per turn — call_with_retry's `request.clone()`
+        // becomes a refcount bump instead of a deep clone of the history (#3766).
         let request = CompletionRequest {
             model: api_model,
-            messages: messages.clone(),
-            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
+            messages: std::sync::Arc::new(messages.clone()),
+            tools: tools_cache.get(available_tools, &session_loaded_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             // Clone from the pre-built snapshot rather than the original to
@@ -3545,8 +3719,10 @@ pub async fn run_agent_loop(
         };
 
         // Strip image base64 from earlier messages (LLM already processed them)
-        strip_processed_image_data(&mut messages);
-        strip_processed_image_data(&mut session.messages);
+        let _ = strip_processed_image_data(&mut messages);
+        if strip_processed_image_data(&mut session.messages) {
+            session.mark_messages_mutated();
+        }
 
         // Recover tool calls output as text by models that don't use the tool_calls API field
         // (e.g. Groq/Llama, DeepSeek emit `<function=name>{json}</function>` in text)
@@ -3976,7 +4152,7 @@ pub async fn run_agent_loop(
                     let (cleaned_text, parsed_directives) =
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
-                    session.messages.push(Message::assistant(&text));
+                    session.push_message(Message::assistant(&text));
                     if !opts.is_fork {
                         if let Err(e) = memory.save_session_async(session).await {
                             warn!("Failed to save session on max continuations: {e}");
@@ -4029,11 +4205,34 @@ pub async fn run_agent_loop(
                 }
                 // Model hit token limit — add partial response and continue
                 let text = response.text();
-                session.messages.push(Message::assistant(&text));
+                session.push_message(Message::assistant(&text));
                 messages.push(Message::assistant(&text));
-                session.messages.push(Message::user("Please continue."));
+                session.push_message(Message::user("Please continue."));
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit, continuing");
+            }
+            StopReason::ContentFiltered => {
+                // Provider refused / safety-filtered the response (#3450).
+                // Persist any partial text and surface as a structured error
+                // — never fall through into the EndTurn success path.
+                let text = response.text();
+                let partial = if text.trim().is_empty() {
+                    "[content filtered by provider]".to_string()
+                } else {
+                    text
+                };
+                warn!(
+                    agent = %manifest.name,
+                    iteration,
+                    "LLM response blocked by provider safety / content filter"
+                );
+                session.push_message(Message::assistant(&partial));
+                if !opts.is_fork {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on content filter: {e}");
+                    }
+                }
+                return Err(LibreFangError::ContentFiltered { message: partial });
             }
         }
     }
@@ -4302,8 +4501,20 @@ async fn stream_with_retry(
                     inactivity_secs,
                     partial_text_len, last_activity, "LLM stream timed out with partial output"
                 );
-                if !partial_text.is_empty() {
-                    let _ = tx.send(StreamEvent::TextDelta { text: partial_text }).await;
+                // #3552: `partial_text` is `Option<Arc<str>>` — copy the body
+                // into the owned `String` that `TextDelta` requires only when
+                // we actually have one to forward. Most consumers (failover
+                // classification, log lines, error stringification through
+                // `LibreFangError::LlmDriver(e.to_string())`) only ever read
+                // `partial_text_len` and pay nothing for the body.
+                if let Some(body) = partial_text.as_deref() {
+                    if !body.is_empty() {
+                        let _ = tx
+                            .send(StreamEvent::TextDelta {
+                                text: body.to_string(),
+                            })
+                            .await;
+                    }
                 }
                 return Err(LibreFangError::LlmDriver(format!(
                     "Task timed out after {inactivity_secs}s of inactivity \
@@ -4617,8 +4828,19 @@ pub async fn run_agent_loop_streaming(
         crate::dangerous_command::DangerousCommandChecker::default(),
     ));
 
-    // Build context budget from model's actual context window (or fallback to default)
-    let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    // Build context budget from model's actual context window. If the model
+    // wasn't in the catalog (`None`), pick a conservative 8K fallback — a
+    // 200K assumption silently bills the user for prompts the provider then
+    // rejects with HTTP 400 (#3349).
+    let ctx_window = context_window_tokens.unwrap_or_else(|| {
+        tracing::warn!(
+            model = %manifest.model.model,
+            fallback = UNKNOWN_MODEL_CONTEXT_WINDOW,
+            "Model not in catalog — falling back to conservative context window. \
+             Set `model.context_window` in agent.toml to silence this warning."
+        );
+        UNKNOWN_MODEL_CONTEXT_WINDOW
+    });
     let context_budget = ContextBudget::new(ctx_window);
     // Context compressor — LLM-based soft compression before hard trim.
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
@@ -4650,6 +4872,11 @@ pub async fn run_agent_loop_streaming(
     // to the non-streaming path: constant across iterations, cloned per-LLM call
     // because CompletionRequest takes ownership, so clone once up-front.
     let system_prompt_snapshot = system_prompt.clone();
+
+    // Resolve tool list once before the loop and reuse via Arc on every
+    // iteration.  See `ResolvedToolsCache` for rationale (#3586).
+    let mut tools_cache =
+        ResolvedToolsCache::new(available_tools, &session_loaded_tools, lazy_tools);
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
@@ -4743,8 +4970,6 @@ pub async fn run_agent_loop_streaming(
                 .await?;
             result.recovery
         } else {
-            // LLM-based soft compression first, then hard overflow recovery.
-            // Routes through the aux client when one is wired (issue #3314).
             let (compressed, compression_events) = context_compressor
                 .compress_if_needed_with_aux(
                     messages.clone(),
@@ -4756,55 +4981,44 @@ pub async fn run_agent_loop_streaming(
                     opts.aux_client.as_deref(),
                 )
                 .await;
-            if !compression_events.is_empty() {
+
+            let had_soft_compression = !compression_events.is_empty();
+            let mut hard_trimmed = false;
+
+            if had_soft_compression {
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
-                // Ensure history starts with a user turn after soft compression.
                 messages = crate::session_repair::ensure_starts_with_user(messages);
-                // Keep session.messages in sync with the compressed LLM working copy
-                // so subsequent turns don't re-read the uncompressed history.
-                session.messages = messages.clone();
-                // Re-estimate after soft compression; only invoke hard trim if still
-                // above the 70% threshold used by recover_from_overflow.
-                let remaining_tokens = crate::compactor::estimate_token_count(
-                    &messages,
-                    Some(&system_prompt),
-                    Some(available_tools),
-                );
-                let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
-                let recovery = if remaining_tokens > hard_trim_threshold {
-                    let r = recover_from_overflow(
-                        &mut messages,
-                        &system_prompt,
-                        available_tools,
-                        ctx_window,
-                    );
-                    if r != RecoveryStage::None {
-                        messages = crate::session_repair::validate_and_repair(&messages);
-                        // Ensure history starts with a user turn after overflow recovery.
-                        messages = crate::session_repair::ensure_starts_with_user(messages);
-                    }
-                    r
-                } else {
-                    RecoveryStage::None
-                };
-                apply_context_guard(&mut messages, &context_budget, available_tools);
-                recovery
-            } else {
-                let recovery = recover_from_overflow(
+            }
+
+            let remaining_tokens = crate::compactor::estimate_token_count(
+                &messages,
+                Some(&system_prompt),
+                Some(available_tools),
+            );
+            let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
+            let recovery = if remaining_tokens > hard_trim_threshold {
+                let r = recover_from_overflow(
                     &mut messages,
                     &system_prompt,
                     available_tools,
                     ctx_window,
                 );
-                if recovery != RecoveryStage::None {
-                    messages = crate::session_repair::validate_and_repair(&messages);
-                    // Ensure history starts with a user turn after overflow recovery.
-                    messages = crate::session_repair::ensure_starts_with_user(messages);
-                }
-                apply_context_guard(&mut messages, &context_budget, available_tools);
-                recovery
+                hard_trimmed = r != RecoveryStage::None;
+                r
+            } else {
+                RecoveryStage::None
+            };
+
+            if hard_trimmed {
+                messages = crate::session_repair::validate_and_repair(&messages);
+                messages = crate::session_repair::ensure_starts_with_user(messages);
             }
+            if had_soft_compression {
+                session.set_messages(messages.clone());
+            }
+            apply_context_guard(&mut messages, &context_budget, available_tools);
+            recovery
         };
         match &recovery {
             RecoveryStage::None => {}
@@ -4853,10 +5067,11 @@ pub async fn run_agent_loop_streaming(
                 }
             });
 
+        // Same Arc-wrap as the non-streaming hot path (#3766).
         let request = CompletionRequest {
             model: api_model,
-            messages: messages.clone(),
-            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
+            messages: std::sync::Arc::new(messages.clone()),
+            tools: tools_cache.get(available_tools, &session_loaded_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             // Clone from pre-built snapshot (same rationale as non-streaming loop).
@@ -4922,7 +5137,7 @@ pub async fn run_agent_loop_streaming(
                          The user's request could not be completed. \
                          Any partial output was already sent to the user.]"
                     );
-                    session.messages.push(Message::assistant(note));
+                    session.push_message(Message::assistant(note));
                     repair_session_before_save(session, agent_id_str.as_str(), "streaming_timeout");
                     if !opts.is_fork {
                         if let Err(save_err) = memory.save_session_async(session).await {
@@ -4954,8 +5169,10 @@ pub async fn run_agent_loop_streaming(
         };
 
         // Strip image base64 from earlier messages (LLM already processed them)
-        strip_processed_image_data(&mut messages);
-        strip_processed_image_data(&mut session.messages);
+        let _ = strip_processed_image_data(&mut messages);
+        if strip_processed_image_data(&mut session.messages) {
+            session.mark_messages_mutated();
+        }
 
         // Recover tool calls output as text (streaming path)
         let mut tools_recovered_from_text = false;
@@ -5407,7 +5624,7 @@ pub async fn run_agent_loop_streaming(
                     let (cleaned_text, parsed_directives) =
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
-                    session.messages.push(Message::assistant(&text));
+                    session.push_message(Message::assistant(&text));
                     if !opts.is_fork {
                         if let Err(e) = memory.save_session_async(session).await {
                             warn!("Failed to save session on max continuations: {e}");
@@ -5460,11 +5677,33 @@ pub async fn run_agent_loop_streaming(
                     });
                 }
                 let text = response.text();
-                session.messages.push(Message::assistant(&text));
+                session.push_message(Message::assistant(&text));
                 messages.push(Message::assistant(&text));
-                session.messages.push(Message::user("Please continue."));
+                session.push_message(Message::user("Please continue."));
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit (streaming), continuing");
+            }
+            StopReason::ContentFiltered => {
+                // Streaming twin of the non-streaming refusal handler (#3450).
+                let text = response.text();
+                let partial = if text.trim().is_empty() {
+                    "[content filtered by provider]".to_string()
+                } else {
+                    text
+                };
+                warn!(
+                    agent = %manifest.name,
+                    iteration,
+                    "LLM response blocked by provider safety / content filter (streaming)"
+                );
+                session.push_message(Message::assistant(&partial));
+                if !opts.is_fork {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on content filter: {e}");
+                    }
+                }
+                signal_response_complete(&stream_tx).await;
+                return Err(LibreFangError::ContentFiltered { message: partial });
             }
         }
     }
@@ -5908,9 +6147,11 @@ fn recover_text_tool_calls(text: &str, available_tools: &[ToolDefinition]) -> Ve
     // The parameters value is HTML-entity-escaped JSON (&quot; etc.).
     {
         use regex_lite::Regex;
-        // Match both self-closing <function ... /> and <function ...></function>
-        let re =
-            Regex::new(r#"<function\s+name="([^"]+)"\s+parameters="([^"]*)"[^/]*/?>"#).unwrap();
+        // Cached: this parser runs on every LLM response (#3491).
+        static FUNCTION_TAG_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+            Regex::new(r#"<function\s+name="([^"]+)"\s+parameters="([^"]*)"[^/]*/?>"#).unwrap()
+        });
+        let re = &*FUNCTION_TAG_RE;
         for caps in re.captures_iter(text) {
             let tool_name = caps.get(1).unwrap().as_str();
             let raw_params = caps.get(2).unwrap().as_str();
@@ -6220,8 +6461,11 @@ mod tests {
     use super::*;
     use crate::llm_driver::{CompletionResponse, LlmError};
     use async_trait::async_trait;
+    use librefang_memory::session::SessionStore;
     use librefang_types::tool::ToolCall;
+    use rusqlite::Connection;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_max_iterations_constant() {
@@ -6408,6 +6652,74 @@ mod tests {
         assert!(
             resolved.len() < pool.len(),
             "lazy mode should trim when tool_load is present"
+        );
+    }
+
+    #[test]
+    fn test_resolved_tools_cache_reuses_arc_when_input_is_stable() {
+        // The whole point of #3586 is that an idle iteration (no new tools
+        // loaded via `tool_load`) MUST hand back the same `Arc` rather than
+        // rebuild the resolved tool list. Pin that with `Arc::ptr_eq` so a
+        // future regression that reverts the cache to a no-op fails here
+        // instead of silently in a profiler.
+        let pool: Vec<ToolDefinition> = (0..LAZY_TOOLS_THRESHOLD + 5)
+            .map(|i| fake_tool(&format!("tool_{i}")))
+            .chain(std::iter::once(fake_tool("tool_load")))
+            .collect();
+
+        let mut cache = ResolvedToolsCache::new(&pool, &[], true);
+        let a = cache.get(&pool, &[]);
+        let b = cache.get(&pool, &[]);
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "stable input must reuse the cached Arc"
+        );
+    }
+
+    #[test]
+    fn test_resolved_tools_cache_rebuilds_when_session_loaded_grows() {
+        // Lazy mode + a new tool_load redemption mid-turn: the cache must
+        // rebuild so the LLM sees the just-loaded tool on the next turn.
+        let pool: Vec<ToolDefinition> = (0..LAZY_TOOLS_THRESHOLD + 5)
+            .map(|i| fake_tool(&format!("tool_{i}")))
+            .chain(std::iter::once(fake_tool("tool_load")))
+            .collect();
+        let mut session_loaded: Vec<ToolDefinition> = Vec::new();
+
+        let mut cache = ResolvedToolsCache::new(&pool, &session_loaded, true);
+        let before = cache.get(&pool, &session_loaded);
+
+        session_loaded.push(fake_tool("late_arrival"));
+        let after = cache.get(&pool, &session_loaded);
+
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "growing session_loaded_tools must rebuild the cache"
+        );
+        assert!(
+            after.iter().any(|t| t.name == "late_arrival"),
+            "rebuilt cache must include the newly loaded tool"
+        );
+    }
+
+    #[test]
+    fn test_resolved_tools_cache_no_rebuild_when_lazy_mode_off() {
+        // In non-lazy mode `resolve_request_tools` ignores `session_loaded`,
+        // so the cache should never rebuild — even if the (unused) loaded
+        // vec grows. Guards against an over-eager invalidation that would
+        // re-clone the full eager list every iteration.
+        let pool: Vec<ToolDefinition> = (0..3).map(|i| fake_tool(&format!("t{i}"))).collect();
+        let mut session_loaded: Vec<ToolDefinition> = Vec::new();
+
+        let mut cache = ResolvedToolsCache::new(&pool, &session_loaded, false);
+        let before = cache.get(&pool, &session_loaded);
+
+        session_loaded.push(fake_tool("ignored"));
+        let after = cache.get(&pool, &session_loaded);
+
+        assert!(
+            std::sync::Arc::ptr_eq(&before, &after),
+            "non-lazy mode must never rebuild on session_loaded growth"
         );
     }
 
@@ -6653,6 +6965,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let privacy = librefang_types::config::PrivacyConfig {
             mode: librefang_types::config::PrivacyMode::Redact,
@@ -6696,6 +7010,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let privacy = librefang_types::config::PrivacyConfig::default();
         let filter = crate::pii_filter::PiiFilter::new(&privacy.redact_patterns);
@@ -6769,6 +7085,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut tool_result_blocks = Vec::new();
@@ -6795,6 +7113,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut staged = StagedToolUseTurn {
@@ -6851,6 +7171,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut staged = StagedToolUseTurn {
@@ -6989,6 +7311,8 @@ mod tests {
             }],
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = session.messages.clone();
         let mut staged = StagedToolUseTurn {
@@ -7193,6 +7517,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages_b: Vec<Message> = Vec::new();
         let mut staged_b = StagedToolUseTurn {
@@ -7297,6 +7623,8 @@ mod tests {
             }],
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages_a = session_a.messages.clone();
         let mut staged_a = StagedToolUseTurn {
@@ -7486,6 +7814,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
 
         for i in 0..13 {
@@ -7555,6 +7885,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
 
         for i in 0..13 {
@@ -7615,6 +7947,124 @@ mod tests {
         assert_eq!(tail[0].role, Role::User);
         assert_eq!(tail[0].content.text_content(), "current turn");
         assert_eq!(new_messages_start, session.messages.len().saturating_sub(1));
+    }
+
+    fn orphan_tool_result_message(tool_use_id: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                tool_name: "noop".to_string(),
+                content: "orphan".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    fn message_contains_tool_result(message: &Message, expected_id: &str) -> bool {
+        match &message.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == expected_id
+                )
+            }),
+            MessageContent::Text(_) => false,
+        }
+    }
+
+    #[test]
+    fn test_prepare_llm_messages_cold_load_triggers_repair() {
+        let manifest = test_manifest();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let session_id = librefang_types::agent::SessionId::new();
+        let messages = vec![
+            orphan_tool_result_message("missing"),
+            Message::user("real turn"),
+        ];
+
+        let conn = Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let store = SessionStore::new(Arc::new(Mutex::new(conn)));
+        store
+            .save_session(&Session {
+                id: session_id,
+                agent_id,
+                messages,
+                context_window_tokens: 0,
+                label: None,
+                messages_generation: 0,
+                last_repaired_generation: None,
+            })
+            .unwrap();
+
+        let mut loaded = store.get_session(session_id).unwrap().unwrap();
+        assert_eq!(loaded.last_repaired_generation, None);
+
+        let prepared = prepare_llm_messages(
+            &manifest,
+            &mut loaded,
+            "real turn",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
+
+        assert_eq!(
+            loaded.last_repaired_generation,
+            Some(loaded.messages_generation)
+        );
+        assert_eq!(prepared.repair_stats.orphaned_results_removed, 1);
+        assert!(!prepared
+            .messages
+            .iter()
+            .any(|message| message_contains_tool_result(message, "missing")));
+    }
+
+    #[test]
+    fn test_prepare_llm_messages_generation_skip_equivalence() {
+        let manifest = test_manifest();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: vec![Message::user("hello"), Message::assistant("hi")],
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+
+        let first = prepare_llm_messages(
+            &manifest,
+            &mut session,
+            "hello",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
+        let first_generation = session.messages_generation;
+        let second = prepare_llm_messages(
+            &manifest,
+            &mut session,
+            "hello",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
+
+        assert_eq!(first.messages.len(), second.messages.len());
+        for (left, right) in first.messages.iter().zip(&second.messages) {
+            assert_eq!(left.role, right.role);
+            assert_eq!(left.content.text_content(), right.content.text_content());
+        }
+        assert_eq!(session.messages_generation, first_generation);
+        assert_eq!(
+            second.repair_stats,
+            crate::session_repair::RepairStats::default()
+        );
+        assert_eq!(session.last_repaired_generation, Some(first_generation));
     }
 
     /// Verifies that AgentLoopResult exposes a usable `new_messages_start`
@@ -7700,6 +8150,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut staged = StagedToolUseTurn {
@@ -8054,6 +8506,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -8115,6 +8569,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -8175,6 +8631,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -8226,6 +8684,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -8282,6 +8742,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -8340,6 +8802,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -8400,6 +8864,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -8460,6 +8926,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -8597,6 +9065,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyThenNormalDriver::new());
@@ -8651,6 +9121,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysEmptyDriver);
@@ -8711,6 +9183,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -9485,6 +9959,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());
@@ -9565,6 +10041,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -9627,6 +10105,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());
@@ -9937,6 +10417,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -9996,6 +10478,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -10054,6 +10538,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -10115,6 +10601,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -10188,6 +10676,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         }
     }
 
@@ -10820,6 +11310,79 @@ mod tests {
             messages.first().map(|m| m.role),
             Some(Role::User),
             "history must start with a user turn after trim+repair"
+        );
+    }
+
+    // ── record_tool_call_metric covers failure paths ───────────────────────
+
+    /// Regression for #4560 — `record_tool_call_metric` must fire with
+    /// `outcome="failure"` even when `execute_single_tool_call` returns
+    /// `Err(...)` (e.g. circuit-break), not only on the `Ok` path.
+    ///
+    /// We test `record_tool_call_metric` directly: call it with `is_error =
+    /// true` inside a `with_local_recorder` scope and assert the counter has
+    /// a "failure" label — mirroring the `DebuggingRecorder` pattern used in
+    /// `command_lane.rs::test_submit_records_queue_wait_histogram`.
+    #[test]
+    fn test_record_tool_call_metric_failure_outcome() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            // Simulate what the wrapper does when execute_single_tool_call_inner
+            // returns Err (circuit-break or any hard error).
+            record_tool_call_metric("my_tool", true);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let failure_counter = snap.iter().find(|(ckey, _, _, val)| {
+            ckey.key().name() == "librefang_tool_call_total"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "tool" && l.value() == "my_tool")
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "outcome" && l.value() == "failure")
+                && matches!(val, DebugValue::Counter(_))
+        });
+        assert!(
+            failure_counter.is_some(),
+            "outcome=failure counter must be recorded for error paths"
+        );
+        if let Some((_, _, _, DebugValue::Counter(count))) = failure_counter {
+            assert_eq!(*count, 1, "counter must be incremented exactly once");
+        }
+    }
+
+    /// Success path: `record_tool_call_metric` with `is_error = false` must
+    /// produce `outcome="success"`.
+    #[test]
+    fn test_record_tool_call_metric_success_outcome() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_tool_call_metric("other_tool", false);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let success_counter = snap.iter().find(|(ckey, _, _, val)| {
+            ckey.key().name() == "librefang_tool_call_total"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "outcome" && l.value() == "success")
+                && matches!(val, DebugValue::Counter(_))
+        });
+        assert!(
+            success_counter.is_some(),
+            "outcome=success counter must be recorded for successful tool calls"
         );
     }
 }

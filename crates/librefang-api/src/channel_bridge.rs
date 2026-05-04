@@ -3,11 +3,11 @@
 //! Implements `ChannelBridgeHandle` on `LibreFangKernel` and provides the
 //! `start_channel_bridge()` entry point called by the daemon.
 
+use crate::workflow::{StepAgent, WorkflowId};
 use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, SenderContext};
-use librefang_kernel::approval::ApprovalManager;
 
 /// Sanitize LLM/driver errors into user-friendly messages for channel delivery.
 ///
@@ -28,6 +28,13 @@ fn sanitize_channel_error(err: &str) -> String {
         "I've hit my usage limit and need to rest. I'll be back soon!".to_string()
     } else if lower.contains("auth") || lower.contains("not logged in") || lower.contains("401") {
         "I'm having trouble with my credentials. Please let the admin know.".to_string()
+    } else if lower.contains("content filtered by provider") || lower.contains("content_filter") {
+        // Distinct branch for provider safety / refusal so the user sees a
+        // clear "your request was blocked" message instead of the generic
+        // "something went wrong" fallback. The kernel already routes the
+        // matching `content_filtered` operator notification separately
+        // (#3450) — this is the user-facing companion.
+        "I can't help with that — the request was blocked by the model's safety filter.".to_string()
     } else if lower.contains("exited with code") || lower.contains("llm driver") {
         "Sorry, something went wrong on my end. Please try again in a moment.".to_string()
     } else {
@@ -43,26 +50,44 @@ fn sanitize_channel_error(err: &str) -> String {
 /// Some providers emit tool calls as plain text (recovered by
 /// `agent_loop::recover_text_tool_calls`). These should not be
 /// forwarded to the user through streaming channels.
+///
+/// Long responses (>2000 chars) only match start-of-text patterns.
+/// The `contains()`-based patterns are skipped for long text because
+/// natural language responses that discuss tools (e.g. explaining how
+/// `agent_send` works) will naturally contain tool-call-like substrings
+/// without being leaked tool calls. Real leaked tool calls are compact.
 fn looks_like_tool_call(text: &str) -> bool {
     let t = text.trim();
-    // JSON-style tool calls (may appear at start of text)
-    t.starts_with("[{")
+    // Start-of-text patterns: safe regardless of length — a response that
+    // literally begins with a JSON tool call array/object is always a leak.
+    if t.starts_with("[{")
         || t.starts_with("functions.")
         || t.starts_with("{\"type\":\"function\"")
+        || t.starts_with("{\"tool_calls\":")
+        || t.starts_with("{\"tool_calls\" :")
         || (t.starts_with('[') && t.contains("'type': 'text'"))
-        || contains_bare_json_tool_call(t)
-        // Tag-based patterns — use contains() because tool call tags may
-        // appear after natural language preamble
-        || t.contains("<function=")
-        || t.contains("<function>")
-        || t.contains("<function ")
-        || t.contains("<tool>")
-        || t.contains("[TOOL_CALL]")
-        || t.contains("<tool_call>")
-        // Pattern 4: markdown code block containing a tool call
-        || contains_markdown_tool_call(t)
-        // Pattern 5: backtick-wrapped tool call
-        || contains_backtick_tool_call(t)
+    {
+        return true;
+    }
+
+    // For shorter text, apply deeper heuristics.  Long responses are
+    // natural language that may reference tools; filtering them silently
+    // drops legitimate answers.
+    const MAX_HEURISTIC_LEN: usize = 2000;
+    t.len() <= MAX_HEURISTIC_LEN
+        && (contains_bare_json_tool_call(t)
+            // Tag-based patterns — use contains() because tool call tags may
+            // appear after natural language preamble
+            || t.contains("<function=")
+            || t.contains("<function>")
+            || t.contains("<function ")
+            || t.contains("<tool>")
+            || t.contains("[TOOL_CALL]")
+            || t.contains("<tool_call>")
+            // Pattern 4: markdown code block containing a tool call
+            || contains_markdown_tool_call(t)
+            // Pattern 5: backtick-wrapped tool call
+            || contains_backtick_tool_call(t))
 }
 
 fn contains_markdown_tool_call(text: &str) -> bool {
@@ -302,7 +327,6 @@ use librefang_channels::wechat::WeChatAdapter;
 use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
-use librefang_kernel::error::KernelResult;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
@@ -348,15 +372,18 @@ fn tr_progress_failed(language: &str) -> &'static str {
     }
 }
 
-fn start_stream_text_bridge(
+fn start_stream_text_bridge<E>(
     event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
+        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
     language: &str,
-) -> mpsc::Receiver<String> {
+) -> mpsc::Receiver<String>
+where
+    E: std::fmt::Display + Send + 'static,
+{
     let (rx, _status) = start_stream_text_bridge_with_status(
         event_rx,
         kernel_handle,
@@ -378,10 +405,10 @@ fn start_stream_text_bridge(
 /// text stream. When `false`, the stream is pure model output — useful for
 /// agents whose responses are consumed by parsers or whose channel context
 /// must not have inline status markers.
-fn start_stream_text_bridge_with_status(
+fn start_stream_text_bridge_with_status<E>(
     mut event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
+        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
@@ -389,7 +416,10 @@ fn start_stream_text_bridge_with_status(
 ) -> (
     mpsc::Receiver<String>,
     tokio::sync::oneshot::Receiver<Result<(), String>>,
-) {
+)
+where
+    E: std::fmt::Display + Send + 'static,
+{
     let (tx, rx) = mpsc::channel::<String>(64);
     let (status_tx, status_rx) = tokio::sync::oneshot::channel();
     let error_tx = tx.clone();
@@ -428,7 +458,7 @@ fn start_stream_text_bridge_with_status(
                         if saw_tool_use {
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
                         } else if looks_like_tool_call(&iter_buf) {
-                            debug!("Streaming bridge: filtered leaked tool call text at ContentComplete");
+                            warn!("Streaming bridge: filtered leaked tool call text at ContentComplete (len={})", iter_buf.len());
                         } else if librefang_runtime::silent_response::is_silent_response(&iter_buf)
                         {
                             debug!(
@@ -501,7 +531,10 @@ fn start_stream_text_bridge_with_status(
 
         if !iter_buf.is_empty() && !saw_tool_use {
             if looks_like_tool_call(&iter_buf) {
-                debug!("Streaming bridge: filtered leaked tool call text in final flush");
+                warn!(
+                    "Streaming bridge: filtered leaked tool call text in final flush (len={})",
+                    iter_buf.len()
+                );
             } else if librefang_runtime::silent_response::is_silent_response(&iter_buf) {
                 debug!("Streaming bridge: suppressed NO_REPLY sentinel in final flush");
             } else {
@@ -997,6 +1030,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 librefang_types::model_catalog::AuthStatus::InvalidKey => "invalid key",
                 librefang_types::model_catalog::AuthStatus::AutoDetected => "auto-detected",
                 librefang_types::model_catalog::AuthStatus::LocalOffline => "local (offline)",
+                _ => "unknown",
             };
             msg.push_str(&format!(
                 "  {} — {} [{}, {} model(s)]\n",
@@ -1112,13 +1146,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .execute_run(
                 run_id,
                 |step_agent| match step_agent {
-                    librefang_kernel::workflow::StepAgent::ById { id } => {
+                    StepAgent::ById { id } => {
                         let aid: AgentId = id.parse().ok()?;
                         let entry = registry_ref.get(aid)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((aid, entry.name.clone(), inherit))
                     }
-                    librefang_kernel::workflow::StepAgent::ByName { name } => {
+                    StepAgent::ByName { name } => {
                         let entry = registry_ref.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
@@ -1385,7 +1419,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 // Resolve workflow by UUID or name
                                 let resolved = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id)
                                 {
-                                    Some(librefang_kernel::workflow::WorkflowId(uuid))
+                                    Some(WorkflowId(uuid))
                                 } else {
                                     let workflows =
                                         self.kernel.workflow_engine().list_workflows().await;
@@ -1489,7 +1523,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         return "Too many failed TOTP attempts. Try again later.".into();
                     }
                     match totp_code {
-                        Some(code) if ApprovalManager::is_recovery_code_format(code) => {
+                        Some(code)
+                            if self.kernel.approvals().recovery_code_format_matches(code) =>
+                        {
                             // Atomic redeem: read + verify + consume under
                             // the kernel's recovery-code mutex.  The
                             // earlier vault_get → verify → vault_set
@@ -1499,18 +1535,20 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             match self.kernel.vault_redeem_recovery_code(code) {
                                 Ok(true) => true,
                                 Ok(false) => {
-                                    // Fail-secure: if recording the failure
-                                    // hits a wedged audit DB, refuse the
-                                    // attempt rather than handing the
-                                    // attacker unlimited tries.  The HTTP
-                                    // path already does this.
-                                    if self
+                                    // Atomically check lockout + record failure (#3584).
+                                    // Fail-secure: wedged DB must not grant unlimited tries.
+                                    match self
                                         .kernel
                                         .approvals()
-                                        .record_totp_failure(sender_id)
-                                        .is_err()
+                                        .check_and_record_totp_failure(sender_id)
                                     {
-                                        return "TOTP service temporarily unavailable.".into();
+                                        Err(true) => {
+                                            return "Too many failed TOTP attempts. Try again later.".into();
+                                        }
+                                        Err(false) => {
+                                            return "TOTP service temporarily unavailable.".into();
+                                        }
+                                        Ok(()) => {}
                                     }
                                     return "Invalid recovery code.".into();
                                 }
@@ -1534,7 +1572,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 None => return "TOTP not configured. Set up TOTP first.".into(),
                             };
                             let totp_issuer = self.kernel.approvals().policy().totp_issuer.clone();
-                            match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                            match self.kernel.approvals().verify_totp_with_issuer(
                                 &secret,
                                 code,
                                 &totp_issuer,
@@ -1548,16 +1586,20 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                     true
                                 }
                                 Ok(false) => {
-                                    // Fail-secure parity with the HTTP path:
-                                    // a wedged audit DB must not silently
-                                    // grant unlimited TOTP attempts.
-                                    if self
+                                    // Atomically check lockout + record failure (#3584).
+                                    // Fail-secure parity with the HTTP path.
+                                    match self
                                         .kernel
                                         .approvals()
-                                        .record_totp_failure(sender_id)
-                                        .is_err()
+                                        .check_and_record_totp_failure(sender_id)
                                     {
-                                        return "TOTP service temporarily unavailable.".into();
+                                        Err(true) => {
+                                            return "Too many failed TOTP attempts. Try again later.".into();
+                                        }
+                                        Err(false) => {
+                                            return "TOTP service temporarily unavailable.".into();
+                                        }
+                                        Ok(()) => {}
                                     }
                                     return "Invalid TOTP code.".into();
                                 }
@@ -1603,8 +1645,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn subscribe_events(
         &self,
-    ) -> Option<tokio::sync::broadcast::Receiver<librefang_types::event::Event>> {
+    ) -> Option<tokio::sync::broadcast::Receiver<std::sync::Arc<librefang_types::event::Event>>>
+    {
         Some(self.kernel.event_bus_ref().subscribe_all())
+    }
+
+    fn record_consumer_lag(&self, n: u64, context: &'static str) {
+        self.kernel.event_bus_ref().record_consumer_lag(n, context);
     }
 
     async fn reset_session(&self, agent_id: AgentId) -> Result<String, String> {
@@ -1819,7 +1866,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
 
         let (mut overrides, default_agent_name) = match channel_type {
-            "telegram" => find_channel_info!(telegram),
+            // Telegram has the `message_coalesce_window_ms` alias (#4145)
+            // that feeds into `overrides.message_debounce_ms`; resolve via
+            // `effective_overrides()` rather than cloning `overrides` raw.
+            "telegram" => {
+                let entry = if let Some(aid) = account_id {
+                    channels
+                        .telegram
+                        .iter()
+                        .find(|c| c.account_id.as_deref() == Some(aid))
+                } else {
+                    channels.telegram.first()
+                };
+                (
+                    entry.map(|c| c.effective_overrides()),
+                    entry.and_then(|c| c.default_agent.clone()),
+                )
+            }
             "discord" => find_channel_info!(discord),
             "slack" => find_channel_info!(slack),
             "whatsapp" => find_channel_info!(whatsapp),
@@ -2107,7 +2170,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         message: &str,
         thread_id: Option<&str>,
     ) -> Result<String, String> {
-        use librefang_runtime::kernel_handle::KernelHandle;
+        use librefang_runtime::kernel_handle::prelude::*;
         self.kernel
             .send_channel_message(channel_type, recipient, message, thread_id, None)
             .await
@@ -2128,8 +2191,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 }
 
 /// Parse a trigger pattern string from chat into a `TriggerPattern`.
-fn parse_trigger_pattern(s: &str) -> Option<librefang_kernel::triggers::TriggerPattern> {
-    use librefang_kernel::triggers::TriggerPattern;
+fn parse_trigger_pattern(s: &str) -> Option<crate::triggers::TriggerPattern> {
+    use crate::triggers::TriggerPattern;
     if let Some(rest) = s.strip_prefix("spawned:") {
         return Some(TriggerPattern::AgentSpawned {
             name_pattern: rest.to_string(),
@@ -3132,8 +3195,25 @@ pub async fn start_channel_bridge_with_config(
             }
             DingTalkReceiveMode::Webhook => {
                 if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
-                    let secret =
-                        read_token(&dt_config.secret_env, "DingTalk (secret)").unwrap_or_default();
+                    // #3441: refuse to register a webhook adapter with an empty
+                    // signing secret.  An empty secret would still reject all
+                    // verifications (HMAC of an empty key fails the equality
+                    // check), but this is loud rather than silent — a misconfig
+                    // here means every inbound message is dropped, and the
+                    // operator should know at boot.
+                    let secret = match read_token(&dt_config.secret_env, "DingTalk (secret)") {
+                        Some(s) if !s.is_empty() => s,
+                        _ => {
+                            tracing::error!(
+                                env = %dt_config.secret_env,
+                                "DingTalk webhook adapter requires a non-empty signing secret \
+                                 (env var unset or empty); refusing to register adapter \
+                                 (default-deny). Set the env var or switch receive_mode \
+                                 to \"stream\".",
+                            );
+                            continue;
+                        }
+                    };
                     let adapter = Arc::new(
                         DingTalkAdapter::new(token, secret, dt_config.webhook_port)
                             .with_account_id(dt_config.account_id.clone()),
@@ -3374,8 +3454,9 @@ pub async fn start_channel_bridge_with_config(
     // Load bindings and broadcast config from kernel
     let bindings = kernel.list_bindings();
     if !bindings.is_empty() {
-        // Register all known agents in the router's name cache for binding resolution
-        for entry in kernel.agent_registry().list() {
+        // Register all known agents in the router's name cache for binding
+        // resolution. Read-only iteration; cheap Arc clones (#3569).
+        for entry in kernel.agent_registry().list_arcs() {
             router.register_agent(entry.name.clone(), entry.id);
         }
         router.load_bindings(&bindings);
@@ -3731,14 +3812,67 @@ mod tests {
         assert!(looks_like_tool_call(text));
     }
 
+    /// Short text containing a `<tool_call>` tag should still be flagged —
+    /// the contains()-based heuristic must keep firing under the length
+    /// threshold so genuine compact tool-call leaks are caught (#4028).
+    #[test]
+    fn test_looks_like_tool_call_short_text_with_tool_call_tag_is_flagged() {
+        let text = "Sure, here it is: <tool_call>web_search {\"q\":\"x\"}</tool_call>";
+        assert!(text.len() <= 2000);
+        assert!(looks_like_tool_call(text));
+    }
+
+    /// A long natural-language response (>2000 chars) that merely mentions
+    /// the words "tool_call" / "function_call" must NOT be filtered. Only
+    /// start-of-text patterns apply at this length, so the contains()
+    /// heuristic is suppressed and the legitimate answer survives (#4028).
+    #[test]
+    fn test_looks_like_tool_call_long_natural_language_not_flagged() {
+        let mut text = String::from(
+            "Let me explain how tool_call dispatch works in this system. \
+             A <tool_call> tag is one possible serialization, and providers \
+             may also emit [TOOL_CALL] markers or <function= attributes. ",
+        );
+        // Pad with natural language until the length exceeds the heuristic
+        // cap so that only start-of-text patterns are evaluated.
+        while text.len() <= 2000 {
+            text.push_str(
+                "This sentence discusses how tool calls and function calls \
+                 are represented internally without actually being one. ",
+            );
+        }
+        assert!(text.len() > 2000);
+        assert!(!text.trim_start().starts_with('['));
+        assert!(!text.trim_start().starts_with('{'));
+        assert!(!looks_like_tool_call(&text));
+    }
+
+    /// A long response that *starts* with a raw `{"tool_calls":` JSON
+    /// payload is unambiguously a leaked tool call and must be flagged
+    /// regardless of length (#4028).
+    #[test]
+    fn test_looks_like_tool_call_long_text_starting_with_tool_calls_json_is_flagged() {
+        let mut text = String::from(
+            r#"{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"q\":\"rust\"}"}}"#,
+        );
+        while text.len() <= 5000 {
+            text.push_str(
+                r#",{"id":"call_n","type":"function","function":{"name":"web_search","arguments":"{\"q\":\"rust\"}"}}"#,
+            );
+        }
+        text.push_str("]}");
+        assert!(text.len() > 5000);
+        assert!(looks_like_tool_call(&text));
+    }
+
     /// Verify that tool call JSON emitted as text (without ToolUseStart) is
     /// filtered at ContentComplete, not forwarded to the channel (#2379).
     #[tokio::test]
     async fn test_stream_bridge_filters_agent_send_tool_call_at_content_complete() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -3774,10 +3908,10 @@ mod tests {
     /// behavior of hermes-agent's commentary stream).
     #[tokio::test]
     async fn test_stream_bridge_surfaces_tool_use_progress() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -3837,10 +3971,10 @@ mod tests {
     /// user knows the agent's plan hit a snag.
     #[tokio::test]
     async fn test_stream_bridge_surfaces_tool_failure() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -3879,10 +4013,10 @@ mod tests {
     /// noisy fast for agents that chain many tools.
     #[tokio::test]
     async fn test_stream_bridge_quiet_on_tool_success() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -3944,10 +4078,10 @@ mod tests {
     /// scenarios.
     #[tokio::test]
     async fn test_stream_bridge_show_progress_false_suppresses_all_markers() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(
             event_rx,
@@ -4015,10 +4149,10 @@ mod tests {
     /// should produce only one progress line — some drivers double-fire.
     #[tokio::test]
     async fn test_stream_bridge_dedupes_consecutive_tool_progress() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -4051,10 +4185,10 @@ mod tests {
     /// `record_delivery(success=true)`.
     #[tokio::test]
     async fn test_stream_bridge_status_success() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let (mut rx, status_rx) =
             start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true, "en");
@@ -4090,13 +4224,12 @@ mod tests {
     /// to a public timeline) and to record `success=false`.
     #[tokio::test]
     async fn test_stream_bridge_status_error() {
-        use librefang_kernel::error::KernelError;
         use librefang_types::error::LibreFangError;
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
-                LibreFangError::Internal("rate limit hit".to_string()).into(),
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+                LibreFangError::Internal("rate limit hit".to_string()),
             )
         });
 
@@ -4134,13 +4267,12 @@ mod tests {
     /// like successful empty replies.
     #[tokio::test]
     async fn test_stream_bridge_group_error_suppresses_text_but_reports_err() {
-        use librefang_kernel::error::KernelError;
         use librefang_types::error::LibreFangError;
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
-                LibreFangError::Internal("some internal failure".to_string()).into(),
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+                LibreFangError::Internal("some internal failure".to_string()),
             )
         });
 
@@ -4179,7 +4311,6 @@ mod tests {
     /// text so they understand the reply may be incomplete.
     #[tokio::test]
     async fn test_stream_bridge_timeout_partial_output_reports_ok_status() {
-        use librefang_kernel::error::KernelError;
         use librefang_types::error::LibreFangError;
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
@@ -4190,8 +4321,8 @@ mod tests {
                 "agent loop timed out: {}",
                 librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
             );
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
-                LibreFangError::Internal(err).into(),
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+                LibreFangError::Internal(err),
             )
         });
 
@@ -4333,5 +4464,41 @@ mod tests {
             msg.contains("ref:"),
             "expected ref in generic msg, got: {msg}"
         );
+    }
+
+    /// Provider safety / content-filter refusals must surface as a clear
+    /// "blocked by safety filter" message to the user, not get swallowed
+    /// by the generic "something went wrong" fallback (#3450). Both the
+    /// `LibreFangError::ContentFiltered` Display string and the raw
+    /// upstream `content_filter` token must trigger the branch.
+    #[test]
+    fn test_sanitize_channel_error_content_filter() {
+        let msg =
+            sanitize_channel_error("Content filtered by provider: I cannot help with that request");
+        assert!(
+            msg.contains("safety filter"),
+            "expected safety-filter msg, got: {msg}"
+        );
+
+        let msg = sanitize_channel_error("API error: finish_reason=content_filter");
+        assert!(
+            msg.contains("safety filter"),
+            "expected safety-filter msg, got: {msg}"
+        );
+    }
+
+    /// `KernelBridgeAdapter::record_consumer_lag` must forward to
+    /// `EventBus::record_consumer_lag`, which increments `dropped_count`.
+    /// This test exercises the EventBus path directly (constructing a full
+    /// kernel in a unit test would be prohibitively expensive) and mirrors
+    /// the assertion in `event_bus::tests::record_consumer_lag_increments_dropped_count`.
+    #[test]
+    fn test_event_bus_record_consumer_lag_increments_dropped_count() {
+        let bus = librefang_kernel::event_bus::EventBus::new();
+        assert_eq!(bus.dropped_count(), 0);
+        bus.record_consumer_lag(5, "test-context");
+        assert_eq!(bus.dropped_count(), 5);
+        bus.record_consumer_lag(3, "test-context");
+        assert_eq!(bus.dropped_count(), 8);
     }
 }

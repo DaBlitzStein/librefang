@@ -77,13 +77,33 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/memory/agents/{id}/import",
             axum::routing::post(memory_import_agent),
         )
+        // Agent KV store (#3749 11/N: moved from system.rs).
+        .route("/memory/agents/{id}/kv", axum::routing::get(get_agent_kv))
+        .route(
+            "/memory/agents/{id}/kv/{key}",
+            axum::routing::get(get_agent_kv_key)
+                .put(set_agent_kv_key)
+                .delete(delete_agent_kv_key),
+        )
+        .route(
+            "/agents/{id}/memory/export",
+            axum::routing::get(export_agent_memory),
+        )
+        .route(
+            "/agents/{id}/memory/import",
+            axum::routing::post(import_agent_memory),
+        )
 }
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_types::agent::AgentId;
+use librefang_types::i18n::ErrorTranslator;
 use librefang_types::memory::ProactiveMemory;
 
+use crate::extractors::AgentIdPath;
+use crate::middleware::RequestLanguage;
 use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Query / path helpers
@@ -145,44 +165,114 @@ fn default_user_id() -> String {
 
 /// Map a [`librefang_types::error::LibreFangError`] to the appropriate HTTP status code.
 ///
-/// Previously every failure was mapped to 500. This function now returns
+/// Previously every failure was mapped to 500 (#3661). This function now returns
 /// semantically correct codes for `InvalidInput` (400), `AgentNotFound` /
-/// `SessionNotFound` (404), `CapabilityDenied` (403), and `QuotaExceeded` (429)
-/// so callers can distinguish between client errors and server errors.
-fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
-    map_memory_error(e.to_string())
+/// `SessionNotFound` (404), `CapabilityDenied` / `AuthDenied` (403), and
+/// `QuotaExceeded` (429) so the dashboard can distinguish client errors
+/// from server errors and surface actionable messages.
+///
+/// Type-based matching (rather than `Display` prefix matching) ensures the
+/// classification doesn't silently break if a `#[error(...)]` template ever
+/// changes — the compiler will flag a missing arm.
+fn internal_error<E>(e: E) -> (StatusCode, Json<serde_json::Value>)
+where
+    E: Into<MemoryRouteError>,
+{
+    e.into().into_response_tuple()
 }
 
-fn map_memory_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
-    // Classify by the error message prefix emitted by LibreFangError Display impls.
-    // This avoids a dependency on the concrete type at every call-site while still
-    // providing correct HTTP semantics.
-    //
-    // Body policy: client-facing errors (4xx) echo the full message because
-    // the content is already shaped from caller-supplied input or
-    // documented quota state.  Server-side errors (5xx) deliberately
-    // return a generic body — the underlying message can carry a
-    // database path, an internal trace ID, or other deployment detail
-    // we don't want to leak across an API boundary.  The original
-    // `internal_error` returned only "Internal server error"; #3661
-    // unintentionally regressed that by echoing every error message.
-    let (status, body_msg) = if msg.starts_with("Invalid input:") {
-        (StatusCode::BAD_REQUEST, msg)
-    } else if msg.starts_with("Agent not found:") || msg.starts_with("Session not found:") {
-        (StatusCode::NOT_FOUND, msg)
-    } else if msg.starts_with("Capability denied:") {
-        (StatusCode::FORBIDDEN, msg)
-    } else if msg.starts_with("Resource quota exceeded:") {
-        (StatusCode::TOO_MANY_REQUESTS, msg)
-    } else {
-        tracing::error!("Memory operation failed: {msg}");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal server error".to_string(),
-        )
-    };
+/// Internal classification helper. Owns its message so 4xx bodies can echo
+/// caller-supplied input back without ambiguity. 5xx bodies return a
+/// generic "Internal server error" to avoid leaking deployment detail
+/// (DB paths, internal trace IDs, low-level error chains).
+enum MemoryRouteError {
+    InvalidInput(String),
+    NotFound(String),
+    Forbidden(String),
+    QuotaExceeded(String),
+    Internal(String),
+}
 
-    (status, Json(serde_json::json!({ "error": body_msg })))
+impl MemoryRouteError {
+    fn into_response_tuple(self) -> (StatusCode, Json<serde_json::Value>) {
+        let (status, body_msg) = match self {
+            MemoryRouteError::InvalidInput(m) => (StatusCode::BAD_REQUEST, m),
+            MemoryRouteError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            MemoryRouteError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
+            MemoryRouteError::QuotaExceeded(m) => (StatusCode::TOO_MANY_REQUESTS, m),
+            MemoryRouteError::Internal(m) => {
+                tracing::error!("Memory operation failed: {m}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            }
+        };
+        (status, Json(serde_json::json!({ "error": body_msg })))
+    }
+}
+
+// Type-based mapping: stable against Display-template changes.
+impl From<librefang_types::error::LibreFangError> for MemoryRouteError {
+    fn from(e: librefang_types::error::LibreFangError) -> Self {
+        use librefang_types::error::LibreFangError as E;
+        match e {
+            E::InvalidInput(m) => MemoryRouteError::InvalidInput(format!("Invalid input: {m}")),
+            E::AgentNotFound(m) => MemoryRouteError::NotFound(format!("Agent not found: {m}")),
+            E::SessionNotFound(m) => MemoryRouteError::NotFound(format!("Session not found: {m}")),
+            E::CapabilityDenied(m) => {
+                MemoryRouteError::Forbidden(format!("Capability denied: {m}"))
+            }
+            E::AuthDenied(m) => MemoryRouteError::Forbidden(format!("Auth denied: {m}")),
+            E::QuotaExceeded(m) => {
+                MemoryRouteError::QuotaExceeded(format!("Resource quota exceeded: {m}"))
+            }
+            // All other variants are server-side or systemic; collapse to 500.
+            other => MemoryRouteError::Internal(other.to_string()),
+        }
+    }
+}
+
+// Fallback for `anyhow::Error`-style call sites: keep prefix-based hint
+// for messages already shaped like a `LibreFangError`, otherwise treat
+// as an internal failure.
+impl From<anyhow::Error> for MemoryRouteError {
+    fn from(e: anyhow::Error) -> Self {
+        classify_by_message(e.to_string())
+    }
+}
+
+impl From<String> for MemoryRouteError {
+    fn from(s: String) -> Self {
+        classify_by_message(s)
+    }
+}
+
+impl From<&str> for MemoryRouteError {
+    fn from(s: &str) -> Self {
+        classify_by_message(s.to_string())
+    }
+}
+
+fn classify_by_message(msg: String) -> MemoryRouteError {
+    if msg.starts_with("Invalid input:") {
+        MemoryRouteError::InvalidInput(msg)
+    } else if msg.starts_with("Agent not found:") || msg.starts_with("Session not found:") {
+        MemoryRouteError::NotFound(msg)
+    } else if msg.starts_with("Capability denied:") || msg.starts_with("Auth denied:") {
+        MemoryRouteError::Forbidden(msg)
+    } else if msg.starts_with("Resource quota exceeded:") {
+        MemoryRouteError::QuotaExceeded(msg)
+    } else {
+        MemoryRouteError::Internal(msg)
+    }
+}
+
+// Test helper: keep the legacy string-based entry-point for the
+// `map_memory_error_*` regression tests.
+#[cfg(test)]
+fn map_memory_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
+    classify_by_message(msg).into_response_tuple()
 }
 
 /// Build a [`MemoryNamespaceGuard`] for the current request from the
@@ -312,7 +402,7 @@ fn auth_denied(
         ("q" = String, Query, description = "Search query"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = serde_json::Value))
+    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
 )]
 pub async fn memory_search(
     State(state): State<Arc<AppState>>,
@@ -357,7 +447,7 @@ pub async fn memory_search(
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated memory list", body = serde_json::Value))
+    responses((status = 200, description = "Paginated memory list", body = crate::types::JsonObject))
 )]
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
@@ -418,7 +508,7 @@ pub async fn memory_list(
     path = "/api/memory/user/{user_id}",
     tag = "proactive-memory",
     params(("user_id" = String, Path, description = "User ID")),
-    responses((status = 200, description = "User memories", body = serde_json::Value))
+    responses((status = 200, description = "User memories", body = crate::types::JsonObject))
 )]
 pub async fn memory_get_user(
     State(state): State<Arc<AppState>>,
@@ -452,8 +542,8 @@ pub async fn memory_get_user(
     post,
     path = "/api/memory",
     tag = "proactive-memory",
-    request_body = serde_json::Value,
-    responses((status = 201, description = "Memories added", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 201, description = "Memories added", body = crate::types::JsonObject))
 )]
 pub async fn memory_add(
     State(state): State<Arc<AppState>>,
@@ -490,8 +580,8 @@ pub async fn memory_add(
     path = "/api/memory/items/{memory_id}",
     tag = "proactive-memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Memory updated", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Memory updated", body = crate::types::JsonObject))
 )]
 pub async fn memory_update(
     State(state): State<Arc<AppState>>,
@@ -541,7 +631,7 @@ pub async fn memory_update(
     path = "/api/memory/items/{memory_id}",
     tag = "proactive-memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
-    responses((status = 200, description = "Memory deleted", body = serde_json::Value))
+    responses((status = 200, description = "Memory deleted", body = crate::types::JsonObject))
 )]
 pub async fn memory_delete(
     State(state): State<Arc<AppState>>,
@@ -579,8 +669,8 @@ pub async fn memory_delete(
     post,
     path = "/api/memory/bulk-delete",
     tag = "proactive-memory",
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Bulk delete results", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Bulk delete results", body = crate::types::JsonObject))
 )]
 pub async fn memory_bulk_delete(
     State(state): State<Arc<AppState>>,
@@ -639,7 +729,7 @@ pub async fn memory_bulk_delete(
     get,
     path = "/api/memory/stats",
     tag = "proactive-memory",
-    responses((status = 200, description = "Memory statistics", body = serde_json::Value))
+    responses((status = 200, description = "Memory statistics", body = crate::types::JsonObject))
 )]
 pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Graceful degradation: proactive memory disabled → null stats, not 500.
@@ -681,7 +771,7 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
     path = "/api/memory/agents/{id}",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Memories reset", body = serde_json::Value))
+    responses((status = 200, description = "Memories reset", body = crate::types::JsonObject))
 )]
 pub async fn memory_reset_agent(
     State(state): State<Arc<AppState>>,
@@ -711,7 +801,7 @@ pub async fn memory_reset_agent(
         ("id" = String, Path, description = "Agent ID"),
         ("level" = String, Path, description = "Memory level: user, session, or agent"),
     ),
-    responses((status = 200, description = "Memories cleared at level", body = serde_json::Value))
+    responses((status = 200, description = "Memories cleared at level", body = crate::types::JsonObject))
 )]
 pub async fn memory_clear_level(
     State(state): State<Arc<AppState>>,
@@ -762,7 +852,7 @@ pub async fn memory_clear_level(
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated agent memory list", body = serde_json::Value))
+    responses((status = 200, description = "Paginated agent memory list", body = crate::types::JsonObject))
 )]
 pub async fn memory_list_agent(
     State(state): State<Arc<AppState>>,
@@ -817,7 +907,7 @@ pub async fn memory_list_agent(
         ("q" = String, Query, description = "Search query"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = serde_json::Value))
+    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
 )]
 pub async fn memory_search_agent(
     State(state): State<Arc<AppState>>,
@@ -857,7 +947,7 @@ pub async fn memory_search_agent(
     path = "/api/memory/agents/{id}/stats",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Agent memory statistics", body = serde_json::Value))
+    responses((status = 200, description = "Agent memory statistics", body = crate::types::JsonObject))
 )]
 pub async fn memory_stats_agent(
     State(state): State<Arc<AppState>>,
@@ -884,7 +974,7 @@ pub async fn memory_stats_agent(
     path = "/api/memory/agents/{id}/duplicates",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Duplicate memory groups", body = serde_json::Value))
+    responses((status = 200, description = "Duplicate memory groups", body = crate::types::JsonObject))
 )]
 pub async fn memory_duplicates(
     State(state): State<Arc<AppState>>,
@@ -917,7 +1007,7 @@ pub async fn memory_duplicates(
     path = "/api/memory/items/{memory_id}/history",
     tag = "proactive-memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
-    responses((status = 200, description = "Memory version history", body = serde_json::Value))
+    responses((status = 200, description = "Memory version history", body = crate::types::JsonObject))
 )]
 pub async fn memory_history(
     State(state): State<Arc<AppState>>,
@@ -954,7 +1044,7 @@ pub async fn memory_history(
     path = "/api/memory/agents/{id}/consolidate",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Consolidation result", body = serde_json::Value))
+    responses((status = 200, description = "Consolidation result", body = crate::types::JsonObject))
 )]
 pub async fn memory_consolidate(
     State(state): State<Arc<AppState>>,
@@ -989,7 +1079,7 @@ pub async fn memory_consolidate(
     post,
     path = "/api/memory/cleanup",
     tag = "proactive-memory",
-    responses((status = 200, description = "Cleanup result", body = serde_json::Value))
+    responses((status = 200, description = "Cleanup result", body = crate::types::JsonObject))
 )]
 pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -1020,7 +1110,7 @@ pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResp
     path = "/api/memory/agents/{id}/export",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Exported memories", body = serde_json::Value))
+    responses((status = 200, description = "Exported memories", body = crate::types::JsonObject))
 )]
 pub async fn memory_export_agent(
     State(state): State<Arc<AppState>>,
@@ -1054,8 +1144,8 @@ pub async fn memory_export_agent(
     path = "/api/memory/agents/{id}/import",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Import result", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Import result", body = crate::types::JsonObject))
 )]
 pub async fn memory_import_agent(
     State(state): State<Arc<AppState>>,
@@ -1093,7 +1183,7 @@ pub async fn memory_import_agent(
     post,
     path = "/api/memory/decay",
     tag = "proactive-memory",
-    responses((status = 200, description = "Decay result", body = serde_json::Value))
+    responses((status = 200, description = "Decay result", body = crate::types::JsonObject))
 )]
 pub async fn memory_decay(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -1131,7 +1221,7 @@ pub struct MemoryCountQuery {
         ("id" = String, Path, description = "Agent ID"),
         ("level" = Option<String>, Query, description = "Memory level filter (user, session, agent)"),
     ),
-    responses((status = 200, description = "Memory count", body = serde_json::Value))
+    responses((status = 200, description = "Memory count", body = crate::types::JsonObject))
 )]
 pub async fn memory_count_agent(
     State(state): State<Arc<AppState>>,
@@ -1176,8 +1266,8 @@ pub async fn memory_count_agent(
     path = "/api/memory/agents/{id}/relations",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Relations stored", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Relations stored", body = crate::types::JsonObject))
 )]
 pub async fn memory_store_relations(
     State(state): State<Arc<AppState>>,
@@ -1226,7 +1316,7 @@ pub struct RelationQueryParams {
         ("relation" = Option<String>, Query, description = "Relation type"),
         ("target" = Option<String>, Query, description = "Target entity name or ID"),
     ),
-    responses((status = 200, description = "Matching relations", body = serde_json::Value))
+    responses((status = 200, description = "Matching relations", body = crate::types::JsonObject))
 )]
 pub async fn memory_query_relations(
     State(state): State<Arc<AppState>>,
@@ -1289,7 +1379,7 @@ pub async fn memory_query_relations(
 // GET /api/memory/config — Get memory configuration
 // ---------------------------------------------------------------------------
 
-#[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = crate::types::JsonObject)))]
 pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.kernel.config_ref();
     Json(serde_json::json!({
@@ -1311,7 +1401,7 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
 // PATCH /api/memory/config — Update memory configuration (writes config.toml)
 // ---------------------------------------------------------------------------
 
-#[utoipa::path(patch, path = "/api/memory/config", tag = "memory", request_body = serde_json::Value, responses((status = 200, description = "Memory configuration updated", body = serde_json::Value)))]
+#[utoipa::path(patch, path = "/api/memory/config", tag = "memory", request_body = crate::types::JsonObject, responses((status = 200, description = "Memory configuration updated", body = crate::types::JsonObject)))]
 pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
@@ -1395,10 +1485,437 @@ pub async fn memory_config_patch(
 
     tracing::info!("Memory config updated via API");
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "updated", "note": "Restart required for full effect"})),
+    // Return the canonical entity (matches GET /api/memory/config shape) sourced
+    // from the freshly-written TOML table so callers can `setQueryData` without a
+    // follow-up GET. The in-memory `KernelConfig` is not hot-reloaded for this
+    // endpoint, so values reflect what is now persisted on disk; `restart_required`
+    // surfaces that the running kernel still uses the previous values until reboot.
+    // See issue #3832.
+    let memory_section = table.get("memory").and_then(|v| v.as_table());
+    let proactive_section = table.get("proactive_memory").and_then(|v| v.as_table());
+
+    let toml_str = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<String> {
+        t.and_then(|m| m.get(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    };
+    let toml_bool = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<bool> {
+        t.and_then(|m| m.get(k)).and_then(|v| v.as_bool())
+    };
+    let toml_f64 = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<f64> {
+        t.and_then(|m| m.get(k)).and_then(|v| v.as_float())
+    };
+    let toml_u64 = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<u64> {
+        t.and_then(|m| m.get(k))
+            .and_then(|v| v.as_integer())
+            .and_then(|n| u64::try_from(n).ok())
+    };
+
+    let live = state.kernel.config_ref();
+    let body = serde_json::json!({
+        "embedding_provider": toml_str(memory_section, "embedding_provider")
+            .or_else(|| live.memory.embedding_provider.clone()),
+        "embedding_model": toml_str(memory_section, "embedding_model")
+            .unwrap_or_else(|| live.memory.embedding_model.clone()),
+        "embedding_api_key_env": toml_str(memory_section, "embedding_api_key_env")
+            .or_else(|| live.memory.embedding_api_key_env.clone()),
+        "decay_rate": toml_f64(memory_section, "decay_rate")
+            .unwrap_or(live.memory.decay_rate),
+        "proactive_memory": {
+            "enabled": toml_bool(proactive_section, "enabled")
+                .unwrap_or(live.proactive_memory.enabled),
+            "auto_memorize": toml_bool(proactive_section, "auto_memorize")
+                .unwrap_or(live.proactive_memory.auto_memorize),
+            "auto_retrieve": toml_bool(proactive_section, "auto_retrieve")
+                .unwrap_or(live.proactive_memory.auto_retrieve),
+            "extraction_model": toml_str(proactive_section, "extraction_model")
+                .or_else(|| live.proactive_memory.extraction_model.clone()),
+            "max_retrieve": toml_u64(proactive_section, "max_retrieve")
+                .unwrap_or(live.proactive_memory.max_retrieve as u64),
+        },
+        "restart_required": true,
+    });
+    drop(live);
+
+    (StatusCode::OK, Json(body))
+}
+
+// ---------------------------------------------------------------------------
+// Agent KV store endpoints (#3749 11/N: moved from system.rs).
+// ---------------------------------------------------------------------------
+
+/// Owner-or-admin scoping for the per-agent KV store.
+///
+/// Returns `Err((status, body))` when the caller is authenticated but is
+/// neither an admin nor the agent's author — caller propagates that pair
+/// through `into_json_tuple`-style returns. Anonymous (no extension) and
+/// admin callers always succeed.
+///
+/// The list endpoint already enforced this; the single-key get / set /
+/// delete and the export / import handlers were missed in the original
+/// `system.rs` implementation, which let any authenticated user read or
+/// mutate `user.preferences`, `oncall.contact`, `api.tokens`, etc. on
+/// any agent as long as they knew the key name.
+fn assert_kv_owner_or_admin(
+    state: &AppState,
+    agent_id: librefang_types::agent::AgentId,
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    t: &ErrorTranslator,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let Some(user) = api_user else {
+        return Ok(());
+    };
+    use crate::middleware::UserRole;
+    if user.0.role >= UserRole::Admin {
+        return Ok(());
+    }
+    let owned = state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|e| e.manifest.author.eq_ignore_ascii_case(&user.0.name))
+        .unwrap_or(false);
+    if owned {
+        Ok(())
+    } else {
+        Err(ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple())
+    }
+}
+
+/// GET /api/memory/agents/:id/kv — List KV pairs for an agent.
+#[utoipa::path(get, path = "/api/memory/agents/{id}/kv", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent KV store", body = crate::types::JsonObject)))]
+pub async fn get_agent_kv(
+    State(state): State<Arc<AppState>>,
+    AgentIdPath(agent_id): AgentIdPath,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        // #3511: tag the ACL-denial response with the resolved agent_id.
+        return crate::extensions::with_agent_id(agent_id, resp);
+    }
+    let body = match state.kernel.memory_substrate().list_kv(agent_id) {
+        Ok(pairs) => {
+            let kv: Vec<serde_json::Value> = pairs
+                .into_iter()
+                .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!({"kv_pairs": kv}))).into_response()
+        }
+        Err(e) => {
+            tracing::warn!("Memory list_kv failed: {e}");
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
+}
+
+/// GET /api/memory/agents/:id/kv/:key — Get a specific KV value.
+#[utoipa::path(get, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV value", body = crate::types::JsonObject)))]
+pub async fn get_agent_kv_key(
+    State(state): State<Arc<AppState>>,
+    Path((id, key)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> axum::response::Response {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return crate::extensions::with_agent_id(agent_id, resp);
+    }
+    let body = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, &key)
+    {
+        Ok(Some(val)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"key": key, "value": val})),
+        )
+            .into_response(),
+        Ok(None) => ApiErrorResponse::not_found(t.t("api-error-kv-key-not-found"))
+            .into_json_tuple()
+            .into_response(),
+        Err(e) => {
+            tracing::warn!("Memory get failed for key '{key}': {e}");
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
+}
+
+/// PUT /api/memory/agents/:id/kv/:key — Set a KV value.
+#[utoipa::path(put, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), request_body = crate::types::JsonObject, responses((status = 200, description = "KV value set", body = crate::types::JsonObject)))]
+pub async fn set_agent_kv_key(
+    State(state): State<Arc<AppState>>,
+    Path((id, key)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return crate::extensions::with_agent_id(agent_id, resp);
+    }
+    let value = body.get("value").cloned().unwrap_or(body);
+
+    let body = match state
+        .kernel
+        .memory_substrate()
+        .structured_set(agent_id, &key, value)
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "stored", "key": key})),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!("Memory set failed for key '{key}': {e}");
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
+}
+
+/// DELETE /api/memory/agents/:id/kv/:key — Delete a KV value.
+#[utoipa::path(delete, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV key deleted")))]
+pub async fn delete_agent_kv_key(
+    State(state): State<Arc<AppState>>,
+    Path((id, key)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> axum::response::Response {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return crate::extensions::with_agent_id(agent_id, resp);
+    }
+    let body = match state
+        .kernel
+        .memory_substrate()
+        .structured_delete(agent_id, &key)
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::warn!("Memory delete failed for key '{key}': {e}");
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
+}
+
+/// GET /api/agents/:id/memory/export — Export all KV memory for an agent as JSON.
+#[utoipa::path(get, path = "/api/agents/{id}/memory/export", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Exported memory", body = crate::types::JsonObject)))]
+pub async fn export_agent_memory(
+    State(state): State<Arc<AppState>>,
+    AgentIdPath(agent_id): AgentIdPath,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    // Verify agent exists. The owner-or-admin check below would already
+    // hide unknown agents from non-admins via 404, but admins skip the
+    // scope check entirely, so we still need this branch to give them a
+    // clean 404 instead of falling through to a `list_kv` against a
+    // non-existent id.
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple(),
+        );
+    }
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return crate::extensions::with_agent_id(agent_id, resp);
+    }
+
+    let body = match state.kernel.memory_substrate().list_kv(agent_id) {
+        Ok(pairs) => {
+            let kv_map: serde_json::Map<String, serde_json::Value> = pairs.into_iter().collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "agent_id": agent_id.0.to_string(),
+                    "version": 1,
+                    "kv": kv_map,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!("Memory export failed for agent {agent_id}: {e}");
+            ApiErrorResponse::internal(t.t("api-error-kv-export-failed"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
+}
+
+/// POST /api/agents/:id/memory/import — Import KV memory from JSON into an agent.
+///
+/// Accepts a JSON body with a `kv` object mapping string keys to JSON values.
+/// Optionally accepts `clear_existing: true` to wipe existing memory before import.
+///
+/// **Response contract — clients MUST inspect `body.status`, not just the
+/// HTTP status code.** A 200 may indicate either:
+///   - `{ "status": "imported", "keys_imported": N }` — every key written.
+///   - `{ "status": "partial", "keys_imported": N, "failed_keys": [...] }` —
+///     one or more keys failed at the substrate layer; the rest were
+///     written. The endpoint deliberately does not surface partial as
+///     207 Multi-Status to avoid breaking existing callers that gate on
+///     `status == 200`. Treat any non-`"imported"` body status as a
+///     soft failure that requires retrying the listed keys.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/memory/import",
+    tag = "memory",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Memory imported (status=\"imported\") OR partial \
+            failure (status=\"partial\" with failed_keys list — clients must check body)",
+            body = crate::types::JsonObject),
+        (status = 400, description = "Missing or malformed `kv` object"),
+        (status = 404, description = "Agent not found, or caller is not the agent's author and not an admin"),
+        (status = 500, description = "Backend failure clearing existing memory before import")
     )
+)]
+pub async fn import_agent_memory(
+    State(state): State<Arc<AppState>>,
+    AgentIdPath(agent_id): AgentIdPath,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    // Verify agent exists (admins skip the owner check below, so we still
+    // need this branch for them — see `export_agent_memory`).
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple(),
+        );
+    }
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return crate::extensions::with_agent_id(agent_id, resp);
+    }
+
+    let kv = match body.get("kv").and_then(|v| v.as_object()) {
+        Some(obj) => obj.clone(),
+        None => {
+            return crate::extensions::with_agent_id(
+                agent_id,
+                ApiErrorResponse::bad_request(t.t("api-error-kv-missing-kv-object"))
+                    .into_json_tuple(),
+            );
+        }
+    };
+
+    let clear_existing = body
+        .get("clear_existing")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Clear existing memory if requested
+    if clear_existing {
+        match state.kernel.memory_substrate().list_kv(agent_id) {
+            Ok(existing) => {
+                for (key, _) in existing {
+                    if let Err(e) = state
+                        .kernel
+                        .memory_substrate()
+                        .structured_delete(agent_id, &key)
+                    {
+                        tracing::warn!("Failed to delete key '{key}' during import clear: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to list existing KV during import clear: {e}");
+                return crate::extensions::with_agent_id(
+                    agent_id,
+                    ApiErrorResponse::internal(t.t("api-error-kv-import-clear-failed"))
+                        .into_json_tuple(),
+                );
+            }
+        }
+    }
+
+    let mut imported = 0u64;
+    let mut errors = Vec::new();
+
+    for (key, value) in &kv {
+        match state
+            .kernel
+            .memory_substrate()
+            .structured_set(agent_id, key, value.clone())
+        {
+            Ok(()) => imported += 1,
+            Err(e) => {
+                tracing::warn!("Memory import failed for key '{key}': {e}");
+                errors.push(key.clone());
+            }
+        }
+    }
+
+    let body = if errors.is_empty() {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "imported",
+                "keys_imported": imported,
+            })),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "partial",
+                "keys_imported": imported,
+                "failed_keys": errors,
+            })),
+        )
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 #[cfg(test)]
@@ -1420,8 +1937,8 @@ mod tests {
     //! kernel; `auth_denied_*` tests do boot a kernel because we need to
     //! observe the audit chain.
     use super::*;
+    use librefang_kernel::audit::AuditAction;
     use librefang_memory::namespace_acl::{MemoryNamespaceGuard, NamespaceGate};
-    use librefang_runtime::audit::AuditAction;
     use librefang_types::config::KernelConfig;
 
     #[test]
@@ -1558,7 +2075,6 @@ mod tests {
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
-            peer_registry: None,
             bridge_manager: tokio::sync::Mutex::new(None),
             channels_config: tokio::sync::RwLock::new(Default::default()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -1570,8 +2086,6 @@ mod tests {
                 home_dir.join("data").join("webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            #[cfg(feature = "telemetry")]
-            prometheus_handle: None,
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
@@ -1580,6 +2094,8 @@ mod tests {
             pending_a2a_agents: dashmap::DashMap::new(),
             auth_login_limiter: std::sync::Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
+            trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+            trust_forwarded_for: false,
         });
         (state, tmp)
     }
@@ -1635,7 +2151,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn auth_denied_emits_audit_row_for_authenticated_user() {
         use crate::middleware::AuthenticatedApiUser;
-        use librefang_kernel::auth::UserRole;
+        use crate::middleware::UserRole;
         use librefang_types::agent::UserId;
 
         let (state, _tmp) = audit_test_app_state();

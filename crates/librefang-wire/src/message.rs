@@ -28,6 +28,11 @@ pub enum WireMessageKind {
     /// One-way notification (no response expected).
     #[serde(rename = "notification")]
     Notification(WireNotification),
+    /// Forward-compat fallback: any unknown message `type` from a peer
+    /// running a newer protocol version. Decodes successfully so the TCP
+    /// link stays alive (#3544); callers should ignore the message.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Request messages.
@@ -51,6 +56,29 @@ pub enum WireRequest {
         /// HMAC-SHA256(shared_secret, nonce + node_id).
         #[serde(default)]
         auth_hmac: String,
+        /// SECURITY (#3873): Sender's Ed25519 public key (base64). Optional
+        /// for backward compatibility with peers that do not yet provision a
+        /// keypair — those fall back to HMAC-only authentication and no
+        /// TOFU pin is established.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        public_key: Option<String>,
+        /// SECURITY (#3873): Ed25519 signature (base64) over the same
+        /// `nonce|node_id|recipient_node_id` byte string the HMAC covers,
+        /// signed with the sender's private key. Verified against
+        /// `public_key`; on first contact the pubkey is pinned to `node_id`
+        /// (TOFU) and subsequent handshakes from the same `node_id` MUST
+        /// present the same pubkey or are rejected. Optional only when
+        /// `public_key` is also absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity_signature: Option<String>,
+        /// SECURITY (#4269): Per-handshake X25519 ephemeral public key
+        /// (base64, 32 bytes). When both peers send one, the per-message
+        /// HMAC `session_key` is derived via X25519 ECDH + HKDF instead
+        /// of from `shared_secret + nonces`, decoupling session integrity
+        /// from `shared_secret` and gaining forward secrecy. Optional
+        /// for backward compatibility with peers that omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ephemeral_pubkey: Option<String>,
     },
     /// Discover agents matching a query on the remote peer.
     #[serde(rename = "discover")]
@@ -71,6 +99,9 @@ pub enum WireRequest {
     /// Ping to check if the peer is alive.
     #[serde(rename = "ping")]
     Ping,
+    /// Forward-compat fallback for unknown `method` values. See `WireMessageKind::Unknown`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Response messages.
@@ -90,6 +121,15 @@ pub enum WireResponse {
         /// HMAC-SHA256(shared_secret, nonce + node_id).
         #[serde(default)]
         auth_hmac: String,
+        /// SECURITY (#3873): See `WireRequest::Handshake::public_key`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        public_key: Option<String>,
+        /// SECURITY (#3873): See `WireRequest::Handshake::identity_signature`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity_signature: Option<String>,
+        /// SECURITY (#4269): See `WireRequest::Handshake::ephemeral_pubkey`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ephemeral_pubkey: Option<String>,
     },
     /// Discovery results.
     #[serde(rename = "discover_result")]
@@ -114,6 +154,9 @@ pub enum WireResponse {
         /// Error message.
         message: String,
     },
+    /// Forward-compat fallback for unknown `method` values. See `WireMessageKind::Unknown`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Notification messages (one-way, no response).
@@ -129,6 +172,9 @@ pub enum WireNotification {
     /// Peer is shutting down.
     #[serde(rename = "shutting_down")]
     ShuttingDown,
+    /// Forward-compat fallback for unknown `event` values. See `WireMessageKind::Unknown`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Information about a remote agent.
@@ -207,6 +253,9 @@ mod tests {
                 }],
                 nonce: "test-nonce".to_string(),
                 auth_hmac: "test-hmac".to_string(),
+                public_key: None,
+                identity_signature: None,
+                ephemeral_pubkey: None,
             }),
         };
         let json = serde_json::to_string_pretty(&msg).unwrap();
@@ -275,6 +324,48 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("agent_spawned"));
         let _: WireMessage = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn test_unknown_message_type_decodes() {
+        // A peer running a newer protocol version may emit message types we
+        // don't understand. The TCP link must stay alive (#3544).
+        let json = r#"{"id":"x","type":"future_message","payload":{"foo":1}}"#;
+        let decoded: WireMessage = serde_json::from_str(json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Unknown => {}
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_request_method_decodes() {
+        let json = r#"{"id":"x","type":"request","method":"future_method","x":1}"#;
+        let decoded: WireMessage = serde_json::from_str(json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Request(WireRequest::Unknown) => {}
+            other => panic!("expected Request(Unknown), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_response_method_decodes() {
+        let json = r#"{"id":"x","type":"response","method":"future_method"}"#;
+        let decoded: WireMessage = serde_json::from_str(json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Response(WireResponse::Unknown) => {}
+            other => panic!("expected Response(Unknown), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_notification_event_decodes() {
+        let json = r#"{"id":"x","type":"notification","event":"future_event"}"#;
+        let decoded: WireMessage = serde_json::from_str(json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Notification(WireNotification::Unknown) => {}
+            other => panic!("expected Notification(Unknown), got {other:?}"),
+        }
     }
 
     #[test]

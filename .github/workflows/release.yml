@@ -85,6 +85,21 @@ jobs:
             echo "No release-tag marker found, skipping"
             exit 0
           fi
+
+          # Guard against PR-body markers that drifted from the actual
+          # workspace version. Without this gate, a stale `<!-- release-tag: vX -->`
+          # marker would tag the merge with vX while the binary inside reports
+          # the workspace version, producing artifacts whose `librefang --version`
+          # disagrees with the GitHub Release name. See #3545.
+          # Scope to the [workspace.package] section so a future top-level
+          # [package] block or any other left-anchored `version = ...` line
+          # cannot shadow the real workspace version.
+          WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
+          if [ "${TAG#v}" != "$WS_VERSION" ]; then
+            echo "::error::PR-body release-tag $TAG does not match [workspace.package].version $WS_VERSION"
+            exit 1
+          fi
+
           echo "Creating tag $TAG on main"
           git tag "$TAG"
           git push origin "$TAG"
@@ -146,6 +161,25 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+
+      # Block any tag whose stripped form does not match
+      # `[workspace.package].version` in Cargo.toml. A mismatch means the
+      # CHANGELOG `awk` extractor below silently falls through to the generic
+      # "See CHANGELOG..." note, the Homebrew formula version (derived from
+      # `${TAG#v}` further down the workflow) drifts from `librefang --version`,
+      # and downstream consumers ship inconsistent metadata. See #3545.
+      - name: Verify tag matches workspace version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Scope to the [workspace.package] section so a future top-level
+          # [package] block or any other left-anchored `version = ...` line
+          # cannot shadow the real workspace version.
+          WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
+          if [ "${TAG#v}" != "$WS_VERSION" ]; then
+            echo "::error::pushed tag $TAG does not match [workspace.package].version $WS_VERSION"
+            exit 1
+          fi
+          echo "Tag $TAG matches workspace version $WS_VERSION"
 
       - name: Extract changelog for this version
         id: changelog
@@ -305,7 +339,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
+      - uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6
         with:
           version: 10
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -760,6 +794,145 @@ jobs:
           echo "::error::Upload failed after 5 attempts"
           exit 1
 
+  # ═════════════════════════════════════════════════════════════════════════
+  # Aggregate per-asset *.sha256 sibling files into one SHA256SUMS manifest
+  # and sign it with cosign keyless (Sigstore + GitHub OIDC). See #3546.
+  #
+  # Why an aggregator instead of signing each `*.sha256` in place:
+  #   - One signature per release (vs ~20) is cheaper for verifiers.
+  #   - `install.sh` only has to fetch+verify two files (SHA256SUMS,
+  #     SHA256SUMS.sig) and the cert bundle, regardless of platform count.
+  #   - Matches the layout most upstream Rust tooling (rustup, sigstore-rs)
+  #     already understands.
+  #
+  # Keyless signing uses the workflow's OIDC identity, so no long-lived
+  # secret is required. Verifiers re-derive trust from:
+  #     --certificate-identity-regexp "https://github\.com/librefang/librefang/.*"
+  #     --certificate-oidc-issuer     "https://token.actions.githubusercontent.com"
+  #
+  # SLSA build-provenance attestation (`actions/attest-build-provenance`) is
+  # tracked as a follow-up — it requires touching every per-target packaging
+  # step to stamp `subject-path:`, which is out of scope for this PR.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  sign_release_artifacts:
+    name: Sign Release Artifacts
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs:
+      - create_release
+      - cli_mac
+      - cli_linux
+      - cli_android
+      - cli_linux_mini
+      - cli_musl
+      - cli_windows
+      - cli_mac_mini
+      - cli_windows_mini
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # upload signed manifest as release asset
+      id-token: write   # fetch OIDC token for cosign keyless signing
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        with:
+          cosign-release: "v2.6.3"
+
+      - name: Build SHA256SUMS manifest from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p sums
+          cd sums
+
+          # Pull every per-asset sibling .sha256 the cli_* jobs uploaded.
+          # Skip the manifest itself if it exists from a prior re-run.
+          gh release view "$TAG" --json assets \
+            --jq '.assets[].name | select(endswith(".sha256")) | select(. != "SHA256SUMS")' \
+            > asset-list.txt
+
+          if [ ! -s asset-list.txt ]; then
+            echo "::error::no *.sha256 sibling files attached to release $TAG"
+            exit 1
+          fi
+
+          # Exact-match sanity check: must equal the total number of matrix
+          # targets across the cli_* jobs in `needs:` above (NOT the number of
+          # jobs — most cli_* are matrix jobs that emit one .sha256 per target).
+          # Current breakdown:
+          #   cli_mac          x86_64 + aarch64                       = 2
+          #   cli_linux        x86_64 + aarch64                       = 2
+          #   cli_android      aarch64                                = 1
+          #   cli_linux_mini   x86_64                                 = 1
+          #   cli_musl         x86_64 + aarch64                       = 2
+          #   cli_windows      x86_64 + aarch64                       = 2
+          #   cli_mac_mini     x86_64                                 = 1
+          #   cli_windows_mini x86_64                                 = 1
+          #                                                    total  = 12
+          # Drift in either direction is a bug — adding a new matrix target
+          # without bumping this constant would silently publish a manifest
+          # missing the new platform's hash; dropping a target without
+          # decrementing it blocks all releases until corrected (the desired
+          # loud failure). Update both together.
+          EXPECTED_PLATFORMS=12
+          ACTUAL=$(wc -l < asset-list.txt | tr -d ' ')
+          if [ "$ACTUAL" -ne "$EXPECTED_PLATFORMS" ]; then
+            echo "::error::expected exactly $EXPECTED_PLATFORMS .sha256 siblings (one per matrix target across cli_* jobs), got $ACTUAL"
+            cat asset-list.txt
+            exit 1
+          fi
+
+          while IFS= read -r name; do
+            echo "Fetching $name"
+            gh release download "$TAG" --pattern "$name" --clobber
+          done < asset-list.txt
+
+          # Each sibling file already contains "<hash>  <filename>". Use
+          # `awk 1` to concatenate so a sibling missing its trailing newline
+          # cannot glue two records onto the same line and silently break
+          # `sha256sum -c SHA256SUMS` on the verifier side. Sorted input for
+          # deterministic ordering.
+          ls *.sha256 | sort | xargs awk 1 > ../SHA256SUMS
+
+          cd ..
+          echo "::group::SHA256SUMS"
+          cat SHA256SUMS
+          echo "::endgroup::"
+
+      - name: Sign SHA256SUMS with cosign (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Verify signature locally before upload
+        run: |
+          cosign verify-blob \
+            --certificate SHA256SUMS.pem \
+            --signature SHA256SUMS.sig \
+            --certificate-identity-regexp "^https://github\\.com/${GITHUB_REPOSITORY}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            SHA256SUMS
+
+      - name: Upload signed manifest to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release upload "$TAG" \
+            SHA256SUMS \
+            SHA256SUMS.sig \
+            SHA256SUMS.pem \
+            --clobber
+
   cli_npm:
     name: CLI / npm
     if: >
@@ -1173,7 +1346,7 @@ jobs:
         with:
           key: desktop-${{ matrix.platform.rust_target }}-${{ github.ref_name }}
 
-      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
+      - uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6
         with:
           version: 10
 
@@ -1330,13 +1503,13 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Set up JDK 17 (Temurin)
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK + NDK
-        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
         with:
           packages: "platforms;android-34 build-tools;34.0.0 ndk;${{ env.NDK_VERSION }}"
 
@@ -1352,7 +1525,7 @@ jobs:
         with:
           node-version: 20
 
-      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
+      - uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6
         with:
           version: 10
 
@@ -1363,7 +1536,7 @@ jobs:
             mobile-android-
 
       - name: Cache Gradle
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ~/.gradle/caches
@@ -1373,7 +1546,7 @@ jobs:
 
       # See mobile-smoke.yml for why this cache is paired with the install.
       - name: Cache tauri-cli binary
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2
@@ -1472,14 +1645,16 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        # `--no-default-features --features mobile-no-email`: rustls-connector
-        # 0.23.0 (pulled by channel-email) → rustls-platform-verifier 0.7.0 →
-        # Verifier::new_with_extra_roots is not implemented for Android.
+        # `-f mobile-no-email -- --no-default-features`: tauri-cli takes
+        # `-f` directly but `--no-default-features` is a cargo flag that
+        # must follow `--`. rustls-connector 0.23.0 (pulled by channel-email)
+        # → rustls-platform-verifier 0.7.0 → Verifier::new_with_extra_roots
+        # is not implemented for Android.
         run: |
           cargo tauri android build \
             --target aarch64 \
             --apk --aab \
-            --no-default-features --features mobile-no-email
+            -f mobile-no-email -- --no-default-features
 
       - name: Locate artifacts
         id: art
@@ -1574,7 +1749,7 @@ jobs:
         with:
           node-version: 20
 
-      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
+      - uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6
         with:
           version: 10
 
@@ -1585,7 +1760,7 @@ jobs:
             mobile-ios-
 
       - name: Cache tauri-cli binary
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2
@@ -1604,6 +1779,23 @@ jobs:
 
       - name: Initialise iOS project
         working-directory: crates/librefang-desktop
+        # cargo-mobile2 reads APPLE_DEVELOPMENT_TEAM at init time and bakes
+        # it into the generated xcodeproj's DEVELOPMENT_TEAM build setting.
+        # Without it, xcodebuild later fails with "Signing for ... requires a
+        # development team". Reuses the same secret as the macOS notarize
+        # step — same Apple Developer account.
+        #
+        # APPLE_PROFILE_NAME flips the generated xcodeproj from automatic to
+        # manual signing and sets PROVISIONING_PROFILE_SPECIFIER to the named
+        # profile. Required because GitHub-hosted runners have no signed-in
+        # Apple ID, so automatic signing fails with "No Accounts: Add a new
+        # account in Accounts settings." even though the .mobileprovision is
+        # imported into ~/Library/MobileDevice/Provisioning Profiles/. The
+        # secret value is the profile's display Name (not bundle id, not
+        # UUID file name) — see issue #4385.
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
         run: cargo tauri ios init
 
       # Mirror of the Android version-derivation logic. Both jobs run in
@@ -1704,12 +1896,15 @@ jobs:
         working-directory: crates/librefang-desktop
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        # `--no-default-features --features mobile-no-email`: rustls-connector
-        # 0.23.0 (pulled by channel-email) → rustls-platform-verifier 0.7.0 →
-        # Verifier::new_with_extra_roots is not implemented on Android, and we
-        # keep iOS on the same flavor so mobile binaries are consistent.
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
+        # `-f mobile-no-email -- --no-default-features`: see android build
+        # above for why `--no-default-features` goes after `--`. We keep iOS
+        # on the same channel flavor as Android so mobile binaries are
+        # consistent and don't pull channel-email deps that aren't useful
+        # on iOS either.
         run: |
-          cargo tauri ios build --target aarch64 --no-default-features --features mobile-no-email
+          cargo tauri ios build --target aarch64 -f mobile-no-email -- --no-default-features
 
       - name: Locate .ipa
         id: art
@@ -2180,7 +2375,8 @@ jobs:
             echo "✓ ${PKG_NAME}@${PKG_VERSION} already published to npm, skipping"
           else
             NPM_TAG=""
-            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+            # Accept both canonical `-beta.N` (#3310) and legacy `-betaN`.
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)\.?[0-9]'; then
               NPM_TAG="--tag next"
             elif echo "$PKG_VERSION" | grep -qE -- '\-lts'; then
               NPM_TAG="--tag lts"
@@ -2196,7 +2392,8 @@ jobs:
           npm config set registry https://npm.pkg.github.com
           PKG_VERSION=$(node -p "require('./package.json').version")
           GPR_TAG=""
-          if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+          # Accept both canonical `-beta.N` (#3310) and legacy `-betaN`.
+          if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)\.?[0-9]'; then
             GPR_TAG="--tag next"
           elif echo "$PKG_VERSION" | grep -qE -- '-lts'; then
             GPR_TAG="--tag lts"
@@ -2236,7 +2433,8 @@ jobs:
             echo "✓ ${PKG_NAME}@${PKG_VERSION} already published, skipping"
           else
             NPM_TAG=""
-            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+            # Accept both canonical `-beta.N` (#3310) and legacy `-betaN`.
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)\.?[0-9]'; then
               NPM_TAG="--tag next"
             fi
             npm publish --access public --ignore-scripts $NPM_TAG
@@ -2268,8 +2466,11 @@ jobs:
       - name: Sync version from tag
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          # PEP 440: convert -beta1 → b1, -rc1 → rc1, strip -lts (no PEP 440 equivalent)
-          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/; s/-lts//')
+          # PEP 440: convert -beta.1 → b1, -rc.1 → rc1 (canonical form, #3310);
+          # also handle legacy -beta1 / -rc1; strip -lts (no PEP 440 equivalent).
+          # Order matters: dot-form first, otherwise the no-dot rule converts
+          # `-beta.1` → `b.1` (invalid PEP 440).
+          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta\./b/; s/-rc\./rc/; s/-beta/b/; s/-rc/rc/; s/-lts//')
           sed -i "s/^version = .*/version = \"$PYPI_VERSION\"/" pyproject.toml
           echo "Publishing librefang-sdk==$PYPI_VERSION"
           grep '^version' pyproject.toml

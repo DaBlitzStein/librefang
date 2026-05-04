@@ -23,11 +23,11 @@
 
 use super::AppState;
 use crate::middleware::AuthenticatedApiUser;
+use crate::middleware::UserRole;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
 use librefang_types::user_policy::UserToolGate;
 use serde::{Deserialize, Serialize};
@@ -105,7 +105,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
     tag = "system",
     params(("user_id" = String, Path, description = "User UUID or configured name")),
     responses(
-        (status = 200, description = "Effective permissions snapshot", body = serde_json::Value),
+        (status = 200, description = "Effective permissions snapshot", body = crate::types::JsonObject),
         (status = 404, description = "Unknown user"),
     )
 )]

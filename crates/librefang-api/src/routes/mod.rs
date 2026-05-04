@@ -13,26 +13,37 @@
 // `routes::agents::router()`), so there is no actual conflict.
 #![allow(ambiguous_glob_reexports)]
 
+pub mod agent_templates;
 pub mod agents;
+pub mod approvals;
 pub mod audit;
 pub mod authz;
 pub mod auto_dream;
+pub mod backup;
+pub mod bindings;
 pub mod budget;
 pub mod channels;
+pub mod commands;
 pub mod config;
 pub mod goals;
 pub mod inbox;
+pub mod logs;
 pub mod mcp_auth;
 pub mod media;
 pub mod memory;
 pub mod network;
+pub mod pairing;
 pub mod plugins;
 pub mod prompts;
 pub mod providers;
+pub mod registry;
 pub mod skills;
 pub mod system;
+pub mod task_queue;
 pub mod terminal;
+pub mod tools_sessions;
 pub mod users;
+pub mod webhooks;
 pub mod workflows;
 
 // Glob re-export to keep `routes::handler_name` backward compatible
@@ -45,25 +56,39 @@ pub mod workflows;
 // All modules export a `router()` function; glob re-export produces an ambiguity
 // warning, but `router()` is only accessed via qualified paths (e.g.
 // `routes::agents::router()`), so there is no actual conflict.
+pub use agent_templates::*;
 pub use agents::*;
+pub use approvals::*;
 pub use audit::*;
 pub use authz::*;
 pub use auto_dream::*;
+pub use backup::*;
+pub use bindings::*;
 pub use budget::*;
 pub use channels::*;
+pub use commands::*;
 pub use config::*;
 pub use goals::*;
 pub use inbox::*;
+pub use logs::*;
 pub use mcp_auth::*;
 pub use media::*;
 pub use memory::*;
 pub use network::*;
+pub use pairing::*;
 pub use plugins::*;
 pub use providers::*;
+// `registry::*` is intentionally not re-exported: every handler in
+// `routes::registry` is a private `async fn`, so the glob resolves to zero
+// items and would trip `-D unused-imports`. The module is reached via the
+// qualified `crate::routes::registry::router()` call inside `system.rs`.
 pub use skills::*;
 pub use system::*;
+pub use task_queue::*;
 pub use terminal::*;
+pub use tools_sessions::*;
 pub use users::*;
+pub use webhooks::*;
 pub use workflows::*;
 
 use crate::middleware::RequestLanguage;
@@ -101,8 +126,6 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 pub struct AppState {
     pub kernel: Arc<LibreFangKernel>,
     pub started_at: Instant,
-    /// Optional peer registry for OFP mesh networking status.
-    pub peer_registry: Option<Arc<librefang_wire::registry::PeerRegistry>>,
     /// Channel bridge manager — held behind a Mutex so it can be swapped on hot-reload.
     pub bridge_manager: tokio::sync::Mutex<Option<librefang_channels::bridge::BridgeManager>>,
     /// Live channel config — updated on every hot-reload so list_channels() reflects reality.
@@ -157,7 +180,15 @@ pub struct AppState {
     /// task can call `retain_recent()` to evict stale per-IP entries and prevent
     /// the DashMap from growing unbounded over a long-running daemon. See #3668.
     pub gcra_limiter: Arc<KeyedRateLimiter>,
-    /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
-    #[cfg(feature = "telemetry")]
-    pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    /// Compiled `trusted_proxies` allowlist — built once at boot and shared with
+    /// the GCRA + auth-login middlewares (see `server.rs`). Re-used by WS
+    /// upgrade handlers (`ws::agent_ws`, `routes::terminal::terminal_ws`) to
+    /// resolve the real client IP for per-IP slot keying without re-parsing
+    /// the raw config strings (and re-emitting the malformed-entry warning)
+    /// on every upgrade.
+    pub trusted_proxies: Arc<crate::client_ip::TrustedProxies>,
+    /// Master switch matching `KernelConfig::trust_forwarded_for`. Cached at
+    /// boot alongside `trusted_proxies` so WS handlers don't have to hold a
+    /// `config_ref()` guard just to read this single bool.
+    pub trust_forwarded_for: bool,
 }

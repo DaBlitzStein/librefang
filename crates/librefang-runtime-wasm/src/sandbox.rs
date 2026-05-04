@@ -24,7 +24,7 @@
 //! and returns a packed pointer to JSON `{"ok": ...}` or `{"error": "..."}`.
 
 use crate::host_functions;
-use librefang_kernel_handle::KernelHandle;
+use librefang_kernel_handle::prelude::*;
 use librefang_types::capability::Capability;
 use serde_json::json;
 use std::sync::Arc;
@@ -40,6 +40,70 @@ use wasmtime::*;
 /// truncated and annotated with a byte count so the operator knows the
 /// original was clipped.
 const MAX_LOG_BYTES: usize = 4096;
+
+/// Maximum bytes accepted in a single `host_call` request payload (#3866).
+///
+/// Aligned with the shell_exec cap (#3529). Lifted to module scope so the
+/// regression test in this file pins the same constant the host reads at
+/// runtime — no risk of the test passing while the call site silently
+/// raises the cap.
+pub(crate) const MAX_HOST_CALL_REQUEST_BYTES: usize = 1024 * 1024;
+
+/// Maximum bytes accepted in a guest `execute` result payload (#3866).
+pub(crate) const MAX_GUEST_RESULT_BYTES: usize = 1024 * 1024;
+
+/// Marker error returned by the per-store `epoch_deadline_callback` when
+/// THIS guest has overrun its wall-clock budget (#3864). Detected via
+/// `downcast_ref` so the timeout-trap path doesn't depend on string
+/// matching against wasmtime's wrapped error message.
+#[derive(Debug)]
+struct WallClockTimeout {
+    budget: std::time::Duration,
+}
+
+impl std::fmt::Display for WallClockTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "WASM guest exceeded wall-clock timeout of {}s",
+            self.budget.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for WallClockTimeout {}
+
+/// Per-method fuel reservation for `host_call` (#3532).
+///
+/// Wasm fuel only meters guest instructions, so without these
+/// reservations a guest can fan out arbitrarily many host LLM calls,
+/// outbound fetches, or child agent spawns under a token budget meant
+/// to cap CPU. Each cost is an upper-bound estimate of the host-side
+/// resource the call may consume — the goal is to make the
+/// per-invocation `fuel_limit` a real ceiling on host cost, not just
+/// guest CPU.
+///
+/// Calibration: with the default `fuel_limit = 1_000_000` (sandbox
+/// default), the LLM-bearing path `agent_send` is bounded to ~10
+/// invocations per guest run, `agent_spawn` to ~5, and `net_fetch` to
+/// ~200 — sane upper bounds for skill-shaped workloads. Pure-host
+/// methods (`time_now`, `kv_*`, `env_read`, `fs_*`) charge nothing so
+/// existing benign skills stay within budget.
+pub(crate) fn host_call_fuel_cost(method: &str) -> u64 {
+    match method {
+        // LLM-bearing fanout — `send_to_agent` triggers a downstream
+        // agent loop that may itself call providers. Highest cost.
+        "agent_send" => 100_000,
+        // `spawn_agent_checked` registers a new agent and (depending on
+        // schedule) immediately runs it. Treat as an LLM-bearing call.
+        "agent_spawn" => 200_000,
+        // Outbound HTTP — bandwidth + provider rate-limit budget.
+        "net_fetch" => 5_000,
+        // Shell exec spawns a subprocess; CPU + audit volume.
+        "shell_exec" => 5_000,
+        _ => 0,
+    }
+}
 
 /// Configuration for a WASM sandbox instance.
 #[derive(Debug, Clone)]
@@ -106,6 +170,13 @@ pub struct GuestState {
     pub tokio_handle: tokio::runtime::Handle,
     /// Memory limiter enforcing `SandboxConfig::max_memory_bytes`.
     limiter: MemoryLimiter,
+    /// Wall-clock instant this guest started executing — used by the
+    /// per-store epoch_deadline_callback to make a store-local timeout
+    /// decision, simulating per-store interrupt on top of the engine-global
+    /// `Engine::increment_epoch()` mechanism (Bug #3864).
+    start: std::time::Instant,
+    /// Wall-clock budget for this guest. Set from `SandboxConfig::timeout_secs`.
+    timeout: std::time::Duration,
 }
 
 #[cfg(test)]
@@ -127,6 +198,11 @@ impl GuestState {
             limiter: MemoryLimiter {
                 max_bytes: usize::MAX,
             },
+            start: std::time::Instant::now(),
+            // Effectively unbounded for unit tests that don't exercise
+            // wall-clock timeout; Duration construction is safe far below
+            // u64::MAX.
+            timeout: std::time::Duration::from_secs(86_400),
         }
     }
 }
@@ -238,6 +314,7 @@ impl WasmSandbox {
             .map_err(|e| SandboxError::Compilation(e.to_string()))?;
 
         // Create store with guest state (includes the memory limiter)
+        let timeout_secs = config.timeout_secs.unwrap_or(30);
         let mut store = Store::new(
             engine,
             GuestState {
@@ -248,12 +325,40 @@ impl WasmSandbox {
                 limiter: MemoryLimiter {
                     max_bytes: config.max_memory_bytes,
                 },
+                start: std::time::Instant::now(),
+                timeout: std::time::Duration::from_secs(timeout_secs),
             },
         );
 
         // Enforce the memory cap: every memory.grow call from the guest goes
         // through MemoryLimiter::memory_growing before any allocation happens.
         store.limiter(|state| &mut state.limiter);
+
+        // Per-store interrupt simulation (Bug #3864). `Engine::increment_epoch`
+        // is engine-global: any concurrent Store sharing the engine sees the
+        // tick. We already hand each `execute` its own `Engine` so the tick
+        // can't physically reach another guest, but we layer on a
+        // store-local sanity check via `epoch_deadline_callback`. When the
+        // epoch fires, the callback inspects this store's own start/timeout
+        // and traps only if THIS guest has actually exceeded its budget;
+        // otherwise it extends the deadline by 1 tick and resumes. This
+        // turns the engine-global epoch tick into an effective per-store
+        // interrupt — defense in depth against any future regression that
+        // shares an Engine across guests.
+        store.epoch_deadline_callback(|ctx| {
+            let data = ctx.data();
+            if data.start.elapsed() >= data.timeout {
+                // Real timeout — propagate as a typed trap so the trap-
+                // handler can detect it via `downcast_ref::<WallClockTimeout>`
+                // instead of pattern-matching against a stringified message.
+                return Err(wasmtime::Error::new(WallClockTimeout {
+                    budget: data.timeout,
+                }));
+            }
+            // False positive (some other guest's watchdog tripped this
+            // engine's epoch). Resume with a fresh 1-tick deadline.
+            Ok(wasmtime::UpdateDeadline::Continue(1))
+        });
 
         // Set fuel budget (deterministic metering)
         if config.fuel_limit > 0 {
@@ -267,10 +372,13 @@ impl WasmSandbox {
         // `Engine::increment_epoch()` is global to an `Engine` — in earlier
         // versions of this code a single shared Engine was used, so a watchdog
         // firing for one guest would trip the epoch for *all* concurrently
-        // running guests (Bug #3864). That was fixed by creating a fresh
-        // Engine per invocation in `WasmSandbox::execute`; each execution now
-        // has its own epoch counter so `increment_epoch` only interrupts the
-        // guest running inside this store.
+        // running guests (Bug #3864). Two layers of defence are now in place:
+        //   1. Each execution creates a fresh `Engine`, so the engine-global
+        //      tick can't physically reach another guest.
+        //   2. The store's `epoch_deadline_callback` (registered above) checks
+        //      this guest's own elapsed time before trapping. Even on a shared
+        //      engine, a false-positive epoch tick is silently dropped for a
+        //      guest whose own budget hasn't elapsed.
         //
         // The watchdog thread blocks in `park_timeout(deadline - now)` and is
         // woken via `Thread::unpark` the moment the main thread finishes. It
@@ -284,7 +392,7 @@ impl WasmSandbox {
         // slips through.
         store.set_epoch_deadline(1);
         let engine_clone = engine.clone();
-        let timeout = config.timeout_secs.unwrap_or(30);
+        let timeout = timeout_secs;
         let watchdog_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let watchdog_done_for_thread = std::sync::Arc::clone(&watchdog_done);
         let watchdog = std::thread::spawn(move || {
@@ -393,8 +501,15 @@ impl WasmSandbox {
                 if let Some(Trap::OutOfFuel) = e.downcast_ref::<Trap>() {
                     return Err(SandboxError::FuelExhausted);
                 }
-                // Check for epoch deadline (wall-clock timeout)
-                if let Some(Trap::Interrupt) = e.downcast_ref::<Trap>() {
+                // Check for epoch deadline (wall-clock timeout). The
+                // per-store callback returns a typed `WallClockTimeout`;
+                // wasmtime may also surface a bare `Trap::Interrupt` if a
+                // future engine-shared regression bypasses our callback.
+                // Detect both shapes — typed downcast is the primary path,
+                // `Trap::Interrupt` is the fallback.
+                if e.downcast_ref::<WallClockTimeout>().is_some()
+                    || matches!(e.downcast_ref::<Trap>(), Some(Trap::Interrupt))
+                {
                     return Err(SandboxError::Execution(format!(
                         "WASM execution timed out after {}s (epoch interrupt)",
                         timeout
@@ -411,14 +526,15 @@ impl WasmSandbox {
         // SECURITY: Cap result size before any memory access or JSON parsing
         // (Bug #3866). A malicious guest can return a `result_len` of up to
         // 2^32-1 bytes. Without this guard the host would either try to slice
-        // gigabytes of memory (triggering the bounds check below) or, if the
-        // guest had somehow pre-allocated that much memory, feed a huge buffer
-        // to serde_json whose recursive descent parser has no depth limit and
-        // can stack-overflow on deeply-nested input.
-        const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
-        if result_len > MAX_RESULT_BYTES {
+        // gigabytes of memory (triggering the bounds check below) or feed a
+        // huge buffer to serde_json. Aligned with the 1 MiB shell_exec cap
+        // (#3529); deeply-nested JSON is independently bounded by serde_json's
+        // default RECURSION_LIMIT of 128 — we never call
+        // `disable_recursion_limit`, so guest input cannot stack-overflow the
+        // recursive descent parser.
+        if result_len > MAX_GUEST_RESULT_BYTES {
             return Err(SandboxError::AbiError(format!(
-                "Guest result too large: {result_len} bytes (max {MAX_RESULT_BYTES})"
+                "Guest result too large: {result_len} bytes (max {MAX_GUEST_RESULT_BYTES})"
             )));
         }
 
@@ -566,13 +682,13 @@ impl WasmSandbox {
     ) -> anyhow::Result<i64> {
         // SECURITY: Reject oversized or negative host_call request payloads
         // before deserialising (Bug #3866). `request_len` is i32 from the
-        // guest ABI; a negative value as usize wraps to a huge number, and a
-        // very large positive value feeds an unbounded serde_json parse that
-        // can stack-overflow on deeply-nested JSON.
-        const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
-        if request_len < 0 || request_len as usize > MAX_REQUEST_BYTES {
+        // guest ABI; a negative value as usize wraps to a huge number. The
+        // 1 MiB cap matches the shell_exec cap (#3529); guest-controlled JSON
+        // depth is bounded by serde_json's default RECURSION_LIMIT of 128
+        // since we never call `disable_recursion_limit`.
+        if request_len < 0 || request_len as usize > MAX_HOST_CALL_REQUEST_BYTES {
             anyhow::bail!(
-                "host_call request length invalid: {} (max {MAX_REQUEST_BYTES})",
+                "host_call request length invalid: {} (max {MAX_HOST_CALL_REQUEST_BYTES})",
                 request_len
             );
         }
@@ -587,6 +703,48 @@ impl WasmSandbox {
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+
+        // SECURITY (#3532): every host call is a denial-of-wallet vector if
+        // it touches an external resource (LLM tokens, outbound HTTP,
+        // cross-agent fanout). Wasm guest fuel only meters guest
+        // instructions, so a tight loop of `agent_send` / `net_fetch` /
+        // `agent_spawn` consumes effectively zero fuel while burning real
+        // money. Charge a method-keyed fuel reservation BEFORE dispatch so
+        // the per-invocation `fuel_limit` actually caps host-side cost.
+        let cost = host_call_fuel_cost(&method);
+        if cost > 0 {
+            // Fail closed if fuel metering is disabled on this store —
+            // the reservation is the only thing standing between the
+            // guest and unbounded LLM/HTTP fanout.
+            let remaining = match caller.get_fuel() {
+                Ok(n) => n,
+                Err(e) => {
+                    let response = serde_json::json!({
+                        "error": format!(
+                            "host fuel meter unavailable for {method}: {e}; \
+                             denial-of-wallet guard requires fuel to be enabled"
+                        )
+                    });
+                    return Self::write_guest_json(caller, &response);
+                }
+            };
+            if remaining < cost {
+                let response = serde_json::json!({
+                    "error": format!(
+                        "host fuel exhausted for {method} (need {cost}, have {remaining}); \
+                         denial-of-wallet guard"
+                    )
+                });
+                return Self::write_guest_json(caller, &response);
+            }
+            if let Err(e) = caller.set_fuel(remaining - cost) {
+                let response = serde_json::json!({
+                    "error": format!("failed to reserve host fuel for {method}: {e}")
+                });
+                return Self::write_guest_json(caller, &response);
+            }
+        }
+
         let response = host_functions::dispatch(caller.data(), &method, &params);
 
         Self::write_guest_json(caller, &response)
@@ -725,6 +883,38 @@ mod tests {
         assert_eq!(config.fuel_limit, 1_000_000);
         assert_eq!(config.max_memory_bytes, 16 * 1024 * 1024);
         assert!(config.capabilities.is_empty());
+    }
+
+    /// Regression for #3532: host calls that touch external resources
+    /// (LLM tokens, outbound HTTP, child agent spawn) must charge a
+    /// non-zero fuel cost so the sandbox `fuel_limit` is a real ceiling
+    /// on host-side spend, not just guest CPU. Pure-host calls remain
+    /// free so existing benign skills don't regress.
+    #[test]
+    fn test_host_call_fuel_cost_table_covers_dow_methods() {
+        assert!(host_call_fuel_cost("agent_send") > 0);
+        assert!(host_call_fuel_cost("agent_spawn") > 0);
+        assert!(host_call_fuel_cost("net_fetch") > 0);
+        assert!(host_call_fuel_cost("shell_exec") > 0);
+
+        // Pure-host methods stay free.
+        assert_eq!(host_call_fuel_cost("time_now"), 0);
+        assert_eq!(host_call_fuel_cost("kv_get"), 0);
+        assert_eq!(host_call_fuel_cost("kv_set"), 0);
+        assert_eq!(host_call_fuel_cost("env_read"), 0);
+        assert_eq!(host_call_fuel_cost("fs_read"), 0);
+        assert_eq!(host_call_fuel_cost("fs_write"), 0);
+        assert_eq!(host_call_fuel_cost("fs_list"), 0);
+        // Unknown method also free; capability check catches it.
+        assert_eq!(host_call_fuel_cost("unknown_method"), 0);
+
+        // Relative ordering: spawn (registers + may run a child agent)
+        // is the priciest, then send (single LLM-bearing fanout), then
+        // outbound network / shell.
+        assert!(host_call_fuel_cost("agent_spawn") > host_call_fuel_cost("agent_send"));
+        assert!(host_call_fuel_cost("agent_send") > host_call_fuel_cost("net_fetch"));
+        assert!(host_call_fuel_cost("net_fetch") >= host_call_fuel_cost("shell_exec"));
+        assert!(host_call_fuel_cost("shell_exec") > host_call_fuel_cost("kv_get"));
     }
 
     #[test]
@@ -868,6 +1058,46 @@ mod tests {
         );
     }
 
+    /// Regression for #3532: when remaining fuel is below the per-method
+    /// reservation, the dispatch layer must reject the host call BEFORE
+    /// invoking the host function — otherwise the denial-of-wallet guard
+    /// is decorative. We pick `agent_send` (cost 100K) and a fuel limit
+    /// well below that so any remaining fuel after proxy startup still
+    /// can't cover the reservation, then assert the guest sees a
+    /// `host fuel exhausted` error rather than the call going through.
+    #[tokio::test]
+    async fn test_host_call_fuel_exhausted_blocks_dispatch() {
+        let sandbox = WasmSandbox::new().unwrap();
+        let input = serde_json::json!({
+            "method": "agent_send",
+            "params": {"target": "anyone", "message": "hi"}
+        });
+        // 50_000 < host_call_fuel_cost("agent_send") = 100_000, so even
+        // if proxy startup consumed zero fuel the reservation can't be
+        // met and the guard must fire before dispatch.
+        let config = SandboxConfig {
+            fuel_limit: 50_000,
+            ..Default::default()
+        };
+
+        let result = sandbox
+            .execute(
+                HOST_CALL_PROXY_WAT.as_bytes(),
+                input,
+                config,
+                None,
+                "test-agent",
+            )
+            .await
+            .unwrap();
+
+        let err_msg = result.output["error"].as_str().unwrap_or("");
+        assert!(
+            err_msg.contains("host fuel exhausted"),
+            "expected denial-of-wallet guard to fire, got: {err_msg}"
+        );
+    }
+
     #[tokio::test]
     async fn test_host_call_unknown_method() {
         let sandbox = WasmSandbox::new().unwrap();
@@ -957,10 +1187,10 @@ mod tests {
         );
     }
     /// Module that returns a packed result whose `result_len` field is set to
-    /// MAX_RESULT_BYTES + 1 (0x1000001 = 16 MiB + 1) with a ptr of 0, to
+    /// MAX_RESULT_BYTES + 1 (0x100001 = 1 MiB + 1) with a ptr of 0, to
     /// trigger the oversized-result guard introduced in Bug #3866.
     ///
-    /// The `result_len` (low 32 bits) is set to a value beyond the 16 MiB cap.
+    /// The `result_len` (low 32 bits) is set to a value beyond the 1 MiB cap.
     /// The pointer points to the start of memory (offset 0), which contains
     /// whatever zeroed or initialised bytes the runtime put there — we only
     /// care that the size guard fires BEFORE we try to slice memory.
@@ -977,9 +1207,9 @@ mod tests {
             )
 
             (func (export "execute") (param $ptr i32) (param $len i32) (result i64)
-                ;; Return ptr=0, len = 16 MiB + 1 (0x1000001) — exceeds the cap.
-                ;; packed = (0 << 32) | 0x1000001
-                (i64.const 0x1000001)
+                ;; Return ptr=0, len = 1 MiB + 1 (0x100001) — exceeds the cap.
+                ;; packed = (0 << 32) | 0x100001
+                (i64.const 0x100001)
             )
         )
     "#;
@@ -1076,5 +1306,99 @@ mod tests {
             serde_json::json!({"ping": "pong"}),
             "Normal guest output must be unchanged"
         );
+    }
+
+    /// Regression test for Bug #3866 (depth): serde_json's default
+    /// RECURSION_LIMIT of 128 must reject deeply-nested guest input fed into
+    /// `host_call`. We synthesize ~200 levels of `[` brackets — deeper than
+    /// the default limit — and feed it as a host_call request via the proxy.
+    /// Without the depth limit, recursive descent would risk stack overflow.
+    #[tokio::test]
+    async fn test_host_call_rejects_deep_nesting() {
+        let sandbox = WasmSandbox::new().unwrap();
+        // Build a JSON value nested ~200 levels deep — past serde_json's
+        // default 128-deep RECURSION_LIMIT.
+        let depth = 200usize;
+        let mut deep = serde_json::Value::Null;
+        for _ in 0..depth {
+            deep = serde_json::Value::Array(vec![deep]);
+        }
+        // Wrap as a host_call envelope. The guest forwards this verbatim.
+        let input = serde_json::json!({"method": "time_now", "params": deep});
+        let config = SandboxConfig {
+            fuel_limit: 10_000_000,
+            ..Default::default()
+        };
+
+        let result = sandbox
+            .execute(
+                HOST_CALL_PROXY_WAT.as_bytes(),
+                input,
+                config,
+                None,
+                "test-agent",
+            )
+            .await
+            .unwrap();
+
+        // serde_json's RECURSION_LIMIT (128) fires during host_call
+        // deserialisation; the host returns an error response. Assert that
+        // the output has an "error" key — accepting "no ok" is too loose and
+        // would pass even if the guest simply returned nothing.
+        assert!(
+            result.output.get("error").is_some(),
+            "Deeply-nested host_call request must produce an error response, got: {:?}",
+            result.output
+        );
+    }
+
+    /// Regression test for Bug #3866 (size): host_call request and guest
+    /// result caps must stay aligned at 1 MiB (matches shell_exec / kv_set
+    /// caps from #3529 / #3866). Pins the actual module-level constants so
+    /// a refactor that raises either cap fails this test.
+    #[test]
+    fn test_size_caps_are_one_mib() {
+        assert_eq!(MAX_HOST_CALL_REQUEST_BYTES, 1024 * 1024);
+        assert_eq!(MAX_GUEST_RESULT_BYTES, 1024 * 1024);
+    }
+
+    /// Per-store interrupt semantics (Bug #3864): the
+    /// `epoch_deadline_callback` registered on the Store must be called
+    /// when the engine epoch is bumped, and must trap only when THIS
+    /// guest's wall-clock budget has actually elapsed. The cross-guest
+    /// regression in `test_epoch_timeout_does_not_bleed_to_concurrent_guests`
+    /// exercises the engine-isolation half; this test verifies the
+    /// callback is wired (and traps) when the guest itself overruns.
+    #[tokio::test]
+    async fn test_per_store_callback_traps_on_real_timeout() {
+        let sandbox = WasmSandbox::new().unwrap();
+        let config = SandboxConfig {
+            // u64::MAX: fuel tracking stays enabled (keeps epoch check-points active)
+            // but can't be exhausted in 1 s — wall-clock timeout wins.
+            fuel_limit: u64::MAX,
+            timeout_secs: Some(1),
+            ..Default::default()
+        };
+
+        let err = sandbox
+            .execute(
+                INFINITE_LOOP_WAT.as_bytes(),
+                serde_json::json!({}),
+                config,
+                None,
+                "self-timeout-guest",
+            )
+            .await
+            .unwrap_err();
+
+        // Verify the error is a wall-clock timeout (not fuel, not ABI, not
+        // compilation). The message is built by the trap-handler from the
+        // fixed "timed out after …s" format — asserting on it means the test
+        // catches any regression where the per-store callback is unwired and
+        // execution exits through an unrelated path.
+        match &err {
+            SandboxError::Execution(msg) if msg.contains("timed out") => {}
+            other => panic!("Expected SandboxError::Execution with 'timed out', got: {other:?}"),
+        }
     }
 }

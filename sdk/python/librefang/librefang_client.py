@@ -181,6 +181,9 @@ class _AgentsResource(_Resource):
     def get_agent_deliveries(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/deliveries")
 
+    def list_agent_events(self, id: str, limit: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/events", None, query={"limit": limit})
+
     def list_agent_files(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/files")
 
@@ -205,6 +208,12 @@ class _AgentsResource(_Resource):
     def update_agent_identity(self, id: str, **data):
         return self._c._request("PATCH", f"/api/agents/{id}/identity", data)
 
+    def inject_message(self, id: str, **data):
+        return self._c._request("POST", f"/api/agents/{id}/inject", data)
+
+    def agent_logs(self, id: str, n: Any = None, level: Any = None, offset: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/logs", None, query={"n": n, "level": level, "offset": offset})
+
     def get_agent_mcp_servers(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
 
@@ -217,11 +226,23 @@ class _AgentsResource(_Resource):
     def send_message_stream(self, id: str, **data) -> Generator[Dict, None, None]:
         return self._c._stream("POST", f"/api/agents/{id}/message/stream", data)
 
+    def agent_metrics(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/metrics")
+
     def set_agent_mode(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/mode", data)
 
     def set_model(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/model", data)
+
+    def push_message(self, id: str, **data):
+        return self._c._request("POST", f"/api/agents/{id}/push", data)
+
+    def reload_agent_manifest(self, id: str):
+        return self._c._request("POST", f"/api/agents/{id}/reload")
+
+    def resume_agent(self, id: str):
+        return self._c._request("PUT", f"/api/agents/{id}/resume")
 
     def list_agent_runtime(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/runtime")
@@ -268,8 +289,14 @@ class _AgentsResource(_Resource):
     def set_agent_skills(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/skills", data)
 
+    def get_agent_stats(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/stats")
+
     def stop_agent(self, id: str):
         return self._c._request("POST", f"/api/agents/{id}/stop")
+
+    def suspend_agent(self, id: str):
+        return self._c._request("PUT", f"/api/agents/{id}/suspend")
 
     def get_agent_tools(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/tools")
@@ -279,9 +306,6 @@ class _AgentsResource(_Resource):
 
     def get_agent_traces(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/traces")
-
-    def update_agent(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/update", data)
 
     def upload_file(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{id}/upload", data)
@@ -320,6 +344,15 @@ class _AuthResource(_Resource):
     def auth_callback_post(self, **data):
         return self._c._request("POST", "/api/auth/callback", data)
 
+    def change_password(self, **data):
+        return self._c._request("POST", "/api/auth/change-password", data)
+
+    def dashboard_auth_check(self):
+        return self._c._request("GET", "/api/auth/dashboard-check")
+
+    def dashboard_login(self, **data):
+        return self._c._request("POST", "/api/auth/dashboard-login", data)
+
     def auth_introspect(self, **data):
         return self._c._request("POST", "/api/auth/introspect", data)
 
@@ -329,8 +362,14 @@ class _AuthResource(_Resource):
     def auth_login_provider(self, provider: str):
         return self._c._request("GET", f"/api/auth/login/{provider}")
 
+    def dashboard_logout(self):
+        return self._c._request("POST", "/api/auth/logout")
+
     def auth_providers(self):
         return self._c._request("GET", "/api/auth/providers")
+
+    def auth_refresh(self, **data):
+        return self._c._request("POST", "/api/auth/refresh", data)
 
     def auth_userinfo(self):
         return self._c._request("GET", "/api/auth/userinfo")

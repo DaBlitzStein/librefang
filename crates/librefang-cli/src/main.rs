@@ -540,6 +540,27 @@ enum VaultCommands {
         /// Credential key.
         key: String,
     },
+    /// Rotate the vault master key (re-encrypt every entry with a new key).
+    ///
+    /// Recovery / hygiene workflow shipped for #3651. By default reads the
+    /// old key from `LIBREFANG_VAULT_KEY_OLD` and the new key from
+    /// `LIBREFANG_VAULT_KEY_NEW`; pass `--from-stdin` to read the new key
+    /// from stdin instead (useful when the new key cannot safely live in
+    /// the shell history). Both keys must be valid base64 of exactly
+    /// 32 bytes (`openssl rand -base64 32`).
+    ///
+    /// The vault is re-encrypted to a temp file, fsync'd, then atomically
+    /// renamed over the original — no half-rotated state on disk if the
+    /// process is killed mid-way. The startup sentinel is preserved so the
+    /// daemon will boot cleanly under the new key.
+    #[command(
+        long_about = "Rotate the vault master key (re-encrypt every entry with a new key).\n\nReads the old key from LIBREFANG_VAULT_KEY_OLD and the new key from LIBREFANG_VAULT_KEY_NEW (or from stdin with --from-stdin). Both must be base64 of exactly 32 bytes (openssl rand -base64 32).\n\nAfter a successful rotation, restart the daemon with the new LIBREFANG_VAULT_KEY set to the new value. Until you do, the daemon will refuse to boot — the startup sentinel verifies the key matches the rotated vault.\n\nExamples:\n  LIBREFANG_VAULT_KEY_OLD=$(cat .key.old) \\\n  LIBREFANG_VAULT_KEY_NEW=$(cat .key.new) \\\n    librefang vault rotate-key\n\n  echo $NEW_KEY | LIBREFANG_VAULT_KEY_OLD=$OLD_KEY librefang vault rotate-key --from-stdin"
+    )]
+    RotateKey {
+        /// Read the new key from stdin instead of `LIBREFANG_VAULT_KEY_NEW`.
+        #[arg(long)]
+        from_stdin: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2185,6 +2206,7 @@ fn main() {
             VaultCommands::Set { key } => cmd_vault_set(&key),
             VaultCommands::List => cmd_vault_list(),
             VaultCommands::Remove { key } => cmd_vault_remove(&key),
+            VaultCommands::RotateKey { from_stdin } => cmd_vault_rotate_key(from_stdin),
         },
         Some(Commands::New { kind }) => cmd_scaffold(kind),
         // ── New commands ────────────────────────────────────────────────
@@ -2304,25 +2326,49 @@ pub(crate) fn restrict_dir_permissions(path: &std::path::Path) {
 #[cfg(not(unix))]
 pub(crate) fn restrict_dir_permissions(_path: &std::path::Path) {}
 
-fn find_daemon_in_home(home_dir: &std::path::Path) -> Option<String> {
+/// Normalize a daemon listen address for client-side probing.
+///
+/// `0.0.0.0` (the default bind-all address) is replaced with `127.0.0.1`,
+/// which avoids DNS/connectivity hangs on macOS when probing locally.
+fn normalize_daemon_addr(listen_addr: &str) -> String {
+    listen_addr.replace("0.0.0.0", "127.0.0.1")
+}
+
+/// Core daemon-detection logic, parameterized over the health-probe.
+///
+/// Returns `Some(base_url)` iff `daemon.json` is readable AND `probe`
+/// reports the daemon's `/api/health` endpoint is up. Extracted so unit
+/// tests can inject a fake probe instead of binding real sockets.
+fn find_daemon_with_probe<F>(home_dir: &std::path::Path, probe: F) -> Option<String>
+where
+    F: FnOnce(&str) -> bool,
+{
     let info = read_daemon_info(home_dir)?;
-
-    // Normalize listen address: replace 0.0.0.0 with 127.0.0.1 to avoid
-    // DNS/connectivity issues on macOS where 0.0.0.0 can hang.
-    let addr = info.listen_addr.replace("0.0.0.0", "127.0.0.1");
-    let url = format!("http://{addr}/api/health");
-
-    let client = crate::http_client::client_builder()
-        .connect_timeout(std::time::Duration::from_secs(1))
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()?;
-    let resp = client.get(&url).send().ok()?;
-    if resp.status().is_success() {
+    let addr = normalize_daemon_addr(&info.listen_addr);
+    let health_url = format!("http://{addr}/api/health");
+    if probe(&health_url) {
         Some(format!("http://{addr}"))
     } else {
         None
     }
+}
+
+fn find_daemon_in_home(home_dir: &std::path::Path) -> Option<String> {
+    find_daemon_with_probe(home_dir, |url| {
+        let client = match crate::http_client::client_builder()
+            .connect_timeout(std::time::Duration::from_secs(1))
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        client
+            .get(url)
+            .send()
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    })
 }
 
 pub(crate) fn find_daemon() -> Option<String> {
@@ -3350,9 +3396,14 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
     let pipe_write = fds[1];
     let pipe_read = fds[0];
 
-    // Save copy of original stdout/stderr (to restore on drop)
+    // Save a copy of original stdout (to restore both fd 1 and fd 2 on
+    // drop). We don't keep a separate stderr copy: by the time the tee
+    // thread reads from the pipe, stdout and stderr have already been
+    // merged at the fd level, so we cannot route output back to the
+    // correct original fd. Writing to both copies would simply duplicate
+    // every line in any consumer that captures both fds (e.g. the Docker
+    // log driver), which is the bug this code path used to cause.
     let stdout_copy = unsafe { libc::dup(libc::STDOUT_FILENO) };
-    let stderr_copy = unsafe { libc::dup(libc::STDERR_FILENO) };
 
     // Redirect stdout and stderr to the pipe. From here on any write to the
     // standard streams goes through the pipe and must be drained by the
@@ -3374,10 +3425,10 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
                 unsafe { libc::close(pipe_read) };
                 break;
             }
-            // Write to terminal (original stdout/stderr)
+            // Write to the saved stdout fd once. See comment at the dup site
+            // for why we don't also write to a stderr copy.
             unsafe {
                 libc::write(stdout_copy, buf.as_ptr() as *const libc::c_void, n as usize);
-                libc::write(stderr_copy, buf.as_ptr() as *const libc::c_void, n as usize);
             }
             // Write to log file
             if let Ok(mut f) = log_file.lock() {
@@ -3385,7 +3436,7 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
                 let _ = f.flush();
             }
         }
-        // guard Drop closes stdout_copy/stderr_copy; pipe_read is closed above on break
+        // guard Drop closes stdout_copy; pipe_read is closed above on break
     });
 
     ForegroundTeeGuard {
@@ -3964,21 +4015,21 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
         match agents {
             Some(agents) if agents.is_empty() => println!("{}", i18n::t("agent-no-agents")),
             Some(agents) => {
-                println!(
-                    "{:<38} {:<16} {:<10} {:<12} MODEL",
-                    "ID", "NAME", "STATE", "PROVIDER"
-                );
-                println!("{}", "-".repeat(95));
+                // Render via the shared Table builder so column widths
+                // self-size to the actual content (instead of hard-coded
+                // {:<38} which truncates / over-pads), and so piped output
+                // automatically falls back to ASCII (#3306).
+                let mut t = crate::table::Table::new(&["ID", "NAME", "STATE", "PROVIDER", "MODEL"]);
                 for a in agents {
-                    println!(
-                        "{:<38} {:<16} {:<10} {:<12} {}",
+                    t.add_row(&[
                         a["id"].as_str().unwrap_or("?"),
                         a["name"].as_str().unwrap_or("?"),
                         a["state"].as_str().unwrap_or("?"),
                         a["model_provider"].as_str().unwrap_or("?"),
                         a["model_name"].as_str().unwrap_or("?"),
-                    );
+                    ]);
                 }
+                t.print();
             }
             None => println!("{}", i18n::t("agent-no-agents")),
         }
@@ -4010,17 +4061,19 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
             return;
         }
 
-        println!("{:<38} {:<20} {:<12} CREATED", "ID", "NAME", "STATE");
-        println!("{}", "-".repeat(85));
+        let mut t = crate::table::Table::new(&["ID", "NAME", "STATE", "CREATED"]);
         for entry in agents {
-            println!(
-                "{:<38} {:<20} {:<12} {}",
-                entry.id,
-                entry.name,
-                format!("{:?}", entry.state),
-                entry.created_at.format("%Y-%m-%d %H:%M")
-            );
+            let id = entry.id.to_string();
+            let state = format!("{:?}", entry.state);
+            let created = entry.created_at.format("%Y-%m-%d %H:%M").to_string();
+            t.add_row(&[
+                id.as_str(),
+                entry.name.as_str(),
+                state.as_str(),
+                created.as_str(),
+            ]);
         }
+        t.print();
     }
 }
 
@@ -4776,64 +4829,36 @@ fn render_detail_section(body: &serde_json::Value) {
 /// Render the agent list as a column-aligned table. Empty input is a no-op
 /// so the caller can unconditionally call this after a non-empty check.
 fn render_agents_table(agents: &[serde_json::Value]) {
-    // Compute per-column widths so names and ids line up even when one entry
-    // is much longer than the others. Keep a minimum width so a single-row
-    // table doesn't look squashed against the header.
-    let mut rows: Vec<[String; 4]> = Vec::with_capacity(agents.len());
+    // Cap ID column at 12 so we don't push the model column off the screen
+    // — users rarely need more than a handful of id bytes for correlation.
+    const ID_TRIM: usize = 12;
+    let id_trim = |s: &str| -> String {
+        if s.len() <= ID_TRIM {
+            s.to_string()
+        } else {
+            s.chars().take(ID_TRIM).collect()
+        }
+    };
+
+    // Migrated to crate::table::Table (#3306) — keeps content layout stable
+    // while removing 30+ lines of manual width math and giving us automatic
+    // ASCII fallback when stdout is piped.
+    let mut t = crate::table::Table::new(&["NAME", "ID", "STATE", "MODEL"]);
     for a in agents {
-        let name = a["name"].as_str().unwrap_or("?").to_string();
-        let id = a["id"].as_str().unwrap_or("?").to_string();
-        let state = a["state"].as_str().unwrap_or("?").to_string();
+        let id = id_trim(a["id"].as_str().unwrap_or("?"));
         let model = format!(
             "{}:{}",
             a["model_provider"].as_str().unwrap_or("?"),
             a["model_name"].as_str().unwrap_or("?"),
         );
-        rows.push([name, id, state, model]);
+        t.add_row(&[
+            a["name"].as_str().unwrap_or("?"),
+            id.as_str(),
+            a["state"].as_str().unwrap_or("?"),
+            model.as_str(),
+        ]);
     }
-    let headers = ["NAME", "ID", "STATE", "MODEL"];
-    let mut widths = [0usize; 4];
-    for (i, h) in headers.iter().enumerate() {
-        widths[i] = h.len();
-    }
-    for row in &rows {
-        for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
-        }
-    }
-    // Cap ID column at 12 so we don't push the model column off the screen
-    // — users rarely need more than a handful of id bytes for correlation.
-    widths[1] = widths[1].min(12);
-    let id_trim = |s: &str| -> String {
-        if s.len() <= widths[1] {
-            s.to_string()
-        } else {
-            s.chars().take(widths[1]).collect()
-        }
-    };
-    let header_line = format!(
-        "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
-        headers[0],
-        headers[1],
-        headers[2],
-        headers[3],
-        w0 = widths[0],
-        w1 = widths[1],
-        w2 = widths[2],
-    );
-    println!("{}", header_line.dimmed());
-    for row in &rows {
-        println!(
-            "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
-            row[0],
-            id_trim(&row[1]),
-            row[2],
-            row[3],
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2],
-        );
-    }
+    t.print();
 }
 
 fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> i32 {
@@ -8633,6 +8658,25 @@ fn cmd_config_get(key: &str) {
     }
 }
 
+/// Parse a string as a TOML integer, rejecting values outside i64 range.
+/// TOML integers are i64; we never silently truncate `u64 > i64::MAX` into
+/// negative numbers (#3461).
+fn parse_toml_integer(raw: &str) -> Result<toml::Value, String> {
+    if let Ok(v) = raw.parse::<i64>() {
+        return Ok(toml::Value::Integer(v));
+    }
+    if let Ok(v) = raw.parse::<u64>() {
+        return match i64::try_from(v) {
+            Ok(v) => Ok(toml::Value::Integer(v)),
+            Err(_) => Err(format!(
+                "value {v} exceeds i64::MAX ({}); TOML cannot store unsigned integers above this bound",
+                i64::MAX
+            )),
+        };
+    }
+    Err(format!("'{raw}' is not a valid integer"))
+}
+
 fn cmd_config_set(key: &str, value: &str) {
     let home = librefang_home();
     let config_path = home.join("config.toml");
@@ -8710,11 +8754,13 @@ fn cmd_config_set(key: &str, value: &str) {
     // Try to preserve type: if the existing value is an integer, parse as int, etc.
     let new_value = if let Some(existing) = tbl.get(last_key) {
         match existing {
-            toml::Value::Integer(_) => value
-                .parse::<u64>()
-                .map(|v| toml::Value::Integer(v as i64))
-                .or_else(|_| value.parse::<i64>().map(toml::Value::Integer))
-                .unwrap_or_else(|_| toml::Value::String(value.to_string())),
+            toml::Value::Integer(_) => match parse_toml_integer(value) {
+                Ok(v) => v,
+                Err(msg) => {
+                    ui::error(&msg);
+                    std::process::exit(1);
+                }
+            },
             toml::Value::Float(_) => value
                 .parse::<f64>()
                 .map(toml::Value::Float)
@@ -8729,10 +8775,8 @@ fn cmd_config_set(key: &str, value: &str) {
         // No existing value — infer type from the string content
         if let Ok(b) = value.parse::<bool>() {
             toml::Value::Boolean(b)
-        } else if let Ok(i) = value.parse::<u64>() {
-            toml::Value::Integer(i as i64)
-        } else if let Ok(i) = value.parse::<i64>() {
-            toml::Value::Integer(i)
+        } else if let Ok(v) = parse_toml_integer(value) {
+            v
         } else if let Ok(f) = value.parse::<f64>() {
             toml::Value::Float(f)
         } else {
@@ -9666,6 +9710,150 @@ fn cmd_vault_remove(key: &str) {
             std::process::exit(1);
         }
     }
+}
+
+/// Rotate the vault master key by re-encrypting every entry under a fresh
+/// 32-byte key. Issue #3651.
+///
+/// Source of the keys (in order):
+///   - OLD: env var `LIBREFANG_VAULT_KEY_OLD` (REQUIRED)
+///   - NEW: env var `LIBREFANG_VAULT_KEY_NEW` unless `--from-stdin` is set,
+///     in which case stdin is read until EOF and trimmed.
+///
+/// Both must be base64 of exactly 32 raw bytes (`openssl rand -base64 32`,
+/// matches `LIBREFANG_VAULT_KEY` in production). Any other length is
+/// rejected up-front before any vault state is touched.
+///
+/// On success the vault file is atomically replaced (vault.rs's `save()`
+/// already writes to `<path>.tmp` and `rename`s — re-using it gives us the
+/// atomic-swap-on-disk guarantee for free) and prints the new key fingerprint
+/// so the operator has a non-secret confirmation that the rotation took.
+fn cmd_vault_rotate_key(from_stdin: bool) {
+    use std::io::Read as _;
+    use zeroize::Zeroizing;
+
+    let home = librefang_home();
+    let vault_path = home.join("vault.enc");
+
+    // Pre-flight: vault must already exist. Refuse on missing file rather
+    // than silently `init()` — rotating a vault that was never created is
+    // a no-op masking an operator error.
+    if !vault_path.exists() {
+        ui::error(&i18n::t("vault-rotate-no-vault"));
+        std::process::exit(1);
+    }
+
+    // Read OLD key from env. Always required.
+    let old_key_b64 = match std::env::var("LIBREFANG_VAULT_KEY_OLD") {
+        Ok(s) if !s.is_empty() => Zeroizing::new(s),
+        _ => {
+            ui::error(&i18n::t("vault-rotate-old-key-missing"));
+            std::process::exit(1);
+        }
+    };
+
+    // Read NEW key from stdin or env, depending on the flag. stdin wins
+    // when `--from-stdin` is set so a key in env can't accidentally
+    // override an explicit stdin pipe.
+    let new_key_b64 = if from_stdin {
+        let mut buf = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+            ui::error(&i18n::t_args(
+                "vault-rotate-stdin-read-failed",
+                &[("error", &e.to_string())],
+            ));
+            std::process::exit(1);
+        }
+        let trimmed = buf.trim().to_string();
+        if trimmed.is_empty() {
+            ui::error(&i18n::t("vault-rotate-stdin-empty"));
+            std::process::exit(1);
+        }
+        Zeroizing::new(trimmed)
+    } else {
+        match std::env::var("LIBREFANG_VAULT_KEY_NEW") {
+            Ok(s) if !s.is_empty() => Zeroizing::new(s),
+            _ => {
+                ui::error(&i18n::t("vault-rotate-new-key-missing"));
+                std::process::exit(1);
+            }
+        }
+    };
+
+    // Reject identical OLD/NEW up-front — silently no-op rotations are a
+    // footgun. (`Zeroizing<String>` derefs to `&str` so direct comparison
+    // is safe and constant-time on equal-length strings is unnecessary
+    // here: this is a configuration check, not a credential check.)
+    if old_key_b64.as_str() == new_key_b64.as_str() {
+        ui::error(&i18n::t("vault-rotate-same-key"));
+        std::process::exit(1);
+    }
+
+    // Decode both keys via the same parser the production daemon uses so
+    // any rejection here matches what the daemon will reject at boot.
+    let old_key_bytes = match librefang_extensions::vault::decode_master_key(&old_key_b64) {
+        Ok(k) => k,
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "vault-rotate-old-key-invalid",
+                &[("error", &e.to_string())],
+            ));
+            std::process::exit(1);
+        }
+    };
+    let new_key_bytes = match librefang_extensions::vault::decode_master_key(&new_key_b64) {
+        Ok(k) => k,
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "vault-rotate-new-key-invalid",
+                &[("error", &e.to_string())],
+            ));
+            std::process::exit(1);
+        }
+    };
+
+    // Open + unlock with OLD key. Use `unlock_with_key` so the rotation
+    // doesn't accidentally pick up a stale env / keyring value — we want
+    // the rotation to fail loudly if `LIBREFANG_VAULT_KEY_OLD` doesn't
+    // match the on-disk vault.
+    let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path.clone());
+    if let Err(e) = vault.unlock_with_key(old_key_bytes) {
+        ui::error(&i18n::t_args(
+            "vault-rotate-unlock-failed",
+            &[("error", &e.to_string())],
+        ));
+        std::process::exit(1);
+    }
+
+    // Verify (or backfill) the sentinel under the OLD key BEFORE rotating.
+    // This catches "OLD key decrypted noise" and ensures legacy vaults
+    // gain a sentinel during rotation rather than after.
+    if let Err(e) = vault.verify_or_install_sentinel() {
+        ui::error(&i18n::t_args(
+            "vault-rotate-sentinel-failed",
+            &[("error", &e.to_string())],
+        ));
+        std::process::exit(1);
+    }
+
+    let entry_count = vault.list_keys().len();
+
+    // Re-encrypt the entire vault under the NEW key. `rewrap_with_new_key`
+    // re-uses the proven atomic save path inside vault.rs (write to
+    // `<path>.tmp`, fsync, rename) — no separate code path to maintain.
+    if let Err(e) = vault.rewrap_with_new_key(new_key_bytes) {
+        ui::error(&i18n::t_args(
+            "vault-rotate-rewrap-failed",
+            &[("error", &e.to_string())],
+        ));
+        std::process::exit(1);
+    }
+
+    ui::success(&i18n::t_args(
+        "vault-rotate-success",
+        &[("count", &entry_count.to_string())],
+    ));
+    println!("{}", i18n::t("vault-rotate-next-step"));
 }
 
 // ---------------------------------------------------------------------------
@@ -12378,7 +12566,8 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 mod tests {
     use super::{
         channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
-        daemon_log_path_for_home, detached_daemon_args, normalize_release_tag, parse_version_core,
+        daemon_log_path_for_home, detached_daemon_args, find_daemon_with_probe,
+        normalize_daemon_addr, normalize_release_tag, parse_toml_integer, parse_version_core,
         resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
         Commands, DeviceAuthNextStep, GatewayCommands, ReleaseComparison,
     };
@@ -12387,6 +12576,36 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
+
+    // --- Config set numeric parsing (#3461) ---
+
+    #[test]
+    fn parse_toml_integer_accepts_normal_i64() {
+        match parse_toml_integer("42").unwrap() {
+            toml::Value::Integer(v) => assert_eq!(v, 42),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_toml_integer_accepts_i64_max() {
+        match parse_toml_integer(&i64::MAX.to_string()).unwrap() {
+            toml::Value::Integer(v) => assert_eq!(v, i64::MAX),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_toml_integer_rejects_u64_max_instead_of_truncating() {
+        // u64::MAX as i64 would silently become -1 — we must error instead.
+        let err = parse_toml_integer(&u64::MAX.to_string()).unwrap_err();
+        assert!(err.contains("exceeds i64::MAX"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_toml_integer_rejects_non_integer() {
+        assert!(parse_toml_integer("not-a-number").is_err());
+    }
 
     // --- Doctor command unit tests ---
 
@@ -13136,5 +13355,121 @@ input_schema = { type = "object" }
             "expected lowercase hex, got {hex:?}"
         );
         assert_eq!(hex, "0123456789abcdef0123456789abcdef");
+    }
+
+    // --- Daemon detection / launcher port logic (#3582) ---
+    //
+    // These exercise the `find_daemon_with_probe` core, which was extracted
+    // from `find_daemon_in_home` so the HTTP probe can be faked in unit
+    // tests instead of binding sockets or making real requests.
+
+    fn write_daemon_json(home: &Path, listen_addr: &str) {
+        let body = json!({
+            "pid": 4242u32,
+            "listen_addr": listen_addr,
+            "started_at": "1970-01-01T00:00:00Z",
+            "version": "0.0.0-test",
+            "platform": "test",
+        });
+        fs::write(home.join("daemon.json"), body.to_string()).expect("write daemon.json");
+    }
+
+    #[test]
+    fn normalize_daemon_addr_rewrites_bind_all_to_loopback() {
+        // `0.0.0.0:4545` is the default bind-all address; on macOS, probing
+        // it directly can hang, so the launcher rewrites to 127.0.0.1.
+        assert_eq!(normalize_daemon_addr("0.0.0.0:4545"), "127.0.0.1:4545");
+    }
+
+    #[test]
+    fn normalize_daemon_addr_leaves_explicit_loopback_alone() {
+        assert_eq!(normalize_daemon_addr("127.0.0.1:4545"), "127.0.0.1:4545");
+    }
+
+    #[test]
+    fn normalize_daemon_addr_leaves_other_hosts_alone() {
+        // A user who explicitly bound to a LAN IP should keep it.
+        assert_eq!(
+            normalize_daemon_addr("192.168.1.10:4545"),
+            "192.168.1.10:4545"
+        );
+    }
+
+    #[test]
+    fn find_daemon_with_probe_returns_none_when_no_daemon_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No daemon.json written. Probe must NOT be invoked.
+        let probe_called = std::cell::Cell::new(false);
+        let got = find_daemon_with_probe(tmp.path(), |_url| {
+            probe_called.set(true);
+            true
+        });
+        assert!(got.is_none());
+        assert!(
+            !probe_called.get(),
+            "probe must not run when daemon.json is absent — saves a network round-trip"
+        );
+    }
+
+    #[test]
+    fn find_daemon_with_probe_returns_none_on_unparseable_daemon_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("daemon.json"), "not valid json {{{").unwrap();
+        let got = find_daemon_with_probe(tmp.path(), |_url| true);
+        assert!(
+            got.is_none(),
+            "corrupt daemon.json must not be treated as a live daemon"
+        );
+    }
+
+    #[test]
+    fn find_daemon_with_probe_returns_base_url_on_healthy_probe() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_daemon_json(tmp.path(), "127.0.0.1:4545");
+
+        let seen = std::cell::Cell::new(None);
+        let got = find_daemon_with_probe(tmp.path(), |url| {
+            seen.set(Some(url.to_string()));
+            true
+        });
+
+        // The probe receives the /api/health URL...
+        assert_eq!(
+            seen.into_inner().as_deref(),
+            Some("http://127.0.0.1:4545/api/health")
+        );
+        // ...and the caller gets back the *base* URL (no /api/health suffix).
+        assert_eq!(got.as_deref(), Some("http://127.0.0.1:4545"));
+    }
+
+    #[test]
+    fn find_daemon_with_probe_normalizes_bind_all_in_url() {
+        // Regression: ensure 0.0.0.0 in daemon.json is rewritten to 127.0.0.1
+        // BEFORE we hand the URL to the probe (and before we return it).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_daemon_json(tmp.path(), "0.0.0.0:4545");
+
+        let seen = std::cell::Cell::new(None);
+        let got = find_daemon_with_probe(tmp.path(), |url| {
+            seen.set(Some(url.to_string()));
+            true
+        });
+
+        assert_eq!(
+            seen.into_inner().as_deref(),
+            Some("http://127.0.0.1:4545/api/health"),
+            "probe must see normalized 127.0.0.1 URL, never 0.0.0.0"
+        );
+        assert_eq!(got.as_deref(), Some("http://127.0.0.1:4545"));
+    }
+
+    #[test]
+    fn find_daemon_with_probe_returns_none_on_failed_probe() {
+        // Stale daemon.json (process gone, port in use by something else, or
+        // returning 5xx) — probe returns false → caller gets None.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_daemon_json(tmp.path(), "127.0.0.1:4545");
+        let got = find_daemon_with_probe(tmp.path(), |_url| false);
+        assert!(got.is_none());
     }
 }

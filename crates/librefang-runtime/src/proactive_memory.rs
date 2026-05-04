@@ -402,10 +402,10 @@ impl MemoryExtractor for LlmMemoryExtractor {
         // (libre-code's `extractMemories` shape); that's a separate PR.
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
-            messages: vec![librefang_types::message::Message::user(format!(
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(format!(
                 "Extract memories from this conversation:\n\n{conversation_text}"
-            ))],
-            tools: Vec::new(),
+            ))]),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 1024,
             temperature: 0.1,
             system: Some(build_extraction_prompt(categories)),
@@ -556,8 +556,8 @@ impl MemoryExtractor for LlmMemoryExtractor {
         // fires dozens of times per session.
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
-            messages: vec![librefang_types::message::Message::user(user_msg)],
-            tools: Vec::new(),
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(user_msg)]),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 256,
             temperature: 0.0,
             system: Some(DECISION_SYSTEM_PROMPT.to_string()),
@@ -867,6 +867,7 @@ mod tests {
             Err(crate::llm_driver::LlmError::Api {
                 status: 500,
                 message: "mock failure".into(),
+                code: None,
             })
         }
         fn is_configured(&self) -> bool {

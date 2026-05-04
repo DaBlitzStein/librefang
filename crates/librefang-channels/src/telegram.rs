@@ -414,7 +414,8 @@ impl TelegramAdapter {
         // must use `split_to_utf16_chunks` rather than a plain byte/codepoint
         // split to avoid 400 errors on messages heavy with such characters.
         let chunks = split_to_utf16_chunks(&sanitized, TELEGRAM_MESSAGE_LIMIT);
-        for chunk in chunks {
+        let total = chunks.len();
+        for (idx, chunk) in chunks.iter().enumerate() {
             let mut body = serde_json::json!({
                 "chat_id": chat_id,
                 "text": chunk,
@@ -424,11 +425,27 @@ impl TelegramAdapter {
                 body["message_thread_id"] = serde_json::json!(tid);
             }
 
-            let resp = self.client.post(&url).json(&body).send().await?;
+            // Issue #3664: when a multi-chunk send fails part-way through
+            // we must surface the error to the caller — silently dropping
+            // chunks 2..N gives the user a truncated message with no signal
+            // that anything went wrong. We log the chunk index so operators
+            // can correlate the failure with the partial delivery.
+            let resp = self.client.post(&url).json(&body).send().await.map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> {
+                    warn!(
+                        "Telegram sendMessage chunk {}/{total} network error: {e}",
+                        idx + 1
+                    );
+                    Box::new(e)
+                },
+            )?;
             let status = resp.status();
             if !status.is_success() {
                 let body_text = resp.text().await.unwrap_or_default();
-                warn!("Telegram sendMessage failed ({status}): {body_text}");
+                warn!(
+                    "Telegram sendMessage chunk {}/{total} failed ({status}): {body_text}",
+                    idx + 1
+                );
                 // If HTML parsing failed, retry as plain text (no parse_mode)
                 if status == reqwest::StatusCode::BAD_REQUEST
                     && body_text.contains("can't parse entities")
@@ -441,10 +458,28 @@ impl TelegramAdapter {
                         plain_body["message_thread_id"] = serde_json::json!(tid);
                     }
                     let retry = self.client.post(&url).json(&plain_body).send().await?;
-                    if !retry.status().is_success() {
+                    let retry_status = retry.status();
+                    if !retry_status.is_success() {
                         let retry_text = retry.text().await.unwrap_or_default();
-                        warn!("Telegram sendMessage plain fallback also failed: {retry_text}");
+                        warn!(
+                            "Telegram sendMessage chunk {}/{total} plain fallback also failed ({retry_status}): {retry_text}",
+                            idx + 1
+                        );
+                        return Err(format!(
+                            "Telegram sendMessage failed on chunk {}/{total}: HTTP {retry_status}",
+                            idx + 1
+                        )
+                        .into());
                     }
+                } else {
+                    // Non-recoverable failure: stop sending further chunks
+                    // and propagate so the caller can decide whether to
+                    // retry the full message or report failure upstream.
+                    return Err(format!(
+                        "Telegram sendMessage failed on chunk {}/{total}: HTTP {status}",
+                        idx + 1
+                    )
+                    .into());
                 }
             }
         }
@@ -2247,13 +2282,25 @@ impl ChannelAdapter for TelegramAdapter {
                 if let Err(e) = self.api_edit_message(chat_id, msg_id, chunks[0]).await {
                     warn!("Telegram: failed to edit first chunk (msg_id={msg_id}): {e}");
                 }
-                for chunk in &chunks[1..] {
+                let total = chunks.len();
+                for (i, chunk) in chunks[1..].iter().enumerate() {
                     if let Err(e) = self.api_send_message(chat_id, chunk, tid).await {
-                        warn!("Telegram: failed to send continuation chunk: {e}");
+                        // i is 0-indexed into chunks[1..], so the absolute
+                        // chunk number is i + 2.
+                        warn!(
+                            "Telegram: failed to send continuation chunk {}/{total}: {e}",
+                            i + 2
+                        );
                         // Stop sending further chunks — partial delivery is
                         // preferable to sending out-of-order fragments after
                         // a gap caused by a rate-limit or API error.
-                        break;
+                        // Surface the error to the caller so retry / alerting
+                        // logic can react (issue #3664).
+                        return Err(format!(
+                            "Telegram streaming send failed on chunk {}/{total}: {e}",
+                            i + 2
+                        )
+                        .into());
                     }
                 }
             }
@@ -2976,6 +3023,11 @@ fn calculate_backoff(current: Duration, max: Duration) -> Duration {
 /// Escapes angle brackets that are NOT part of Telegram-allowed HTML tags.
 /// Allowed tags: b, i, u, s, tg-spoiler, a, code, pre, blockquote.
 /// Everything else (e.g. `<name>`, `<thinking>`) gets escaped to `&lt;...&gt;`.
+///
+/// For `<a>` tags, only `https`, `http`, `mailto`, and `tg` URL schemes are
+/// allowed; tags with disallowed/unparseable schemes (e.g. `javascript:`)
+/// are stripped to plain text. All attribute values are HTML-escaped to
+/// prevent attribute injection past Telegram's parse_mode=HTML boundary.
 fn sanitize_telegram_html(text: &str) -> String {
     const ALLOWED: &[&str] = &[
         "b",
@@ -3012,26 +3064,39 @@ fn sanitize_telegram_html(text: &str) -> String {
                 if !tag_name_raw.is_empty()
                     && ALLOWED.iter().any(|a| a.eq_ignore_ascii_case(tag_name_raw))
                 {
-                    let tag_name = tag_name_raw.to_ascii_lowercase();
+                    let tag_name_lc = tag_name_raw.to_ascii_lowercase();
                     if is_closing {
-                        if let Some(pos) = open_tags.iter().rposition(|t| t == &tag_name) {
+                        if let Some(pos) = open_tags.iter().rposition(|t| t == &tag_name_lc) {
                             open_tags.remove(pos);
+                            // Preserve original case of close tag.
                             result.push_str(&text[i..tag_end + 1]);
                         } else {
                             result.push_str("&lt;");
-                            result.push_str(tag_content);
+                            result.push_str(&escape_html_text(tag_content));
                             result.push_str("&gt;");
                         }
-                    } else if tag_content.ends_with('/') {
-                        result.push_str(&text[i..tag_end + 1]);
                     } else {
-                        open_tags.push(tag_name);
-                        result.push_str(&text[i..tag_end + 1]);
+                        // Self-closing or opening: rebuild tag with sanitized attrs.
+                        let self_closing = tag_content.ends_with('/');
+                        let attrs_raw = &tag_content[tag_name_raw.len()..];
+                        let attrs_raw = attrs_raw.trim_end_matches('/').trim();
+                        match rebuild_safe_tag(tag_name_raw, attrs_raw, self_closing) {
+                            Some(rebuilt) => {
+                                result.push_str(&rebuilt);
+                                if !self_closing {
+                                    open_tags.push(tag_name_lc);
+                                }
+                            }
+                            None => {
+                                // Tag rejected (e.g. <a> with bad scheme): drop the
+                                // tag entirely; surrounding inner text still renders.
+                            }
+                        }
                     }
                 } else {
-                    // Unknown tag — escape both brackets
+                    // Unknown tag — escape both brackets, escape inner content too.
                     result.push_str("&lt;");
-                    result.push_str(tag_content);
+                    result.push_str(&escape_html_text(tag_content));
                     result.push_str("&gt;");
                 }
                 // Advance past the whole tag
@@ -3060,6 +3125,142 @@ fn sanitize_telegram_html(text: &str) -> String {
     }
 
     result
+}
+
+/// Escape `<`, `>`, `&`, `"` in arbitrary text (not pre-escaped HTML).
+fn escape_html_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// URL schemes allowed inside `<a href>` for Telegram HTML.
+const ALLOWED_HREF_SCHEMES: &[&str] = &["https", "http", "mailto", "tg"];
+
+/// Returns true if `url` starts with one of the allowed schemes (case-insensitive).
+/// Relative URLs (no scheme) are rejected — Telegram requires absolute URLs.
+fn is_safe_href(url: &str) -> bool {
+    let trimmed = url.trim();
+    let Some(colon) = trimmed.find(':') else {
+        return false;
+    };
+    let scheme = &trimmed[..colon];
+    ALLOWED_HREF_SCHEMES
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(scheme))
+}
+
+/// Parse simple `key="value"` / `key='value'` attributes into an ordered list.
+fn parse_attrs(attrs: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = attrs.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip whitespace
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // Read key
+        let key_start = i;
+        while i < bytes.len() && bytes[i] != b'=' && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let key = attrs[key_start..i].to_ascii_lowercase();
+        if key.is_empty() {
+            break;
+        }
+        // Expect '='
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            // Bare attribute, no value
+            out.push((key, String::new()));
+            continue;
+        }
+        i += 1; // consume =
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        // Read value (quoted or bare)
+        if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+            let quote = bytes[i];
+            i += 1;
+            let val_start = i;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            let val = attrs[val_start..i].to_string();
+            if i < bytes.len() {
+                i += 1;
+            }
+            out.push((key, val));
+        } else {
+            let val_start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            out.push((key, attrs[val_start..i].to_string()));
+        }
+    }
+    out
+}
+
+/// Rebuild an opening tag with sanitized attributes. Returns `None` if the
+/// tag should be rejected entirely (e.g. `<a>` with an unsafe href).
+/// `tag_name` keeps its original case; `self_closing` adds a trailing `/`.
+fn rebuild_safe_tag(tag_name: &str, attrs_raw: &str, self_closing: bool) -> Option<String> {
+    let attrs = parse_attrs(attrs_raw);
+    let mut buf = String::from("<");
+    buf.push_str(tag_name);
+    match tag_name.to_ascii_lowercase().as_str() {
+        "a" => {
+            // Find href; reject tag if missing or unsafe.
+            let href = attrs.iter().find(|(k, _)| k == "href").map(|(_, v)| v);
+            let href = href?;
+            if !is_safe_href(href) {
+                return None;
+            }
+            buf.push_str(" href=\"");
+            buf.push_str(&escape_html_text(href));
+            buf.push('"');
+        }
+        "code" => {
+            // Telegram supports a single `class="language-xxx"` on code.
+            if let Some((_, v)) = attrs.iter().find(|(k, _)| k == "class") {
+                buf.push_str(" class=\"");
+                buf.push_str(&escape_html_text(v));
+                buf.push('"');
+            }
+        }
+        "tg-emoji" => {
+            // Telegram custom emoji uses `emoji-id="…"`.
+            if let Some((_, v)) = attrs.iter().find(|(k, _)| k == "emoji-id") {
+                buf.push_str(" emoji-id=\"");
+                buf.push_str(&escape_html_text(v));
+                buf.push('"');
+            }
+        }
+        _ => {
+            // Other allowed tags: drop all attributes.
+        }
+    }
+    if self_closing {
+        buf.push('/');
+    }
+    buf.push('>');
+    Some(buf)
 }
 
 #[cfg(test)]
@@ -4330,6 +4531,72 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_telegram_html_javascript_href_dropped() {
+        // javascript: scheme must be stripped, inner text preserved.
+        let input = r#"<a href="javascript:alert(1)">click</a>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("javascript:"), "got: {output}");
+        assert!(!output.contains("href="), "got: {output}");
+        assert!(output.contains("click"), "got: {output}");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_data_href_dropped() {
+        let input = r#"<a href="data:text/html,<script>">x</a>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("data:"), "got: {output}");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_relative_href_dropped() {
+        // No scheme → relative URL → reject.
+        let input = r#"<a href="/admin">x</a>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("href="), "got: {output}");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_safe_schemes_kept() {
+        for scheme in ["https", "http", "mailto", "tg"] {
+            let input = format!(r#"<a href="{scheme}://x">x</a>"#);
+            let output = sanitize_telegram_html(&input);
+            assert!(
+                output.contains(&format!("{scheme}://x")),
+                "scheme {scheme} should be kept: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_attr_injection_escaped() {
+        // Attribute value with embedded quote/bracket must be escaped.
+        let input = r#"<a href="https://x"" onclick="hack()"">click</a>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("onclick"), "got: {output}");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_unknown_tag_attr_escaped() {
+        // Unknown tag with HTML-special characters in body must be escaped.
+        let input = r#"<thinking attr="&">"#;
+        let output = sanitize_telegram_html(input);
+        assert!(
+            output.contains("&amp;"),
+            "ampersand should be escaped: {output}"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_drops_disallowed_attrs_on_b() {
+        // Allowed tag with extra attrs: attrs should be dropped.
+        let input = r#"<b style="color:red" onclick="x()">bold</b>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("style"), "got: {output}");
+        assert!(!output.contains("onclick"), "got: {output}");
+        assert!(output.contains("<b>"), "got: {output}");
+    }
+
+    #[test]
     fn test_supports_streaming() {
         let adapter = TelegramAdapter::new(
             "fake:token".to_string(),
@@ -5020,5 +5287,311 @@ mod tests {
                 panic!("expected unchanged Text (no photo URL with fake token), got {other:?}")
             }
         }
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Continues the #3820 series (slack/discord/teams/line/dingtalk/messenger/
+    // mattermost/bluesky/viber/keybase/mastodon/nextcloud/ntfy/pumble/reddit/
+    // gotify already covered). Uses `wiremock` to stand up a local HTTP server
+    // and points `TelegramAdapter` at it via the `api_url` constructor parameter.
+    // Exercises `ChannelAdapter::send` and `ChannelAdapter::send_in_thread`,
+    // asserting URL path (`/bot{token}/{method}`), JSON body shape, the
+    // 4096-UTF-16-unit chunking boundary, HTML sanitization on the wire, and
+    // failure propagation.
+
+    use wiremock::matchers::{body_json, body_partial_json, method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TEST_TOKEN: &str = "123456:test-bot-token";
+
+    fn make_send_adapter(api_base: String) -> TelegramAdapter {
+        TelegramAdapter::new(
+            TEST_TOKEN.to_string(),
+            vec![],
+            std::time::Duration::from_secs(5),
+            Some(api_base),
+        )
+    }
+
+    fn dummy_user(chat_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: chat_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_send_text_calls_send_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 12345_i64,
+                "text": "hello from librefang",
+                "parse_mode": "HTML",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 12345, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("12345"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_propagates_non_2xx_failure() {
+        // Non-recoverable failure (HTTP 500, body without "can't parse entities")
+        // must surface to the caller — silently swallowing would leave operators
+        // unaware of delivery loss.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        let err = adapter
+            .send(&dummy_user("12345"), ChannelContent::Text("kaboom".into()))
+            .await
+            .expect_err("send must propagate non-2xx as error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Telegram sendMessage failed"),
+            "expected error to mention sendMessage failure, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_send_long_text_splits_at_4096_boundary() {
+        // Telegram caps a single sendMessage at 4096 UTF-16 units. A 6000-char
+        // ASCII payload must be split into 2 chunks; both must hit the wire.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let long_text: String = "a".repeat(6000);
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(&dummy_user("1"), ChannelContent::Text(long_text))
+            .await
+            .expect("send must succeed across two chunks");
+        // Wiremock's `expect(2)` is verified on MockServer drop; force it now
+        // so the assertion failure (if any) is attributed to this test.
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn telegram_send_command_formats_with_slash_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 7_i64,
+                "text": "/start arg1 arg2",
+                "parse_mode": "HTML",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 7, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("7"),
+                ChannelContent::Command {
+                    name: "start".into(),
+                    args: vec!["arg1".into(), "arg2".into()],
+                },
+            )
+            .await
+            .expect("command send must succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_in_thread_includes_message_thread_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 9000_i64,
+                "text": "topic reply",
+                "parse_mode": "HTML",
+                "message_thread_id": 42_i64,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 9000, "type": "supergroup" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send_in_thread(
+                &dummy_user("9000"),
+                ChannelContent::Text("topic reply".into()),
+                "42",
+            )
+            .await
+            .expect("send_in_thread must succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_unknown_html_tag_is_escaped_on_the_wire() {
+        // Sanitizer must escape disallowed tags (e.g. <thinking>) before the
+        // request leaves the adapter — otherwise Telegram's parse_mode=HTML
+        // rejects the message with 400. We assert on the actual JSON body to
+        // catch regressions in the sanitize boundary.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .and(body_partial_json(serde_json::json!({
+                "chat_id": 1_i64,
+                "text": "&lt;thinking&gt;hidden&lt;/thinking&gt; visible",
+                "parse_mode": "HTML",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::Text("<thinking>hidden</thinking> visible".into()),
+            )
+            .await
+            .expect("send with unknown HTML tag must succeed (sanitized)");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_location_calls_send_location_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendLocation")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 1_i64,
+                "latitude": 37.7749,
+                "longitude": -122.4194,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::Location {
+                    lat: 37.7749,
+                    lon: -122.4194,
+                },
+            )
+            .await
+            .expect("location send must succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_image_calls_send_photo_with_caption() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendPhoto")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 1_i64,
+                "photo": "https://example.com/cat.png",
+                "caption": "look at this cat",
+                "parse_mode": "HTML",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::Image {
+                    url: "https://example.com/cat.png".into(),
+                    caption: Some("look at this cat".into()),
+                    mime_type: None,
+                },
+            )
+            .await
+            .expect("image send must succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_interactive_falls_through_silently_on_5xx() {
+        // PRODUCTION OBSERVATION (#3820): Telegram's
+        // `api_send_interactive_message` logs warn! on non-2xx but always
+        // returns Ok(()). This is fail-open behaviour — inconsistent with
+        // `api_send_message` (which propagates non-2xx as Err). This test
+        // pins the current behaviour so a future fix is a deliberate change,
+        // not an accidental drift. Tracked in the PR body.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(format!(r"^/bot{TEST_TOKEN}/sendMessage$")))
+            .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        let res = adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::Interactive {
+                    text: "pick one".into(),
+                    buttons: vec![vec![InteractiveButton {
+                        label: "ok".into(),
+                        action: "ok".into(),
+                        url: None,
+                        style: None,
+                    }]],
+                },
+            )
+            .await;
+        assert!(
+            res.is_ok(),
+            "interactive send currently swallows 5xx (see PR #3820 production observation)"
+        );
     }
 }

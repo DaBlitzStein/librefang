@@ -10,13 +10,18 @@
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
-use librefang_kernel::auth::UserRole;
+// Re-export `UserRole` through the api-layer auth boundary so that route
+// modules (and tests) don't need to reach into `librefang_kernel::auth`
+// directly. This keeps the `librefang-api` <-> `librefang-kernel` import
+// surface narrow per issue #3744 — the underlying type still lives in the
+// kernel; only the import path is centralized here.
+pub use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
 use librefang_types::i18n;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 
 use librefang_telemetry::metrics;
 
@@ -101,6 +106,17 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
             | "/api/config/reload"
             | "/api/auth/change-password"
             | "/api/shutdown"
+            // #3621: TOTP enrollment is an Owner-equivalent action — a
+            // confirmed enrollment hands the holder approve power for every
+            // privileged tool call, so any non-Owner bearer token must not
+            // be able to start, confirm, or revoke the enrollment.
+            | "/api/approvals/totp/setup"
+            | "/api/approvals/totp/confirm"
+            | "/api/approvals/totp/revoke"
+            // A2A discover registers a remote agent into the pending registry,
+            // expanding the trust surface; restrict to Owner so non-Owner API keys
+            // cannot fill the registry or stage impersonation attempts (#3483).
+            | "/api/a2a/discover"
     ) {
         return true;
     }
@@ -248,16 +264,49 @@ pub async fn accept_language(mut request: Request<Body>, next: Next) -> Response
 }
 
 /// Middleware: inject a unique request ID and log the request/response.
+///
+/// The request_id is also published as a field on a per-request tracing
+/// span that wraps the downstream handler.  Any child span opened inside
+/// the handler — including the kernel orchestration spans and the
+/// `llm.complete` / `llm.stream` spans on each LLM driver — inherits this
+/// field automatically, so a single grep on `request_id=<uuid>` lights up
+/// the full execution path (HTTP → kernel → LLM provider).  This closes
+/// the propagation gap reported in #3775.
 pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Body> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = request.method().clone();
     let uri = request.uri().path().to_string();
     let start = Instant::now();
 
-    let mut response = next.run(request).await;
+    // Span wraps the entire downstream future so any `tracing::instrument`
+    // (or manual span) opened inside the handler chain becomes a child of
+    // this span and carries `request_id` for free.  `info_span!` (not
+    // `debug_span!`) so the span is recorded at the default subscriber
+    // level — debug-level spans get filtered out in release builds and
+    // the propagation guarantee disappears with them.
+    let request_span = tracing::info_span!(
+        "http_request",
+        request_id = %request_id,
+        method = %method,
+        path = %uri,
+    );
+
+    let mut response = next.run(request).instrument(request_span).await;
 
     let elapsed = start.elapsed();
     let status = response.status().as_u16();
+
+    // Lift handler-resolved identifiers (currently `agent_id`) out of the
+    // response extensions and onto the structured access-log line. Closes
+    // #3511 — without this, tracing all requests for a specific agent
+    // across the kernel boundary requires `RUST_LOG=debug` and string
+    // matching on raw URI paths. `session_id` will land in a follow-up PR
+    // once `KernelHandle::send_message` surfaces the resolved `SessionId`.
+    let agent_id = response
+        .extensions()
+        .get::<crate::extensions::AgentIdField>()
+        .map(|f| f.0.to_string());
+    let agent_id_field = agent_id.as_deref().unwrap_or("");
 
     // 4xx/5xx elevated so auth storms and server faults surface; GET successes suppressed to avoid poll noise.
     if status >= 500 {
@@ -267,6 +316,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             path = %uri,
             status = status,
             latency_ms = elapsed.as_millis() as u64,
+            agent_id = %agent_id_field,
             "API request"
         );
     } else if status >= 400 {
@@ -276,6 +326,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             path = %uri,
             status = status,
             latency_ms = elapsed.as_millis() as u64,
+            agent_id = %agent_id_field,
             "API request"
         );
     } else if method == axum::http::Method::GET {
@@ -285,6 +336,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             path = %uri,
             status = status,
             latency_ms = elapsed.as_millis() as u64,
+            agent_id = %agent_id_field,
             "API request"
         );
     } else {
@@ -294,6 +346,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             path = %uri,
             status = status,
             latency_ms = elapsed.as_millis() as u64,
+            agent_id = %agent_id_field,
             "API request"
         );
     }
@@ -376,6 +429,189 @@ pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response
     }
 
     response
+}
+
+// ---------------------------------------------------------------------------
+// Public route catalog
+//
+// These typed constants are the single source of truth for which routes the
+// auth middleware treats as publicly reachable.  They are intentionally
+// `pub` so that integration tests can enumerate them and assert that every
+// path either lives here or requires an Authorization header.
+//
+// Sorted alphabetically by path within each slice for deterministic ordering.
+// ---------------------------------------------------------------------------
+
+/// Whether a public route is reachable on any HTTP method or GET only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicMethod {
+    /// Any HTTP method is public (no token required).
+    Any,
+    /// Only GET requests are public; other methods require auth.
+    GetOnly,
+}
+
+/// Whether the path must match exactly or may be a prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicMatch {
+    /// The normalised request path must equal `path` exactly.
+    Exact,
+    /// The normalised request path must start with `path`.
+    Prefix,
+}
+
+/// A single entry in the public-route allowlist.
+#[derive(Debug, Clone, Copy)]
+pub struct PublicRoute {
+    pub method: PublicMethod,
+    pub path: &'static str,
+    pub match_kind: PublicMatch,
+}
+
+impl PublicRoute {
+    const fn exact_any(path: &'static str) -> Self {
+        Self {
+            method: PublicMethod::Any,
+            path,
+            match_kind: PublicMatch::Exact,
+        }
+    }
+    const fn exact_get(path: &'static str) -> Self {
+        Self {
+            method: PublicMethod::GetOnly,
+            path,
+            match_kind: PublicMatch::Exact,
+        }
+    }
+    const fn prefix_any(path: &'static str) -> Self {
+        Self {
+            method: PublicMethod::Any,
+            path,
+            match_kind: PublicMatch::Prefix,
+        }
+    }
+    const fn prefix_get(path: &'static str) -> Self {
+        Self {
+            method: PublicMethod::GetOnly,
+            path,
+            match_kind: PublicMatch::Prefix,
+        }
+    }
+}
+
+/// Routes that are public on **any** HTTP method, regardless of auth config.
+///
+/// These are either static assets needed to render the login screen, auth
+/// flow entry points, or minimal liveness probes that leak nothing sensitive.
+///
+/// Ordering note: entries here are grouped by semantic role (assets /
+/// auth-flow / pairing / liveness / OAuth) rather than sorted alphabetically,
+/// for readability. `PUBLIC_ROUTES_GET_ONLY` and `PUBLIC_ROUTES_DASHBOARD_READS`
+/// are sorted alphabetically by path. Maintain the chosen ordering when adding
+/// new entries to each slice.
+pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
+    // Static assets / shell
+    PublicRoute::exact_any("/"),
+    PublicRoute::exact_any("/favicon.ico"),
+    PublicRoute::exact_any("/logo.png"),
+    // Auth flow entry points (method-free so POST also works)
+    PublicRoute::exact_any("/api/auth/callback"),
+    PublicRoute::exact_any("/api/auth/dashboard-check"),
+    PublicRoute::exact_any("/api/auth/dashboard-login"),
+    // Mobile pairing — phone has no API key yet
+    PublicRoute::exact_any("/api/pairing/complete"),
+    // Minimal liveness probes
+    PublicRoute::exact_any("/api/health"),
+    PublicRoute::exact_any("/api/version"),
+    PublicRoute::exact_any("/api/versions"),
+    // GitHub Copilot OAuth — prefix, any method
+    PublicRoute::prefix_any("/api/providers/github-copilot/oauth/"),
+];
+
+/// Routes that are public on **GET only**, regardless of auth config.
+pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
+    PublicRoute::exact_get("/.well-known/agent.json"),
+    // A2A: agent listing is public so external callers can discover agents
+    // without a bearer token (A2A spec intent). All other /a2a/* paths require
+    // auth (Bug #3781).
+    PublicRoute::exact_get("/a2a/agents"),
+    PublicRoute::exact_get("/api/auth/providers"),
+    // Auth login prefix
+    PublicRoute::prefix_get("/api/auth/login"),
+    // Config schema
+    PublicRoute::exact_get("/api/config/schema"),
+    // Dashboard assets (JS/CSS/fonts) — always public, SPA needs them for login page
+    PublicRoute::prefix_get("/dashboard/assets/"),
+    // PWA siblings of the dashboard shell — static bytes baked into the binary
+    // via `include_dir!` (see `webchat.rs::resolve_dashboard_file`), identical
+    // for every user and leaking nothing sensitive. They MUST be reachable
+    // unauthenticated because:
+    //   * the W3C App Manifest spec mandates `credentials="omit"` for
+    //     `<link rel="manifest">` fetches absent `crossorigin="use-credentials"`,
+    //     so the session cookie is intentionally not sent;
+    //   * the service-worker register fetch and PWA icons are likewise issued
+    //     before/around the login flow.
+    // Without the exemption every authenticated dashboard load would log a
+    // stream of WARN 401s for these paths.
+    //
+    // Source of truth for the asset set is `dashboard/public/` (bundled by
+    // Vite into `dist/`). Adding a new PWA asset there means: (1) reference
+    // it from `dashboard/index.html` (or `manifest.json`) and (2) add an
+    // exact-match entry here. The rate limiter exempts the whole `/dashboard/`
+    // tree via prefix in `rate_limiter.rs::is_rate_limit_exempt`, so no
+    // change is needed there.
+    PublicRoute::exact_get("/dashboard/icon-192.png"),
+    PublicRoute::exact_get("/dashboard/icon-512.png"),
+    PublicRoute::exact_get("/dashboard/manifest.json"),
+    PublicRoute::exact_get("/dashboard/sw.js"),
+    // i18n locale bundles — static, fetched before auth flow
+    PublicRoute::prefix_get("/locales/"),
+];
+
+/// Routes in the "dashboard reads" group — public when `require_auth_for_reads`
+/// is NOT enabled (or no auth is configured), authenticated otherwise.
+///
+/// All entries are GET-only. Prefix entries are marked `PublicMatch::Prefix`.
+pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
+    PublicRoute::exact_get("/api/a2a/agents"),
+    PublicRoute::exact_get("/api/agents"),
+    PublicRoute::exact_get("/api/auto-dream/status"),
+    PublicRoute::exact_get("/api/budget"),
+    PublicRoute::exact_get("/api/budget/agents"),
+    PublicRoute::prefix_get("/api/budget/agents/"),
+    PublicRoute::exact_get("/api/channels"),
+    PublicRoute::exact_get("/api/config"),
+    PublicRoute::prefix_get("/api/cron/"),
+    PublicRoute::exact_get("/api/hands"),
+    PublicRoute::exact_get("/api/hands/active"),
+    PublicRoute::prefix_get("/api/hands/"),
+    PublicRoute::exact_get("/api/mcp/catalog"),
+    PublicRoute::exact_get("/api/mcp/health"),
+    PublicRoute::exact_get("/api/mcp/servers"),
+    PublicRoute::exact_get("/api/models"),
+    PublicRoute::exact_get("/api/models/aliases"),
+    PublicRoute::exact_get("/api/network/status"),
+    PublicRoute::exact_get("/api/profiles"),
+    PublicRoute::exact_get("/api/providers"),
+    PublicRoute::exact_get("/api/sessions"),
+    PublicRoute::exact_get("/api/skills"),
+    PublicRoute::exact_get("/api/status"),
+    PublicRoute::exact_get("/api/workflows"),
+];
+
+/// Check whether a normalised path matches a [`PublicRoute`] entry.
+fn matches_route(route: &PublicRoute, path: &str, is_get: bool) -> bool {
+    let method_ok = match route.method {
+        PublicMethod::Any => true,
+        PublicMethod::GetOnly => is_get,
+    };
+    if !method_ok {
+        return false;
+    }
+    match route.match_kind {
+        PublicMatch::Exact => path == route.path,
+        PublicMatch::Prefix => path.starts_with(route.path),
+    }
 }
 
 /// Bearer token authentication middleware.
@@ -549,24 +785,19 @@ pub async fn auth(
     // `/api/health` stays public because its payload is genuinely minimal
     // (status + version + a two-item checks array) and load balancers /
     // orchestrators need it for probing.
-    let always_public_method_free = matches!(
-        path,
-        "/" | "/logo.png"
-            | "/favicon.ico"
-            | "/api/versions"
-            | "/api/health"
-            | "/api/version"
-            | "/api/auth/callback"
-            | "/api/auth/dashboard-login"
-            | "/api/auth/dashboard-check"
-            // Mobile pairing — phone has no API key yet, needs to exchange
-            // the one-time QR token for the daemon's api_key.
-            | "/api/pairing/complete"
-    ) || path.starts_with("/api/providers/github-copilot/oauth/");
+    // Walk PUBLIC_ROUTES_ALWAYS: public on any HTTP method regardless of auth config.
+    let always_public_method_free = PUBLIC_ROUTES_ALWAYS
+        .iter()
+        .any(|r| matches_route(r, path, is_get));
+
     // MCP OAuth callback — browser redirect from OAuth provider, no API key.
     // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
+    // This is the sole public entry point for the MCP OAuth flow; the prefix
+    // "/api/mcp/servers/" is NOT in the PUBLIC_ROUTES_* slices so that
+    // /api/mcp/servers/{name} and /auth/status remain auth-protected.
     let is_mcp_oauth_callback =
         is_get && path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback");
+
     // Path has been trimmed of trailing slashes above, so `/dashboard/` is
     // normalized to `/dashboard`. Match the bare root as well as any
     // descendant so the login gate (and cookie session lookup below) don't
@@ -588,30 +819,20 @@ pub async fn auth(
     // entry UI; the individual `/api/*` endpoints still require a Bearer
     // token, which is the real security boundary.
     //
-    // Dashboard assets (JS/CSS/font chunks) are always public — they contain
-    // no sensitive data and the SPA shell needs them to render even the
-    // inline login page returned for unauthenticated browsers. The same
-    // applies to `/locales/*.json` — translation bundles are static i18n
-    // resources fetched by the SPA shell before any auth flow runs.
-    let is_dashboard_asset = path.starts_with("/dashboard/assets/");
-    let is_locale_bundle = path.starts_with("/locales/");
-    let dashboard_shell_public = (!auth_state.dashboard_auth_enabled && is_dashboard_path)
-        || is_dashboard_asset
-        || is_locale_bundle;
+    // Dashboard assets (JS/CSS/font chunks) and locale bundles are in
+    // PUBLIC_ROUTES_GET_ONLY; the dashboard shell is conditionally public
+    // based on dashboard_auth_enabled (handled below).
+    let dashboard_shell_public = !auth_state.dashboard_auth_enabled && is_dashboard_path;
 
+    // Walk PUBLIC_ROUTES_GET_ONLY: public on GET only regardless of auth config.
+    // MCP OAuth callbacks are handled separately by is_mcp_oauth_callback above
+    // (prefix + suffix check), not via a PUBLIC_ROUTES_GET_ONLY prefix entry.
     let always_public_get_only = is_get
-        && (matches!(
-            path,
-            "/.well-known/agent.json" | "/api/config/schema" | "/api/auth/providers"
-        ) || dashboard_shell_public
-            // The /a2a/agents listing is public so external callers can discover
-            // local agents without a bearer token (matches the A2A spec intent).
-            // All other /a2a/* paths — including /a2a/tasks/{id} which returns full
-            // task transcripts — require authentication (Bug #3781).
-            || path == "/a2a/agents"
-            // /api/uploads/* is intentionally NOT in the public list — uploads
-            // require authentication, UUID guessing is not access control (#3361).
-            || path.starts_with("/api/auth/login"));
+        && (PUBLIC_ROUTES_GET_ONLY
+            .iter()
+            .any(|r| matches_route(r, path, is_get))
+            || dashboard_shell_public);
+
     let always_public =
         always_public_method_free || always_public_get_only || is_mcp_oauth_callback;
 
@@ -620,51 +841,19 @@ pub async fn auth(
     // when `require_auth_for_reads` is enabled AND an `api_key` is configured,
     // so a remote attacker can no longer enumerate agents, config, budget,
     // sessions, approvals, hands, skills, or workflows.
-    let dashboard_read_exact = matches!(
-        path,
-        "/api/agents"
-            | "/api/profiles"
-            | "/api/config"
-            | "/api/status"
-            | "/api/models"
-            | "/api/models/aliases"
-            | "/api/providers"
-            | "/api/budget"
-            | "/api/budget/agents"
-            | "/api/network/status"
-            | "/api/a2a/agents"
-            // /api/approvals removed — list_approvals returns the same
-            // action_summary (pending shell command) the prefix carve
-            // protects against.  See the matching change to
-            // dashboard_read_prefix below.
-            | "/api/channels"
-            | "/api/hands"
-            | "/api/hands/active"
-            | "/api/skills"
-            | "/api/sessions"
-            | "/api/mcp/servers"
-            | "/api/mcp/catalog"
-            | "/api/mcp/health"
-            | "/api/workflows"
-            | "/api/auto-dream/status"
-    );
-    // SECURITY #3367 + post-merge audit of #3941: every read path under
-    // /api/approvals/* exposes the same `action_summary` field (the
-    // pending shell command and arguments) — it is reachable through
-    // GET /approvals (list), GET /approvals/{id}, GET /approvals/audit,
-    // and the previously-carved /approvals/session/* tree.  #3941 only
-    // gated /api/approvals/session/, leaving the same payload
-    // unauthenticated through the sister endpoints.  Drop the prefix
-    // from the public allowlist entirely so the auth gate covers every
-    // approvals route; the dashboard already attaches credentials on
-    // every request via its api helper, so this is not a UX regression.
-    let dashboard_read_prefix = path.starts_with("/api/budget/agents/")
-        || path.starts_with("/api/hands/")
-        || path.starts_with("/api/cron/");
-    // NOTE: /api/logs/stream (SSE) is intentionally excluded from the public
-    // allowlist. It streams real-time audit/log events and must require auth
-    // the same way every other sensitive read endpoint does. (#3593/#3680)
-    let dashboard_read_public = is_get && (dashboard_read_exact || dashboard_read_prefix);
+    //
+    // SECURITY #3367 + post-merge audit of #3941: /api/approvals/* is
+    // intentionally absent — every read path there exposes `action_summary`
+    // (the pending shell command). The dashboard attaches credentials on every
+    // request via its api helper, so this is not a UX regression.
+    //
+    // NOTE: /api/logs/stream (SSE) is also intentionally excluded — it
+    // streams real-time audit/log events and must require auth the same way
+    // every other sensitive read endpoint does. (#3593/#3680)
+    let dashboard_read_public = is_get
+        && PUBLIC_ROUTES_DASHBOARD_READS
+            .iter()
+            .any(|r| matches_route(r, path, is_get));
 
     let enforce_auth_on_reads = auth_state.require_auth_for_reads && auth_configured;
 
@@ -708,19 +897,38 @@ pub async fn auth(
             .unwrap_or_default();
     }
 
-    // Check Authorization: Bearer <token> header, then fallback to X-API-Key
+    // Check Authorization: Bearer <token> header, then fallback to X-API-Key,
+    // then fallback to Sec-WebSocket-Protocol: bearer.<token> for WS upgrades.
+    // Browsers cannot set custom headers on WebSocket handshakes, so the
+    // dashboard encodes the session token as a sub-protocol entry — this must
+    // be checked here for non-loopback connections (Docker bridge, LAN) where
+    // the loopback fast-path above is not taken.
     let bearer_token = request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
 
-    let api_token = bearer_token.or_else(|| {
-        request
-            .headers()
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-    });
+    let api_token = bearer_token
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+        })
+        .or_else(|| {
+            // WS upgrade fallback: Sec-WebSocket-Protocol: bearer.<token>
+            request
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .find(|p| p.starts_with("bearer."))
+                        .and_then(|p| p.strip_prefix("bearer."))
+                })
+        });
 
     // Cookie-based session token — only accepted for SPA shell navigation
     // (`/dashboard/*`). API endpoints still require a Bearer/header token so
@@ -979,6 +1187,54 @@ mod tests {
             assert!(
                 user_role_allows_request(UserRole::Owner, &post, path),
                 "Owner must be allowed to POST {path}"
+            );
+        }
+    }
+
+    // #3621: TOTP enrollment must be Owner-only. Without this gate, any
+    // bearer token (including a Viewer or User role) could overwrite the
+    // unconfirmed `totp_secret` and hijack enrollment, or wipe a confirmed
+    // enrollment via `revoke` and silently disable 2FA on login.
+    #[test]
+    fn test_totp_enrollment_is_owner_only() {
+        let post = axum::http::Method::POST;
+        for role in [UserRole::Viewer, UserRole::User, UserRole::Admin] {
+            for path in [
+                "/api/approvals/totp/setup",
+                "/api/approvals/totp/confirm",
+                "/api/approvals/totp/revoke",
+            ] {
+                assert!(
+                    !user_role_allows_request(role, &post, path),
+                    "{role:?} must NOT be allowed to POST {path}"
+                );
+            }
+        }
+        // Owner still has access.
+        for path in [
+            "/api/approvals/totp/setup",
+            "/api/approvals/totp/confirm",
+            "/api/approvals/totp/revoke",
+        ] {
+            assert!(
+                user_role_allows_request(UserRole::Owner, &post, path),
+                "Owner must be allowed to POST {path}"
+            );
+        }
+
+        // Regression for over-gating: GET /api/approvals/totp/status is a
+        // read-only enrollment-status probe and must remain reachable for
+        // every authenticated role, including non-Owner ones.
+        let get = axum::http::Method::GET;
+        for role in [
+            UserRole::Viewer,
+            UserRole::User,
+            UserRole::Admin,
+            UserRole::Owner,
+        ] {
+            assert!(
+                user_role_allows_request(role, &get, "/api/approvals/totp/status"),
+                "{role:?} must be allowed to GET /api/approvals/totp/status"
             );
         }
     }
@@ -2080,6 +2336,36 @@ mod tests {
             response.status(),
             StatusCode::UNAUTHORIZED,
             "GET /a2a/tasks/{{id}} must require auth — it returns full task transcripts"
+        );
+    }
+
+    /// Regression for #3473 (dup of #3781): GET /a2a/tasks/{id}/status must
+    /// also require auth. The status endpoint exposes per-task progress
+    /// signals usable for side-channel inference even before the full
+    /// transcript is fetched, so it has to share the auth gate.
+    #[tokio::test]
+    async fn a2a_task_status_requires_auth() {
+        let app = Router::new()
+            .route("/a2a/tasks/{id}/status", get(|| async { "task status" }))
+            .layer(axum::middleware::from_fn_with_state(
+                with_key_state("secret"),
+                auth,
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/a2a/tasks/some-uuid-1234/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET /a2a/tasks/{{id}}/status must require auth (#3473 dup of #3781)"
         );
     }
 

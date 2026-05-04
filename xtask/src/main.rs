@@ -22,12 +22,14 @@ mod fmt;
 mod integration_test;
 mod license_check;
 mod loc;
+mod local_check_mode;
 mod migrate;
 mod pre_commit;
 mod publish_npm_binaries;
 mod publish_pypi_binaries;
 mod publish_sdks;
 mod release;
+mod schema_check;
 mod setup;
 mod sync_versions;
 mod update_deps;
@@ -133,6 +135,9 @@ enum Command {
 
     /// Publish platform-specific CLI wheels to PyPI
     PublishPypiBinaries(publish_pypi_binaries::PublishPypiBinariesArgs),
+
+    /// Detect drift between schema artifacts and committed sha256 baselines
+    SchemaCheck(schema_check::SchemaCheckArgs),
 }
 
 fn main() {
@@ -168,6 +173,7 @@ fn main() {
         Command::Contributors(args) => contributors::run(args),
         Command::PublishNpmBinaries(args) => publish_npm_binaries::run(args),
         Command::PublishPypiBinaries(args) => publish_pypi_binaries::run(args),
+        Command::SchemaCheck(args) => schema_check::run(args),
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");

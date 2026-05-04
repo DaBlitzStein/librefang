@@ -215,6 +215,7 @@ use super::channels::FieldType;
 use super::config::json_to_toml_value;
 use super::AppState;
 use super::RequestLanguage;
+use crate::mcp_oauth::KernelOAuthProvider;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -230,12 +231,14 @@ use std::time::Instant;
 // ---------------------------------------------------------------------------
 
 /// GET /api/skills — List installed skills.
+///
+/// `categories` always reflects all skills regardless of the `?category=` filter.
 #[utoipa::path(
     get,
     path = "/api/skills",
     tag = "skills",
     responses(
-        (status = 200, description = "List installed skills", body = Vec<serde_json::Value>)
+        (status = 200, description = "List installed skills", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_skills(
@@ -310,9 +313,13 @@ pub async fn list_skills(
         .collect();
 
     let categories_vec: Vec<String> = categories.into_iter().collect();
+    let total = skills.len();
+    // Untyped JSON so `categories` can be added alongside PaginatedResponse fields without a new struct.
     Json(serde_json::json!({
-        "skills": skills,
-        "total": skills.len(),
+        "items": skills,
+        "total": total,
+        "offset": 0,
+        "limit": serde_json::Value::Null,
         "categories": categories_vec,
     }))
 }
@@ -322,9 +329,9 @@ pub async fn list_skills(
     post,
     path = "/api/skills/install",
     tag = "skills",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Install a skill from FangHub", body = serde_json::Value)
+        (status = 200, description = "Install a skill from FangHub", body = crate::types::JsonObject)
     )
 )]
 pub async fn install_skill(
@@ -399,9 +406,9 @@ pub async fn install_skill(
     post,
     path = "/api/skills/uninstall",
     tag = "skills",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Uninstall a skill", body = serde_json::Value)
+        (status = 200, description = "Uninstall a skill", body = crate::types::JsonObject)
     )
 )]
 pub async fn uninstall_skill(
@@ -438,7 +445,7 @@ pub async fn uninstall_skill(
     path = "/api/skills/reload",
     tag = "skills",
     responses(
-        (status = 200, description = "Rescan the skills directory from disk", body = serde_json::Value)
+        (status = 200, description = "Rescan the skills directory from disk", body = crate::types::JsonObject)
     )
 )]
 pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -461,7 +468,7 @@ pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoRespo
     path = "/api/skills/registry",
     tag = "skills",
     responses(
-        (status = 200, description = "Official skills available in the FangHub registry", body = serde_json::Value)
+        (status = 200, description = "Official skills available in the FangHub registry", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -489,16 +496,20 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&skill_md_path) {
-                if let Some((name, description)) = parse_skill_md_frontmatter(&content) {
-                    let skill_name = if name.is_empty() { &dir_name } else { &name };
+                if let Some(fm) = parse_skill_md_frontmatter(&content) {
+                    let skill_name = if fm.name.is_empty() {
+                        &dir_name
+                    } else {
+                        &fm.name
+                    };
                     let installed_dir = state.kernel.home_dir().join("skills").join(skill_name);
                     let is_installed = installed_dir.exists();
                     skills.push(serde_json::json!({
                         "name": skill_name,
-                        "description": description,
-                        "version": null,
-                        "author": null,
-                        "tags": [],
+                        "description": fm.description,
+                        "version": fm.version,
+                        "author": fm.author,
+                        "tags": fm.tags,
                         "is_installed": is_installed,
                     }));
                 }
@@ -511,7 +522,58 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
 }
 
 /// Parse YAML frontmatter from a SKILL.md file. Returns `(name, description)`.
-fn parse_skill_md_frontmatter(content: &str) -> Option<(String, String)> {
+/// Parsed YAML frontmatter from a SKILL.md.
+///
+/// Only `name` and `description` were ever required by the LibreFang
+/// registry; `version` / `author` / `tags` are optional add-ons that
+/// the dashboard's federated catalog UI surfaces when present. Missing
+/// fields parse to `None` / `[]` rather than failing — old SKILL.md
+/// files that pre-date the schema extension keep working.
+#[derive(Debug, Default)]
+struct SkillMdFrontmatter {
+    name: String,
+    description: String,
+    version: Option<String>,
+    author: Option<String>,
+    tags: Vec<String>,
+}
+
+fn strip_yaml_value(raw: &str) -> String {
+    // YAML scalar values can be wrapped in single or double quotes; strip
+    // either form and trim whitespace.
+    let trimmed = raw.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    unquoted.to_string()
+}
+
+fn parse_yaml_inline_list(raw: &str) -> Vec<String> {
+    // Accept the two shapes that show up in the wild:
+    //   tags: ["a", "b"]
+    //   tags: [a, b]
+    // Anything else (block-list `- item` form, multi-line) is left for
+    // a future iteration; SKILL.md frontmatters in the registry only
+    // ever use the inline form today.
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    inner
+        .split(',')
+        .map(strip_yaml_value)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn parse_skill_md_frontmatter(content: &str) -> Option<SkillMdFrontmatter> {
     let trimmed = content.trim();
     if !trimmed.starts_with("---") {
         return None;
@@ -519,20 +581,31 @@ fn parse_skill_md_frontmatter(content: &str) -> Option<(String, String)> {
     let after_open = &trimmed[3..];
     let close = after_open.find("---")?;
     let frontmatter = &after_open[..close];
-    let mut name = String::new();
-    let mut description = String::new();
+    let mut fm = SkillMdFrontmatter::default();
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
-            name = val.trim().to_string();
+            fm.name = strip_yaml_value(val);
         } else if let Some(val) = line.strip_prefix("description:") {
-            description = val.trim().to_string();
+            fm.description = strip_yaml_value(val);
+        } else if let Some(val) = line.strip_prefix("version:") {
+            let v = strip_yaml_value(val);
+            if !v.is_empty() {
+                fm.version = Some(v);
+            }
+        } else if let Some(val) = line.strip_prefix("author:") {
+            let a = strip_yaml_value(val);
+            if !a.is_empty() {
+                fm.author = Some(a);
+            }
+        } else if let Some(val) = line.strip_prefix("tags:") {
+            fm.tags = parse_yaml_inline_list(val);
         }
     }
-    if name.is_empty() && description.is_empty() {
+    if fm.name.is_empty() && fm.description.is_empty() {
         return None;
     }
-    Some((name, description))
+    Some(fm)
 }
 
 /// GET /api/marketplace/search — Search the FangHub marketplace.
@@ -544,7 +617,7 @@ fn parse_skill_md_frontmatter(content: &str) -> Option<(String, String)> {
         ("q" = Option<String>, Query, description = "Search query"),
     ),
     responses(
-        (status = 200, description = "Search the FangHub marketplace", body = serde_json::Value)
+        (status = 200, description = "Search the FangHub marketplace", body = crate::types::JsonObject)
     )
 )]
 pub async fn marketplace_search(
@@ -606,7 +679,7 @@ pub async fn marketplace_search(
         ("q" = Option<String>, Query, description = "Search query"),
     ),
     responses(
-        (status = 200, description = "Search ClawHub skills", body = serde_json::Value)
+        (status = 200, description = "Search ClawHub skills", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_search(
@@ -692,7 +765,7 @@ pub async fn clawhub_search(
         ("q" = Option<String>, Query, description = "Search query"),
     ),
     responses(
-        (status = 200, description = "Browse ClawHub skills by sort order", body = serde_json::Value)
+        (status = 200, description = "Browse ClawHub skills by sort order", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_browse(
@@ -766,7 +839,7 @@ pub async fn clawhub_browse(
         ("slug" = String, Path, description = "Skill slug"),
     ),
     responses(
-        (status = 200, description = "Get detailed info about a ClawHub skill", body = serde_json::Value)
+        (status = 200, description = "Get detailed info about a ClawHub skill", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_skill_detail(
@@ -842,7 +915,7 @@ pub async fn clawhub_skill_detail(
         ("slug" = String, Path, description = "Skill slug"),
     ),
     responses(
-        (status = 200, description = "Fetch source code of a ClawHub skill", body = serde_json::Value)
+        (status = 200, description = "Fetch source code of a ClawHub skill", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_skill_code(
@@ -890,9 +963,9 @@ pub async fn clawhub_skill_code(
     post,
     path = "/api/clawhub/install",
     tag = "skills",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Install a skill from ClawHub", body = serde_json::Value)
+        (status = 200, description = "Install a skill from ClawHub", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_install(
@@ -1684,7 +1757,7 @@ fn server_platform() -> &'static str {
     path = "/api/hands",
     tag = "hands",
     responses(
-        (status = 200, description = "List all hand definitions", body = serde_json::Value)
+        (status = 200, description = "List all hand definitions", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_hands(
@@ -1767,7 +1840,13 @@ pub async fn list_hands(
         })
         .collect();
 
-    Json(serde_json::json!({ "hands": hands, "total": hands.len() }))
+    let total = hands.len();
+    Json(crate::types::PaginatedResponse {
+        items: hands,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/hands/active — List active hand instances.
@@ -1776,7 +1855,7 @@ pub async fn list_hands(
     path = "/api/hands/active",
     tag = "hands",
     responses(
-        (status = 200, description = "List active hand instances", body = serde_json::Value)
+        (status = 200, description = "List active hand instances", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_active_hands(
@@ -1832,7 +1911,13 @@ pub async fn list_active_hands(
         })
         .collect();
 
-    Json(serde_json::json!({ "instances": items, "total": items.len() }))
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/hands/{hand_id} — Get a single hand definition with requirements check.
@@ -1844,7 +1929,7 @@ pub async fn list_active_hands(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Get a single hand definition with requirements", body = serde_json::Value)
+        (status = 200, description = "Get a single hand definition with requirements", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_hand(
@@ -2069,7 +2154,7 @@ pub async fn get_hand_manifest(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Re-check dependency status for a hand", body = serde_json::Value)
+        (status = 200, description = "Re-check dependency status for a hand", body = crate::types::JsonObject)
     )
 )]
 pub async fn check_hand_deps(
@@ -2131,7 +2216,7 @@ pub async fn check_hand_deps(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Auto-install missing dependencies for a hand", body = serde_json::Value)
+        (status = 200, description = "Auto-install missing dependencies for a hand", body = crate::types::JsonObject)
     )
 )]
 pub async fn install_hand_deps(
@@ -2413,7 +2498,7 @@ pub async fn install_hand_deps(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Hand uninstalled", body = serde_json::Value),
+        (status = 200, description = "Hand uninstalled", body = crate::types::JsonObject),
         (status = 404, description = "Hand not found or is a built-in"),
         (status = 409, description = "Hand is still active — deactivate first"),
     )
@@ -2425,7 +2510,7 @@ pub async fn uninstall_hand(
     let home_dir = state.kernel.home_dir().to_path_buf();
     match state.kernel.hands().uninstall_hand(&home_dir, &hand_id) {
         Ok(()) => {
-            librefang_kernel::router::invalidate_hand_route_cache();
+            state.kernel.invalidate_hand_route_cache();
             state.kernel.persist_hand_state();
             (
                 StatusCode::OK,
@@ -2454,9 +2539,9 @@ pub async fn uninstall_hand(
     post,
     path = "/api/hands/install",
     tag = "hands",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Install a hand from TOML content", body = serde_json::Value)
+        (status = 200, description = "Install a hand from TOML content", body = crate::types::JsonObject)
     )
 )]
 pub async fn install_hand(
@@ -2476,19 +2561,40 @@ pub async fn install_hand(
         skill_content,
     ) {
         Ok(def) => {
-            librefang_kernel::router::invalidate_hand_route_cache();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "id": def.id,
-                    "name": def.name,
-                    "description": def.description,
-                    "category": format!("{:?}", def.category),
-                })),
-            )
+            state.kernel.invalidate_hand_route_cache();
+            // Return the full canonical `HandDefinition` so dashboard /
+            // SDK callers can `setQueryData` on the hands list directly
+            // instead of doing a follow-up GET. The previous {id, name,
+            // description, category} subset forced a refetch round-trip
+            // and was inconsistent with how list_hands serializes hand
+            // metadata. Refs #3832.
+            //
+            // We materialise as `serde_json::Value` so the OK arm and the
+            // Err arm (`ApiErrorResponse::into_json_tuple()`) line up on
+            // `Json<serde_json::Value>` — the tuple's match arms must
+            // share a body type.
+            let body = serde_json::to_value(&def).unwrap_or(serde_json::Value::Null);
+            (StatusCode::OK, Json(body))
         }
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
+}
+
+/// Render a `HandInstance` to the canonical JSON shape used by every
+/// hand-instance mutation handler (activate / pause / resume).
+///
+/// Keeps activate, pause, and resume byte-identical so dashboard clients
+/// can `setQueryData` directly from any of them. Bug #3832 — mutation
+/// handlers must return the post-mutation entity, not an ack envelope.
+fn hand_instance_to_json(instance: &librefang_hands::HandInstance) -> serde_json::Value {
+    serde_json::json!({
+        "instance_id": instance.instance_id,
+        "hand_id": instance.hand_id,
+        "status": format!("{}", instance.status),
+        "agent_id": instance.agent_id().map(|a: librefang_types::agent::AgentId| a.to_string()),
+        "agent_name": instance.agent_name(),
+        "activated_at": instance.activated_at.to_rfc3339(),
+    })
 }
 
 /// POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).
@@ -2499,9 +2605,9 @@ pub async fn install_hand(
     params(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Activate a hand (spawns agent)", body = serde_json::Value)
+        (status = 200, description = "Activate a hand (spawns agent)", body = crate::types::JsonObject)
     )
 )]
 pub async fn activate_hand(
@@ -2535,17 +2641,7 @@ pub async fn activate_hand(
                     }
                 }
             }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "instance_id": instance.instance_id,
-                    "hand_id": instance.hand_id,
-                    "status": format!("{}", instance.status),
-                    "agent_id": instance.agent_id().map(|a: librefang_types::agent::AgentId| a.to_string()),
-                    "agent_name": instance.agent_name(),
-                    "activated_at": instance.activated_at.to_rfc3339(),
-                })),
-            )
+            (StatusCode::OK, Json(hand_instance_to_json(&instance)))
         }
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
@@ -2560,7 +2656,7 @@ pub async fn activate_hand(
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Pause a hand instance", body = serde_json::Value)
+        (status = 200, description = "Pause a hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn pause_hand(
@@ -2568,10 +2664,15 @@ pub async fn pause_hand(
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
     match state.kernel.pause_hand(id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "paused", "instance_id": id})),
-        ),
+        Ok(()) => match state.kernel.hands().get_instance(id) {
+            // #3832: return the post-mutation entity instead of an ack envelope
+            // so the dashboard can setQueryData without a follow-up GET.
+            Some(instance) => (StatusCode::OK, Json(hand_instance_to_json(&instance))),
+            None => {
+                ApiErrorResponse::internal(format!("hand instance {id} disappeared after pause"))
+                    .into_json_tuple()
+            }
+        },
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
@@ -2585,7 +2686,7 @@ pub async fn pause_hand(
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Resume a paused hand instance", body = serde_json::Value)
+        (status = 200, description = "Resume a paused hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn resume_hand(
@@ -2593,10 +2694,15 @@ pub async fn resume_hand(
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
     match state.kernel.resume_hand(id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "resumed", "instance_id": id})),
-        ),
+        Ok(()) => match state.kernel.hands().get_instance(id) {
+            // #3832: return the post-mutation entity instead of an ack envelope
+            // so the dashboard can setQueryData without a follow-up GET.
+            Some(instance) => (StatusCode::OK, Json(hand_instance_to_json(&instance))),
+            None => {
+                ApiErrorResponse::internal(format!("hand instance {id} disappeared after resume"))
+                    .into_json_tuple()
+            }
+        },
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
@@ -2610,7 +2716,7 @@ pub async fn resume_hand(
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Deactivate a hand (kills agent)", body = serde_json::Value)
+        (status = 200, description = "Deactivate a hand (kills agent)", body = crate::types::JsonObject)
     )
 )]
 pub async fn deactivate_hand(
@@ -2632,8 +2738,8 @@ pub async fn deactivate_hand(
     path = "/api/hands/{hand_id}/secret",
     tag = "hands",
     params(("hand_id" = String, Path, description = "Hand ID")),
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Secret saved", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Secret saved", body = crate::types::JsonObject))
 )]
 pub async fn set_hand_secret(
     State(state): State<Arc<AppState>>,
@@ -2711,7 +2817,7 @@ pub async fn set_hand_secret(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Get settings schema and current values", body = serde_json::Value)
+        (status = 200, description = "Get settings schema and current values", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_hand_settings(
@@ -2764,9 +2870,9 @@ pub async fn get_hand_settings(
     params(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Update settings for a hand instance", body = serde_json::Value)
+        (status = 200, description = "Update settings for a hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn update_hand_settings(
@@ -2812,7 +2918,7 @@ pub async fn update_hand_settings(
     path = "/api/hands/reload",
     tag = "hands",
     responses(
-        (status = 200, description = "Reload hand definitions from disk", body = serde_json::Value)
+        (status = 200, description = "Reload hand definitions from disk", body = crate::types::JsonObject)
     )
 )]
 pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2838,7 +2944,7 @@ pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoRespon
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Get dashboard stats for a hand instance", body = serde_json::Value)
+        (status = 200, description = "Get dashboard stats for a hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn hand_stats(
@@ -2913,7 +3019,7 @@ pub async fn hand_stats(
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Get live browser state for a hand instance", body = serde_json::Value)
+        (status = 200, description = "Get live browser state for a hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn hand_instance_browser(
@@ -3064,7 +3170,7 @@ pub async fn hand_send_message(
 
     // Resolve file attachments
     if !req.attachments.is_empty() {
-        let image_blocks = super::agents::resolve_attachments(&req.attachments);
+        let image_blocks = super::agents::resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
             super::agents::inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
         }
@@ -3394,7 +3500,7 @@ fn serialize_mcp_transport(
     path = "/api/mcp/taint-rules",
     tag = "mcp",
     responses(
-        (status = 200, description = "List configured named taint rule sets", body = serde_json::Value)
+        (status = 200, description = "List configured named taint rule sets", body = crate::types::JsonArray)
     )
 )]
 pub async fn list_mcp_taint_rules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -3420,7 +3526,7 @@ pub async fn list_mcp_taint_rules(State(state): State<Arc<AppState>>) -> impl In
     path = "/api/mcp/servers",
     tag = "mcp",
     responses(
-        (status = 200, description = "List configured MCP servers and their tools", body = serde_json::Value)
+        (status = 200, description = "List configured MCP servers and their tools", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -3527,7 +3633,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         ("name" = String, Path, description = "Server name"),
     ),
     responses(
-        (status = 200, description = "MCP server details", body = serde_json::Value),
+        (status = 200, description = "MCP server details", body = crate::types::JsonObject),
         (status = 404, description = "MCP server not found")
     )
 )]
@@ -3594,9 +3700,9 @@ pub async fn get_mcp_server(
     post,
     path = "/api/mcp/servers",
     tag = "mcp",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Add a new MCP server configuration", body = serde_json::Value)
+        (status = 200, description = "Add a new MCP server configuration", body = crate::types::JsonObject)
     )
 )]
 pub async fn add_mcp_server(
@@ -3781,9 +3887,9 @@ pub async fn add_mcp_server(
     params(
         ("name" = String, Path, description = "Server name"),
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Update an existing MCP server configuration", body = serde_json::Value)
+        (status = 200, description = "Update an existing MCP server configuration", body = crate::types::JsonObject)
     )
 )]
 pub async fn update_mcp_server(
@@ -3902,10 +4008,10 @@ pub(crate) struct PatchMcpTaintRequest {
     path = "/api/mcp/servers/{name}/taint",
     tag = "mcp",
     params(("name" = String, Path, description = "Server name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Taint settings updated", body = serde_json::Value),
-        (status = 404, description = "Server not found", body = serde_json::Value),
+        (status = 200, description = "Taint settings updated", body = crate::types::JsonObject),
+        (status = 404, description = "Server not found", body = crate::types::JsonObject),
     )
 )]
 #[allow(private_interfaces)]
@@ -4000,7 +4106,7 @@ pub async fn patch_mcp_server_taint(
         ("name" = String, Path, description = "Server name"),
     ),
     responses(
-        (status = 200, description = "Remove an MCP server configuration", body = serde_json::Value)
+        (status = 200, description = "Remove an MCP server configuration", body = crate::types::JsonObject)
     )
 )]
 pub async fn delete_mcp_server(
@@ -4046,11 +4152,17 @@ pub async fn delete_mcp_server(
     }
     drop(t);
 
-    // Clean up OAuth vault tokens, auth state, and live connections
+    // Clean up OAuth vault tokens, auth state, and live connections.
+    //
+    // #3651: replaced `let _ = vault_remove(...)` so vault crypto failures
+    // during MCP server uninstall are no longer silently dropped. Behavior
+    // is intentionally unchanged on success (uninstall continues even if a
+    // few vault entries can't be wiped — the auth state is reset
+    // unconditionally below) but each failure now produces an `audit` log
+    // line so operators can detect leftover credentials after a wrong-key
+    // boot.
     if let Some(ref url) = server_url {
-        let provider = librefang_kernel::mcp_oauth_provider::KernelOAuthProvider::new(
-            state.kernel.home_dir().to_path_buf(),
-        );
+        let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
         for field in &[
             "access_token",
             "refresh_token",
@@ -4061,9 +4173,16 @@ pub async fn delete_mcp_server(
             "pkce_state",
             "redirect_uri",
         ] {
-            let _ = provider.vault_remove(
-                &librefang_kernel::mcp_oauth_provider::KernelOAuthProvider::vault_key(url, field),
-            );
+            let vault_key = KernelOAuthProvider::vault_key(url, field);
+            if let Err(e) = provider.vault_remove(&vault_key) {
+                tracing::error!(
+                    target: "audit",
+                    op = "vault_remove",
+                    key = %vault_key,
+                    error = %e,
+                    "vault op failed during MCP server uninstall"
+                );
+            }
         }
     }
     state
@@ -4209,9 +4328,9 @@ fn validate_static_file_path(
     post,
     path = "/api/skills/create",
     tag = "skills",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Create a new prompt-only skill", body = serde_json::Value)
+        (status = 200, description = "Create a new prompt-only skill", body = crate::types::JsonObject)
     )
 )]
 pub async fn create_skill(
@@ -4286,7 +4405,7 @@ pub async fn create_skill(
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
     responses(
-        (status = 200, description = "Skill detail with evolution history", body = serde_json::Value),
+        (status = 200, description = "Skill detail with evolution history", body = crate::types::JsonObject),
         (status = 404, description = "Skill not found")
     )
 )]
@@ -4464,7 +4583,7 @@ fn evolution_ok_response(
         ("path" = String, Query, description = "Relative file path inside the skill directory")
     ),
     responses(
-        (status = 200, description = "File contents", body = serde_json::Value),
+        (status = 200, description = "File contents", body = crate::types::JsonObject),
         (status = 400, description = "Invalid path"),
         (status = 404, description = "Skill or file not found")
     )
@@ -4570,9 +4689,9 @@ fn audit_evolve(state: &Arc<AppState>, action: &str, skill_name: &str, detail: &
     path = "/api/skills/{name}/evolve/update",
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Skill updated", body = serde_json::Value),
+        (status = 200, description = "Skill updated", body = crate::types::JsonObject),
         (status = 400, description = "Invalid request / security-blocked content"),
         (status = 404, description = "Skill not found")
     )
@@ -4617,9 +4736,9 @@ pub async fn evolve_update_skill(
     path = "/api/skills/{name}/evolve/patch",
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Skill patched", body = serde_json::Value),
+        (status = 200, description = "Skill patched", body = crate::types::JsonObject),
         (status = 400, description = "Invalid request / fuzzy match failed"),
         (status = 404, description = "Skill not found")
     )
@@ -4671,7 +4790,7 @@ pub async fn evolve_patch_skill(
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
     responses(
-        (status = 200, description = "Skill rolled back", body = serde_json::Value),
+        (status = 200, description = "Skill rolled back", body = crate::types::JsonObject),
         (status = 404, description = "Skill or snapshot not found")
     )
 )]
@@ -4708,7 +4827,7 @@ pub async fn evolve_rollback_skill(
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
     responses(
-        (status = 200, description = "Skill deleted", body = serde_json::Value),
+        (status = 200, description = "Skill deleted", body = crate::types::JsonObject),
         (status = 400, description = "Non-local skill — deletion refused"),
         (status = 404, description = "Skill not found")
     )
@@ -4737,9 +4856,9 @@ pub async fn evolve_delete_skill(
     path = "/api/skills/{name}/evolve/file",
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "File written", body = serde_json::Value),
+        (status = 200, description = "File written", body = crate::types::JsonObject),
         (status = 400, description = "Invalid path / over size limit"),
         (status = 404, description = "Skill not found")
     )
@@ -4784,7 +4903,7 @@ pub async fn evolve_write_file(
         ("path" = String, Query, description = "Relative path of the file to remove")
     ),
     responses(
-        (status = 200, description = "File removed", body = serde_json::Value),
+        (status = 200, description = "File removed", body = crate::types::JsonObject),
         (status = 400, description = "Missing 'path' parameter"),
         (status = 404, description = "Skill or file not found")
     )
@@ -5156,7 +5275,7 @@ fn render_catalog_entry(
     path = "/api/mcp/catalog",
     tag = "mcp",
     responses(
-        (status = 200, description = "MCP catalog entries", body = serde_json::Value)
+        (status = 200, description = "MCP catalog entries", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_mcp_catalog(
@@ -5189,8 +5308,8 @@ pub async fn list_mcp_catalog(
     tag = "mcp",
     params(("id" = String, Path, description = "Catalog entry id")),
     responses(
-        (status = 200, description = "Catalog entry detail", body = serde_json::Value),
-        (status = 404, description = "Catalog entry not found", body = serde_json::Value),
+        (status = 200, description = "Catalog entry detail", body = crate::types::JsonObject),
+        (status = 404, description = "Catalog entry not found", body = crate::types::JsonObject),
     )
 )]
 pub async fn get_mcp_catalog_entry(
@@ -5223,8 +5342,8 @@ pub async fn get_mcp_catalog_entry(
     tag = "mcp",
     params(("name" = String, Path, description = "Server name")),
     responses(
-        (status = 200, description = "Reconnect an MCP server", body = serde_json::Value),
-        (status = 404, description = "MCP server not configured", body = serde_json::Value),
+        (status = 200, description = "Reconnect an MCP server", body = crate::types::JsonObject),
+        (status = 404, description = "MCP server not configured", body = crate::types::JsonObject),
     )
 )]
 pub async fn reconnect_mcp_server_handler(
@@ -5268,7 +5387,7 @@ pub async fn reconnect_mcp_server_handler(
     path = "/api/mcp/health",
     tag = "mcp",
     responses(
-        (status = 200, description = "Health snapshot for all configured MCP servers", body = serde_json::Value)
+        (status = 200, description = "Health snapshot for all configured MCP servers", body = crate::types::JsonObject)
     )
 )]
 pub async fn mcp_health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -5302,7 +5421,7 @@ pub async fn mcp_health_handler(State(state): State<Arc<AppState>>) -> impl Into
     path = "/api/mcp/reload",
     tag = "mcp",
     responses(
-        (status = 200, description = "Reload catalog and reconnect MCP servers", body = serde_json::Value)
+        (status = 200, description = "Reload catalog and reconnect MCP servers", body = crate::types::JsonObject)
     )
 )]
 pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -5369,7 +5488,7 @@ fn status_str_for_catalog(
     path = "/api/extensions",
     tag = "extensions",
     responses(
-        (status = 200, description = "List catalog entries with install/health status", body = serde_json::Value)
+        (status = 200, description = "List catalog entries with install/health status", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -5420,7 +5539,7 @@ pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoRes
         ("name" = String, Path, description = "Catalog entry id"),
     ),
     responses(
-        (status = 200, description = "Catalog entry detail + install status", body = serde_json::Value)
+        (status = 200, description = "Catalog entry detail + install status", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_extension(
@@ -5488,9 +5607,9 @@ pub async fn get_extension(
     post,
     path = "/api/extensions/install",
     tag = "extensions",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Install a catalog entry", body = serde_json::Value)
+        (status = 200, description = "Install a catalog entry", body = crate::types::JsonObject)
     )
 )]
 pub async fn install_extension(
@@ -5590,9 +5709,9 @@ pub async fn install_extension(
     post,
     path = "/api/extensions/uninstall",
     tag = "extensions",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Uninstall a catalog-backed MCP server", body = serde_json::Value)
+        (status = 200, description = "Uninstall a catalog-backed MCP server", body = crate::types::JsonObject)
     )
 )]
 pub async fn uninstall_extension(

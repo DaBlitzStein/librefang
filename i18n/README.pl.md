@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-    <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pl.md">Polski</a>
+    <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pl.md">Polski</a> | <a href="README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -111,9 +111,9 @@ Zbuduj własnego: zdefiniuj `HAND.toml` + prompt systemowy + `SKILL.md`. [Przewo
 
 ```
 librefang-kernel            Orkiestracja, przepływy pracy, opomiarowanie, RBAC, scheduler, budżet
-librefang-runtime           Pętla agenta, 3 sterowniki LLM, 53 narzędzia, piaskownica WASM, MCP, A2A
+librefang-runtime           Pętla agenta, wykonywanie narzędzi, piaskownica WASM, MCP, A2A
 librefang-api               140+ endpointów REST/WS/SSE, API kompatybilne z OpenAI, dashboard
-librefang-channels          40 adapterów komunikacyjnych z limitowaniem liczby żądań, polityki DM/grupowe
+librefang-channels          45 adapterów komunikacyjnych z limitowaniem liczby żądań, polityki DM/grupowe
 librefang-memory            Persystencja SQLite, osadzenia wektorowe, sesje, kompakcja
 librefang-types             Typy podstawowe, taint tracking, podpisywanie Ed25519, katalog modeli
 librefang-skills            60 wbudowanych umiejętności, parser SKILL.md, marketplace FangHub

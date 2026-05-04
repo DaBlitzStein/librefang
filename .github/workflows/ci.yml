@@ -17,7 +17,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  # NOTE: `RUSTFLAGS: "-D warnings"` is intentionally NOT set here.
+  # Setting it workflow-wide propagates to dependency compilation, which
+  # makes every CI lane break whenever any transitive crate introduces a
+  # new lint warning. First-party warnings are still gated:
+  #   - `cargo clippy ... -- -D warnings` in the `quality` job below
+  #   - `[workspace.lints.rust] warnings = "deny"` in the root Cargo.toml
+  #     (applied to first-party crates via `lints.workspace = true`)
+  # See issue #3554.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -38,6 +45,7 @@ jobs:
       ci: ${{ steps.diff.outputs.ci }}
       install: ${{ steps.diff.outputs.install }}
       full_run: ${{ steps.diff.outputs.full_run }}
+      full_test: ${{ steps.diff.outputs.full_test }}
       crates: ${{ steps.diff.outputs.crates }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -67,28 +75,64 @@ jobs:
           # Boolean flags — `grep -q` against the diff filenames.
           has() { printf '%s\n' "$CHANGED" | grep -qE "$1"; }
 
-          RUST=false;    has '^(crates/|Cargo\.toml$|Cargo\.lock$|xtask/)'            && RUST=true
+          # `openapi.json` and `sdk/` are tracked outputs of `cargo xtask
+          # codegen --openapi` + `scripts/codegen-sdks.py`. A manual edit
+          # to either (without a corresponding source change) is a drift
+          # vector that the local hook used to catch. Now that pre-push
+          # no longer runs codegen, fold those paths into RUST so the
+          # `openapi-drift` job still gates direct edits.
+          RUST=false;    has '^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)' && RUST=true
           DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
           CI=false;      has '^\.github/workflows/'                                   && CI=true
           INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
-          ROOT_CARGO=false; has '^Cargo\.toml$|^xtask/'                               && ROOT_CARGO=true
+          # Workspace-level Cargo manifest ≠ xtask source. A workspace
+          # `Cargo.toml` change can shift dep versions, profile flags,
+          # workspace lints, or membership — anything in the tree may
+          # break. An xtask source change only affects the xtask binary
+          # itself; runtime crates' libraries are untouched.
+          WORKSPACE_CARGO=false; has '^Cargo\.(toml|lock)$'                            && WORKSPACE_CARGO=true
+          XTASK_SRC=false;       has '^xtask/'                                         && XTASK_SRC=true
 
-          # Full run policy — stated plainly so it's auditable from the log:
-          # 1. Push to main (merge) → catch cross-crate breakage before it rots
-          # 2. CI file itself changed → test the new pipeline on every platform
-          # 3. Root Cargo.toml / xtask → graph-level change, per-crate logic
-          #    can't safely predict the blast radius
-          #
-          # Platform regressions don't need a special full_run bucket — PR lane
-          # test jobs on Windows/macOS cover their affected crates directly.
+          # `full_run` (build + clippy job): wider net. Any of these is a
+          # legitimate reason to run workspace-wide build + clippy:
+          #   1. push to main — sanity check before merge rots the index
+          #   2. CI workflow changed — exercise the new pipeline once
+          #   3. workspace Cargo.toml/Cargo.lock changed — dep / lints
+          #      drift can ripple anywhere
+          #   4. xtask source changed — a few CI jobs (`cargo xtask ci`,
+          #      `cargo xtask codegen --openapi`) wrap xtask; broken xtask
+          #      breaks the build pipeline, so re-running build+clippy
+          #      across the workspace catches cascading damage cheaply.
           if [ "$EVENT_NAME" = "push" ]; then
             FULL=true; REASON="push to main"
           elif [ "$CI" = "true" ]; then
             FULL=true; REASON="CI workflow changed"
-          elif [ "$ROOT_CARGO" = "true" ]; then
-            FULL=true; REASON="workspace Cargo.toml or xtask changed"
+          elif [ "$WORKSPACE_CARGO" = "true" ]; then
+            FULL=true; REASON="workspace Cargo.toml/Cargo.lock changed"
+          elif [ "$XTASK_SRC" = "true" ]; then
+            FULL=true; REASON="xtask source changed"
           else
             FULL=false; REASON="selective"
+          fi
+
+          # `full_test` (test matrix job): strictly narrower. Re-running
+          # 6500+ unit tests across the workspace only pays off when a
+          # change can plausibly affect runtime behaviour of unrelated
+          # crates. CI-pipeline tweaks and xtask source changes do NOT
+          # affect runtime — they're build tooling. Excluding them here
+          # is what unblocks PRs like #4528 (xtask + ci.yml only) from
+          # paying a 20-30 min nextest matrix on every push.
+          #
+          #   • push to main      → full_test=true (last-line catch-all)
+          #   • workspace Cargo.toml/Cargo.lock → full_test=true (dep
+          #     upgrade can break runtime)
+          #   • everything else   → selective (per-crate from DIRECT)
+          if [ "$EVENT_NAME" = "push" ]; then
+            FULL_TEST=true; TREASON="push to main"
+          elif [ "$WORKSPACE_CARGO" = "true" ]; then
+            FULL_TEST=true; TREASON="workspace Cargo.toml/Cargo.lock changed"
+          else
+            FULL_TEST=false; TREASON="selective"
           fi
 
           {
@@ -97,13 +141,23 @@ jobs:
             echo "ci=$CI"
             echo "install=$INSTALL"
             echo "full_run=$FULL"
+            echo "full_test=$FULL_TEST"
           } >> "$GITHUB_OUTPUT"
-          echo "Route: full_run=$FULL ($REASON)"
+          echo "Route: full_run=$FULL ($REASON), full_test=$FULL_TEST ($TREASON)"
 
           # Directly-touched crates (no downstream fan-out — on purpose).
           DIRECT=$(printf '%s\n' "$CHANGED" \
             | sed -n 's|^crates/\([^/]*\)/.*|\1|p' \
             | sort -u | tr '\n' ' ')
+
+          # xtask isn't under `crates/`, so the regex above misses it.
+          # Pull it in explicitly when its source changes so that the
+          # selective test lane runs `cargo nextest -p xtask` (xtask
+          # self-tests) instead of compiling-but-skipping the package.
+          if [ "$XTASK_SRC" = "true" ] && ! printf '%s\n' $DIRECT | grep -qx 'xtask'; then
+            DIRECT="$DIRECT xtask"
+            echo "Pulling xtask into affected set (xtask source changed)"
+          fi
 
           # Schema-mirror rule. `librefang-types` is the source of the
           # schemars-derived `KernelConfig` schema, but the golden-file guard
@@ -168,6 +222,12 @@ jobs:
             patchelf
       - name: Check formatting
         run: cargo xtask fmt
+      - name: Check API error response shape (issue #3505)
+        # Pure text scan, ~milliseconds. Rejects new `{"detail": …}` or
+        # `{"status": "error", …}` constructions in `routes/`. Files
+        # that still carry legacy shapes are listed in the script's
+        # LEGACY_FILES allowlist with their cleanup follow-ups.
+        run: bash scripts/check-error-shape.sh
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Build + clippy
@@ -191,6 +251,34 @@ jobs:
             echo "Selective clippy for: $CRATES"
             cargo clippy $PFLAGS --all-targets --all-features -- -D warnings
           fi
+      # Informational lint for empty-string / "<unknown>" sentinel patterns
+      # in API response code (refs #3302). Runs in warn mode — never fails
+      # the build until the existing inventory is cleared and the script is
+      # flipped to --strict. See docs/architecture/api-conventions.md.
+      - name: Sentinel-pattern lint (warn-only)
+        run: scripts/check-no-empty-string-sentinels.sh
+
+  # ── CHANGELOG attribution check ────────────────────────────────────────────────
+  # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
+  # section in this PR. Historical entries (1,800+ bullets, many predating
+  # any attribution convention) are NOT retroactively flagged — the validator
+  # only looks at lines this diff introduces. See #3400.
+  changelog-attribution:
+    name: CHANGELOG Attribution
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Validate (@user) attribution on new [Unreleased] bullets
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check-changelog-attribution.py
 
   # ── OpenAPI / SDK drift check ──────────────────────────────────────────────────
   # Regenerates openapi.json and the four SDKs and fails if anything differs
@@ -205,8 +293,25 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Same-repo PRs need write to push the auto-codegen commit back to the
+    # PR branch. Fork PRs run with read-only GITHUB_TOKEN regardless of
+    # what we declare here — they fall through to the fail-with-instructions
+    # path below.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Internal PRs only: check out the PR head branch (not the merge
+          # commit) so the auto-codegen step below can `git push` back. Fork
+          # PRs and push events leave `ref` empty so `actions/checkout` falls
+          # back to its default ref — that path never reaches the push branch
+          # and would otherwise fail at fetch (the fork's branch does not
+          # exist in this repo's `origin`).
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || '' }}
+          # `persist-credentials: true` is the default; we re-state it for
+          # readability. Required for the auto-commit step below.
+          persist-credentials: true
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -226,17 +331,51 @@ jobs:
         run: cargo xtask codegen --openapi
       - name: Regenerate SDKs
         run: python3 scripts/codegen-sdks.py
-      - name: Verify no drift
+      # Schema drift baseline regen (#3300): the schema-check gate compares
+      # sha256 baselines under xtask/baselines/ against the on-disk schema
+      # artifacts. We regenerate those baselines here so the auto-commit
+      # step below also rolls them into the same robot commit — internal
+      # PRs no longer need a manual `cargo xtask schema-check gen` round.
+      - name: Regenerate schema baselines
+        run: cargo xtask schema-check gen
+      - name: Verify no drift (auto-commit on internal PRs)
+        env:
+          # Same-repo PR: GITHUB_TOKEN has write scope -> we can push the
+          # regenerated artifacts back to the PR branch.
+          # Fork PR or push event: GITHUB_TOKEN is read-only -> fall back
+          # to the original "fail with reproduce instructions" behaviour.
+          IS_INTERNAL_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
-          if ! git diff --exit-code -- openapi.json sdk/; then
-            echo "::error::openapi.json or generated SDKs are out of sync with the source code."
-            echo "Reproduce locally:"
-            echo "  cargo xtask codegen --openapi"
-            echo "  python3 scripts/codegen-sdks.py"
-            echo "Then commit the regenerated openapi.json and sdk/* files."
-            exit 1
+          if git diff --quiet -- openapi.json sdk/ xtask/baselines/; then
+            echo "openapi.json, SDKs, and schema baselines are in sync."
+            exit 0
           fi
-          echo "openapi.json and SDKs are in sync."
+          if [ "$IS_INTERNAL_PR" = "true" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add openapi.json sdk/ xtask/baselines/
+            git commit -m "chore(codegen): auto-regenerate openapi.json + sdk + schema baselines [skip ci]"
+            git push
+            echo "::notice::Auto-committed regenerated openapi.json + sdk/ + xtask/baselines/ to the PR branch."
+            echo "::notice::The [skip ci] marker prevents an immediate re-run; if you want full CI"
+            echo "::notice::on the post-codegen tip, push an empty commit or close+reopen the PR."
+            exit 0
+          fi
+          # Fork PR or push to main — fail loudly.
+          echo "::error::openapi.json, generated SDKs, or schema baselines are out of sync with the source code."
+          echo "Reproduce locally:"
+          echo "  cargo xtask codegen --openapi"
+          echo "  python3 scripts/codegen-sdks.py"
+          echo "  cargo xtask schema-check gen"
+          echo "Then commit the regenerated openapi.json, sdk/*, and xtask/baselines/* files."
+          echo "(Fork PRs cannot use the auto-commit path because GITHUB_TOKEN"
+          echo "is read-only on cross-repository pull requests.)"
+          exit 1
+      # Sanity verify that `schema-check gen` produced baselines that
+      # match the on-disk schema artifacts — catches a bug in `gen`
+      # itself rather than letting drift leak past us.
+      - name: Schema baseline check
+        run: cargo xtask schema-check check
 
   # ── Security audit (independent) ───────────────────────────────────────────────
   security:
@@ -248,6 +387,17 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: |
+            web/pnpm-lock.yaml
+            docs/pnpm-lock.yaml
+            crates/librefang-api/dashboard/pnpm-lock.yaml
       - name: Run security audit
         run: |
           # Ignore known vulnerabilities without fix:
@@ -273,7 +423,8 @@ jobs:
             --ignore RUSTSEC-2026-0049 \
             --ignore RUSTSEC-2026-0098 \
             --ignore RUSTSEC-2026-0099 \
-            --ignore RUSTSEC-2026-0104
+            --ignore RUSTSEC-2026-0104 \
+            --web
 
   # ── Secrets scanning (independent) ─────────────────────────────────────────────
   secrets:
@@ -339,7 +490,7 @@ jobs:
             patchelf
       - name: Build tests
         run: |
-          if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
+          if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
             echo "Building workspace tests (full run)…"
             cargo test --workspace --no-run -j 2
           else
@@ -357,7 +508,7 @@ jobs:
         env:
           RUST_TEST_THREADS: "1"
         run: |
-          if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
+          if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
             echo "Running workspace tests (full run)…"
             cargo nextest run --workspace --no-fail-fast
           else
@@ -396,7 +547,7 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
+          if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
             echo "Running workspace tests (full run)…"
             cargo nextest run --workspace --no-fail-fast
           else
@@ -433,7 +584,7 @@ jobs:
         run: mkdir -p crates/librefang-api/static/react
       - name: Run tests
         run: |
-          if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
+          if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
             echo "Running workspace tests (full run)…"
             cargo nextest run --workspace --no-fail-fast
           else

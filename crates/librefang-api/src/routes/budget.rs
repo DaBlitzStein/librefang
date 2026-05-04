@@ -32,12 +32,13 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
                 .delete(delete_user_budget),
         )
 }
+use crate::extractors::AgentIdPath;
+use crate::middleware::UserRole;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use librefang_kernel::auth::UserRole;
-use librefang_types::agent::{AgentId, UserId};
+use librefang_types::agent::UserId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -128,15 +129,18 @@ fn fmt_global_budget_diff(
 // ---------------------------------------------------------------------------
 
 /// GET /api/usage — Get per-agent usage statistics.
+///
+/// The per-agent rollup is materialized from the in-memory agent registry
+/// and returned in one page — `offset=0` and `limit=None` always.
 #[utoipa::path(
     get,
     path = "/api/usage",
     tag = "budget",
-    responses((status = 200, description = "Per-agent usage statistics", body = serde_json::Value))
+    responses((status = 200, description = "Per-agent usage statistics", body = crate::types::JsonObject))
 )]
 pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let usage_store = state.kernel.memory_substrate().usage();
-    let agents: Vec<serde_json::Value> = state
+    let items: Vec<serde_json::Value> = state
         .kernel
         .agent_registry()
         .list()
@@ -158,8 +162,13 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
             })
         })
         .collect();
-
-    Json(serde_json::json!({"agents": agents}))
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +180,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
     get,
     path = "/api/usage/summary",
     tag = "budget",
-    responses((status = 200, description = "Overall usage summary", body = serde_json::Value))
+    responses((status = 200, description = "Overall usage summary", body = crate::types::JsonObject))
 )]
 pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.kernel.memory_substrate().usage().query_summary(None) {
@@ -197,7 +206,7 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
     get,
     path = "/api/usage/by-model",
     tag = "budget",
-    responses((status = 200, description = "Usage grouped by model", body = serde_json::Value))
+    responses((status = 200, description = "Usage grouped by model", body = crate::types::JsonObject))
 )]
 pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.kernel.memory_substrate().usage().query_by_model() {
@@ -225,7 +234,7 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
     get,
     path = "/api/usage/by-model/performance",
     tag = "budget",
-    responses((status = 200, description = "Model performance metrics", body = serde_json::Value))
+    responses((status = 200, description = "Model performance metrics", body = crate::types::JsonObject))
 )]
 pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state
@@ -263,7 +272,7 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> i
     get,
     path = "/api/usage/daily",
     tag = "budget",
-    responses((status = 200, description = "Daily usage breakdown", body = serde_json::Value))
+    responses((status = 200, description = "Daily usage breakdown", body = crate::types::JsonObject))
 )]
 pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let days = state
@@ -310,7 +319,7 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
     path = "/api/budget",
     tag = "budget",
     responses(
-        (status = 200, description = "Global budget status", body = serde_json::Value)
+        (status = 200, description = "Global budget status", body = crate::types::JsonObject)
     )
 )]
 pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -326,7 +335,7 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
     put,
     path = "/api/budget",
     tag = "budget",
-    responses((status = 200, description = "Updated global budget status", body = serde_json::Value))
+    responses((status = 200, description = "Updated global budget status", body = crate::types::JsonObject))
 )]
 pub async fn update_budget(
     State(state): State<Arc<AppState>>,
@@ -392,23 +401,20 @@ pub async fn update_budget(
     path = "/api/budget/agents/{id}",
     tag = "budget",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Per-agent budget and quota status", body = serde_json::Value))
+    responses((status = 200, description = "Per-agent budget and quota status", body = crate::types::JsonObject))
 )]
 pub async fn agent_budget_status(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AgentIdPath(agent_id): AgentIdPath,
 ) -> impl IntoResponse {
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid agent ID").into_response();
-        }
-    };
-
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return ApiErrorResponse::not_found("Agent not found").into_response();
+            // #3511: even on 404 we know agent_id was well-formed, so emit it.
+            return crate::extensions::with_agent_id(
+                agent_id,
+                ApiErrorResponse::not_found("Agent not found"),
+            );
         }
     };
 
@@ -423,7 +429,7 @@ pub async fn agent_budget_status(
     let token_usage = state.kernel.scheduler_ref().get_usage(agent_id);
     let tokens_used = token_usage.map(|s| s.total_tokens).unwrap_or(0);
 
-    (
+    let body = (
         StatusCode::OK,
         Json(serde_json::json!({
             "agent_id": agent_id.to_string(),
@@ -449,8 +455,9 @@ pub async fn agent_budget_status(
                 "pct": if quota.effective_token_limit() > 0 { tokens_used as f64 / quota.effective_token_limit() as f64 } else { 0.0 },
             },
         })),
-    )
-        .into_response()
+    );
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// GET /api/budget/agents — Per-agent cost ranking (top spenders).
@@ -458,12 +465,16 @@ pub async fn agent_budget_status(
 /// Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to
 /// eliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal
 /// dashboard polling at 100 agents. See #3684.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}` per
+/// #3842; the underlying GROUP BY returns the full ranking in a single shot, so
+/// `offset=0`, `limit=None`.
 #[utoipa::path(
     get,
     path = "/api/budget/agents",
     tag = "budget",
     responses(
-        (status = 200, description = "Per-agent cost ranking", body = Vec<serde_json::Value>)
+        (status = 200, description = "Per-agent cost ranking", body = crate::types::JsonObject)
     )
 )]
 pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -479,7 +490,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         .collect();
 
     let registry_entries = state.kernel.agent_registry().list();
-    let agents: Vec<serde_json::Value> = registry_entries
+    let items: Vec<serde_json::Value> = registry_entries
         .iter()
         .filter_map(|entry| {
             let daily = *daily_costs.get(&entry.id).unwrap_or(&0.0);
@@ -499,7 +510,13 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         })
         .collect();
 
-    Json(serde_json::json!({"agents": agents, "total": agents.len()}))
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// PUT /api/budget/agents/{id} — Update per-agent budget limits at runtime.
@@ -508,21 +525,15 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
     path = "/api/budget/agents/{id}",
     tag = "budget",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Updated agent budget", body = serde_json::Value))
+    responses((status = 200, description = "Updated agent ResourceQuota (max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour, …)", body = crate::types::JsonObject))
 )]
 pub async fn update_agent_budget(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AgentIdPath(agent_id): AgentIdPath,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let api_user_ref = api_user.as_ref().map(|e| &e.0);
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid agent ID").into_response();
-        }
-    };
 
     let hourly = body["max_cost_per_hour_usd"].as_f64();
     let daily = body["max_cost_per_day_usd"].as_f64();
@@ -530,10 +541,13 @@ pub async fn update_agent_budget(
     let tokens = body["max_llm_tokens_per_hour"].as_u64();
 
     if hourly.is_none() && daily.is_none() && monthly.is_none() && tokens.is_none() {
-        return ApiErrorResponse::bad_request(
-            "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour",
-        )
-        .into_response();
+        // #3511: tag even validation failures with agent_id (path was well-formed).
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::bad_request(
+                "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour",
+            ),
+        );
     }
 
     // Capture OLD per-agent caps BEFORE the in-memory mutation so the
@@ -546,7 +560,7 @@ pub async fn update_agent_budget(
         .get(agent_id)
         .map(|e| e.manifest.resources.clone());
 
-    match state
+    let body = match state
         .kernel
         .agent_registry()
         .update_resources(agent_id, hourly, daily, monthly, tokens)
@@ -577,14 +591,27 @@ pub async fn update_agent_budget(
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),
             );
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "ok", "message": "Agent budget updated"})),
-            )
-                .into_response()
+            // Return the post-mutation ResourceQuota so callers can
+            // setQueryData / hydrate caches without an extra GET.
+            // If the agent vanished between update and snapshot (race),
+            // fall back to a minimal ack so the call still appears to
+            // have succeeded — `update_resources` already returned Ok.
+            match new_resources {
+                Some(resources) => (StatusCode::OK, Json(resources)).into_response(),
+                None => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "message": "Agent budget updated"
+                    })),
+                )
+                    .into_response(),
+            }
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 // ---------------------------------------------------------------------------
@@ -651,7 +678,7 @@ fn require_admin_for_user_budget(
     path = "/api/budget/users",
     tag = "budget",
     params(("limit" = Option<u32>, Query, description = "Top N users (default 25, cap 1000)")),
-    responses((status = 200, description = "Per-user cost ranking", body = serde_json::Value))
+    responses((status = 200, description = "Per-user cost ranking", body = crate::types::JsonObject))
 )]
 pub async fn user_budget_ranking(
     State(state): State<Arc<AppState>>,
@@ -735,7 +762,7 @@ pub async fn user_budget_ranking(
     path = "/api/budget/users/{user_id}",
     tag = "budget",
     params(("user_id" = String, Path, description = "User UUID or configured name")),
-    responses((status = 200, description = "Single user budget detail", body = serde_json::Value))
+    responses((status = 200, description = "Single user budget detail", body = crate::types::JsonObject))
 )]
 pub async fn user_budget_detail(
     State(state): State<Arc<AppState>>,
@@ -848,7 +875,7 @@ pub async fn user_budget_detail(
     tag = "budget",
     params(("user_id" = String, Path, description = "User UUID or configured name")),
     responses(
-        (status = 200, description = "Budget written and reloaded", body = serde_json::Value),
+        (status = 200, description = "Budget written and reloaded", body = crate::types::JsonObject),
         (status = 400, description = "Invalid or partial budget payload"),
         (status = 403, description = "Caller is not an admin"),
         (status = 404, description = "No user matches the given id/name"),

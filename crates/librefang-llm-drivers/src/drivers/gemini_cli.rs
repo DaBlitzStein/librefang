@@ -97,7 +97,7 @@ impl GeminiCliDriver {
             parts.push(format!("[System]\n{sys}"));
         }
 
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             let role_label = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
@@ -144,6 +144,11 @@ impl GeminiCliDriver {
 
 #[async_trait]
 impl LlmDriver for GeminiCliDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "gemini_cli", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let prompt = Self::build_prompt(&request);
         let args = self.build_args(&prompt, &request.model);
@@ -200,6 +205,7 @@ impl LlmDriver for GeminiCliDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 

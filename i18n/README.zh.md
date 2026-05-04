@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pl.md">Polski</a>
+  <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pl.md">Polski</a> | <a href="README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -111,9 +111,9 @@ librefang hand list                  # 查看所有 Hands
 
 ```
 librefang-kernel            编排、工作流、计量、RBAC、调度、预算
-librefang-runtime           智能体循环、3 个 LLM 驱动器、53 个工具、WASM 沙箱、MCP、A2A
+librefang-runtime           智能体循环、工具执行、WASM 沙箱、MCP、A2A
 librefang-api               140+ REST/WS/SSE 端点、OpenAI 兼容 API、控制台
-librefang-channels          40 个消息适配器，速率限制、DM/群组策略
+librefang-channels          45 个消息适配器，速率限制、DM/群组策略
 librefang-memory            SQLite 持久化、向量嵌入、会话、压缩
 librefang-types             核心类型、污点追踪、Ed25519 签名、模型目录
 librefang-skills            60 个内置技能、SKILL.md 解析器、FangHub 市场
@@ -208,6 +208,11 @@ cargo fmt --all -- --check                               # 格式化检查
 ## 对比
 
 查看 [对比](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth) 了解 LibreFang 与 OpenClaw、ZeroClaw、CrewAI、AutoGen、LangGraph 的基准测试和功能对比。
+
+## 中文文档
+
+- [技能开发指南（中文）](skill-development.zh.md) — 技能格式、Python/WASM 运行时、FangHub 发布与 CLI 管理
+- [官方文档](https://docs.librefang.ai)（英文）
 
 ## 链接
 

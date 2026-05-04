@@ -28,6 +28,7 @@ import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { Card } from "../components/ui/Card";
+import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -37,11 +38,13 @@ import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
 import { truncateId } from "../lib/string";
+import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/overview";
-import { useSessions, useSessionDetails } from "../lib/queries/sessions";
-import { useMemorySearchOrList } from "../lib/queries/memory";
-import { useAuditRecent, useCronJobs } from "../lib/queries/runtime";
+import { useSessionDetails } from "../lib/queries/sessions";
+import { useAgentKvMemory } from "../lib/queries/memory";
+import { useCronJobs } from "../lib/queries/runtime";
+import { useAgentTriggers } from "../lib/queries/schedules";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { AgentManifestForm } from "../components/AgentManifestForm";
@@ -57,6 +60,9 @@ import {
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
 import {
   agentQueries,
+  useAgentEvents,
+  useAgentSessions,
+  useAgentStats,
   useAgentTemplates,
   useExperimentMetrics,
   useExperiments,
@@ -476,46 +482,44 @@ export function AgentsPage() {
   // deduplicates the poll when both pages are mounted, and agent counts on the
   // Overview tab stay in sync with this list automatically.
   const agentsQuery = useDashboardSnapshot();
-  // Sessions index, used by both the list row's per-agent "sessions · cost"
-  // suffix and the detail panel's KPI tiles. Single fetch per render so the
-  // 30s refetch interval is the only network cost.
-  const sessionsQuery = useSessions();
   // Detail-panel data sources. Memory + audit are global lists filtered
   // client-side by agent id; cron is server-side filtered (its own
   // `enabled` flag gates the network request on `detailAgent?.id`).
   // TanStack Query dedupes / caches across pages so revisiting an agent
   // is free.
-  const memoryListQuery = useMemorySearchOrList("");
-  const auditRecentQuery = useAuditRecent(120);
+  // Per-agent KV memory (matches the design canvas's key/value/age rows).
+  // The previous useMemorySearchOrList(\"\") query returned global proactive
+  // memory, which is empty unless [proactive_memory] is enabled — so the
+  // tab read empty even when the agent had KV pairs.
+  const agentKvMemoryQuery = useAgentKvMemory(detailAgent?.id ?? "");
   const cronJobsQuery = useCronJobs(detailAgent?.id);
-  // Pick the latest session for the selected agent so the Conversation
-  // tab can stream in its messages without a separate per-agent route.
-  const latestSessionForAgent = useMemo(() => {
-    if (!detailAgent?.id) return undefined;
-    let best: { session_id: string; ts: number } | undefined;
-    for (const s of sessionsQuery.data ?? []) {
-      if (s.agent_id !== detailAgent.id) continue;
-      const ts = s.created_at ? Date.parse(s.created_at) : 0;
-      if (!best || ts > best.ts) best = { session_id: s.session_id, ts };
-    }
-    return best?.session_id;
-  }, [sessionsQuery.data, detailAgent?.id]);
+  // Per-agent KPI rollup (#4246) — replaces a global /api/sessions scan
+  // that was capped by pagination and missed agents whose sessions
+  // weren't in the latest N rows.
+  const agentStatsQuery = useAgentStats(detailAgent?.id ?? "");
+  // Per-agent triggers — GET /api/triggers?agent_id=… so the Schedule
+  // tab's event-trigger cards don't depend on agent detail embedding
+  // them (which it currently doesn't).
+  const agentTriggersQuery = useAgentTriggers(detailAgent?.id ?? "");
+  // Per-agent recent turn events — backs the Logs tab. usage_events is
+  // turn-level (model dispatch, latency, tokens, cost) — exactly what
+  // the design's stderr-style log feed wants. The previous source
+  // (global audit) only had admin lifecycle entries, leaving the tab
+  // blank for almost every agent.
+  const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
+  // Per-agent session list — Conversation tab uses this directly. The
+  // global /api/sessions used previously was paginated to 50, so the
+  // agent's latest session was often not in the page.
+  const agentSessionsQuery = useAgentSessions(detailAgent?.id ?? "");
+  // Sourced from useAgentSessions (/api/agents/{id}/sessions) — NOT the
+  // global useSessions() — to avoid the global endpoint's 50-row pagination
+  // cap silently hiding this agent's newest session on busy systems. See
+  // issue #4294 and lib/sessionSelector.ts for the regression test.
+  const latestSessionForAgent = useMemo(
+    () => pickLatestSessionId(agentSessionsQuery.data),
+    [agentSessionsQuery.data],
+  );
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
-  const sessionsByAgent = useMemo(() => {
-    const map = new Map<string, { sessions24h: number; cost24h: number }>();
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    for (const s of sessionsQuery.data ?? []) {
-      const id = s.agent_id;
-      if (!id) continue;
-      const ts = s.created_at ? Date.parse(s.created_at) : 0;
-      if (ts < cutoff) continue;
-      const entry = map.get(id) ?? { sessions24h: 0, cost24h: 0 };
-      entry.sessions24h += 1;
-      entry.cost24h += typeof s.cost_usd === "number" ? s.cost_usd : 0;
-      map.set(id, entry);
-    }
-    return map;
-  }, [sessionsQuery.data]);
 
   const modelsQuery = useModels(
     { provider: modelDraft.provider },
@@ -675,9 +679,25 @@ export function AgentsPage() {
     setDetailLoading(false);
   };
 
+  // Auto-select the first agent on desktop so the detail panel isn't blank
+  // on first paint. Skipped on mobile because the detail view is a full-
+  // screen overlay there — auto-opening it would block access to the list.
+  useEffect(() => {
+    if (detailAgent) return;
+    if (filteredAgents.length === 0) return;
+    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1024px)").matches) return;
+    void selectAgent(filteredAgents[0]);
+    // selectAgent is recreated each render; depending on filteredAgents+detailAgent is sufficient.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredAgents, detailAgent]);
+
   const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
-    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
+    // Row-embedded stats from /api/agents (single grouped SQL pass). The
+    // canonical envelope always ships these fields; see `enrich_agent_json`.
+    const sessions24h = typeof agent.sessions_24h === "number" ? agent.sessions_24h : 0;
+    const cost24h = typeof agent.cost_24h === "number" ? agent.cost_24h : 0;
+    const stats = { sessions24h, cost24h };
     const stateLower = (agent.state || "").toLowerCase();
     return (
       <button
@@ -709,7 +729,9 @@ export function AgentsPage() {
         <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-[22px] mt-1">
           <span className="truncate min-w-0">{agent.model_name || agent.model_provider || "—"}</span>
           <span className="text-text-dim/60">·</span>
-          <span className="truncate min-w-0">{agent.profile || t("common.local", { defaultValue: "local" })}</span>
+          <span className="truncate min-w-0">
+            {agent.schedule || t("agents.schedule_manual", { defaultValue: "manual" })}
+          </span>
           <span className="ml-auto shrink-0 tabular-nums">
             {stats.sessions24h} · ${stats.cost24h.toFixed(2)}
           </span>
@@ -726,9 +748,7 @@ export function AgentsPage() {
     const detailState = ((agent as AgentView).state || "").toLowerCase();
     const isSuspended = detailState === "suspended";
     const isCrashed = detailState === "crashed";
-    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
     const detailCaps = (agent as AgentView).capabilities;
-    const skillsCount = Array.isArray(detailCaps?.skills) ? detailCaps.skills.length : 0;
     const toolsCount = Array.isArray(detailCaps?.tools) ? detailCaps.tools.length : 0;
     const tabs: Array<{ id: typeof agentTab; label: string; Icon: typeof Bot }> = [
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
@@ -739,10 +759,20 @@ export function AgentsPage() {
     ];
 
     return (
-      <Card padding="none" className="surface-lit overflow-hidden flex flex-col min-h-[640px]">
+      <Card padding="none" className="surface-lit overflow-hidden flex flex-col min-h-0 lg:min-h-[640px] h-full lg:h-auto">
         {/* Header */}
-        <div className="px-5 pt-4 pb-3 border-b border-border-subtle">
-          <div className="flex items-center gap-3">
+        <div className="px-3 sm:px-5 pt-3 sm:pt-4 pb-3 border-b border-border-subtle">
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* Mobile-only "back to list" affordance — closes the detail
+                overlay without deselecting state for lg+. */}
+            <button
+              type="button"
+              onClick={() => setDetailAgent(null)}
+              className="lg:hidden -ml-1 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 shrink-0"
+              aria-label={t("common.back", { defaultValue: "Back" })}
+            >
+              <X className="w-4 h-4" />
+            </button>
             <div className="w-9 h-9 rounded-lg bg-brand/10 border border-brand/30 grid place-items-center text-brand shrink-0">
               <Bot className="w-[18px] h-[18px]" />
             </div>
@@ -765,26 +795,49 @@ export function AgentsPage() {
                 {(agent as AgentView).profile ? ` · ${(agent as AgentView).profile}` : ""}
               </p>
             </div>
-            <div className="flex items-center gap-1.5 shrink-0">
+            {/* Action cluster — labels collapse on mobile so the row keeps
+                three icon-buttons + back arrow on a 390px viewport. */}
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
               {isSuspended ? (
-                <Button variant="ghost" size="sm" leftIcon={<Play className="w-3.5 h-3.5" />} onClick={async () => {
-                  try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
-                    addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
-                  }
-                }}>
-                  {t("agents.resume", { defaultValue: "Resume" })}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Play className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.resume", { defaultValue: "Resume" })}
+                  title={t("agents.resume", { defaultValue: "Resume" })}
+                  onClick={async () => {
+                    try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
+                      addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
+                    }
+                  }}
+                >
+                  <span className="hidden sm:inline">{t("agents.resume", { defaultValue: "Resume" })}</span>
                 </Button>
               ) : (
-                <Button variant="ghost" size="sm" leftIcon={<Pause className="w-3.5 h-3.5" />} onClick={async () => {
-                  try { await suspendMutation.mutateAsync(agent.id); } catch (e) {
-                    addToast(toastErr(e, t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" })), "error");
-                  }
-                }}>
-                  {t("agents.suspend", { defaultValue: "Pause" })}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Pause className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.suspend", { defaultValue: "Pause" })}
+                  title={t("agents.suspend", { defaultValue: "Pause" })}
+                  onClick={async () => {
+                    try { await suspendMutation.mutateAsync(agent.id); } catch (e) {
+                      addToast(toastErr(e, t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" })), "error");
+                    }
+                  }}
+                >
+                  <span className="hidden sm:inline">{t("agents.suspend", { defaultValue: "Pause" })}</span>
                 </Button>
               )}
-              <Button variant="secondary" size="sm" leftIcon={<MessageCircle className="w-3.5 h-3.5" />} onClick={() => navigate({ to: "/chat", search: { agentId: agent.id } })}>
-                {t("common.interact", { defaultValue: "Chat" })}
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<MessageCircle className="w-3.5 h-3.5" />}
+                aria-label={t("common.interact", { defaultValue: "Chat" })}
+                title={t("common.interact", { defaultValue: "Chat" })}
+                onClick={() => navigate({ to: "/chat", search: { agentId: agent.id } })}
+              >
+                <span className="hidden sm:inline">{t("common.interact", { defaultValue: "Chat" })}</span>
               </Button>
               <Button
                 variant="ghost"
@@ -798,21 +851,101 @@ export function AgentsPage() {
             </div>
           </div>
 
-          {/* KPI tiles */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
-            {[
-              { l: t("agents.kpi.sessions",  { defaultValue: "Sessions · 24h" }), v: String(stats.sessions24h),               m: stats.sessions24h > 0 ? "active" : "—" },
-              { l: t("agents.kpi.cost",      { defaultValue: "Cost · 24h" }),     v: `$${stats.cost24h.toFixed(2)}`,           m: stats.cost24h > 0 ? "billed" : "—" },
-              { l: t("agents.kpi.skills",    { defaultValue: "Skills" }),         v: String(skillsCount || "—"),               m: skillsCount > 0 ? `${skillsCount} installed` : "none" },
-              { l: t("agents.kpi.tools",     { defaultValue: "Tools" }),          v: String(toolsCount || "—"),                m: toolsCount > 0 ? `${toolsCount} configured` : "none" },
-            ].map((s) => (
-              <div key={s.l} className="px-3 py-2 rounded-md bg-main/60 border border-border-subtle">
-                <div className="text-[10px] uppercase font-semibold text-text-dim tracking-[0.08em]">{s.l}</div>
-                <div className="font-mono font-semibold text-[17px] mt-1 truncate tabular-nums text-text-main">{s.v}</div>
-                <div className="text-[10.5px] text-text-dim/80 mt-0.5 truncate">{s.m}</div>
+          {/* KPI tiles — Sessions · Cost · P95 · Tools (matches design canvas).
+              Backed by GET /api/agents/{id}/stats so values are accurate even
+              when the agent hasn't appeared in the global session list page. */}
+          {(() => {
+            const live = agentStatsQuery.data;
+            const sessions24h = live?.sessions_24h ?? 0;
+            const cost24h = live?.cost_24h ?? 0;
+            const p95Ms = live?.p95_latency_ms ?? 0;
+            const samples = live?.samples ?? 0;
+            const activeNow = live?.active_now ?? 0;
+            const prev = live?.prev;
+            const skillNames: string[] = Array.isArray((agent as AgentView).skills)
+              ? ((agent as AgentView).skills as string[])
+              : Array.isArray((agent as AgentView).capabilities?.skills)
+                ? (((agent as AgentView).capabilities!.skills) as string[])
+                : [];
+            const toolsMeta = skillNames.length > 0
+              ? skillNames.slice(0, 3).join(" · ")
+              : toolsCount > 0
+                ? `${toolsCount} configured`
+                : "—";
+
+            // Trend deltas vs the prior 24h. Percent change for counts,
+            // signed dollar for cost, signed milliseconds for latency.
+            // When the prior period is empty we surface "new" instead of
+            // a divide-by-zero-induced "+∞%".
+            const pctDelta = (cur: number, p: number): string => {
+              if (p === 0) return cur > 0 ? "new" : "—";
+              const d = ((cur - p) / p) * 100;
+              const sign = d >= 0 ? "+" : "−";
+              return `${sign}${Math.abs(d).toFixed(0)}%`;
+            };
+            const usdDelta = (cur: number, p: number): string => {
+              const d = cur - p;
+              // Treat sub-cent moves as no-change rather than rendering
+              // "−$0.00" / "+$0.00", which looks like a real signal.
+              if (Math.abs(d) < 0.01) return cur === 0 && p === 0 ? "—" : "≈$0.00";
+              const sign = d >= 0 ? "+" : "−";
+              return `${sign}$${Math.abs(d).toFixed(2)}`;
+            };
+            const msDelta = (cur: number, p: number): string => {
+              if (cur === 0 && p === 0) return "—";
+              if (p === 0) return "new";
+              const d = cur - p;
+              const sign = d >= 0 ? "+" : "−";
+              return Math.abs(d) >= 1000
+                ? `${sign}${(Math.abs(d) / 1000).toFixed(1)}s`
+                : `${sign}${Math.abs(Math.round(d))}ms`;
+            };
+
+            return (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
+                {[
+                  {
+                    l: t("agents.kpi.sessions", { defaultValue: "Sessions · 24h" }),
+                    v: String(sessions24h),
+                    m: prev
+                      ? activeNow > 0
+                        ? `${activeNow} live · ${pctDelta(sessions24h, prev.sessions_24h)}`
+                        : pctDelta(sessions24h, prev.sessions_24h)
+                      : activeNow > 0 ? `${activeNow} live` : "—",
+                  },
+                  {
+                    l: t("agents.kpi.cost", { defaultValue: "Cost · 24h" }),
+                    v: `$${cost24h.toFixed(2)}`,
+                    m: prev ? usdDelta(cost24h, prev.cost_24h) : "—",
+                  },
+                  {
+                    l: t("agents.kpi.p95", { defaultValue: "P95 latency" }),
+                    v: p95Ms > 0
+                      ? p95Ms >= 1000
+                        ? `${(p95Ms / 1000).toFixed(2)}s`
+                        : `${Math.round(p95Ms)}ms`
+                      : "—",
+                    m: prev && (samples > 0 || prev.p95_latency_ms > 0)
+                      ? msDelta(p95Ms, prev.p95_latency_ms)
+                      : samples > 0
+                        ? t("agents.kpi.samples", { count: samples, defaultValue: "{{count}} samples" })
+                        : "—",
+                  },
+                  {
+                    l: t("agents.kpi.tools", { defaultValue: "Tools" }),
+                    v: String(toolsCount || "—"),
+                    m: toolsMeta,
+                  },
+                ].map((s) => (
+                  <div key={s.l} className="px-3 py-2 rounded-md bg-main/60 border border-border-subtle">
+                    <div className="text-[10px] uppercase font-semibold text-text-dim tracking-[0.08em]">{s.l}</div>
+                    <div className="font-mono font-semibold text-[17px] mt-1 truncate tabular-nums text-text-main">{s.v}</div>
+                    <div className="text-[10.5px] text-text-dim/80 mt-0.5 truncate">{s.m}</div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            );
+          })()}
 
           {/* Tabs */}
           <div className="flex gap-1 mt-4 -mb-3 border-b border-border-subtle overflow-x-auto">
@@ -838,7 +971,7 @@ export function AgentsPage() {
         </div>
 
         {/* Tab content */}
-        <div className="flex-1 overflow-y-auto px-5 py-4">
+        <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 sm:py-4">
           {renderTabContent(agent, isCrashed)}
         </div>
       </Card>
@@ -909,16 +1042,23 @@ export function AgentsPage() {
             const isUser = m.role === "user";
             const txt = messageText(m).trim();
             if (!txt) return null;
+            // Truncate first, then render. The full conversation lives
+            // behind the "Open chat" button — this is a preview only.
+            const preview = txt.length > 280 ? `${txt.slice(0, 280)}…` : txt;
             return (
               <div key={i} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
                 <div
-                  className={`max-w-[78%] rounded-lg px-3 py-2 text-[12.5px] whitespace-pre-wrap break-words border ${
+                  className={`max-w-[78%] rounded-lg px-3 py-2 text-[12.5px] break-words border ${
                     isUser
                       ? "bg-brand/10 border-brand/30 text-text-main"
                       : "bg-main/60 border-border-subtle text-text-main"
                   }`}
                 >
-                  {txt.length > 280 ? `${txt.slice(0, 280)}…` : txt}
+                  {isUser ? (
+                    <span className="whitespace-pre-wrap">{preview}</span>
+                  ) : (
+                    <MarkdownContent>{preview}</MarkdownContent>
+                  )}
                 </div>
               </div>
             );
@@ -938,22 +1078,56 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Memory tab — KV row layout per design canvas
+  // ---------- Memory tab — per-agent KV row layout per design canvas
   const renderMemoryTab = (agent: AgentDetail) => {
-    const allItems = (memoryListQuery.data?.memories ?? []) as Array<{
-      id?: string;
-      content?: string;
-      category?: string | null;
-      created_at?: string;
-      agent_id?: string;
-    }>;
-    const scoped = allItems.filter((m) => !m.agent_id || m.agent_id === agent.id);
-    const rows = scoped.slice(0, 5);
+    const kv = agentKvMemoryQuery.data ?? [];
+
+    // The kv_store backs both real KV (`user.preferences.tone` →
+    // `"concise"`) and the proactive-memory cache (key = `memory:<uuid>`,
+    // value = the full MemoryItem JSON). Render those two cases
+    // differently so the proactive entries don't dump 600-char JSON
+    // blobs into the row.
+    type View = { key: string; value: string; ageIso?: string };
+    const projected: View[] = kv.map((r) => {
+      const value = r.value as unknown;
+      if (
+        typeof r.key === "string" &&
+        r.key.startsWith("memory:") &&
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+      ) {
+        const obj = value as Record<string, unknown>;
+        const content = typeof obj.content === "string" ? obj.content : "";
+        const category = typeof obj.category === "string" ? obj.category : "memory";
+        const createdAt = typeof obj.created_at === "string" ? obj.created_at : undefined;
+        return { key: category, value: content || "—", ageIso: createdAt };
+      }
+      // Plain KV: show value as a string. Avoid JSON.stringify wrapping
+      // strings with extra quotes.
+      const valueStr = typeof value === "string"
+        ? value
+        : value == null
+          ? "—"
+          : (() => {
+              try {
+                return JSON.stringify(value);
+              } catch {
+                return String(value);
+              }
+            })();
+      return {
+        key: r.key,
+        value: valueStr,
+        ageIso: r.created_at,
+      };
+    });
+    const rows = projected.slice(0, 8);
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-            {t("agents.detail.memory_label", { defaultValue: "Memory · sqlite" })} · {scoped.length}
+            {t("agents.detail.memory_label", { defaultValue: "Memory · sqlite" })} · {kv.length}
           </div>
           <Button
             variant="ghost"
@@ -964,7 +1138,7 @@ export function AgentsPage() {
             {t("agents.detail.open_memory", { defaultValue: "Open" })}
           </Button>
         </div>
-        {memoryListQuery.isLoading ? (
+        {agentKvMemoryQuery.isLoading ? (
           <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
         ) : rows.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
@@ -972,22 +1146,22 @@ export function AgentsPage() {
           </div>
         ) : (
           <div className="flex flex-col gap-1.5">
-            {rows.map((r, i) => {
-              const key = r.category || r.id || `row-${i}`;
-              const valueText = (r.content || "").replace(/\s+/g, " ").trim();
-              return (
-                <div
-                  key={r.id || `mem-${i}`}
-                  className="flex items-center gap-2.5 px-3 py-2 rounded-md border border-border-subtle bg-main/40"
-                >
-                  <span className="font-mono text-[12px] text-brand min-w-[180px] truncate shrink-0">{key}</span>
-                  <span className="font-mono text-[12px] text-text-dim flex-1 min-w-0 truncate">{valueText || "—"}</span>
-                  <span className="font-mono text-[10.5px] text-text-dim/70 shrink-0 tabular-nums">
-                    {r.created_at ? formatRelativeTime(r.created_at) : "—"}
+            {rows.map((r, i) => (
+              <div
+                key={`${r.key}-${i}`}
+                className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5 px-3 py-2 rounded-md border border-border-subtle bg-main/40"
+              >
+                <div className="flex items-center justify-between gap-2 sm:contents">
+                  <span className="font-mono text-[12px] text-brand sm:min-w-[180px] truncate sm:shrink-0 min-w-0">{r.key}</span>
+                  <span className="font-mono text-[10.5px] text-text-dim/70 sm:order-3 sm:shrink-0 tabular-nums shrink-0">
+                    {r.ageIso ? formatRelativeTime(r.ageIso) : "—"}
                   </span>
                 </div>
-              );
-            })}
+                <span className="font-mono text-[12px] text-text-dim sm:flex-1 min-w-0 truncate sm:order-2" title={r.value}>
+                  {r.value}
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -1002,11 +1176,22 @@ export function AgentsPage() {
       : Array.isArray(view.capabilities?.skills)
         ? view.capabilities!.skills!
         : [];
+    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
+    // every skill in the registry, the default), or 'allowlist' (manifest
+    // pinned a list). Each needs a different empty-state copy; the
+    // previous code collapsed them all to "0 installed".
+    const skillsMode = (agent as AgentDetail).skills_mode;
+    const usesAllSkills = skillsMode === "all" && skills.length === 0;
+    const skillsDisabled = skillsMode === "none";
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-            {t("agents.detail.installed_skills", { defaultValue: "Installed skills" })} · {skills.length}
+            {t("agents.detail.installed_skills", { defaultValue: "Installed skills" })}
+            {" · "}
+            {usesAllSkills
+              ? t("agents.detail.skills_all", { defaultValue: "all" })
+              : skills.length}
           </div>
           <Button
             variant="ghost"
@@ -1017,7 +1202,38 @@ export function AgentsPage() {
             {t("agents.detail.install_skill", { defaultValue: "Install" })}
           </Button>
         </div>
-        {skills.length === 0 ? (
+        {skillsDisabled ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+            <X className="w-4 h-4 text-text-dim shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[12.5px] font-medium text-text-main">
+                {t("agents.detail.skills_disabled_title", { defaultValue: "Skills disabled" })}
+              </div>
+              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                {t("agents.detail.skills_disabled_desc", {
+                  defaultValue: "manifest pinned skills_disabled = true — the agent runs without skill dispatch",
+                })}
+              </div>
+            </div>
+          </div>
+        ) : usesAllSkills ? (
+          <div
+            onClick={() => navigate({ to: "/skills" })}
+            className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
+          >
+            <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[12.5px] font-medium text-text-main">
+                {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+              </div>
+              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                {t("agents.detail.skills_all_desc", {
+                  defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
+                })}
+              </div>
+            </div>
+          </div>
+        ) : skills.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
             {t("agents.detail.no_skills", { defaultValue: "No skills installed for this agent." })}
           </div>
@@ -1047,9 +1263,35 @@ export function AgentsPage() {
   // ---------- Schedule tab — trigger card + 14-run bar chart per design canvas
   const renderScheduleTab = (agent: AgentDetail) => {
     const cron = cronJobsQuery.data ?? [];
-    const triggers: AgentTriggerSummary[] = Array.isArray((agent as AgentView).triggers)
-      ? ((agent as AgentView).triggers as AgentTriggerSummary[])
-      : [];
+    // GET /api/agents/{id} doesn't embed triggers, so we hit the
+    // dedicated /api/triggers?agent_id=... endpoint here. Falling back
+    // to the (legacy) embedded-on-detail field if a future backend
+    // version ships it.
+    const liveTriggers = (agentTriggersQuery.data ?? []) as Array<{
+      id?: string;
+      pattern?: unknown;
+      prompt_template?: string;
+      enabled?: boolean;
+    }>;
+    const triggers: AgentTriggerSummary[] = liveTriggers.map((tr) => {
+      // Render the trigger pattern compactly. The full TriggerPattern shape
+      // is rich (event filters / regex / etc.); the detail panel only
+      // needs a one-liner — full pattern lives on the dedicated page.
+      const patternStr = (() => {
+        if (!tr.pattern) return undefined;
+        if (typeof tr.pattern === "string") return tr.pattern;
+        try {
+          return JSON.stringify(tr.pattern);
+        } catch {
+          return undefined;
+        }
+      })();
+      return {
+        event_pattern: patternStr,
+        name: tr.id,
+        description: tr.prompt_template,
+      };
+    });
     // Synthetic "last 14 runs" — backend doesn't expose per-fire history
     // through a single agent-scoped endpoint yet, so we visualise an
     // agent-id-seeded waveform as a placeholder. Wire up real run
@@ -1109,9 +1351,36 @@ export function AgentsPage() {
             ))}
           </>
         ) : (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_schedule", { defaultValue: "Manual — no triggers or cron jobs configured." })}
-          </div>
+          // Honest empty state — most agents are reactive (no cron, no
+          // triggers) and the panel was previously rendering "Manual" as
+          // if it were a misconfiguration. Surface the manifest's actual
+          // schedule mode (also returned by GET /api/agents on list, but
+          // we re-derive from the detail response defensively).
+          (() => {
+            const mode = (agent as AgentDetail).schedule;
+            const isReactive = !mode || mode === "manual";
+            return (
+              <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+                <Zap className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[12.5px] font-medium text-text-main">
+                    {isReactive
+                      ? t("agents.detail.schedule_reactive_title", { defaultValue: "Reactive" })
+                      : mode}
+                  </div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                    {isReactive
+                      ? t("agents.detail.schedule_reactive_desc", {
+                          defaultValue: "wakes on incoming messages and events — no cron or trigger pinned",
+                        })
+                      : t("agents.detail.schedule_no_triggers", {
+                          defaultValue: "schedule mode set but no cron jobs or event triggers configured",
+                        })}
+                  </div>
+                </div>
+              </div>
+            );
+          })()
         )}
 
         <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-2">
@@ -1138,17 +1407,12 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Logs tab — terminal-style stderr tail per design canvas
-  const renderLogsTab = (agent: AgentDetail) => {
-    const audit = (auditRecentQuery.data ?? []) as Array<{
-      timestamp?: string;
-      action?: string;
-      agent_id?: string;
-      detail?: string;
-      target?: string;
-      level?: string;
-    }>;
-    const filtered = audit.filter((row) => !row.agent_id || row.agent_id === agent.id).slice(0, 12);
+  // ---------- Logs tab — terminal-style turn feed per design canvas
+  // Sourced from /api/agents/{id}/events (usage_events) so each row is
+  // a real LLM turn — model / latency / tokens / cost — instead of the
+  // global audit ledger, which is mostly admin lifecycle entries.
+  const renderLogsTab = (_agent: AgentDetail) => {
+    const events = agentEventsQuery.data ?? [];
     const fmtTime = (s?: string): string => {
       if (!s) return "—";
       try {
@@ -1162,31 +1426,24 @@ export function AgentsPage() {
         return s;
       }
     };
-    const levelOf = (row: { level?: string; action?: string }): "INFO" | "WARN" | "DEBUG" | "ERROR" => {
-      const lv = (row.level || "").toUpperCase();
-      if (lv === "WARN" || lv === "ERROR" || lv === "DEBUG" || lv === "INFO") return lv as never;
-      const action = (row.action || "").toLowerCase();
-      if (action.includes("fail") || action.includes("error") || action.includes("denied")) return "ERROR";
-      if (action.includes("warn") || action.includes("budget")) return "WARN";
-      return "INFO";
-    };
-    const levelColor = (lv: string) =>
-      lv === "WARN" ? "text-warning" :
-      lv === "ERROR" ? "text-error" :
-      lv === "DEBUG" ? "text-text-dim/60" : "text-success";
+    // Token shorthand (1.2k tok) — keeps the line fitting the design.
+    const fmtTokens = (n: number): string =>
+      n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+    const formatLine = (e: typeof events[number]): string =>
+      `turn · ${e.model} · in=${fmtTokens(e.input_tokens)} out=${fmtTokens(e.output_tokens)} · ${e.latency_ms}ms · $${e.cost_usd.toFixed(4)}`;
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-            {t("agents.detail.stderr_tail", { defaultValue: "stderr · tail" })}
+            {t("agents.detail.events_tail", { defaultValue: "events · tail" })} · {events.length}
           </div>
           <Button
             variant="ghost"
             size="sm"
             leftIcon={<Copy className="h-3.5 w-3.5" />}
             onClick={() => {
-              const text = filtered
-                .map((r) => `${fmtTime(r.timestamp)} ${levelOf(r)} ${r.action ?? ""} ${r.detail ?? ""}`)
+              const text = events
+                .map((e) => `${fmtTime(e.timestamp)} INFO ${e.provider || "—"} ${formatLine(e)}`)
                 .join("\n");
               void navigator.clipboard?.writeText(text);
               addToast(t("common.copied", { defaultValue: "Copied" }), "success");
@@ -1195,28 +1452,27 @@ export function AgentsPage() {
             {t("common.copy", { defaultValue: "Copy" })}
           </Button>
         </div>
-        {auditRecentQuery.isLoading ? (
+        {agentEventsQuery.isLoading ? (
           <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
-        ) : filtered.length === 0 ? (
+        ) : events.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_logs", { defaultValue: "No recent log entries for this agent." })}
+            {t("agents.detail.no_logs", { defaultValue: "No turns recorded yet for this agent." })}
           </div>
         ) : (
           <div
-            className="rounded-md border border-border-subtle p-3 font-mono text-[11.5px] leading-[1.6] max-h-60 overflow-y-auto"
+            className="rounded-md border border-border-subtle p-3 font-mono text-[11.5px] leading-[1.6] max-h-60 overflow-auto -mx-3 sm:mx-0"
             style={{ background: "rgba(2,6,23,0.6)" }}
           >
-            {filtered.map((row, i) => {
-              const lv = levelOf(row);
-              return (
-                <div key={i} className="flex gap-2.5">
-                  <span className="text-text-dim/60 shrink-0">{fmtTime(row.timestamp)}</span>
-                  <span className={`${levelColor(lv)} w-12 shrink-0`}>{lv}</span>
-                  <span className="text-accent w-24 shrink-0 truncate">{row.action || "—"}</span>
-                  <span className="text-text-dim min-w-0 truncate">{row.detail || row.target || ""}</span>
-                </div>
-              );
-            })}
+            {events.map((e, i) => (
+              <div key={`${e.timestamp}-${i}`} className="flex gap-2.5 min-w-max sm:min-w-0">
+                <span className="text-text-dim/60 shrink-0">{fmtTime(e.timestamp)}</span>
+                <span className="text-success w-12 shrink-0">INFO</span>
+                <span className="text-accent w-24 shrink-0 truncate">{e.provider || "agent"}</span>
+                <span className="text-text-dim min-w-0 truncate" title={formatLine(e)}>
+                  {formatLine(e)}
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -1242,9 +1498,15 @@ export function AgentsPage() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 min-h-[640px]">
-        {/* Left list panel — search + filter pills + sort + scroll body. */}
-        <Card padding="none" className="surface-lit overflow-hidden flex flex-col h-[calc(100vh-200px)] min-h-[480px]">
+      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 lg:min-h-[640px]">
+        {/* Left list panel — search + filter pills + sort + scroll body.
+            On mobile the list owns the viewport; the detail panel is
+            promoted to a full-screen overlay (see below) so we never
+            stack two scrollers on a 390px phone. */}
+        <Card
+          padding="none"
+          className={`surface-lit overflow-hidden flex flex-col h-[calc(100vh-200px)] min-h-[480px] ${detailAgent ? "hidden lg:flex" : "flex"}`}
+        >
           <div className="px-3 pt-3 pb-2.5 border-b border-border-subtle flex flex-col gap-2 flex-shrink-0">
             <Input
               value={search}
@@ -1339,11 +1601,20 @@ export function AgentsPage() {
           </div>
         </Card>
 
-        {/* Right detail panel — header + KPI tiles + 5 tabs. */}
+        {/* Right detail panel — header + KPI tiles + 5 tabs.
+            Mobile: rendered as a fixed full-viewport overlay above the
+            list (top inset 0, bottom inset 14 reserves the global tab
+            bar's ~56px so it never gets covered). lg+: collapses back
+            into the master-detail grid. */}
         {detailAgent ? (
-          renderDetailPanel(detailAgent)
+          <div className="fixed inset-x-0 top-0 bottom-[calc(56px+env(safe-area-inset-bottom))] z-30 bg-surface lg:static lg:inset-auto lg:bottom-auto lg:z-auto lg:bg-transparent overflow-hidden flex flex-col">
+            {renderDetailPanel(detailAgent)}
+          </div>
         ) : (
-          <Card padding="lg" className="surface-lit grid place-items-center text-center min-h-[480px]">
+          // Placeholder is desktop-only — on mobile the list fills the
+          // viewport when no agent is selected, so this empty-state would
+          // just be wasted vertical space.
+          <Card padding="lg" className="surface-lit hidden lg:grid place-items-center text-center min-h-[480px]">
             <div className="max-w-xs">
               <div className="w-12 h-12 mx-auto rounded-xl bg-brand/10 border border-brand/30 grid place-items-center text-brand mb-3">
                 <Bot className="w-6 h-6" />

@@ -1,12 +1,10 @@
 import { formatCost } from "../lib/format";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
-import rehypeKatex from "rehype-katex";
-import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
 import { messageIn, fadeInUp } from "../lib/motion";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocket, sendAgentMessage, loadAgentSession } from "../api";
+import { buildAuthenticatedWebSocket } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { clearAgentHistory } from "../lib/http/client";
@@ -14,14 +12,14 @@ import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
-import { useAgents, useAgentSessions } from "../lib/queries/agents";
+import { agentQueries, useAgents, useAgentSessions } from "../lib/queries/agents";
 import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -30,16 +28,17 @@ import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
+import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
   useDeleteAgentSession,
   usePatchAgentConfig,
   usePatchHandAgentRuntimeConfig,
   useResolveApproval,
+  useSendAgentMessage,
   useStopAgent,
   useUploadAgentFile,
 } from "../lib/mutations/agents";
-import "katex/dist/katex.min.css";
 
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required" && status !== "auto_detected";
@@ -118,9 +117,6 @@ const SLASH_COMMANDS = [
 // Commands that require backend processing via WebSocket command protocol
 const BACKEND_COMMANDS = SLASH_COMMANDS.filter(c => c.backend).map(c => c.cmd.slice(1));
 
-const REMARK_PLUGINS = [remarkMath];
-const REHYPE_PLUGINS = [rehypeKatex];
-
 let _nextMessageId = 0;
 function makeMessageId(prefix: string): string {
   _nextMessageId += 1;
@@ -161,6 +157,13 @@ function useWebSocket(
   const retriesRef = useRef(0);
   // Callback fired when WS closes while a response is pending
   const onDropRef = useRef<(() => void) | null>(null);
+  // Issue #3550: every in-flight slash-command listener registers its
+  // AbortController here so ws.onclose can detach them all at once.
+  // Without this the listeners stay attached on the dead WebSocket
+  // reference and re-issuing the command silently no-ops on the new
+  // socket. Each registrant is responsible for removing its own entry
+  // on the success/error/timeout paths.
+  const pendingCommandsRef = useRef<Set<AbortController>>(new Set());
   // Bug #3847: store the current URL + WS sub-protocols in refs so the
   // reconnect closure always reads the latest values rather than capturing
   // them from the previous agent via a stale closure.
@@ -231,6 +234,16 @@ function useWebSocket(
           if (onDropRef.current) {
             onDropRef.current();
             onDropRef.current = null;
+          }
+          // Issue #3550: detach any pending slash-command listeners.
+          // Their handlers were registered with { signal } so abort()
+          // both removes the listener from the (about-to-be-replaced)
+          // socket AND fires the abort handler that surfaces a system
+          // message to the user.
+          if (pendingCommandsRef.current.size > 0) {
+            const pending = Array.from(pendingCommandsRef.current);
+            pendingCommandsRef.current.clear();
+            for (const ctrl of pending) ctrl.abort();
           }
 
           // Bug #3854: stop reconnecting on auth-failure close codes
@@ -305,6 +318,15 @@ function useWebSocket(
       authErrorRef.current = false;
       gaveUpRef.current = false;
       onDropRef.current = null;
+      // Issue #3550: agent/session change tears down the socket. Any
+      // command listener still pending would be orphaned, so abort
+      // them here too — abort() detaches the listener via the
+      // AbortSignal we registered with addEventListener.
+      if (pendingCommandsRef.current.size > 0) {
+        const pending = Array.from(pendingCommandsRef.current);
+        pendingCommandsRef.current.clear();
+        for (const ctrl of pending) ctrl.abort();
+      }
       const ws = wsRef.current;
       if (ws) {
         ws.onclose = null; // prevent reconnect on intentional close
@@ -320,17 +342,29 @@ function useWebSocket(
     };
   }, [agentId, sessionId]);
 
-  return { ws: wsRef, wsConnected, onDropRef, ariaAnnouncement, ariaNonce };
+  return { ws: wsRef, wsConnected, onDropRef, pendingCommandsRef, ariaAnnouncement, ariaNonce };
 }
 
-// Per-agent session cache — survives agent switches within the same page lifecycle
+// Per-(agent, session) message cache — survives agent/session switches within
+// the same page lifecycle. Keying by agent alone (issue #4295) returned the
+// previously-viewed session's messages whenever the user switched sessions on
+// the same agent, because the cache hit on a fresh mount didn't consult the
+// requested sessionId.
 const sessionCache = new Map<string, ChatMessage[]>();
+const cacheKey = (agentId: string, sessionId: string | null): string =>
+  `${agentId}:${sessionId ?? ""}`;
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
 function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null, onNewSession?: (sessionId: string) => void) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
+  const sendAgentMessageMutation = useSendAgentMessage();
+  // Used to fetch the agent's session snapshot through the queries layer so
+  // hits get TanStack Query caching, dedup, and back/forward instant-load
+  // (see agentQueries.session). Imperative fetchQuery rather than useQuery
+  // because the load is gated on `sessionVersion` and `sessionCache`.
+  const queryClient = useQueryClient();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
   // ChatInput on every agent while one of them is streaming (#2322). Keyed
@@ -385,7 +419,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       if (!alive.has(id)) delete latestTurns[id];
     }
   }, [agents]);
-  const { ws, wsConnected, onDropRef, ariaAnnouncement, ariaNonce } = useWebSocket(agentId, sessionId, onClearError);
+  const { ws, wsConnected, onDropRef, pendingCommandsRef, ariaAnnouncement, ariaNonce } = useWebSocket(agentId, sessionId, onClearError);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
@@ -394,6 +428,10 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
   // during a previous render can tell whether their target is still on screen.
   const currentAgentRef = useRef<string | null>(agentId);
   useEffect(() => { currentAgentRef.current = agentId; }, [agentId]);
+  // Track the currently-viewed sessionId too so off-screen cache writes target
+  // the right (agent, session) bucket (issue #4295).
+  const currentSessionRef = useRef<string | null>(sessionId);
+  useEffect(() => { currentSessionRef.current = sessionId; }, [sessionId]);
 
   // Route a message update to either live React state (when the target agent
   // is on screen) or straight to the session cache (when the user has
@@ -408,8 +446,16 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     if (id === currentAgentRef.current) {
       setMessages(updater);
     } else {
-      const current = sessionCache.get(id) ?? [];
-      sessionCache.set(id, updater(current));
+      // Off-screen update: route into the cache bucket for whichever session
+      // was active for that agent at the time we swapped away. We don't track
+      // per-agent session pointers, so fall back to the live currentSessionRef
+      // when the off-screen agent matches; otherwise key by agent only with an
+      // empty session segment (best-effort — the load-effect will overwrite on
+      // next view anyway).
+      const sid = id === currentAgentRef.current ? currentSessionRef.current : null;
+      const key = cacheKey(id, sid);
+      const current = sessionCache.get(key) ?? [];
+      sessionCache.set(key, updater(current));
     }
   }, []);
 
@@ -458,31 +504,34 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
 
     prevAgentRef.current = agentId;
     const ownedAgentId = agentId;
+    const ownedSessionId = sessionId;
 
     return () => {
-      sessionCache.set(ownedAgentId, messagesRef.current);
+      sessionCache.set(cacheKey(ownedAgentId, ownedSessionId), messagesRef.current);
     };
-  }, [agentId]);
+  }, [agentId, sessionId]);
 
   // Load history — use cache if available, otherwise fetch
   // sessionVersion changes force a fresh load (skip cache)
   useEffect(() => {
     if (!agentId) { setMessages([]); return; }
 
+    const key = cacheKey(agentId, sessionId);
     if (sessionVersion === 0) {
-      const cached = sessionCache.get(agentId);
+      const cached = sessionCache.get(key);
       if (cached) {
         setMessages(cached);
         return;
       }
     } else {
-      sessionCache.delete(agentId);
+      sessionCache.delete(key);
     }
 
     setMessages([]);
     const loadId = agentId;
     setAgentLoading(loadId, true);
-    loadAgentSession(loadId, sessionId)
+    queryClient
+      .fetchQuery(agentQueries.session(loadId, sessionId))
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
@@ -528,8 +577,8 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           // for loadId. Only touch live React state when the user is still
           // viewing loadId; otherwise a slow A load resolving after the
           // user has swapped to B would overwrite B's displayed messages.
-          sessionCache.set(loadId, historical);
-          if (loadId === currentAgentRef.current) {
+          sessionCache.set(cacheKey(loadId, sessionId), historical);
+          if (loadId === currentAgentRef.current && sessionId === currentSessionRef.current) {
             setMessages(historical);
           }
         }
@@ -543,7 +592,12 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
         onClearError?.(message);
       })
       .finally(() => setAgentLoading(loadId, false));
-  }, [agentId, sessionVersion]);
+    // sessionId is in the deps so picking a different session in the dropdown
+    // re-runs the loader. Without it, the navigate() URL update lands a render
+    // after setSessionVersion, but the effect doesn't re-run on that render —
+    // so the previous session's messages stay on screen until a second click
+    // bumps sessionVersion again (issue #4295, Bug A).
+  }, [agentId, sessionId, sessionVersion]);
 
   const clearHistory = useCallback(async () => {
     if (!agentId) {
@@ -552,7 +606,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
     try {
       await clearAgentHistory(agentId);
-      sessionCache.delete(agentId);
+      sessionCache.delete(cacheKey(agentId, sessionId));
       if (prevAgentRef.current === agentId) {
         messagesRef.current = [];
       }
@@ -560,7 +614,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     } catch (error) {
       onClearError?.(error instanceof Error ? error.message : t("common.error"));
     }
-  }, [agentId, onClearError, t]);
+  }, [agentId, sessionId, onClearError, t]);
 
   // Send message - WS first, HTTP fallback. `attachments` is the list of
   // already-uploaded files that the agent should attach to this turn (image
@@ -610,11 +664,32 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           { id: makeMessageId("user"), role: "user" as const, content: trimmed, timestamp: new Date() },
         ]);
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+          // Issue #3550: a one-shot listener that's only removed inside the
+          // handler leaks on dead-socket scenarios (network blip, daemon
+          // restart, route navigation between send and response). The dead
+          // socket is replaced by the reconnect path; the leaked listener
+          // sits on the old reference and the user's retry silently no-ops.
+          // Wrap the listener in an AbortController + 30s watchdog and
+          // register the controller in `pendingCommandsRef` so the WS
+          // close path (in useWebSocket) can mass-abort on disconnect.
+          const ctrl = new AbortController();
+          let settled = false;
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          const finalize = () => {
+            if (settled) return;
+            settled = true;
+            if (timer) { clearTimeout(timer); timer = null; }
+            pendingCommandsRef.current.delete(ctrl);
+            // abort() is idempotent and doubles as the listener removal —
+            // calling it on success keeps us off the socket for any late
+            // straggler frames.
+            ctrl.abort();
+          };
           const handleCmdResponse = (event: MessageEvent) => {
             try {
               const data = JSON.parse(event.data as string);
               if (data.type === "command_result" || data.type === "error") {
-                ws.current?.removeEventListener("message", handleCmdResponse);
+                finalize();
                 const responseText = data.message || data.content || "";
                 // /new and /reset clear the backend session, so clear frontend too
                 if (data.type === "command_result" && (cmd === "new" || cmd === "reset")) {
@@ -638,8 +713,30 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               }
             } catch { /* ignore non-JSON */ }
           };
-          ws.current.addEventListener("message", handleCmdResponse);
+          // When the abort fires (timeout, ws close, or success), surface
+          // a system message ONLY if we got there from timeout / drop,
+          // not from the success path which already pushed its own reply.
+          ctrl.signal.addEventListener("abort", () => {
+            if (timer) { clearTimeout(timer); timer = null; }
+            pendingCommandsRef.current.delete(ctrl);
+            if (!settled) {
+              // We got aborted before the response landed — either the
+              // 30s timer expired or the WS dropped. Either way the user
+              // needs a visible "command lost" hint so the silent no-op
+              // doesn't repeat.
+              settled = true;
+              setMessages(prev => [...prev,
+                { id: makeMessageId("sys"), role: "system" as const, content: t("chat.command_timeout"), timestamp: new Date() }
+              ]);
+            }
+          });
+          pendingCommandsRef.current.add(ctrl);
+          ws.current.addEventListener("message", handleCmdResponse, { signal: ctrl.signal });
           ws.current.send(JSON.stringify({ type: "command", command: cmd, args: cmdArgs }));
+          // 30s watchdog mirrors the slash-command UX expectation that
+          // backend commands are near-instant; LLM turns get the longer
+          // 180s window further down.
+          timer = setTimeout(() => { ctrl.abort(); }, 30_000);
         } else {
           sysMsg(t("chat.ws_not_connected"));
         }
@@ -677,11 +774,15 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     // Helper: send via HTTP (used as primary fallback and WS drop recovery)
     const sendViaHttp = async () => {
       try {
-        const response = await sendAgentMessage(sendAgentId, trimmed, {
-          thinking: deepThinking,
-          show_thinking: showThinkingProcess,
-          session_id: sessionId,
-          attachments: hasAttachments ? attachments : undefined,
+        const response = await sendAgentMessageMutation.mutateAsync({
+          agentId: sendAgentId,
+          message: trimmed,
+          options: {
+            thinking: deepThinking,
+            show_thinking: showThinkingProcess,
+            session_id: sessionId,
+            attachments: hasAttachments ? attachments : undefined,
+          },
         });
         const fullContent = response.response || "";
         updateAgentMessages(sendAgentId, prev => prev.map(m =>
@@ -1033,6 +1134,11 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
       .trim();
   }, [message.content, isUser]);
 
+  // Lazy-load remark-math / rehype-katex / katex CSS only when this message
+  // actually contains math delimiters. Saves ~280 KB of KaTeX from the
+  // initial bundle on math-free chats (#3381).
+  const mathPlugins = useMathPlugins(displayContent);
+
   return (
     <motion.div className={`flex ${isUser ? "justify-end" : "justify-start"}`} variants={messageIn} initial="initial" animate="animate">
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
@@ -1156,8 +1262,8 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             <p className="whitespace-pre-line [overflow-wrap:anywhere]">{displayContent}</p>
           ) : (
             <MarkdownContent
-              remarkPlugins={REMARK_PLUGINS}
-              rehypePlugins={REHYPE_PLUGINS}
+              remarkPlugins={mathPlugins.remarkPlugins}
+              rehypePlugins={mathPlugins.rehypePlugins}
             >
               {displayContent}
             </MarkdownContent>
@@ -1827,7 +1933,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount, onOpenMobileSheet }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
@@ -1846,6 +1952,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   attached?: boolean;
   /** Number of SSE events received on the attach stream (for operator visibility). */
   attachedEventCount?: number;
+  /** Mobile-only — opens the agent/session picker sheet. */
+  onOpenMobileSheet?: () => void;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -1975,11 +2083,21 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   return (
     <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-linear-to-r from-surface to-transparent flex items-center justify-between">
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
-        <div className="relative">
+        {onOpenMobileSheet && (
+          <button
+            type="button"
+            onClick={onOpenMobileSheet}
+            className="lg:hidden -ml-0.5 inline-flex h-8 w-8 items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors shrink-0"
+            aria-label={t("chat.open_agent_picker", { defaultValue: "Open agent picker" })}
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+        )}
+        <div className="relative hidden lg:block">
           <Wifi className="h-3.5 w-3.5 text-success" />
           <span className="absolute inset-0 rounded-full bg-success/30 animate-pulse" />
         </div>
-        <span className="text-xs font-semibold text-success uppercase tracking-wide hidden sm:inline">{t("chat.secure_link")}</span>
+        <span className="text-xs font-semibold text-success uppercase tracking-wide hidden lg:inline">{t("chat.secure_link")}</span>
         {wsConnected && (
           <Badge variant="brand" dot>
             <Zap className="h-2.5 w-2.5 mr-0.5" />
@@ -1995,8 +2113,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               : ""}
           </Badge>
         )}
-        <span className="text-text-dim/30 hidden sm:inline">&bull;</span>
-        <span className="text-xs font-medium text-text-dim truncate">{agentName}</span>
+        <span className="text-text-dim/30 hidden lg:inline">&bull;</span>
+        <span className="text-xs font-semibold text-text-main truncate">{agentName}</span>
         {isLoading && (
           <span className="ml-2 px-2 py-0.5 rounded-full bg-brand/10 text-brand text-[10px] font-medium animate-pulse">
             {wsConnected ? t("chat.ws_streaming") : t("chat.generating")}
@@ -2399,6 +2517,8 @@ export function ChatPage() {
   // Message windowing: render only the last N messages to avoid DOM bloat in
   // long sessions. The user can load earlier messages with the button above.
   const [visibleCount, setVisibleCount] = useState(50);
+  // Mobile-only: agent picker / session list slide-in sheet visibility.
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const addToast = useUIStore((s) => s.addToast);
   const createSessionMutation = useCreateAgentSession();
   // NOTE: switch_agent_session is no longer called from ChatPage — see issue
@@ -2413,8 +2533,19 @@ export function ChatPage() {
   const selectAgent = useCallback((id: string) => {
     setSelectedAgentId(id);
     setVisibleCount(50);
-    navigate({ to: "/chat", search: { agentId: id }, replace: true });
-  }, [navigate]);
+    setMobileSheetOpen(false);
+    // Preserve sessionId only when the URL already targets the same agent —
+    // otherwise the session is invalid for the new agent and would 404. This
+    // is the last line of defense against the bootstrap race in issue #4296
+    // (Bug C): without it, auto-select clobbers a URL-pinned sessionId via
+    // `replace: true`, and the back button can't recover it.
+    const keepSession = search?.agentId === id ? search?.sessionId : undefined;
+    navigate({
+      to: "/chat",
+      search: keepSession ? { agentId: id, sessionId: keepSession } : { agentId: id },
+      replace: true,
+    });
+  }, [navigate, search]);
 
   // Check TTS provider availability
   const mediaProvidersQuery = useMediaProviders();
@@ -2618,11 +2749,31 @@ export function ChatPage() {
   // (multi-tab safety, issue #2959); if absent, fall back to the server's
   // canonical active session so initial navigation still highlights correctly.
   const sessionsQuery = useAgentSessions(selectedAgentId);
-  const serverActiveSessionId = useMemo(() => {
-    const active = sessionsQuery.data?.find((s: SessionListItem) => s.active);
-    return active?.session_id;
+  // Fallback session pick when the URL has no `?sessionId=`. The server's
+  // `active` field is broken for trigger-driven agents using
+  // `session_mode = "new"` — the registry pointer often lands on a session
+  // not yet in the SQL listing, so zero rows report `active: true` and the
+  // chat lands with no session selected (issue #4295 Bug C, root cause #4293).
+  // Pick the most-recently-created session instead — that's what users
+  // actually want when they click an agent with many stored sessions, and it
+  // matches what the Agent detail Conversation tab does.
+  const fallbackSessionId = useMemo(() => {
+    const sessions = sessionsQuery.data;
+    if (!sessions || sessions.length === 0) return undefined;
+    let newest: SessionListItem | undefined;
+    let newestTs = -Infinity;
+    for (const s of sessions) {
+      const ts = s.created_at ? Date.parse(s.created_at) : NaN;
+      if (Number.isFinite(ts) && ts > newestTs) {
+        newestTs = ts;
+        newest = s;
+      }
+    }
+    // If no row had a parseable created_at, fall back to the first entry so
+    // the dropdown still highlights something rather than going blank.
+    return (newest ?? sessions[0]).session_id;
   }, [sessionsQuery.data]);
-  const activeSessionId = urlSessionId ?? serverActiveSessionId;
+  const activeSessionId = urlSessionId ?? fallbackSessionId;
 
   // Multi-attach SSE viewer (issue #3078). Opt-in behind ?attach=1 — the
   // server-side route ships in a separate PR; until that lands the hook
@@ -2678,6 +2829,10 @@ export function ChatPage() {
   useEffect(() => {
     if (!selectedAgentId) return;
     if (agentsQuery.data === undefined) return;
+    // Wait for the hands query too when hand agents are visible — otherwise
+    // `agents` is missing every is_hand entry mid-bootstrap and we'd clear a
+    // URL-pinned hand-agent selection on a stale list (issue #4296 Bug B).
+    if (showHandAgents && handsQuery.data === undefined) return;
     if (agents.some(a => a.id === selectedAgentId)) return;
     // Not in the current list — before clearing, try expanding the query
     // to include hand-spawned agents. The URL may point at a hand agent
@@ -2688,7 +2843,7 @@ export function ChatPage() {
       return;
     }
     setSelectedAgentId("");
-  }, [agents, selectedAgentId, agentsQuery.data, showHandAgents]);
+  }, [agents, selectedAgentId, agentsQuery.data, handsQuery.data, showHandAgents]);
 
   useEffect(() => {
     // Auto-select first running agent
@@ -2761,27 +2916,28 @@ export function ChatPage() {
   );
 
   return (
-    <div className="flex h-[calc(100vh-100px)] sm:h-[calc(100vh-140px)] flex-col">
+    <div className="flex h-[calc(100dvh-180px)] lg:h-[calc(100vh-140px)] flex-col min-h-0">
       {/* Bug #3849: two separate aria-live regions so WS state changes and
           new-message announcements are each surfaced independently — a single
           region with `||` would silence msgAriaAnnouncement whenever the WS
           connection string is non-empty. */}
       <div key={ariaNonce} aria-live="polite" aria-atomic="true" className="sr-only">{ariaAnnouncement}</div>
       <div aria-live="polite" aria-atomic="true" className="sr-only">{msgAriaAnnouncement}</div>
-      {/* Header */}
-      <header className="pb-2 sm:pb-4">
+      {/* Header — hidden on mobile to maximize chat real estate above the BottomTabs */}
+      <header className="hidden lg:block pb-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 sm:gap-3">
-            <div className="relative hidden sm:block">
+          <div className="flex items-center gap-3">
+            <div className="relative">
               <Sparkles className="h-5 w-5 text-brand" />
               <span className="absolute inset-0 bg-brand/30 animate-pulse" />
             </div>
-            <span className="text-brand font-bold uppercase tracking-widest text-[10px] hidden sm:inline">{t("chat.neural_terminal")}</span>
-            <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
+            <span className="text-brand font-bold uppercase tracking-widest text-[10px]">{t("chat.neural_terminal")}</span>
+            <h1 className="text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
           </div>
           <button
             onClick={() => void agentsQuery.refetch()}
-            className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-colors"
+            className="p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-colors"
+            aria-label={t("common.refresh", { defaultValue: "Refresh" })}
           >
             <RefreshCw className={`h-4 w-4 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
@@ -2789,9 +2945,9 @@ export function ChatPage() {
       </header>
 
       {/* Main content area */}
-      <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
-        {/* Left sidebar - Agent list */}
-        <aside className="hidden md:flex w-64 shrink-0 border-r border-border-subtle bg-main flex-col">
+      <div className="flex flex-1 min-h-0 overflow-hidden rounded-none lg:rounded-2xl border-y lg:border border-border-subtle bg-surface lg:shadow-xl lg:ring-1 lg:ring-black/5 dark:lg:ring-white/5">
+        {/* Left sidebar - Agent list (desktop only; mobile uses a sheet) */}
+        <aside className="hidden lg:flex w-64 shrink-0 border-r border-border-subtle bg-main flex-col">
           <div className="p-4 border-b border-border-subtle space-y-2">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
             <button
@@ -2838,46 +2994,99 @@ export function ChatPage() {
         </aside>
 
         {/* Right side - Chat area */}
-        <main className="flex-1 flex flex-col overflow-hidden bg-main/10 relative">
+        <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden bg-main/10 relative">
           {/* Background decoration */}
           <div className="absolute inset-0 pointer-events-none opacity-30">
             <div className="absolute top-0 left-0 w-64 h-64 bg-brand/5 rounded-full blur-3xl" />
             <div className="absolute bottom-0 right-0 w-48 h-48 bg-accent/5 rounded-full blur-3xl" />
           </div>
 
-          {/* Mobile agent selector */}
-          <div className="md:hidden px-3 py-2 border-b border-border-subtle bg-surface/80">
-            <select
-              value={selectedAgentId}
-              onChange={(e) => selectAgent(e.target.value)}
-              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-bold outline-none focus:border-brand"
-            >
-              <option value="">{t("chat.select_agent")}</option>
-              {picker.standalone.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })} ({agent.state || "unknown"})
-                </option>
-              ))}
-              {picker.handGroups.map((group) => (
-                <optgroup
-                  key={group.hand_id}
-                  label={`${group.hand_icon ?? ""} ${group.hand_name}`.trim()}
-                >
-                  {group.agents.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.role}
-                      {agent.isCoordinator
-                        ? ` (${t("chat.hand_coordinator", { defaultValue: "coordinator" })})`
-                        : ""}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-          </div>
+          {/* Mobile agent picker — slide-in sheet from the left. The backing
+              <aside> is desktop-only (`hidden lg:flex`), so on mobile we mount
+              an absolutely-positioned drawer over the chat area instead of
+              consuming a fixed width. */}
+          {mobileSheetOpen && (
+            <div className="lg:hidden absolute inset-0 z-40">
+              <div
+                className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                onClick={() => setMobileSheetOpen(false)}
+                aria-hidden="true"
+              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label={t("nav.agents")}
+                className="absolute inset-y-0 left-0 w-[80%] max-w-xs bg-main border-r border-border-subtle flex flex-col shadow-xl"
+              >
+                <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+                  <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim">{t("nav.agents")}</h3>
+                  <button
+                    type="button"
+                    onClick={() => setMobileSheetOpen(false)}
+                    className="h-8 w-8 rounded-lg flex items-center justify-center text-text-dim hover:text-brand hover:bg-surface-hover"
+                    aria-label={t("common.close", { defaultValue: "Close" })}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="px-3 pt-3">
+                  <button
+                    onClick={() => setShowHandAgents((value) => !value)}
+                    aria-pressed={showHandAgents}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
+                      showHandAgents
+                        ? "border-brand/30 bg-brand/10 text-brand"
+                        : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+                    }`}
+                  >
+                    <span>{t("agents.show_hand_agents", { defaultValue: "Show hand agents" })}</span>
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin">
+                  {picker.standalone.length === 0 && picker.handGroups.length === 0 ? (
+                    <div className="p-4 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+                  ) : (
+                    <>
+                      {picker.standalone.length > 0 && (
+                        <div className="space-y-2">
+                          {picker.handGroups.length > 0 && (
+                            <h4 className="px-1 pt-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim">
+                              {t("chat.group_standalone", { defaultValue: "Standalone" })}
+                            </h4>
+                          )}
+                          {picker.standalone.map((agent) => renderAgentButton(agent))}
+                        </div>
+                      )}
+                      {picker.handGroups.map((group) => (
+                        <div key={group.hand_id} className="space-y-2 pt-3">
+                          <h4 className="px-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim flex items-center gap-1.5">
+                            {group.hand_icon && <span aria-hidden="true">{group.hand_icon}</span>}
+                            <span>{group.hand_name}</span>
+                          </h4>
+                          {group.agents.map((agent) =>
+                            renderAgentButton(agent, agent.role, agent.isCoordinator),
+                          )}
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+                <div className="p-3 border-t border-border-subtle">
+                  <button
+                    onClick={() => { void agentsQuery.refetch(); }}
+                    className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
+                    <span>{t("common.refresh", { defaultValue: "Refresh" })}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {selectedAgentId && (
             <ConnectionBar
+              onOpenMobileSheet={() => setMobileSheetOpen(true)}
               agentName={selectedAgent?.name || ""}
               isLoading={isLoading}
               messageCount={messages.length}
@@ -2917,7 +3126,7 @@ export function ChatPage() {
           )}
 
           {/* Message area */}
-          <div className="flex-1 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
+          <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
             <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
@@ -2973,8 +3182,11 @@ export function ChatPage() {
             </div>
           </div>
 
-          {/* Input area */}
-          <div className={`pt-2 px-2 pb-safe-2 sm:pt-4 sm:px-4 sm:pb-safe-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
+          {/* Input area — sticks to the bottom of the chat column. The
+              app-shell's <main> already keeps this row above the
+              MobileBottomTabs (lg:hidden, ~56px + safe-area), so we don't
+              need a separate fixed bar here. */}
+          <div className={`shrink-0 pt-2 px-2 pb-2 sm:pt-4 sm:px-4 sm:pb-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               agentId={selectedAgentId ?? ""}
               onSend={sendMessage}

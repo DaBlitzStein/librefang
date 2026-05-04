@@ -1,6 +1,6 @@
 import { useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon, Download, Star, TrendingUp } from 'lucide-react'
 import { useState } from 'react'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
@@ -13,6 +13,8 @@ import SiteHeader from '../components/SiteHeader'
 import Breadcrumbs from '../components/Breadcrumbs'
 import RegistryIcon from '../components/RegistryIcon'
 import { fetchRegistryRaw, pathCandidatesFor, fetchFirstAvailable } from '../lib/registry-raw'
+import { useMarketplace } from '../lib/useMarketplace'
+import { fmtNum } from '../lib/format'
 
 interface RegistryDetailPageProps {
   category: RegistryCategory
@@ -216,6 +218,9 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
     retry: 1,
   })
 
+  const marketplace = useMarketplace(category)
+  const mktPkg = marketplace.get(id)
+
   const catHref = lang === 'en' ? `/${category}` : `/${lang}/${category}`
   const categoryLabel = t.registry?.categories[category]?.title || category
   const desc = item ? getLocalizedDesc(item, lang) : ''
@@ -295,6 +300,59 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
                   {tag}
                 </span>
               ))}
+            </div>
+          )}
+          {mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0 || mktPkg.latest_version) && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mb-4 pt-3 border-t border-black/8 dark:border-white/8">
+              {mktPkg.latest_version && (
+                <span
+                  className="flex items-center gap-1.5 text-xs font-mono font-semibold text-cyan-600 dark:text-cyan-400 bg-cyan-500/10 px-2 py-1 rounded tabular-nums"
+                  aria-label={`Latest version v${mktPkg.latest_version}`}
+                >
+                  v{mktPkg.latest_version}
+                </span>
+              )}
+              {mktPkg.total_downloads > 0 && (
+                <span
+                  className="flex items-center gap-1.5 text-xs font-mono text-gray-600 dark:text-gray-300 tabular-nums"
+                  aria-label={`${mktPkg.total_downloads.toLocaleString()} ${t.registry?.downloads || 'downloads'}`}
+                  title={mktPkg.total_downloads.toLocaleString()}
+                >
+                  <Download className="w-3.5 h-3.5 text-cyan-500/70" aria-hidden="true" />
+                  <strong>{fmtNum(mktPkg.total_downloads)}</strong>
+                  <span className="text-gray-400">{t.registry?.downloads || 'downloads'}</span>
+                </span>
+              )}
+              {/* Render weekly even when zero (when total_downloads > 0) so
+                  visitors can see the metric exists rather than wondering
+                  whether the data simply failed to load. */}
+              {mktPkg.total_downloads > 0 && (
+                <span
+                  className={cn(
+                    'flex items-center gap-1.5 text-xs font-mono tabular-nums',
+                    mktPkg.weekly_downloads > 0
+                      ? 'text-green-600 dark:text-green-400'
+                      : 'text-gray-400 dark:text-gray-600'
+                  )}
+                  aria-label={`${mktPkg.weekly_downloads.toLocaleString()} ${t.registry?.thisWeek || 'this week'}`}
+                  title={mktPkg.weekly_downloads.toLocaleString()}
+                >
+                  <TrendingUp className="w-3.5 h-3.5" aria-hidden="true" />
+                  <strong>{fmtNum(mktPkg.weekly_downloads)}</strong>
+                  <span className="text-gray-400">{t.registry?.thisWeek || 'this week'}</span>
+                </span>
+              )}
+              {mktPkg.stars > 0 && (
+                <span
+                  className="flex items-center gap-1.5 text-xs font-mono text-amber-500 tabular-nums"
+                  aria-label={`${mktPkg.stars.toLocaleString()} ${t.registry?.stars || 'stars'}`}
+                  title={mktPkg.stars.toLocaleString()}
+                >
+                  <Star className="w-3.5 h-3.5" fill="currentColor" aria-hidden="true" />
+                  <strong>{fmtNum(mktPkg.stars)}</strong>
+                  <span className="text-gray-400">{t.registry?.stars || 'stars'}</span>
+                </span>
+              )}
             </div>
           )}
           {commitQuery.data?.date && (

@@ -5,15 +5,39 @@
 //! authorization.
 
 use super::AppState;
+use crate::mcp_oauth::KernelOAuthProvider;
+use crate::middleware::AuthenticatedApiUser;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
-use librefang_kernel::mcp_oauth_provider::KernelOAuthProvider;
+use axum::{Extension, Json};
 use librefang_runtime::mcp_oauth::{self, McpAuthState, OAuthTokens};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use url::Url;
+
+/// SHA-256 prefix of the caller's user_id (UUID).  Embedded into the vault
+/// key + flow_id so a callback initiated by user A cannot be redeemed
+/// against user B's in-flight flow even if they targeted the same server.
+///
+/// Truncated to 64 bits — we only need collision avoidance among concurrent
+/// in-flight flows on a single daemon, not preimage resistance, so 16 hex
+/// chars of SHA-256 is sufficient.
+fn caller_fingerprint(user: &Option<Extension<AuthenticatedApiUser>>) -> String {
+    let raw = match user {
+        Some(Extension(u)) => u.user_id.to_string(),
+        // No identity attached — fall back to a constant so single-user
+        // deployments (no RBAC configured) still produce deterministic
+        // vault keys.  The flow_id random nonce still keeps concurrent
+        // anonymous flows isolated.
+        None => "anon".to_string(),
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    hex::encode(hasher.finalize())[..16].to_string()
+}
 
 fn callback_text(body: String) -> Response {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
@@ -36,7 +60,7 @@ fn auth_failed(detail: impl std::fmt::Display) -> Response {
         ("name" = String, Path, description = "MCP server name"),
     ),
     responses(
-        (status = 200, description = "Auth status for the MCP server", body = serde_json::Value),
+        (status = 200, description = "Auth status for the MCP server", body = crate::types::JsonObject),
         (status = 404, description = "MCP server not found")
     )
 )]
@@ -232,7 +256,7 @@ fn percent_encode_param(s: &str) -> String {
         ("name" = String, Path, description = "MCP server name"),
     ),
     responses(
-        (status = 200, description = "Auth flow started — returns auth URL", body = serde_json::Value),
+        (status = 200, description = "Auth flow started — returns auth URL", body = crate::types::JsonObject),
         (status = 400, description = "Server has no HTTP transport or discovery failed"),
         (status = 404, description = "MCP server not found")
     )
@@ -240,6 +264,7 @@ fn percent_encode_param(s: &str) -> String {
 pub async fn auth_start(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    user: Option<Extension<AuthenticatedApiUser>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // Find the server config
@@ -286,10 +311,16 @@ pub async fn auth_start(
     let redirect_uri = derive_callback_url(&headers, &name, &cfg.trusted_hosts, &cfg.api_listen);
 
     // Check vault for cached client_id, or do Dynamic Client Registration
-    let mut client_id = metadata
-        .client_id
-        .clone()
-        .or_else(|| provider.vault_get(&KernelOAuthProvider::vault_key(&server_url, "client_id")));
+    let mut client_id = metadata.client_id.clone().or_else(|| {
+        // Use the lenient `vault_get_or_warn` here: on a fresh install
+        // there is no `vault.enc` yet, and the strict `vault_get`
+        // would `Err(KeyNotFound)` → emit a "vault_get failed" warning
+        // on every first MCP add. DCR is the documented recovery path
+        // for "no cached client_id" anyway, so collapse missing-vault /
+        // missing-key into None silently. Real vault unlock failures
+        // are still logged at warn! by `vault_get_or_warn`.
+        provider.vault_get_or_warn(&KernelOAuthProvider::vault_key(&server_url, "client_id"))
+    });
 
     if client_id.is_none() {
         if let Some(ref reg_endpoint) = metadata.registration_endpoint {
@@ -303,10 +334,24 @@ pub async fn auth_start(
             {
                 Ok(cid) => {
                     tracing::info!(client_id = %cid, "Dynamic Client Registration succeeded");
-                    let _ = provider.vault_set(
-                        &KernelOAuthProvider::vault_key(&server_url, "client_id"),
-                        &cid,
-                    );
+                    // #3651: replaced `let _ = vault_set(...)` so a vault
+                    // crypto failure here is no longer silently swallowed.
+                    // Behavior is intentionally unchanged on the happy path
+                    // (continue with the freshly-registered client_id even
+                    // if persistence failed — the OAuth flow can still
+                    // complete in-memory) but the audit trail now records
+                    // every failure so operators can detect a
+                    // wrong-`LIBREFANG_VAULT_KEY` boot from the logs.
+                    let vault_key = KernelOAuthProvider::vault_key(&server_url, "client_id");
+                    if let Err(e) = provider.vault_set(&vault_key, &cid) {
+                        tracing::error!(
+                            target: "audit",
+                            op = "vault_set",
+                            key = %vault_key,
+                            error = %e,
+                            "vault op failed during MCP Dynamic Client Registration persistence"
+                        );
+                    }
                     client_id = Some(cid);
                 }
                 Err(e) => {
@@ -334,10 +379,16 @@ pub async fn auth_start(
     // in the OAuth `state` parameter as `{flow_id}.{random_state}` so the
     // callback can look up the correct vault entry.
     //
+    // The flow_id carries a caller fingerprint prefix so a callback initiated
+    // by user A is keyed under a vault entry user B's flow can never reach,
+    // even if both target the same server URL — closing the multi-user
+    // clobber path the issue called out.
+    //
     // This supersedes the earlier per-server `{server_name}:{random}` binding
     // (#3911) — per-flow IDs subsume the per-server protection while also
     // allowing multiple concurrent flows against the same server.
-    let flow_id = mcp_oauth::generate_flow_id();
+    let caller_fp = caller_fingerprint(&user);
+    let flow_id = format!("{caller_fp}-{}", mcp_oauth::generate_flow_id());
     let (pkce_verifier, pkce_challenge) = mcp_oauth::generate_pkce();
     let pkce_random = mcp_oauth::generate_state();
     // Combined state sent to the OAuth server: "{flow_id}.{random_state}"
@@ -346,9 +397,10 @@ pub async fn auth_start(
     // Store PKCE state in vault under per-flow keys for the callback to retrieve.
     let flow_vault_key =
         |field: &str| KernelOAuthProvider::vault_key(&format!("{server_url}:{flow_id}"), field);
-    let store = |field: &str, value: &str| -> Result<(), String> {
-        provider.vault_set(&flow_vault_key(field), value)
-    };
+    let store =
+        |field: &str, value: &str| -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
+            provider.vault_set(&flow_vault_key(field), value)
+        };
     if let Err(e) = store("pkce_verifier", &pkce_verifier) {
         tracing::error!(error = %e, "Failed to store PKCE verifier in vault");
         return ApiErrorResponse::internal(format!(
@@ -363,6 +415,21 @@ pub async fn auth_start(
     }
     if let Err(e) = store("token_endpoint", &metadata.token_endpoint) {
         tracing::warn!(error = %e, "Failed to store token_endpoint in vault");
+    }
+    // #3713: persist the original authorization-server host so the callback
+    // can re-verify that the stored `token_endpoint` still resolves to the
+    // same host the user authorized against. Without this pin, a malicious
+    // (or mid-flow tampered) discovery response could redirect the
+    // authorization-code exchange to an attacker-controlled endpoint and
+    // exfiltrate the auth code. We pin against `server_url`'s host because
+    // that is the URL the operator placed in `config.toml` — the only value
+    // in the flow that the attacker cannot influence.
+    if let Some(issuer_host) = url_host_lower(&server_url) {
+        if let Err(e) = store("issuer_host", &issuer_host) {
+            tracing::warn!(error = %e, "Failed to store issuer_host in vault");
+        }
+    } else {
+        tracing::warn!(server_url = %server_url, "server_url has no host — cannot pin issuer for callback");
     }
     if let Err(e) = store("redirect_uri", &redirect_uri) {
         tracing::warn!(error = %e, "Failed to store redirect_uri in vault");
@@ -481,8 +548,23 @@ pub async fn auth_callback(
     // Load stored PKCE state from vault using the per-flow key (#3727).
     let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
     let flow_key_prefix = format!("{server_url}:{flow_id}");
-    let load =
-        |field: &str| provider.vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field));
+    // #3750: collapse vault Result into Option for callers below — a vault
+    // storage failure during callback is logged and treated the same as
+    // "value missing", since the recovery path (retry from dashboard) is
+    // identical for both cases.
+    let load = |field: &str| -> Option<String> {
+        match provider.vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field)) {
+            Ok(opt) => opt,
+            Err(e) => {
+                tracing::warn!(
+                    field = %field,
+                    error = %e,
+                    "vault_get failed during OAuth callback"
+                );
+                None
+            }
+        }
+    };
 
     let stored_state = match load("pkce_state") {
         Some(s) => s,
@@ -562,6 +644,57 @@ pub async fn auth_callback(
             return auth_failed("Token endpoint missing from vault.");
         }
     };
+    // SSRF guard (#3623): re-validate the stored token_endpoint before the
+    // outbound code exchange.  The parser checks at discovery time, but the
+    // value sat in the vault between then and now and may predate a tightening
+    // of the SSRF policy — the kernel's `try_refresh` already does this; this
+    // is the matching guard for the auth-code path.
+    if let Err(reason) = mcp_oauth::is_ssrf_blocked_url(&token_endpoint) {
+        return auth_failed(format!(
+            "SSRF: token_endpoint rejected for code exchange: {reason}"
+        ));
+    }
+
+    // #3713: pin the token-exchange target to the authorization server's
+    // original host. The discovery metadata's `token_endpoint` is attacker-
+    // influenced data; it must not be trusted to point anywhere outside the
+    // host the user originally authorized against. If the stored issuer host
+    // is missing (e.g. an in-flight flow predating this guard) or does not
+    // match `token_endpoint.host()`, refuse the exchange — never POST the
+    // code to an unverified host.
+    let issuer_host = match load("issuer_host") {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            tracing::error!(
+                server = %name,
+                token_endpoint = %token_endpoint,
+                "issuer_host missing from vault — refusing token exchange (#3713)"
+            );
+            return auth_failed(
+                "Authorization server host pin missing from vault — refusing to exchange the auth code. Please retry the sign-in from the dashboard.",
+            );
+        }
+    };
+    if !token_endpoint_host_matches(&token_endpoint, &issuer_host) {
+        let token_host = url_host_lower(&token_endpoint).unwrap_or_default();
+        tracing::error!(
+            server = %name,
+            token_endpoint = %token_endpoint,
+            issuer_host = %issuer_host,
+            token_host = %token_host,
+            "token_endpoint host does not match authorization server host — refusing token exchange (possible metadata-tamper attack, #3713)"
+        );
+        let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+        auth_states.insert(
+            name.clone(),
+            McpAuthState::Error {
+                message: "token_endpoint host mismatch — refused to exchange auth code".to_string(),
+            },
+        );
+        return auth_failed(
+            "Token endpoint host does not match the authorization server host. Refusing to exchange the auth code.",
+        );
+    }
 
     let client_id = load("client_id");
     let redirect_uri = match load("redirect_uri") {
@@ -588,6 +721,14 @@ pub async fn auth_callback(
         form_params.push(("client_id", cid.clone()));
     }
 
+    // #3730: user-visible errors must NOT leak the token endpoint URL or the
+    // raw response body — both can include internal hostnames, query
+    // parameters, or provider error payloads that contain sensitive context.
+    // Detailed diagnostics go to tracing (operator-only); the user/dashboard
+    // sees a generic message.
+    const GENERIC_TOKEN_EXCHANGE_FAILED: &str =
+        "Token exchange failed. Check the daemon logs for details.";
+
     let token_resp = match http_client
         .post(&token_endpoint)
         .form(&form_params)
@@ -596,63 +737,84 @@ pub async fn auth_callback(
     {
         Ok(resp) => resp,
         Err(e) => {
-            let msg = format!("Token exchange request failed: {e}");
+            tracing::error!(
+                server = %name,
+                token_endpoint = %token_endpoint,
+                error = %e,
+                "OAuth token exchange request failed"
+            );
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
             auth_states.insert(
                 name.clone(),
                 McpAuthState::Error {
-                    message: msg.clone(),
+                    message: GENERIC_TOKEN_EXCHANGE_FAILED.to_string(),
                 },
             );
-            return auth_failed(msg);
+            return auth_failed(GENERIC_TOKEN_EXCHANGE_FAILED);
         }
     };
 
     if !token_resp.status().is_success() {
         let status = token_resp.status();
         let body_raw = token_resp.text().await.unwrap_or_default();
-        // Truncate to guard against a malicious server sending a huge payload.
+        // Truncate operator-visible body for tracing; user gets generic msg.
         let body_preview: String = body_raw.chars().take(500).collect();
-        let msg = format!("Token exchange failed (HTTP {status}): {body_preview}");
+        tracing::error!(
+            server = %name,
+            token_endpoint = %token_endpoint,
+            status = %status,
+            body_preview = %body_preview,
+            "OAuth token exchange returned non-success status"
+        );
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(
             name.clone(),
             McpAuthState::Error {
-                message: msg.clone(),
+                message: GENERIC_TOKEN_EXCHANGE_FAILED.to_string(),
             },
         );
-        return auth_failed(msg);
+        return auth_failed(GENERIC_TOKEN_EXCHANGE_FAILED);
     }
 
     let body = match token_resp.text().await {
         Ok(b) => b,
         Err(e) => {
-            let msg = format!("Failed to read token response body: {e}");
+            tracing::error!(
+                server = %name,
+                token_endpoint = %token_endpoint,
+                error = %e,
+                "Failed to read OAuth token response body"
+            );
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
             auth_states.insert(
                 name.clone(),
                 McpAuthState::Error {
-                    message: msg.clone(),
+                    message: GENERIC_TOKEN_EXCHANGE_FAILED.to_string(),
                 },
             );
-            return auth_failed(msg);
+            return auth_failed(GENERIC_TOKEN_EXCHANGE_FAILED);
         }
     };
 
     let tokens: OAuthTokens = match serde_json::from_str(&body) {
         Ok(t) => t,
         Err(e) => {
-            // Truncate body preview to guard against a malicious server sending a huge payload.
             let body_preview: String = body.chars().take(500).collect();
-            let msg = format!("Failed to parse token response: {e}. Body: {body_preview}");
+            tracing::error!(
+                server = %name,
+                token_endpoint = %token_endpoint,
+                error = %e,
+                body_preview = %body_preview,
+                "Failed to parse OAuth token response"
+            );
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
             auth_states.insert(
                 name.clone(),
                 McpAuthState::Error {
-                    message: msg.clone(),
+                    message: GENERIC_TOKEN_EXCHANGE_FAILED.to_string(),
                 },
             );
-            return auth_failed(msg);
+            return auth_failed(GENERIC_TOKEN_EXCHANGE_FAILED);
         }
     };
 
@@ -662,7 +824,48 @@ pub async fn auth_callback(
         tracing::warn!(error = %e, "Failed to store OAuth tokens");
     }
 
+    // Promote `token_endpoint` (and `client_id` if registered via DCR) from
+    // the per-flow staging namespace into the durable per-server namespace
+    // BEFORE the PKCE cleanup loop deletes them. The kernel's `try_refresh`
+    // path reads these from `{server_url}/...`, not the per-flow keys; if
+    // we skip this step the refresh fails on the first access-token expiry
+    // with `No token_endpoint stored for refresh` and the user is bounced
+    // back through a fresh OAuth flow each session.
+    //
+    // NOTE: concurrent OAuth flows for the same `server_url` race here on
+    // the bare per-server namespace — last write wins. This matches the
+    // existing race in DCR persistence at L345-346 and is acceptable: two
+    // simultaneous sign-ins for one server are an unusual operator action
+    // and both arrive at the same metadata under normal use. No locking.
+    //
+    // Fail-open on `store_oauth_metadata` error (parity with the
+    // `store_tokens` warn-and-continue at L823-825): the user has just
+    // completed an interactive OAuth flow and we already have the access
+    // token in hand. Returning a 5xx here would force them through another
+    // browser round-trip — much worse UX than silently breaking refresh
+    // until the next interactive sign-in, which is the *existing* failure
+    // mode pre-#4547 anyway. The recovery path is: when refresh fails
+    // (`McpOAuthError::MissingTokenEndpoint`), the daemon flips back to
+    // `NeedsAuth` and the next message kicks off a fresh OAuth flow,
+    // which re-runs this block. Operators see the failure in the
+    // `Failed to persist OAuth metadata for refresh` log line above the
+    // expected `No token_endpoint stored for refresh` later — that
+    // pairing is the diagnostic signal.
+    if let Err(e) = trait_provider
+        .store_oauth_metadata(&server_url, &token_endpoint, client_id.as_deref())
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to persist OAuth metadata for refresh");
+    }
+
     // Clean up one-time PKCE values from vault (per-flow key — #3727).
+    //
+    // #3651: replaced `let _ = vault_remove(...)` so vault crypto failures
+    // during PKCE cleanup are no longer silently dropped. Behavior is
+    // intentionally unchanged on success (one-time cleanup, errors don't
+    // abort the OAuth callback path), but every failure now produces an
+    // `audit` log line so operators can correlate stale PKCE entries with
+    // a misconfigured `LIBREFANG_VAULT_KEY`.
     for field in &[
         "pkce_verifier",
         "pkce_state",
@@ -670,7 +873,16 @@ pub async fn auth_callback(
         "token_endpoint",
         "client_id",
     ] {
-        let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(&flow_key_prefix, field));
+        let vault_key = KernelOAuthProvider::vault_key(&flow_key_prefix, field);
+        if let Err(e) = provider.vault_remove(&vault_key) {
+            tracing::error!(
+                target: "audit",
+                op = "vault_remove",
+                key = %vault_key,
+                error = %e,
+                "vault op failed during PKCE cleanup"
+            );
+        }
     }
 
     // Retry the MCP connection now that we have tokens.
@@ -695,7 +907,7 @@ pub async fn auth_callback(
         ("name" = String, Path, description = "MCP server name"),
     ),
     responses(
-        (status = 200, description = "Auth revoked", body = serde_json::Value),
+        (status = 200, description = "Auth revoked", body = crate::types::JsonObject),
         (status = 404, description = "MCP server not found")
     )
 )]
@@ -733,10 +945,30 @@ pub async fn auth_revoke(
     let provider = state.kernel.oauth_provider_ref();
     if let Err(e) = provider.clear_tokens(&server_url).await {
         tracing::error!(server = %name, error = %e, "auth_revoke: vault clear failed");
-        return ApiErrorResponse::internal(format!(
-            "Sign-out partially failed: in-memory session cleared but stored tokens may remain in the vault. Retry. Details: {e}"
-        ))
-        .into_json_tuple();
+        // #3750: surface VaultLocked / KeyNotFound / Io / Crypto distinctly so
+        // the dashboard can render the right recovery prompt instead of a
+        // generic 500.
+        use librefang_runtime::mcp_oauth::McpOAuthError;
+        let resp = match e {
+            McpOAuthError::VaultLocked => ApiErrorResponse::bad_request(
+                "Vault is locked — set LIBREFANG_VAULT_KEY before retrying sign-out.",
+            )
+            .with_status(axum::http::StatusCode::LOCKED)
+            .with_code("vault_locked"),
+            McpOAuthError::KeyNotFound(detail) => ApiErrorResponse::not_found(format!(
+                "No stored tokens to clear: {detail}"
+            ))
+            .with_code("vault_key_not_found"),
+            McpOAuthError::Io(io) => ApiErrorResponse::internal(format!(
+                "Sign-out failed due to vault I/O error: {io}. Tokens may still be valid. Retry."
+            ))
+            .with_code("vault_io"),
+            McpOAuthError::Crypto(detail) => ApiErrorResponse::internal(format!(
+                "Sign-out partially failed: in-memory session cleared but stored tokens may remain in the vault. Retry. Details: {detail}"
+            ))
+            .with_code("vault_crypto"),
+        };
+        return resp.into_json_tuple();
     }
 
     (
@@ -748,11 +980,69 @@ pub async fn auth_revoke(
     )
 }
 
+/// Lowercased host component of a URL string, or None if the URL is
+/// unparseable or has no host. Used to pin the OAuth flow's token endpoint
+/// to the original authorization server's host (#3713).
+fn url_host_lower(raw: &str) -> Option<String> {
+    Url::parse(raw)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+}
+
+/// True iff `token_endpoint` parses to a URL whose host equals
+/// `expected_host` (case-insensitive). A token endpoint with no host, an
+/// unparseable URL, or a different host all return false — the caller MUST
+/// refuse the code exchange in that case (#3713).
+fn token_endpoint_host_matches(token_endpoint: &str, expected_host: &str) -> bool {
+    match url_host_lower(token_endpoint) {
+        Some(h) => h == expected_host.to_ascii_lowercase(),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::UserRole;
     use axum::body::to_bytes;
     use axum::http::{HeaderName, HeaderValue};
+    use librefang_types::agent::UserId;
+
+    #[test]
+    fn caller_fingerprint_is_stable_per_user() {
+        let user = AuthenticatedApiUser {
+            name: "alice".into(),
+            role: UserRole::Owner,
+            user_id: UserId::from_name("alice"),
+        };
+        let fp1 = caller_fingerprint(&Some(Extension(user.clone())));
+        let fp2 = caller_fingerprint(&Some(Extension(user)));
+        assert_eq!(fp1, fp2, "same user must produce identical fingerprint");
+    }
+
+    #[test]
+    fn caller_fingerprint_differs_across_users() {
+        let alice = AuthenticatedApiUser {
+            name: "alice".into(),
+            role: UserRole::Owner,
+            user_id: UserId::from_name("alice"),
+        };
+        let bob = AuthenticatedApiUser {
+            name: "bob".into(),
+            role: UserRole::Owner,
+            user_id: UserId::from_name("bob"),
+        };
+        let fp_a = caller_fingerprint(&Some(Extension(alice)));
+        let fp_b = caller_fingerprint(&Some(Extension(bob)));
+        assert_ne!(fp_a, fp_b, "distinct users must produce distinct prefixes");
+    }
+
+    #[test]
+    fn caller_fingerprint_anonymous_is_stable() {
+        let fp1 = caller_fingerprint(&None);
+        let fp2 = caller_fingerprint(&None);
+        assert_eq!(fp1, fp2);
+    }
 
     fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -938,5 +1228,62 @@ mod tests {
         let h = hdrs(&[("origin", "null")]);
         let url = derive_callback_url(&h, "srv", &[], LISTEN);
         assert!(url.starts_with("http://127.0.0.1:4545/"), "got {url}");
+    }
+
+    #[test]
+    fn token_endpoint_matching_issuer_host_is_accepted() {
+        assert!(token_endpoint_host_matches(
+            "https://auth.example.com/oauth/token",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn token_endpoint_with_different_host_is_rejected() {
+        // The vulnerability scenario: discovery advertises a token endpoint
+        // pointed at an attacker host. The callback must refuse.
+        assert!(!token_endpoint_host_matches(
+            "https://attacker.example/oauth/token",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn token_endpoint_subdomain_is_rejected() {
+        // Defense-in-depth: a sibling/child of the issuer host is still a
+        // different origin and must not be trusted.
+        assert!(!token_endpoint_host_matches(
+            "https://evil.auth.example.com.attacker.example/oauth/token",
+            "auth.example.com"
+        ));
+        assert!(!token_endpoint_host_matches(
+            "https://api.auth.example.com/oauth/token",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn token_endpoint_host_match_is_case_insensitive() {
+        assert!(token_endpoint_host_matches(
+            "https://AUTH.Example.COM/oauth/token",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn unparseable_token_endpoint_is_rejected() {
+        assert!(!token_endpoint_host_matches(
+            "not a url",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn url_host_lower_extracts_lowercased_host() {
+        assert_eq!(
+            url_host_lower("https://Auth.Example.COM/path"),
+            Some("auth.example.com".to_string())
+        );
+        assert_eq!(url_host_lower("not a url"), None);
     }
 }

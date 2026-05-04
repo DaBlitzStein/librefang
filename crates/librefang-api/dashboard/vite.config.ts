@@ -36,8 +36,16 @@ const SINGLETON_DEPS = [
   "recharts",
   "@xyflow/react",
   "zustand",
+  // `lucide-react` is listed here for pre-bundling (optimizeDeps.include) and
+  // separately in manualChunks.icons below for chunk splitting. The two roles
+  // are orthogonal: SINGLETON_DEPS controls Vite's dep pre-bundler; manualChunks
+  // controls the output chunk graph. Both entries are intentional (#3768).
   "lucide-react",
-  "lucide-react/dynamic",
+  // NOTE: `lucide-react/dynamic` is intentionally NOT listed (issue #3768).
+  // It looks up icons by name string at runtime, so bundlers cannot tree-shake
+  // it and including it pulls the full ~1500-icon registry (~1.4 MB raw,
+  // ~200-300 KB gzipped) into the shared chunk. McpServersPage now uses a
+  // `lazy()` wrapper around named imports from `lucide-react` instead.
 ];
 
 export default defineConfig({
@@ -112,13 +120,42 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ["react", "react-dom"],
-          router: ["@tanstack/react-router", "@tanstack/react-query"],
-          charts: ["recharts"],
-          flow: ["@xyflow/react"],
-        }
-      }
-    }
+        // Vite 8 uses Rolldown, which only accepts the function form of
+        // manualChunks. Mirrors the previous Rollup object grouping.
+        manualChunks: (id) => {
+          if (!id.includes("node_modules")) return;
+          if (/[\\/]node_modules[\\/](react|react-dom)[\\/]/.test(id)) return "vendor";
+          if (id.includes("@tanstack/react-router") || id.includes("@tanstack/react-query")) return "router";
+          if (id.includes("recharts")) return "charts";
+          if (id.includes("@xyflow/react")) return "flow";
+          // Order matters: more specific rules must come before broader ones
+          // (katex/remark-math/rehype-katex must match before the generic
+          // remark-/rehype- catch-all in the markdown chunk). See issue #3381.
+          if (
+            id.includes("node_modules/katex") ||
+            id.includes("node_modules/remark-math") ||
+            id.includes("node_modules/rehype-katex")
+          ) return "katex";
+          if (
+            id.includes("node_modules/react-markdown") ||
+            /[\\/]node_modules[\\/]remark-/.test(id) ||
+            /[\\/]node_modules[\\/]rehype-/.test(id)
+          ) return "markdown";
+          if (id.includes("node_modules/@xterm")) return "xterm";
+          if (
+            id.includes("node_modules/motion") ||
+            id.includes("node_modules/framer-motion")
+          ) return "motion";
+          if (
+            id.includes("node_modules/i18next") ||
+            id.includes("node_modules/react-i18next")
+          ) return "i18n";
+          // Isolate lucide-react named imports into their own chunk so adding
+          // a single icon to a route doesn't bloat its first-load bundle.
+          // See issue #3768.
+          if (id.includes("lucide-react")) return "icons";
+        },
+      },
+    },
   }
 });

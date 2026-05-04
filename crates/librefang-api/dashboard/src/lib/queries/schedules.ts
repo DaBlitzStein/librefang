@@ -12,13 +12,15 @@ export const scheduleQueries = {
       queryFn: listSchedules,
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
-  triggers: () =>
+  triggers: (agentId?: string) =>
     queryOptions({
-      queryKey: triggerKeys.lists(),
-      queryFn: listTriggers,
+      queryKey: triggerKeys.list(agentId),
+      queryFn: () => listTriggers(agentId),
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 
@@ -28,4 +30,15 @@ export function useSchedules(options: QueryOverrides = {}) {
 
 export function useTriggers(options: QueryOverrides = {}) {
   return useQuery(withOverrides(scheduleQueries.triggers(), options));
+}
+
+/** Per-agent triggers — uses GET /api/triggers?agent_id=… so the agent
+ *  detail panel doesn't need to load every trigger and filter clientside. */
+export function useAgentTriggers(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(
+    withOverrides(
+      { ...scheduleQueries.triggers(agentId), enabled: !!agentId },
+      options,
+    ),
+  );
 }

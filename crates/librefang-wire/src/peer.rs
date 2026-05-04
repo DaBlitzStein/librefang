@@ -8,6 +8,7 @@
 //! The [`PeerHandle`] trait abstracts the kernel's ability to respond to
 //! remote requests (agent messages, discovery, etc.).
 
+use crate::keys::{verify_signature, Ed25519KeyPair};
 use crate::message::*;
 use crate::registry::{PeerEntry, PeerRegistry, PeerState};
 
@@ -250,6 +251,27 @@ fn hmac_verify(secret: &str, data: &[u8], signature: &str) -> bool {
     subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), signature.as_bytes()).into()
 }
 
+/// SECURITY (#4269): Build the byte string the Ed25519 identity
+/// signature covers. When an ephemeral X25519 pubkey is included in
+/// the handshake, it is appended to `auth_data` so the static-identity
+/// signature also binds the ephemeral — closing an active MITM that
+/// would otherwise swap in its own ephemeral. With no ephemeral
+/// (legacy PR-2..5 peers) the scope reduces to `auth_data`, keeping
+/// signature compatibility with already-pinned peers from those
+/// releases.
+fn identity_signing_scope(auth_data: &[u8], ephemeral_pubkey: Option<&str>) -> Vec<u8> {
+    match ephemeral_pubkey {
+        Some(eph) => {
+            let mut buf = Vec::with_capacity(auth_data.len() + 1 + eph.len());
+            buf.extend_from_slice(auth_data);
+            buf.push(b'|');
+            buf.extend_from_slice(eph.as_bytes());
+            buf
+        }
+        None => auth_data.to_vec(),
+    }
+}
+
 /// Errors from the wire protocol layer.
 #[derive(Debug, Error)]
 pub enum WireError {
@@ -353,14 +375,62 @@ pub struct PeerNode {
     session_key: std::sync::Mutex<Option<String>>,
     /// SECURITY (#3876): Per-peer message and token rate limiter.
     rate_limiter: Arc<PeerRateLimiter>,
+    /// SECURITY (#3873): Optional Ed25519 identity for this node. When
+    /// present, every outbound handshake also carries `public_key` plus an
+    /// Ed25519 signature over the same `nonce|node_id|recipient_node_id`
+    /// byte string the HMAC covers. `None` keeps legacy HMAC-only behavior
+    /// for backward compatibility while the federation rolls forward.
+    keypair: Option<Arc<Ed25519KeyPair>>,
+    /// SECURITY (#3873): In-memory TOFU pin map. Keyed on remote `node_id`,
+    /// value is the base64 Ed25519 public key first observed for that ID.
+    /// Subsequent handshakes from the same `node_id` MUST present the same
+    /// public key or are rejected — a leaked `shared_secret` no longer lets
+    /// an attacker spoof a different node_id, because they would also need
+    /// that node's private key. Persistence across restarts ships in PR-3
+    /// (TrustedPeers store + admin/UI).
+    ///
+    /// Bounded at [`MAX_PIN_ENTRIES`] to prevent a peer that *does* hold
+    /// `shared_secret` from flooding fresh node_ids and exhausting memory.
+    /// Once capped, NEW pins are refused; existing pins (and their
+    /// mismatch-detection guarantee) remain intact.
+    pinned_pubkeys: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// SECURITY (#3873): Persistent backing for `pinned_pubkeys`. When
+    /// `Some`, every new pin is also written to disk via
+    /// `TrustedPeers::trust_peer`. The in-memory map is hydrated from this
+    /// store at startup so pins survive restarts.
+    trust_store: Option<Arc<std::sync::Mutex<crate::trusted_peers::TrustedPeers>>>,
 }
+
+/// SECURITY (#3873): Hard cap on TOFU pin entries — see field doc.
+/// 100k peers is well above any realistic federation size.
+const MAX_PIN_ENTRIES: usize = 100_000;
 
 impl PeerNode {
     /// Create and start listening on the configured address.
+    ///
+    /// Legacy entry point — no Ed25519 identity is presented. The handshake
+    /// will still verify any pubkey/signature pair sent by the **remote**
+    /// peer, but this node itself authenticates only with the shared HMAC.
+    /// Prefer [`PeerNode::start_with_identity`] in production.
     pub async fn start(
         config: PeerConfig,
         registry: PeerRegistry,
         handle: Arc<dyn PeerHandle>,
+    ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), WireError> {
+        Self::start_with_identity(config, registry, handle, None, None).await
+    }
+
+    /// Like [`start`] but binds an Ed25519 keypair to this node. Every
+    /// outbound handshake will then carry the public key and a signature
+    /// over the auth data, and every successful inbound handshake from a
+    /// peer that also presents an identity will TOFU-pin the remote pubkey
+    /// to its `node_id`.
+    pub async fn start_with_identity(
+        config: PeerConfig,
+        registry: PeerRegistry,
+        handle: Arc<dyn PeerHandle>,
+        keypair: Option<Ed25519KeyPair>,
+        trust_store_dir: Option<std::path::PathBuf>,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), WireError> {
         // SECURITY: Require shared_secret for OFP
         if config.shared_secret.is_empty() {
@@ -372,9 +442,51 @@ impl PeerNode {
         let listener = TcpListener::bind(config.listen_addr).await?;
         let local_addr = listener.local_addr()?;
 
+        // SECURITY (#3873): Hydrate the in-memory pin map from the
+        // persistent trust store if a directory was provided. Pins survive
+        // daemon restarts so the mismatch-detection branch protects across
+        // boots, not just within a single lifetime.
+        let mut pin_seed = std::collections::HashMap::<String, String>::new();
+        let trust_store = if let Some(dir) = trust_store_dir {
+            let mut store = crate::trusted_peers::TrustedPeers::new(dir);
+            if let Err(e) = store.load() {
+                // Corrupt or unreadable trust file — refuse to start rather
+                // than silently dropping pins, which would weaken the
+                // mismatch-detection guarantee without operator awareness.
+                return Err(WireError::HandshakeFailed(format!(
+                    "OFP: failed to load trusted peers store: {e}"
+                )));
+            }
+            // SECURITY (#3873): Cap hydration at MAX_PIN_ENTRIES so a
+            // tampered or runaway trust file cannot blow past the
+            // runtime cap by pre-loading into memory.
+            for peer in store.list() {
+                if pin_seed.len() >= MAX_PIN_ENTRIES {
+                    warn!(
+                        "OFP: trust store has more than {} entries; truncating hydration",
+                        MAX_PIN_ENTRIES
+                    );
+                    break;
+                }
+                if let Some(pk) = peer.public_key.clone() {
+                    pin_seed.insert(peer.node_id.clone(), pk);
+                }
+            }
+            Some(Arc::new(std::sync::Mutex::new(store)))
+        } else {
+            None
+        };
+
         info!(
-            "OFP: listening on {} (node_id={})",
-            local_addr, config.node_id
+            "OFP: listening on {} (node_id={}, identity={}, persisted_pins={})",
+            local_addr,
+            config.node_id,
+            if keypair.is_some() {
+                "ed25519"
+            } else {
+                "hmac-only"
+            },
+            pin_seed.len(),
         );
 
         let rate_limiter = Arc::new(PeerRateLimiter::new(
@@ -389,6 +501,9 @@ impl PeerNode {
             nonce_tracker: NonceTracker::new(),
             session_key: std::sync::Mutex::new(None),
             rate_limiter,
+            keypair: keypair.map(Arc::new),
+            pinned_pubkeys: Arc::new(std::sync::Mutex::new(pin_seed)),
+            trust_store,
         });
 
         let node_clone = Arc::clone(&node);
@@ -412,6 +527,177 @@ impl PeerNode {
     /// Get a reference to the peer registry.
     pub fn registry(&self) -> &PeerRegistry {
         &self.registry
+    }
+
+    /// SECURITY (#3873): Stable hex SHA-256 fingerprint of this node's
+    /// Ed25519 public key. `None` when this node was started without an
+    /// identity (HMAC-only legacy mode). The fingerprint is the value an
+    /// operator compares out-of-band with a remote peer to verify the
+    /// pubkey before TOFU pins it.
+    pub fn identity_fingerprint(&self) -> Option<String> {
+        self.keypair.as_ref().map(|kp| kp.fingerprint())
+    }
+
+    /// SECURITY (#3873): Number of remote nodes this PeerNode currently
+    /// has Ed25519 pubkeys pinned for. Includes pins hydrated from the
+    /// persistent trust store at startup plus any added during this
+    /// daemon's lifetime. Surfaced via `/api/network/status` so operators
+    /// can see at a glance whether TOFU pinning is actually populating.
+    pub fn pinned_peer_count(&self) -> usize {
+        self.pinned_pubkeys.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
+    /// SECURITY (#3873): Snapshot of every TOFU-pinned `(node_id,
+    /// public_key, fingerprint)` triple, sorted by `node_id` for stable
+    /// rendering. Used by `GET /api/network/trusted-peers` so an operator
+    /// can verify exactly which identities this node will accept under
+    /// each `node_id`. Fingerprint is the value to compare out-of-band
+    /// with the remote operator before treating the pin as trustworthy.
+    pub fn list_pinned_peers(&self) -> Vec<(String, String, String)> {
+        let pins = match self.pinned_pubkeys.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut out: Vec<_> = pins
+            .iter()
+            .map(|(id, pk)| {
+                (
+                    id.clone(),
+                    pk.clone(),
+                    crate::keys::fingerprint_of_pubkey(pk),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// SECURITY (#3873, #4269): If this node has an Ed25519 identity,
+    /// return `(Some(public_key_b64), Some(signature_b64))`. The signed
+    /// scope is `auth_data | "|" | ephemeral_pubkey` when an ephemeral
+    /// X25519 pubkey is being sent (#4269), or just `auth_data` when not
+    /// — binding the per-handshake KEX pubkey to the static identity so
+    /// an active MITM cannot substitute a pubkey it controls.
+    fn sign_identity(
+        &self,
+        auth_data: &[u8],
+        ephemeral_pubkey: Option<&str>,
+    ) -> (Option<String>, Option<String>) {
+        match &self.keypair {
+            Some(kp) => {
+                let scope = identity_signing_scope(auth_data, ephemeral_pubkey);
+                (Some(kp.public_key().to_string()), Some(kp.sign(&scope)))
+            }
+            None => (None, None),
+        }
+    }
+
+    /// SECURITY (#3873): Verify the remote peer's identity claim and enforce
+    /// TOFU pinning.
+    ///
+    /// Outcomes for `(public_key, signature)`:
+    /// - `(Some, Some)`: signature MUST verify under `public_key` over
+    ///   `auth_data`; on success, pubkey is pinned to `peer_node_id` (or
+    ///   compared against an existing pin — mismatch is rejected).
+    /// - `(None, None)`: legacy peer. Allowed only if no pin exists yet for
+    ///   this `peer_node_id`; if the peer was previously seen WITH an
+    ///   identity, dropping it now is treated as a downgrade attack and
+    ///   rejected.
+    /// - Any partial / mismatched combination is rejected.
+    fn verify_and_pin_identity(
+        &self,
+        peer_node_id: &str,
+        public_key: &Option<String>,
+        signature: &Option<String>,
+        auth_data: &[u8],
+        ephemeral_pubkey: Option<&str>,
+    ) -> Result<(), WireError> {
+        match (public_key, signature) {
+            (Some(pk), Some(sig)) => {
+                let scope = identity_signing_scope(auth_data, ephemeral_pubkey);
+                verify_signature(pk, &scope, sig).map_err(|e| {
+                    WireError::HandshakeFailed(format!(
+                        "Ed25519 identity signature invalid for node {peer_node_id}: {e}"
+                    ))
+                })?;
+                let mut pins = self
+                    .pinned_pubkeys
+                    .lock()
+                    .map_err(|_| WireError::HandshakeFailed("pin map poisoned".into()))?;
+                match pins.get(peer_node_id) {
+                    Some(pinned) if pinned != pk => Err(WireError::HandshakeFailed(format!(
+                        "TOFU pin mismatch for node {peer_node_id}: refusing to accept new public key"
+                    ))),
+                    Some(_) => Ok(()),
+                    None => {
+                        if pins.len() >= MAX_PIN_ENTRIES {
+                            return Err(WireError::HandshakeFailed(format!(
+                                "TOFU pin map full ({MAX_PIN_ENTRIES} entries) — refusing to pin new node {peer_node_id}"
+                            )));
+                        }
+                        pins.insert(peer_node_id.to_string(), pk.clone());
+                        // Drop the in-memory lock before touching the disk
+                        // store to keep the persistence write off the hot
+                        // handshake path's critical section.
+                        drop(pins);
+                        if let Some(store) = &self.trust_store {
+                            let mut store = store.lock().map_err(|_| {
+                                WireError::HandshakeFailed("trust store poisoned".into())
+                            })?;
+                            if let Err(e) = store.trust_peer(
+                                peer_node_id.to_string(),
+                                pk.clone(),
+                                None,
+                                None,
+                            ) {
+                                // Persist failure: log but do not roll back
+                                // the in-memory pin. Within this daemon the
+                                // mismatch-check still works; only the
+                                // cross-restart guarantee is at risk, and
+                                // reverting the pin would let an attacker
+                                // who can break disk writes also break the
+                                // in-memory defense.
+                                warn!(
+                                    "OFP: failed to persist trust pin for {}: {} — in-memory pin retained",
+                                    peer_node_id, e
+                                );
+                            }
+                        }
+                        info!(
+                            "OFP: pinned Ed25519 public key for {} (fingerprint {})",
+                            peer_node_id,
+                            crate::keys::fingerprint_of_pubkey(pk)
+                        );
+                        Ok(())
+                    }
+                }
+            }
+            (None, None) => {
+                let pins = self
+                    .pinned_pubkeys
+                    .lock()
+                    .map_err(|_| WireError::HandshakeFailed("pin map poisoned".into()))?;
+                if pins.contains_key(peer_node_id) {
+                    Err(WireError::HandshakeFailed(format!(
+                        "downgrade rejected: node {peer_node_id} previously authenticated with Ed25519 but now omits identity"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(WireError::HandshakeFailed(
+                "Ed25519 identity fields must both be present or both absent".into(),
+            )),
+        }
+    }
+
+    /// Test-only: read-only view of the in-memory TOFU pin map.
+    #[cfg(test)]
+    pub(crate) fn pinned_pubkeys_snapshot(&self) -> std::collections::HashMap<String, String> {
+        self.pinned_pubkeys
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Connect to a remote peer and perform the handshake.
@@ -453,6 +739,13 @@ impl PeerNode {
             our_nonce, self.config.node_id, recipient_node_id
         );
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
+        // SECURITY (#4269): Generate per-handshake X25519 ephemeral so the
+        // resulting session_key derives from ECDH instead of shared_secret.
+        let our_kex = crate::kex::EphemeralKex::generate()
+            .map_err(|e| WireError::HandshakeFailed(format!("X25519 keygen failed: {e}")))?;
+        let our_eph = our_kex.public_b64().to_string();
+        let (our_pubkey, our_identity_sig) =
+            self.sign_identity(auth_data.as_bytes(), Some(&our_eph));
 
         let handshake = WireMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -463,6 +756,9 @@ impl PeerNode {
                 agents: handle.local_agents(),
                 nonce: our_nonce.clone(),
                 auth_hmac,
+                public_key: our_pubkey,
+                identity_signature: our_identity_sig,
+                ephemeral_pubkey: Some(our_eph.clone()),
             }),
         };
         write_message(&mut writer, &handshake).await?;
@@ -477,6 +773,9 @@ impl PeerNode {
                 agents,
                 nonce: ack_nonce,
                 auth_hmac: ack_hmac,
+                public_key: ack_pubkey,
+                identity_signature: ack_identity_sig,
+                ephemeral_pubkey: ack_eph,
             }) => {
                 if *protocol_version != PROTOCOL_VERSION {
                     return Err(WireError::VersionMismatch {
@@ -501,6 +800,17 @@ impl PeerNode {
                     ));
                 }
 
+                // SECURITY (#3873): Verify Ed25519 identity signature (if
+                // present) over auth_data + ephemeral_pubkey (#4269) and
+                // TOFU-pin the pubkey.
+                self.verify_and_pin_identity(
+                    node_id,
+                    ack_pubkey,
+                    ack_identity_sig,
+                    expected_ack_data.as_bytes(),
+                    ack_eph.as_deref(),
+                )?;
+
                 // SECURITY (#3880): Record nonce AFTER successful HMAC
                 // verification. Recording before verification allows any TCP
                 // client to fill nonce capacity without proving knowledge of
@@ -509,8 +819,21 @@ impl PeerNode {
                     return Err(WireError::HandshakeFailed(replay_err));
                 }
 
-                // SECURITY: Derive per-session key for authenticated messages
-                let key = derive_session_key(&self.config.shared_secret, &our_nonce, ack_nonce);
+                // SECURITY (#4269): Prefer ECDH-derived session_key when
+                // both sides provided an ephemeral pubkey. Falls back to
+                // the legacy shared_secret derivation for peers from
+                // PR-2..5 that don't yet send one.
+                let key = match ack_eph {
+                    Some(remote_eph) => {
+                        let transcript = crate::kex::handshake_transcript(&our_nonce, ack_nonce);
+                        our_kex
+                            .derive_session_key(remote_eph, &transcript)
+                            .map_err(|e| {
+                                WireError::HandshakeFailed(format!("X25519 ECDH failed: {e}"))
+                            })?
+                    }
+                    None => derive_session_key(&self.config.shared_secret, &our_nonce, ack_nonce),
+                };
 
                 info!(
                     "OFP: handshake complete with {} ({}) — {} agents",
@@ -598,6 +921,12 @@ impl PeerNode {
         let our_nonce = uuid::Uuid::new_v4().to_string();
         let auth_data = format!("{}|{}|{}", our_nonce, self.config.node_id, node_id);
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
+        // SECURITY (#4269): per-handshake X25519 ephemeral.
+        let our_kex = crate::kex::EphemeralKex::generate()
+            .map_err(|e| WireError::HandshakeFailed(format!("X25519 keygen failed: {e}")))?;
+        let our_eph = our_kex.public_b64().to_string();
+        let (our_pubkey, our_identity_sig) =
+            self.sign_identity(auth_data.as_bytes(), Some(&our_eph));
 
         let handshake = WireMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -608,6 +937,9 @@ impl PeerNode {
                 agents: handle.local_agents(),
                 nonce: our_nonce.clone(),
                 auth_hmac,
+                public_key: our_pubkey,
+                identity_signature: our_identity_sig,
+                ephemeral_pubkey: Some(our_eph.clone()),
             }),
         };
         write_message(&mut writer, &handshake).await?;
@@ -620,6 +952,9 @@ impl PeerNode {
                 nonce: ack_nonce,
                 auth_hmac: ack_hmac,
                 protocol_version,
+                public_key: ack_pubkey,
+                identity_signature: ack_identity_sig,
+                ephemeral_pubkey: ack_eph,
                 ..
             }) => {
                 if *protocol_version != PROTOCOL_VERSION {
@@ -641,12 +976,32 @@ impl PeerNode {
                         "HMAC verification failed on HandshakeAck".into(),
                     ));
                 }
+                // SECURITY (#3873): Verify Ed25519 identity + TOFU pin
+                // (#4269: scope also covers the server's ephemeral pubkey).
+                self.verify_and_pin_identity(
+                    ack_node_id,
+                    ack_pubkey,
+                    ack_identity_sig,
+                    expected_ack_data.as_bytes(),
+                    ack_eph.as_deref(),
+                )?;
                 // SECURITY (#3880): Record nonce AFTER HMAC verification.
                 if let Err(replay_err) = self.nonce_tracker.check_and_record(ack_nonce) {
                     return Err(WireError::HandshakeFailed(replay_err));
                 }
-                // SECURITY: Derive per-session key for authenticated post-handshake I/O
-                derive_session_key(&self.config.shared_secret, &our_nonce, ack_nonce)
+                // SECURITY (#4269): ECDH-derived session_key when both
+                // peers brought an ephemeral; legacy fallback otherwise.
+                match ack_eph {
+                    Some(remote_eph) => {
+                        let transcript = crate::kex::handshake_transcript(&our_nonce, ack_nonce);
+                        our_kex
+                            .derive_session_key(remote_eph, &transcript)
+                            .map_err(|e| {
+                                WireError::HandshakeFailed(format!("X25519 ECDH failed: {e}"))
+                            })?
+                    }
+                    None => derive_session_key(&self.config.shared_secret, &our_nonce, ack_nonce),
+                }
             }
             WireMessageKind::Response(WireResponse::Error { code, message }) => {
                 return Err(WireError::HandshakeFailed(format!(
@@ -733,6 +1088,9 @@ impl PeerNode {
                 agents,
                 nonce,
                 auth_hmac,
+                public_key: peer_pubkey,
+                identity_signature: peer_identity_sig,
+                ephemeral_pubkey: peer_eph,
             }) => {
                 if *protocol_version != PROTOCOL_VERSION {
                     let err_resp = WireMessage {
@@ -782,6 +1140,28 @@ impl PeerNode {
                     ));
                 }
 
+                // SECURITY (#3873): Verify Ed25519 identity (if present) and
+                // enforce the in-memory TOFU pin. A leaked shared_secret no
+                // longer lets an attacker spoof a different node_id once a
+                // peer's pubkey has been pinned during a prior handshake.
+                if let Err(e) = node.verify_and_pin_identity(
+                    node_id,
+                    peer_pubkey,
+                    peer_identity_sig,
+                    expected_data.as_bytes(),
+                    peer_eph.as_deref(),
+                ) {
+                    let err_resp = WireMessage {
+                        id: msg.id.clone(),
+                        kind: WireMessageKind::Response(WireResponse::Error {
+                            code: 403,
+                            message: "Ed25519 identity verification failed".to_string(),
+                        }),
+                    };
+                    write_message(&mut writer, &err_resp).await?;
+                    return Err(e);
+                }
+
                 // SECURITY (#3880): Record nonce only after HMAC is verified.
                 if let Err(replay_err) = node.nonce_tracker.check_and_record(nonce) {
                     let err_resp = WireMessage {
@@ -803,6 +1183,21 @@ impl PeerNode {
                 let ack_auth_data = format!("{}|{}|{}", ack_nonce, node.config.node_id, node_id);
                 let ack_hmac = hmac_sign(&node.config.shared_secret, ack_auth_data.as_bytes());
 
+                // SECURITY (#4269): Server-side ephemeral X25519. Generated
+                // only when the client also brought one — otherwise we keep
+                // legacy session_key derivation for compatibility with
+                // PR-2..5 peers that have not yet adopted KEX.
+                let our_kex = if peer_eph.is_some() {
+                    Some(crate::kex::EphemeralKex::generate().map_err(|e| {
+                        WireError::HandshakeFailed(format!("X25519 keygen failed: {e}"))
+                    })?)
+                } else {
+                    None
+                };
+                let our_eph = our_kex.as_ref().map(|k| k.public_b64().to_string());
+                let (our_pubkey, our_identity_sig) =
+                    node.sign_identity(ack_auth_data.as_bytes(), our_eph.as_deref());
+
                 let ack = WireMessage {
                     id: msg.id.clone(),
                     kind: WireMessageKind::Response(WireResponse::HandshakeAck {
@@ -812,16 +1207,25 @@ impl PeerNode {
                         agents: handle.local_agents(),
                         nonce: ack_nonce.clone(),
                         auth_hmac: ack_hmac,
+                        public_key: our_pubkey,
+                        identity_signature: our_identity_sig,
+                        ephemeral_pubkey: our_eph,
                     }),
                 };
                 write_message(&mut writer, &ack).await?;
 
-                // SECURITY: Derive per-session key (server side: their nonce first, our nonce second)
-                let session_key = derive_session_key(
-                    &node.config.shared_secret,
-                    nonce,      // client's nonce
-                    &ack_nonce, // our nonce
-                );
+                // SECURITY (#4269): Prefer ECDH-derived session_key when the
+                // KEX was completed on both sides; legacy fallback otherwise.
+                let session_key = match (our_kex, peer_eph.as_deref()) {
+                    (Some(kex), Some(remote_eph)) => {
+                        let transcript = crate::kex::handshake_transcript(nonce, &ack_nonce);
+                        kex.derive_session_key(remote_eph, &transcript)
+                            .map_err(|e| {
+                                WireError::HandshakeFailed(format!("X25519 ECDH failed: {e}"))
+                            })?
+                    }
+                    _ => derive_session_key(&node.config.shared_secret, nonce, &ack_nonce),
+                };
 
                 info!(
                     "OFP: handshake with {} ({}) from {} — {} agents",
@@ -982,6 +1386,16 @@ async fn connection_loop(
                     peer_node_id, msg.id
                 );
             }
+            // Forward-compat (#3544): a peer running a newer protocol version
+            // may emit message types we don't understand. Drop the message
+            // silently — the TCP link must stay alive so older peers stay
+            // reachable. No response is produced for an unknown envelope.
+            WireMessageKind::Unknown => {
+                debug!(
+                    "OFP: ignoring unknown message type from {} (id={:?})",
+                    peer_node_id, msg.id
+                );
+            }
         }
     }
 }
@@ -1090,6 +1504,12 @@ fn handle_notification(peer_node_id: &str, notif: &WireNotification, registry: &
         WireNotification::ShuttingDown => {
             info!("OFP: peer {} is shutting down", peer_node_id);
             registry.mark_disconnected(peer_node_id);
+        }
+        WireNotification::Unknown => {
+            debug!(
+                "OFP: ignoring unknown notification from peer {}",
+                peer_node_id
+            );
         }
     }
 }
@@ -1744,5 +2164,458 @@ mod tests {
             !hmac_verify(secret, wrong_recipient_data.as_bytes(), &sig),
             "HMAC must differ when recipient_node_id differs"
         );
+    }
+
+    // ----- #3873: per-peer Ed25519 identity + TOFU pinning -----
+
+    fn test_config(node_id: &str, node_name: &str) -> PeerConfig {
+        PeerConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            node_id: node_id.to_string(),
+            node_name: node_name.to_string(),
+            shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0,
+            max_llm_tokens_per_peer_per_hour: None,
+        }
+    }
+
+    /// Two nodes with Ed25519 keypairs complete a handshake AND each pins
+    /// the other's pubkey to its node_id. This is the success path for #3873.
+    #[tokio::test]
+    async fn issue_3873_two_identity_nodes_handshake_and_pin() {
+        let kp1 = Ed25519KeyPair::generate().unwrap();
+        let kp2 = Ed25519KeyPair::generate().unwrap();
+        let kp1_pub = kp1.public_key().to_string();
+        let kp2_pub = kp2.public_key().to_string();
+
+        let r1 = PeerRegistry::new();
+        let h1 = Arc::new(TestHandle::new());
+        let (n1, _t1) = PeerNode::start_with_identity(
+            test_config("node-A", "kernel-A"),
+            r1.clone(),
+            h1.clone(),
+            Some(kp1),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let r2 = PeerRegistry::new();
+        let h2 = Arc::new(TestHandle::new());
+        let (n2, _t2) = PeerNode::start_with_identity(
+            test_config("node-B", "kernel-B"),
+            r2.clone(),
+            h2.clone(),
+            Some(kp2),
+            None,
+        )
+        .await
+        .unwrap();
+
+        n2.connect_to_peer_with_id(n1.local_addr(), h2, "node-A")
+            .await
+            .expect("identity-bearing handshake must succeed");
+
+        // Each node pinned the other's pubkey to its node_id.
+        let pins_on_n2 = n2.pinned_pubkeys_snapshot();
+        assert_eq!(pins_on_n2.get("node-A"), Some(&kp1_pub));
+        let pins_on_n1 = n1.pinned_pubkeys_snapshot();
+        assert_eq!(pins_on_n1.get("node-B"), Some(&kp2_pub));
+    }
+
+    /// A peer that previously authenticated with an Ed25519 identity cannot
+    /// later impersonate the same node_id with a different keypair — this is
+    /// exactly the attack #3873 closes off (compromised shared_secret on its
+    /// own no longer lets you spoof another node).
+    #[tokio::test]
+    async fn issue_3873_pubkey_change_rejected_after_first_pin() {
+        let kp_legit = Ed25519KeyPair::generate().unwrap();
+        let kp_attacker = Ed25519KeyPair::generate().unwrap();
+
+        let r_server = PeerRegistry::new();
+        let h_server = Arc::new(TestHandle::new());
+        let (server, _t) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r_server.clone(),
+            h_server.clone(),
+            None, // server has no identity itself; that's fine
+            None,
+        )
+        .await
+        .unwrap();
+
+        // 1st handshake: legitimate "client-A" connects with kp_legit. Pinned.
+        let (legit, _t2) = PeerNode::start_with_identity(
+            test_config("client-A", "legit"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp_legit),
+            None,
+        )
+        .await
+        .unwrap();
+        legit
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await
+            .expect("first handshake establishes pin");
+
+        // 2nd handshake: attacker reuses node_id "client-A" but with a
+        // different keypair. The server has the legitimate pubkey pinned and
+        // must reject.
+        let (attacker, _t3) = PeerNode::start_with_identity(
+            test_config("client-A", "spoof"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp_attacker),
+            None,
+        )
+        .await
+        .unwrap();
+        let res = attacker
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "second handshake with mismatched pubkey for same node_id MUST be rejected"
+        );
+    }
+
+    /// A node that authenticated with Ed25519 cannot subsequently downgrade
+    /// to HMAC-only — that would let an attacker who only has shared_secret
+    /// impersonate nodes whose pubkey was previously pinned.
+    #[tokio::test]
+    async fn issue_3873_downgrade_to_hmac_only_rejected_after_pin() {
+        let kp = Ed25519KeyPair::generate().unwrap();
+
+        let r_server = PeerRegistry::new();
+        let (server, _t) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r_server.clone(),
+            Arc::new(TestHandle::new()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // First, "node-X" connects WITH identity → pinned.
+        let (with_id, _t2) = PeerNode::start_with_identity(
+            test_config("node-X", "with"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp),
+            None,
+        )
+        .await
+        .unwrap();
+        with_id
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await
+            .expect("first handshake establishes pin");
+
+        // Then a different process claims node_id "node-X" but ships no
+        // identity (HMAC-only). Must be rejected.
+        let (no_id, _t3) = PeerNode::start_with_identity(
+            test_config("node-X", "downgrade"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let res = no_id
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "downgrade from Ed25519 identity to HMAC-only for the same node_id MUST be rejected"
+        );
+    }
+
+    /// Backward compatibility: a legacy peer (no Ed25519 identity) can still
+    /// successfully handshake with a server that has no prior pin.
+    #[tokio::test]
+    async fn issue_3873_legacy_peer_first_contact_still_works() {
+        let r_server = PeerRegistry::new();
+        let (server, _t) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r_server.clone(),
+            Arc::new(TestHandle::new()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let (legacy, _t2) = PeerNode::start_with_identity(
+            test_config("legacy", "L"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        legacy
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await
+            .expect("legacy peers (no identity) must still interoperate");
+        assert!(server.pinned_pubkeys_snapshot().is_empty());
+    }
+
+    /// PR-4: pins must survive restart. After a successful identity-bearing
+    /// handshake the trust store on disk records the peer's pubkey, and a
+    /// fresh `PeerNode` instance pointed at the same `data_dir` rejects an
+    /// attacker presenting the same `node_id` with a different keypair —
+    /// the very attack #3873 closes off, now durable across daemon boots.
+    #[tokio::test]
+    async fn issue_3873_pin_survives_restart_via_trust_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().to_path_buf();
+        let kp_legit = Ed25519KeyPair::generate().unwrap();
+        let legit_pub = kp_legit.public_key().to_string();
+
+        // ---- Boot 1: legit client connects, server persists pin to disk.
+        let r1 = PeerRegistry::new();
+        let (server1, _t1) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r1.clone(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(store_dir.clone()),
+        )
+        .await
+        .unwrap();
+
+        let (legit, _t2) = PeerNode::start_with_identity(
+            test_config("client-A", "legit"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp_legit),
+            None,
+        )
+        .await
+        .unwrap();
+        legit
+            .connect_to_peer_with_id(
+                server1.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await
+            .expect("first handshake must persist pin");
+
+        // Sanity: trust file exists on disk now.
+        let trust_file = store_dir.join("trusted_peers.json");
+        assert!(trust_file.exists(), "trust store must be written");
+        let raw = std::fs::read_to_string(&trust_file).unwrap();
+        assert!(
+            raw.contains("client-A") && raw.contains(&legit_pub),
+            "trust file must contain the pinned peer + pubkey"
+        );
+
+        drop(server1);
+
+        // ---- Boot 2: fresh server pointed at the same store_dir.
+        let r2 = PeerRegistry::new();
+        let (server2, _t3) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r2.clone(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(store_dir.clone()),
+        )
+        .await
+        .unwrap();
+
+        // Pin map must be hydrated from disk.
+        let pins = server2.pinned_pubkeys_snapshot();
+        assert_eq!(pins.get("client-A"), Some(&legit_pub));
+
+        // Attacker reuses node_id "client-A" with a different keypair —
+        // the cross-restart pin must reject it.
+        let kp_attacker = Ed25519KeyPair::generate().unwrap();
+        let (attacker, _t4) = PeerNode::start_with_identity(
+            test_config("client-A", "spoof"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp_attacker),
+            None,
+        )
+        .await
+        .unwrap();
+        let res = attacker
+            .connect_to_peer_with_id(
+                server2.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "post-restart impersonation MUST be rejected by the persisted pin"
+        );
+    }
+
+    /// PR-4 follow-up: a corrupt `trusted_peers.json` MUST cause
+    /// `start_with_identity` to fail rather than silently dropping the
+    /// pin set, which would weaken the mismatch-detection guarantee
+    /// without operator awareness.
+    #[tokio::test]
+    async fn issue_3873_corrupt_trust_file_fails_loud() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write garbage where the trust file would live.
+        std::fs::write(tmp.path().join("trusted_peers.json"), "{ not valid json").unwrap();
+
+        let res = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(tmp.path().to_path_buf()),
+        )
+        .await;
+
+        match res {
+            Err(WireError::HandshakeFailed(msg)) => {
+                assert!(
+                    msg.contains("trusted peers store"),
+                    "error must identify the trust store as the failing component, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected HandshakeFailed, got: {other}"),
+            Ok(_) => panic!("corrupt trust file MUST not produce a running PeerNode"),
+        }
+    }
+
+    /// PR-6 / #4269: a successful handshake between two identity-bearing
+    /// peers carries `ephemeral_pubkey` on both legs and the resulting
+    /// post-handshake message exchange round-trips correctly. The
+    /// existing per-message HMAC test (`test_handshake_and_message_loop`)
+    /// already exercises the message loop, but did so under the legacy
+    /// session-key derivation. This test re-runs the same end-to-end
+    /// flow under the KEX path to catch any regression where the
+    /// derivation diverges between the two sides — which would surface
+    /// as the message-loop test passing but the agent_message HMAC
+    /// rejecting.
+    #[tokio::test]
+    async fn issue_4269_kex_session_key_round_trips_a_message() {
+        let kp1 = Ed25519KeyPair::generate().unwrap();
+        let kp2 = Ed25519KeyPair::generate().unwrap();
+
+        let r1 = PeerRegistry::new();
+        let h1 = Arc::new(TestHandle::new());
+        let (n1, _t1) = PeerNode::start_with_identity(
+            test_config("kex-A", "A"),
+            r1.clone(),
+            h1.clone(),
+            Some(kp1),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let r2 = PeerRegistry::new();
+        let h2 = Arc::new(TestHandle::new());
+        let (n2, _t2) = PeerNode::start_with_identity(
+            test_config("kex-B", "B"),
+            r2.clone(),
+            h2.clone(),
+            Some(kp2),
+            None,
+        )
+        .await
+        .unwrap();
+
+        n2.connect_to_peer_with_id(n1.local_addr(), h2.clone(), "kex-A")
+            .await
+            .expect("KEX-bearing handshake must complete");
+
+        // Exercise the post-handshake message channel — this signs each
+        // frame with the session_key both sides derived. If KEX outputs
+        // diverged silently, the receiver's HMAC verify would reject and
+        // send_to_peer would error here.
+        let resp = n2
+            .send_to_peer("kex-A", "echo", "ping over KEX session", None, h2)
+            .await
+            .expect("authenticated message round-trip must succeed under KEX");
+        assert!(resp.contains("ping over KEX session"));
+    }
+
+    /// PR-5: `list_pinned_peers` is the input the admin endpoint at
+    /// `GET /api/network/trusted-peers` rebuilds for operators. It MUST
+    /// emit `(node_id, public_key, fingerprint)` triples sorted by
+    /// `node_id` so the dashboard doesn't reshuffle on every refresh,
+    /// and the fingerprint MUST match what `fingerprint_of_pubkey`
+    /// computes for the corresponding public key (else operators
+    /// OOB-comparing fingerprints would be misled).
+    #[tokio::test]
+    async fn issue_3873_list_pinned_peers_is_sorted_and_consistent() {
+        // Hand-craft a trust file with three peers in non-sorted order
+        // so the hydration step alone doesn't accidentally produce a
+        // sorted output.
+        let tmp = tempfile::tempdir().unwrap();
+        let kp_a = Ed25519KeyPair::generate().unwrap();
+        let kp_b = Ed25519KeyPair::generate().unwrap();
+        let kp_c = Ed25519KeyPair::generate().unwrap();
+        {
+            let mut store = crate::trusted_peers::TrustedPeers::new(tmp.path().to_path_buf());
+            store
+                .trust_peer("zeta".into(), kp_c.public_key().to_string(), None, None)
+                .unwrap();
+            store
+                .trust_peer("alpha".into(), kp_a.public_key().to_string(), None, None)
+                .unwrap();
+            store
+                .trust_peer("mike".into(), kp_b.public_key().to_string(), None, None)
+                .unwrap();
+        }
+
+        let (node, _t) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(tmp.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+        let listed = node.list_pinned_peers();
+        let ids: Vec<&str> = listed.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["alpha", "mike", "zeta"],
+            "must be sorted by node_id"
+        );
+        for (id, pk, fp) in &listed {
+            assert_eq!(
+                fp,
+                &crate::keys::fingerprint_of_pubkey(pk),
+                "fingerprint for {id} must equal fingerprint_of_pubkey(public_key)"
+            );
+        }
+        assert_eq!(listed.len(), 3);
+        assert_eq!(node.pinned_peer_count(), 3);
     }
 }

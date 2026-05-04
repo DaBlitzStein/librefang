@@ -103,8 +103,8 @@ async fn test_mock_llm_driver_recording() {
 
     let request = CompletionRequest {
         model: "test-model".into(),
-        messages: vec![],
-        tools: vec![],
+        messages: std::sync::Arc::new(vec![]),
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: 100,
         temperature: 0.0,
         system: Some("test system prompt".into()),
@@ -184,9 +184,15 @@ system_prompt = "You are a test bot."
     );
 }
 
-/// Tests DELETE /api/agents/{id} — deleting a nonexistent agent should return an error.
+/// Tests DELETE /api/agents/{id} — deleting a nonexistent agent is idempotent (#3509).
+///
+/// 404 is reserved for the malformed-UUID case; a valid UUID that doesn't
+/// resolve to an agent succeeds with `200 OK` and a tagged body so retried
+/// deletes (network blip, dashboard double-click) don't surface a phantom
+/// error. The previous "DELETE → 404" assertion contradicted that contract
+/// and was the upstream cause of the `Test / *` red on `main`.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_delete_agent_not_found() {
+async fn test_delete_nonexistent_agent_is_idempotent() {
     let app = TestAppState::new();
     let router = app.router();
 
@@ -195,11 +201,10 @@ async fn test_delete_agent_not_found() {
     let req = test_request(Method::DELETE, &path, None);
     let resp = router.oneshot(req).await.expect("request failed");
 
-    // Deleting a nonexistent agent should return 404
-    let json = assert_json_error(resp, StatusCode::NOT_FOUND).await;
-    assert!(
-        json.get("error").is_some(),
-        "DELETE 404 response should contain an error field, got: {json}"
+    let json = assert_json_ok(resp).await;
+    assert_eq!(
+        json["status"], "already-deleted",
+        "missing-agent DELETE must surface idempotency tag, got: {json}"
     );
 }
 
@@ -276,8 +281,8 @@ async fn test_mock_llm_driver_custom_tokens_and_stop_reason() {
 
     let request = CompletionRequest {
         model: "test-model".into(),
-        messages: vec![],
-        tools: vec![],
+        messages: std::sync::Arc::new(vec![]),
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: 100,
         temperature: 0.0,
         system: None,
@@ -318,8 +323,8 @@ async fn test_failing_llm_driver() {
 
     let request = CompletionRequest {
         model: "test-model".into(),
-        messages: vec![],
-        tools: vec![],
+        messages: std::sync::Arc::new(vec![]),
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: 100,
         temperature: 0.0,
         system: None,

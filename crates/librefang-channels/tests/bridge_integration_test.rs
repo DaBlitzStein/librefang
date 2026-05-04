@@ -21,6 +21,28 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
 
 // ---------------------------------------------------------------------------
+// Test helper - condition-based polling
+// ---------------------------------------------------------------------------
+//
+// Replace fixed `sleep(100ms)` waits with a deadline-bounded poll so the
+// dispatch pipeline gets exactly as much time as it needs (and tests fail
+// fast on regression rather than flaking on slow CI runners). The 2-second
+// budget is well above the ~tens-of-ms the in-process pipeline actually
+// needs, but tight enough that a stuck dispatch surfaces quickly.
+async fn wait_until<F>(label: &str, mut cond: F)
+where
+    F: FnMut() -> bool,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !cond() {
+        if std::time::Instant::now() >= deadline {
+            panic!("wait_until timed out after 2s: {label}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mock Adapter — injects test messages, captures sent responses
 // ---------------------------------------------------------------------------
 
@@ -158,6 +180,9 @@ impl ChannelBridgeHandle for MockHandle {
     async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
         Err("mock: spawn not implemented".to_string())
     }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,8 +263,11 @@ async fn test_bridge_dispatch_text_message() {
     .await
     .unwrap();
 
-    // Give the async dispatch loop time to process
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Wait until the async dispatch loop produces the response.
+    wait_until("text message dispatch", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
 
     // Verify: adapter received the echo response
     let sent = adapter_ref.get_sent();
@@ -284,7 +312,7 @@ async fn test_bridge_dispatch_agents_command() {
     .await
     .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    wait_until("agents command", || !adapter_ref.get_sent().is_empty()).await;
 
     let sent = adapter_ref.get_sent();
     assert_eq!(sent.len(), 1);
@@ -323,7 +351,7 @@ async fn test_bridge_dispatch_help_command() {
     .await
     .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    wait_until("help command", || !adapter_ref.get_sent().is_empty()).await;
 
     let sent = adapter_ref.get_sent();
     assert_eq!(sent.len(), 1);
@@ -356,7 +384,10 @@ async fn test_bridge_dispatch_agent_select_command() {
     .await
     .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    wait_until("agent select command", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
 
     let sent = adapter_ref.get_sent();
     assert_eq!(sent.len(), 1);
@@ -390,7 +421,10 @@ async fn test_bridge_dispatch_no_agent_assigned() {
         .await
         .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    wait_until("no agent assigned reply", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
 
     let sent = adapter_ref.get_sent();
     assert_eq!(sent.len(), 1);
@@ -421,7 +455,10 @@ async fn test_bridge_dispatch_slash_command_in_text() {
         .await
         .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    wait_until("slash command in text", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
 
     let sent = adapter_ref.get_sent();
     assert_eq!(sent.len(), 1);
@@ -458,7 +495,7 @@ async fn test_bridge_dispatch_status_command() {
     .await
     .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    wait_until("status command", || !adapter_ref.get_sent().is_empty()).await;
 
     let sent = adapter_ref.get_sent();
     assert_eq!(sent.len(), 1);
@@ -496,7 +533,7 @@ async fn test_bridge_manager_lifecycle() {
         .unwrap();
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    wait_until("lifecycle 5 messages", || adapter_ref.get_sent().len() >= 5).await;
 
     let sent = adapter_ref.get_sent();
     assert_eq!(sent.len(), 5, "Expected 5 responses, got {}", sent.len());
@@ -547,7 +584,10 @@ async fn test_bridge_multiple_adapters() {
         .await
         .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    wait_until("multi adapter dispatch", || {
+        !tg_ref.get_sent().is_empty() && !dc_ref.get_sent().is_empty()
+    })
+    .await;
 
     let tg_sent = tg_ref.get_sent();
     assert_eq!(tg_sent.len(), 1);
@@ -734,6 +774,9 @@ impl ChannelBridgeHandle for MockStreamingHandle {
     async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
         Err("mock: spawn not implemented".to_string())
     }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -766,7 +809,10 @@ async fn test_bridge_streaming_adapter_uses_send_streaming() {
     .await
     .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    wait_until("streaming adapter delivers", || {
+        !adapter_ref.get_streamed().is_empty()
+    })
+    .await;
 
     // send_streaming should have been called (not send)
     let streamed = adapter_ref.get_streamed();
@@ -822,7 +868,10 @@ async fn test_bridge_non_streaming_adapter_falls_back_to_send() {
     .await
     .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    wait_until("non-streaming fallback send", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
 
     // Regular send() should have been called since the adapter doesn't support streaming
     let sent = adapter_ref.get_sent();
@@ -942,6 +991,9 @@ impl ChannelBridgeHandle for MockProgressHandle {
         });
         Ok((rx, status_rx))
     }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
 }
 
 /// Verify that a non-streaming adapter (Discord/Slack/Matrix/...) receives
@@ -973,8 +1025,11 @@ async fn test_bridge_non_streaming_adapter_sees_progress_markers() {
     .await
     .unwrap();
 
-    // Allow the dispatch pipeline to settle.
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    // Wait for the consolidated reply to land.
+    wait_until("progress marker reply", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
 
     let sent = adapter_ref.get_sent();
     assert_eq!(
@@ -1137,6 +1192,9 @@ impl ChannelBridgeHandle for MockKernelErrorHandle {
         });
         Ok((rx, status_rx))
     }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
 }
 
 /// Exercises the Telegram-path 4th outcome introduced in V2:
@@ -1172,7 +1230,10 @@ async fn test_bridge_streaming_adapter_kernel_and_transport_both_fail() {
         .await
         .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    wait_until("kernel+transport fail fallback", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
 
     let sent = adapter_ref.get_sent();
     // The fallback path delivers buffered text via send_response (NOT
@@ -1284,6 +1345,9 @@ impl ChannelBridgeHandle for MockKernelOkHandle {
         });
         Ok((rx, status_rx))
     }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
 }
 
 /// Bug 1 (review-driven fix): the Telegram-path outcome 3
@@ -1314,7 +1378,10 @@ async fn test_bridge_streaming_adapter_kernel_ok_transport_fail_records_clean_su
         .await
         .unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    wait_until("kernel-ok transport-fail fallback", || {
+        !adapter_ref.get_sent().is_empty() && !handle_concrete.deliveries().is_empty()
+    })
+    .await;
 
     // Fallback send_response must have delivered the text.
     let sent = adapter_ref.get_sent();

@@ -3,6 +3,7 @@
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use librefang_types::config::{AzureOpenAiConfig, ResponseFormat, VertexAiConfig};
@@ -13,6 +14,7 @@ use thiserror::Error;
 
 /// Error type for LLM driver operations.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum LlmError {
     /// HTTP request failed.
     #[error("HTTP error: {0}")]
@@ -24,6 +26,14 @@ pub enum LlmError {
         status: u16,
         /// Error message from the API.
         message: String,
+        /// Typed provider error code parsed from the structured response body
+        /// (e.g. `error.code = "rate_limit_exceeded"`). When present,
+        /// [`LlmError::failover_reason`] classifies via this typed value
+        /// instead of substring-matching the human-readable `message`. Drivers
+        /// that have not been migrated to populate this field (or transport
+        /// paths that never see a structured body) leave this `None` and fall
+        /// back to status-code-only classification. See #3745.
+        code: Option<crate::llm_errors::ProviderErrorCode>,
     },
     /// Rate limited — should retry after delay.
     #[error("Rate limited, retry after {retry_after_ms}ms{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
@@ -52,10 +62,19 @@ pub enum LlmError {
     #[error("Model not found: {0}")]
     ModelNotFound(String),
     /// Subprocess timed out due to inactivity, but partial output was captured.
+    ///
+    /// `partial_text` is wrapped in `Option<Arc<str>>` so cloning the error
+    /// (e.g. when stringifying through `LibreFangError::LlmDriver(e.to_string())`,
+    /// matching for failover decisions, etc.) is an O(1) refcount bump rather
+    /// than copying potentially-megabyte payloads. Most consumers only ever
+    /// read `partial_text_len` (which is what `Display` references) and never
+    /// touch the body; CLI driver callers that DO want to forward the partial
+    /// to the user can still pattern-match the variant and clone cheaply. See
+    /// #3552.
     #[error("Timed out after {inactivity_secs}s of inactivity (last: {last_activity}, {partial_text_len} chars partial output)")]
     TimedOut {
         inactivity_secs: u64,
-        partial_text: String,
+        partial_text: Option<Arc<str>>,
         partial_text_len: usize,
         /// Last known activity before the process stalled.
         last_activity: String,
@@ -69,7 +88,7 @@ impl LlmError {
     /// Classification is purely structural (variant + embedded status/message)
     /// and therefore allocation-free and infallible.
     pub fn failover_reason(&self) -> crate::llm_errors::FailoverReason {
-        use crate::llm_errors::FailoverReason;
+        use crate::llm_errors::{FailoverReason, ProviderErrorCode};
         match self {
             // Rate-limited: retry the same provider after a backoff.
             LlmError::RateLimited { retry_after_ms, .. } => {
@@ -80,99 +99,48 @@ impl LlmError {
                 })
             }
 
-            // HTTP-level API error: inspect status + message.
-            LlmError::Api { status, message } => {
-                let msg = message.to_lowercase();
-                match status {
-                    429 => FailoverReason::RateLimit(None),
-                    // 401 Unauthorized is always an auth failure.
-                    401 => FailoverReason::AuthError,
-                    // 402 Payment Required is always a billing/credit issue.
-                    402 => FailoverReason::CreditExhausted,
-                    // 403: some providers (e.g. Anthropic) return 403 for rate-limits;
-                    // others use it for billing blocks.  Check rate-limit keywords first.
-                    403 => {
-                        if msg.contains("rate limit")
-                            || msg.contains("rate_limit")
-                            || msg.contains("too many requests")
-                        {
-                            FailoverReason::RateLimit(None)
-                        } else if msg.contains("credit")
-                            || msg.contains("balance")
-                            || msg.contains("billing")
-                            || msg.contains("payment")
-                            || (msg.contains("quota")
-                                && (msg.contains("exceeded") || msg.contains("limit")))
-                        {
-                            FailoverReason::CreditExhausted
-                        } else if msg.contains("model")
-                            || msg.contains("permission")
-                            || msg.contains("not found")
-                            || msg.contains("does not exist")
-                        {
-                            FailoverReason::ModelUnavailable
-                        } else {
-                            FailoverReason::HttpError
-                        }
-                    }
-                    413 => FailoverReason::ContextTooLong,
-                    503 => FailoverReason::ModelUnavailable,
-                    // 404 is only a model error when the message explicitly references
-                    // the model — generic endpoint/base-URL 404s also contain "not found"
-                    // but are not recoverable by switching models.
-                    404 => {
-                        if msg.contains("model not found")
-                            || msg.contains("model does not exist")
-                            || msg.contains("unknown model")
-                            || (msg.contains("model") && msg.contains("not found"))
-                            || (msg.contains("model") && msg.contains("does not exist"))
-                        {
-                            FailoverReason::ModelUnavailable
-                        } else {
-                            FailoverReason::HttpError
-                        }
-                    }
-                    400 => {
-                        // Some providers return context errors as 400.
-                        if msg.contains("context")
-                            || msg.contains("token limit")
-                            || msg.contains("too long")
-                            || msg.contains("context_length")
-                        {
-                            FailoverReason::ContextTooLong
-                        } else {
-                            FailoverReason::HttpError
-                        }
-                    }
-                    _ => {
-                        // Message-level disambiguation for other/unknown status codes.
-                        if msg.contains("rate limit")
-                            || msg.contains("rate_limit")
-                            || msg.contains("too many requests")
-                        {
-                            FailoverReason::RateLimit(None)
-                        } else if msg.contains("credit")
-                            || msg.contains("balance")
-                            || msg.contains("billing")
-                            || msg.contains("insufficient")
-                        {
-                            FailoverReason::CreditExhausted
-                        } else if msg.contains("context")
-                            || msg.contains("token limit")
-                            || msg.contains("context_length")
-                        {
-                            FailoverReason::ContextTooLong
-                        } else if msg.contains("unavailable")
-                            || msg.contains("not found")
-                            || msg.contains("overloaded")
-                        {
-                            FailoverReason::ModelUnavailable
-                        } else {
-                            FailoverReason::HttpError
-                        }
+            // HTTP-level API error.
+            //
+            // When the driver populated `code`, classify by the typed enum —
+            // exhaustive, locale-independent, and immune to provider rewording
+            // (#3745). When `code` is `None`, fall back to status-code-only
+            // classification (no substring matching of the human-readable
+            // message). Drivers that need fine-grained behaviour from
+            // ambiguous statuses (403, 404, 400) must populate `code`.
+            LlmError::Api {
+                status,
+                code: Some(code),
+                ..
+            } => match code {
+                ProviderErrorCode::RateLimit => FailoverReason::RateLimit(None),
+                ProviderErrorCode::CreditExhausted => FailoverReason::CreditExhausted,
+                ProviderErrorCode::ContextLengthExceeded => FailoverReason::ContextTooLong,
+                ProviderErrorCode::ModelNotFound | ProviderErrorCode::ServerUnavailable => {
+                    FailoverReason::ModelUnavailable
+                }
+                ProviderErrorCode::AuthError => FailoverReason::AuthError,
+                ProviderErrorCode::ServerError | ProviderErrorCode::BadRequest => {
+                    // Honour known unambiguous status hints even when the
+                    // typed code is generic.
+                    match status {
+                        413 => FailoverReason::ContextTooLong,
+                        _ => FailoverReason::HttpError,
                     }
                 }
-            }
+            },
+            LlmError::Api {
+                status, code: None, ..
+            } => match status {
+                429 => FailoverReason::RateLimit(None),
+                401 => FailoverReason::AuthError,
+                402 => FailoverReason::CreditExhausted,
+                413 => FailoverReason::ContextTooLong,
+                503 => FailoverReason::ModelUnavailable,
+                // 400/403/404/500 without a typed `code` are ambiguous —
+                // skip to the next provider rather than guessing from the
+                // message text.
+                _ => FailoverReason::HttpError,
+            },
 
             // Inactivity / subprocess timeout maps to Timeout.
             LlmError::TimedOut { .. } => FailoverReason::Timeout,
@@ -213,9 +181,23 @@ pub struct CompletionRequest {
     /// Model identifier.
     pub model: String,
     /// Conversation messages.
-    pub messages: Vec<Message>,
+    ///
+    /// Wrapped in `Arc` so cloning the request (e.g. retry on rate-limit
+    /// inside `call_with_retry`) only bumps a refcount instead of deep-copying
+    /// 200-600 KB of message history every turn (#3766). All driver code
+    /// reads through `&request.messages` / `request.messages.iter()`, both
+    /// of which auto-deref through `Arc<Vec<_>>`.
+    pub messages: std::sync::Arc<Vec<Message>>,
     /// Available tools the model can use.
-    pub tools: Vec<ToolDefinition>,
+    ///
+    /// Wrapped in `Arc` so cloning the request (retry, fallback, etc.) only
+    /// bumps a refcount instead of deep-copying the full tool definition list
+    /// — and so the agent loop can share a single resolved tool snapshot
+    /// across iterations without re-cloning every `ToolDefinition` per turn
+    /// (#3586). All driver code reads through `&request.tools` /
+    /// `request.tools.iter()`, both of which auto-deref through
+    /// `Arc<Vec<_>>`.
+    pub tools: std::sync::Arc<Vec<ToolDefinition>>,
     /// Maximum tokens to generate.
     pub max_tokens: u32,
     /// Sampling temperature.
@@ -305,6 +287,7 @@ pub const PHASE_RESPONSE_COMPLETE: &str = "response_complete";
 
 /// Events emitted during streaming LLM completion.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StreamEvent {
     /// Incremental text content.
     TextDelta { text: String },
@@ -355,6 +338,7 @@ pub enum StreamEvent {
 /// hooks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LlmFamily {
     /// Anthropic Claude family (direct API, Anthropic-compatible providers,
     /// Claude Code CLI).
@@ -393,6 +377,10 @@ pub trait LlmDriver: Send + Sync {
 
     /// Stream a completion request, sending incremental events to the channel.
     /// Returns the full response when complete. Default wraps `complete()`.
+    ///
+    /// #3543: propagate `tx.send` errors. When the receiver is dropped (client
+    /// disconnect, abort, etc.) we treat it as cancellation and return an
+    /// error so the caller stops driving more work.
     async fn stream(
         &self,
         request: CompletionRequest,
@@ -401,14 +389,16 @@ pub trait LlmDriver: Send + Sync {
         let response = self.complete(request).await?;
         let text = response.text();
         if !text.is_empty() {
-            let _ = tx.send(StreamEvent::TextDelta { text }).await;
+            tx.send(StreamEvent::TextDelta { text })
+                .await
+                .map_err(|_| LlmError::Http("stream receiver dropped".to_string()))?;
         }
-        let _ = tx
-            .send(StreamEvent::ContentComplete {
-                stop_reason: response.stop_reason,
-                usage: response.usage,
-            })
-            .await;
+        tx.send(StreamEvent::ContentComplete {
+            stop_reason: response.stop_reason,
+            usage: response.usage,
+        })
+        .await
+        .map_err(|_| LlmError::Http("stream receiver dropped".to_string()))?;
         Ok(response)
     }
 
@@ -553,6 +543,56 @@ impl std::fmt::Debug for DriverConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #3552: `LlmError::TimedOut.partial_text` is `Option<Arc<str>>` so that
+    // cloning the variant (or the whole error) is an O(1) refcount bump.
+    // Display still interpolates `partial_text_len` only — the body is opaque
+    // to most consumers — and pattern-matching the variant must keep working
+    // for the CLI-driver callers that DO want to forward the partial.
+    #[test]
+    fn test_timed_out_partial_text_is_arc_shared_and_display_unchanged() {
+        let body: Arc<str> = Arc::from("hello world partial output");
+        let err = LlmError::TimedOut {
+            inactivity_secs: 30,
+            partial_text: Some(Arc::clone(&body)),
+            partial_text_len: body.len(),
+            last_activity: "tool_use".to_string(),
+        };
+
+        // Display references only `inactivity_secs`, `last_activity`, and
+        // `partial_text_len` — the body is intentionally not interpolated.
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Timed out after 30s of inactivity (last: tool_use, {} chars partial output)",
+                body.len()
+            )
+        );
+
+        // Pattern-match still exposes the partial for CLI callers that want it.
+        match &err {
+            LlmError::TimedOut { partial_text, .. } => {
+                assert_eq!(partial_text.as_deref(), Some(body.as_ref()));
+            }
+            other => panic!("expected TimedOut, got {other:?}"),
+        }
+
+        // The `None` shape is also valid for callers that don't have a partial.
+        let empty = LlmError::TimedOut {
+            inactivity_secs: 5,
+            partial_text: None,
+            partial_text_len: 0,
+            last_activity: "init".to_string(),
+        };
+        assert_eq!(
+            empty.to_string(),
+            "Timed out after 5s of inactivity (last: init, 0 chars partial output)"
+        );
+
+        // Failover classification is unaffected by the field-shape change.
+        assert_eq!(err.failover_reason(), FailoverReason::Timeout);
+        assert_eq!(empty.failover_reason(), FailoverReason::Timeout);
+    }
 
     #[test]
     fn test_completion_response_text() {
@@ -719,8 +759,8 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let request = CompletionRequest {
             model: "test".to_string(),
-            messages: vec![],
-            tools: vec![],
+            messages: std::sync::Arc::new(vec![]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: None,
@@ -748,6 +788,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // #3543: dropping the receiver must surface as an error rather than being
+    // silently swallowed, otherwise callers keep driving cancelled work.
+    #[tokio::test]
+    async fn test_default_stream_errors_when_receiver_dropped() {
+        use tokio::sync::mpsc;
+
+        struct FakeDriver;
+
+        #[async_trait]
+        impl LlmDriver for FakeDriver {
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "hi".to_string(),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                })
+            }
+        }
+
+        let driver = FakeDriver;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let request = CompletionRequest {
+            model: "test".to_string(),
+            messages: std::sync::Arc::new(vec![]),
+            tools: std::sync::Arc::new(vec![]),
+            max_tokens: 1,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let err = driver.stream(request, tx).await.unwrap_err();
+        assert!(
+            matches!(err, LlmError::Http(ref m) if m.contains("receiver dropped")),
+            "expected receiver-dropped error, got: {err:?}"
+        );
     }
 }
 

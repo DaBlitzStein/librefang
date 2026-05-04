@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role, StopReason};
@@ -251,7 +251,7 @@ fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 /// POST /v1/chat/completions
-#[utoipa::path(post, path = "/v1/chat/completions", tag = "openai", request_body = serde_json::Value, responses((status = 200, description = "OpenAI-compatible chat completion", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/v1/chat/completions", tag = "openai", request_body = crate::types::JsonObject, responses((status = 200, description = "OpenAI-compatible chat completion", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
@@ -538,14 +538,19 @@ async fn stream_response(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(stream_rx);
     Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keep-alive"),
+        )
         .into_response())
 }
 
 /// GET /v1/models — List available agents as OpenAI model objects.
-#[utoipa::path(get, path = "/v1/models", tag = "openai", operation_id = "list_openai_models", responses((status = 200, description = "OpenAI-compatible model list", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/v1/models", tag = "openai", operation_id = "list_openai_models", responses((status = 200, description = "OpenAI-compatible model list", body = crate::types::JsonObject)))]
 pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    // Read-only iteration: prefer cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

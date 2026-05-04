@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pl.md">Polski</a>
+  <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pl.md">Polski</a> | <a href="README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -111,9 +111,9 @@ librefang hand list                  # 全 Hands を表示
 
 ```
 librefang-kernel            オーケストレーション、ワークフロー、計量、RBAC、スケジューラ、予算
-librefang-runtime           エージェントループ、3 LLM ドライバ、53 ツール、WASM サンドボックス、MCP、A2A
+librefang-runtime           エージェントループ、ツール実行、WASM サンドボックス、MCP、A2A
 librefang-api               140+ REST/WS/SSE エンドポイント、OpenAI 互換 API、ダッシュボード
-librefang-channels          40 メッセージングアダプター、レート制限、DM/グループポリシー
+librefang-channels          45 メッセージングアダプター、レート制限、DM/グループポリシー
 librefang-memory            SQLite 永続化、ベクトル埋め込み、セッション、圧縮
 librefang-types             コア型、テイント追跡、Ed25519 署名、モデルカタログ
 librefang-skills            60 バンドルスキル、SKILL.md パーサー、FangHub マーケットプレイス

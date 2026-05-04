@@ -1,0 +1,56 @@
+#!/bin/sh
+# Pre-push hook (#3303 → #4531 → this rewrite).
+#
+# Philosophy
+# ----------
+# Local pre-push is NOT a CI replacement. The previous version ran
+# `cargo clippy --workspace --all-targets` and `cargo xtask codegen
+# --openapi` on every push, which made a typical push wait 5-25 min
+# (worse with multiple worktrees competing for the build dir lock).
+# That's wrong design — no major Rust project does this. CI is the
+# authoritative gate; pre-push at most refuses obviously-dangerous
+# pushes and exits in milliseconds.
+#
+# What CI covers (`.github/workflows/ci.yml`)
+#   - `quality` job:        cargo fmt + cargo clippy (selective on PR,
+#                           full on push to main)
+#   - `openapi-drift` job:  regenerates openapi.json + SDKs, fails on
+#                           `git diff --exit-code` against committed
+#   - `security` job:       cargo audit + npm audit + license check
+#   - `test-*` jobs:        nextest matrix on Linux / macOS / Windows
+#
+# Want to lint locally? Run `just lint` or `cargo clippy --workspace
+# --all-targets -- -D warnings` on demand. That belongs in YOUR loop,
+# not gating every push.
+#
+# Skip even this hook with `git push --no-verify` or
+# `LIBREFANG_PREPUSH_SKIP=1 git push`.
+
+set -eu
+
+if [ "${LIBREFANG_PREPUSH_SKIP:-0}" = "1" ]; then
+    exit 0
+fi
+
+# Only check: refuse direct push to protected branches. GitHub branch
+# protection rules also enforce this on the server, but rejecting
+# locally saves the round-trip and avoids a confusing "fetch first" /
+# "branch is protected" error after a long clippy wait.
+PROTECTED='main master'
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # Standard sentinel for branch deletion — let it through; GitHub
+    # will refuse if the branch is protected.
+    [ "$local_sha" = '0000000000000000000000000000000000000000' ] && continue
+
+    for p in $PROTECTED; do
+        if [ "$remote_ref" = "refs/heads/$p" ]; then
+            echo "Refusing direct push to protected branch '$p'."
+            echo "Open a pull request from a feature branch instead, or"
+            echo "set LIBREFANG_PREPUSH_SKIP=1 if this is a one-off"
+            echo "release / hotfix that the maintainers have agreed to."
+            exit 1
+        fi
+    done
+done
+
+exit 0

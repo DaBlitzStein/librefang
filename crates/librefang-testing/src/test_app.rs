@@ -4,8 +4,10 @@
 
 use crate::mock_kernel::MockKernelBuilder;
 use axum::Router;
+use librefang_api::middleware::ApiUserAuth;
 use librefang_api::routes::AppState;
 use librefang_kernel::LibreFangKernel;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -27,6 +29,8 @@ pub struct TestAppState {
     pub state: Arc<AppState>,
     /// Temp directory — must hold the reference, otherwise the directory will be deleted.
     _tmp: TempDir,
+    /// Optional path to a config TOML file written to disk (for config-reload tests).
+    _config_path: Option<PathBuf>,
 }
 
 impl TestAppState {
@@ -39,13 +43,26 @@ impl TestAppState {
     pub fn with_builder(builder: MockKernelBuilder) -> Self {
         let (kernel, tmp) = builder.build();
         let state = Self::build_state(kernel, &tmp);
-        Self { state, _tmp: tmp }
+        Self {
+            state,
+            _tmp: tmp,
+            _config_path: None,
+        }
     }
 
     /// Builds from an existing kernel (caller is responsible for holding TempDir).
+    ///
+    /// Wraps the kernel in `Arc` and wires `set_self_handle` so internal
+    /// `kernel_handle()` lookups (used by `send_message_*`) succeed (#3652).
     pub fn from_kernel(kernel: LibreFangKernel, tmp: TempDir) -> Self {
+        let kernel = Arc::new(kernel);
+        kernel.set_self_handle();
         let state = Self::build_state(kernel, &tmp);
-        Self { state, _tmp: tmp }
+        Self {
+            state,
+            _tmp: tmp,
+            _config_path: None,
+        }
     }
 
     /// Builds an axum Router with common API routes (suitable for testing).
@@ -116,20 +133,68 @@ impl TestAppState {
             .with_state(self.state.clone())
     }
 
+    /// Returns the path to the temporary directory.
+    pub fn tmp_path(&self) -> &std::path::Path {
+        self._tmp.path()
+    }
+
     /// Returns an Arc reference to the AppState.
     pub fn app_state(&self) -> Arc<AppState> {
         self.state.clone()
     }
 
+    /// Sets the global API key so auth middleware accepts it.
+    pub fn with_api_key(self, key: &str) -> Self {
+        *self
+            .state
+            .api_key_lock
+            .try_write()
+            .expect("api key lock should be uncontended during test setup") = key.to_string();
+        self
+    }
+
+    /// Pre-populates the per-user API key list for auth middleware.
+    pub fn with_user_api_keys(self, keys: Vec<ApiUserAuth>) -> Self {
+        *self
+            .state
+            .user_api_keys
+            .try_write()
+            .expect("user API key lock should be uncontended during test setup") = keys;
+        self
+    }
+
+    /// Serializes the kernel config to a TOML file at `path`.
+    ///
+    /// Useful for tests that exercise config-reload endpoints which read
+    /// from disk.
+    ///
+    /// Note: this snapshots the kernel's internal `KernelConfig` only.
+    /// Values set via [`with_api_key`](Self::with_api_key) /
+    /// [`with_user_api_keys`](Self::with_user_api_keys) live on the
+    /// `AppState` runtime locks and are NOT written to disk — bake them
+    /// into the kernel config via `MockKernelBuilder::with_config` if
+    /// the test reloads from this file.
+    pub fn with_config_path(mut self, path: PathBuf) -> Self {
+        let config_str =
+            toml::to_string_pretty(&*self.state.kernel.config_ref()).expect("serialize config");
+        std::fs::write(&path, config_str).expect("write config file");
+        self._config_path = Some(path);
+        self
+    }
+
+    /// Consumes `TestAppState`, returning the components a test may need
+    /// to hold onto directly.
+    pub fn into_parts(self) -> (Arc<AppState>, TempDir, Option<PathBuf>) {
+        (self.state, self._tmp, self._config_path)
+    }
+
     /// Internal: builds AppState from a kernel.
-    fn build_state(kernel: LibreFangKernel, tmp: &TempDir) -> Arc<AppState> {
-        let kernel = Arc::new(kernel);
+    fn build_state(kernel: Arc<LibreFangKernel>, tmp: &TempDir) -> Arc<AppState> {
         let channels_config = kernel.config_ref().channels.clone();
 
         Arc::new(AppState {
             kernel,
             started_at: Instant::now(),
-            peer_registry: None,
             bridge_manager: tokio::sync::Mutex::new(None),
             channels_config: tokio::sync::RwLock::new(channels_config),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -143,7 +208,6 @@ impl TestAppState {
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            prometheus_handle: None,
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             config_write_lock: tokio::sync::Mutex::new(()),
@@ -152,6 +216,10 @@ impl TestAppState {
                 librefang_api::rate_limiter::AuthLoginLimiter::new(),
             ),
             gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
+            // Tests run with header-trust off (the production default) so
+            // per-IP rate-limiter / WS slot keying always uses the TCP peer.
+            trusted_proxies: Arc::new(librefang_api::client_ip::TrustedProxies::default()),
+            trust_forwarded_for: false,
         })
     }
 }

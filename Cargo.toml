@@ -29,7 +29,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.4.28-beta7"
+version = "2026.5.2-beta8"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -63,7 +63,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 # OpenTelemetry
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
+# `default-features = false` is critical: opentelemetry-otlp's default feature
+# set enables `http-proto` + `reqwest-blocking-client`, which forces
+# `opentelemetry-http` to pull `reqwest = "0.12"` alongside the workspace
+# `reqwest = "0.13"` direct dep — duplicating the entire HTTP stack
+# (rustls-platform-verifier 0.6 + 0.7, hyper-util, h2, …). We only ship
+# OTLP traces over gRPC (tonic), so the reqwest-based exporters are dead
+# weight. See #3679.
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace", "metrics", "logs"] }
 tracing-opentelemetry = "0.32"
 
 # Prometheus metrics
@@ -151,6 +158,8 @@ hex = "0.4"
 k256 = { version = "0.13", features = ["schnorr"] }
 subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"
 rsa = "0.9.6"
 rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
@@ -237,3 +246,11 @@ opt-level = "s"
 inherits = "release"
 lto = "thin"
 codegen-units = 4
+
+# Workspace-wide build lint policy. Applies ONLY to first-party crates
+# that opt in via `[lints] workspace = true` in their own Cargo.toml.
+# Replaces the previous workflow-wide `RUSTFLAGS=-D warnings` (#3554)
+# which leaked into dependency compilation and broke CI on transitive
+# lint regressions.
+[workspace.lints.rust]
+warnings = "deny"

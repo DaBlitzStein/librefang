@@ -51,6 +51,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::authz::router())
         .merge(routes::channels::router())
         .merge(routes::system::router())
+        .merge(routes::task_queue::router())
         .merge(routes::memory::router())
         .merge(routes::workflows::router())
         .merge(routes::skills::router())
@@ -62,9 +63,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::goals::router())
         .merge(routes::inbox::router())
         .merge(routes::media::router())
-        .merge(routes::prompts::routes())
+        .merge(routes::prompts::router())
         .merge(routes::terminal::router())
         .merge(routes::users::router())
+        .merge(routes::webhooks::router())
         // Dashboard credential login (handler defined locally in server.rs)
         .route(
             "/auth/dashboard-login",
@@ -209,7 +211,7 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
             }
             Some(middleware::ApiUserAuth {
                 name: user.name.clone(),
-                role: librefang_kernel::auth::UserRole::from_str_role(&user.role),
+                role: middleware::UserRole::from_str_role(&user.role),
                 api_key_hash: api_key_hash.to_string(),
                 user_id: librefang_types::agent::UserId::from_name(&user.name),
             })
@@ -231,12 +233,109 @@ pub(crate) fn paired_device_user_keys(kernel: &LibreFangKernel) -> Vec<middlewar
             let name = format!("device:{device_id}");
             middleware::ApiUserAuth {
                 user_id: librefang_types::agent::UserId::from_name(&name),
-                role: librefang_kernel::auth::UserRole::User,
+                role: middleware::UserRole::User,
                 api_key_hash,
                 name,
             }
         })
         .collect()
+}
+
+/// Returns `true` when at least one form of authentication is configured for
+/// the daemon: an explicit `api_key`, any `[[users]]` entry with an
+/// `api_key_hash`, any paired device, or dashboard credentials. Used at boot
+/// (#3572) to decide whether a non-loopback bind is safe.
+fn any_auth_configured(kernel: &LibreFangKernel) -> bool {
+    let api_key_set = !kernel.config_ref().api_key.trim().is_empty();
+    let users_have_keys = kernel.config_ref().users.iter().any(|u| {
+        u.api_key_hash
+            .as_deref()
+            .map(|h| !h.trim().is_empty())
+            .unwrap_or(false)
+    });
+    let paired_devices = !kernel.pairing_ref().device_api_keys().is_empty();
+    let dashboard = has_dashboard_credentials(kernel);
+    api_key_set || users_have_keys || paired_devices || dashboard
+}
+
+/// Reads the `LIBREFANG_ALLOW_NO_AUTH` env var the same way the auth
+/// middleware does (`1` / `true` / `yes` / `on`, case-insensitive on the
+/// boolean keyword). Kept here so the boot-time refusal in #3572 stays in
+/// sync with the runtime allow flag in `middleware.rs`.
+fn allow_no_auth_env() -> bool {
+    std::env::var("LIBREFANG_ALLOW_NO_AUTH")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Outcome of evaluating a bind address against the configured authentication
+/// posture. See `evaluate_bind_auth_safety` for the decision logic and
+/// `check_bind_auth_safety` for the production wiring that pulls the inputs
+/// from a real `LibreFangKernel`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BindAuthCheck {
+    /// Loopback bind OR auth configured — safe to start silently.
+    Ok,
+    /// Non-loopback bind without auth, but `LIBREFANG_ALLOW_NO_AUTH` is set —
+    /// the daemon should start but `run_daemon` should log a loud warning.
+    OkWithExplicitOptIn,
+    /// Non-loopback bind, no auth, no opt-in — refuse to start with `reason`.
+    Refuse { reason: String },
+}
+
+/// Pure decision function for #3572. Takes the three inputs that determine
+/// the bind-safety posture and returns a verdict; isolated from
+/// `LibreFangKernel` and the environment so it is unit-testable.
+pub(crate) fn evaluate_bind_auth_safety(
+    bind: &SocketAddr,
+    any_auth_configured: bool,
+    allow_no_auth: bool,
+) -> BindAuthCheck {
+    if bind.ip().is_loopback() || any_auth_configured {
+        return BindAuthCheck::Ok;
+    }
+    if allow_no_auth {
+        return BindAuthCheck::OkWithExplicitOptIn;
+    }
+    BindAuthCheck::Refuse {
+        reason: format!(
+            "Refusing to start: api_listen = {bind} is a non-loopback bind but no \
+             authentication is configured. Set `api_key` in config.toml, configure \
+             dashboard credentials (`dashboard_user`/`dashboard_pass`), or define a \
+             `[[users]]` entry with `api_key_hash`. To bind on a loopback address, \
+             set api_listen = \"127.0.0.1:4545\". To run intentionally open (NOT \
+             RECOMMENDED — exposes shell-exec, vault, and LLM keys), set \
+             LIBREFANG_ALLOW_NO_AUTH=1 in the environment."
+        ),
+    }
+}
+
+/// #3572: Refuses to start when the resolved bind is non-loopback AND no
+/// authentication is configured AND `LIBREFANG_ALLOW_NO_AUTH` is unset.
+///
+/// Returns `Ok(())` when the configuration is safe (loopback bind, OR auth
+/// configured, OR operator opted in). Returns `Err(msg)` with an actionable
+/// message otherwise — `run_daemon` propagates that as a startup error so the
+/// CLI prints it and exits non-zero rather than running open and dropping
+/// every request at the middleware layer.
+pub(crate) fn check_bind_auth_safety(
+    kernel: &LibreFangKernel,
+    addr: &SocketAddr,
+) -> Result<(), String> {
+    match evaluate_bind_auth_safety(addr, any_auth_configured(kernel), allow_no_auth_env()) {
+        BindAuthCheck::Ok => Ok(()),
+        BindAuthCheck::OkWithExplicitOptIn => {
+            tracing::error!(
+                bind = %addr,
+                "SECURITY: librefang is starting on a non-loopback bind with no \
+                 authentication (LIBREFANG_ALLOW_NO_AUTH=1 — operator accepted \
+                 risk). Anyone reachable on this address has full unauthenticated \
+                 admin access including shell-exec, vault, and LLM API keys."
+            );
+            Ok(())
+        }
+        BindAuthCheck::Refuse { reason } => Err(reason),
+    }
 }
 
 /// Returns `true` if the request arrived over TLS, either directly or through
@@ -272,7 +371,17 @@ fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a randomly generated session token with expiration metadata.
-async fn dashboard_login(
+#[utoipa::path(
+    post,
+    path = "/api/auth/dashboard-login",
+    tag = "auth",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Login outcome — returns session token on success or `requires_totp` when 2FA is needed", body = serde_json::Value),
+        (status = 401, description = "Invalid username, password, or TOTP code")
+    )
+)]
+pub(crate) async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -356,9 +465,11 @@ async fn dashboard_login(
                     // Verify TOTP code
                     let secret = state.kernel.vault_get("totp_secret").unwrap_or_default();
                     let issuer = policy.totp_issuer.clone();
-                    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                        &secret, totp_code, &issuer,
-                    ) {
+                    match state
+                        .kernel
+                        .approvals()
+                        .verify_totp(&secret, totp_code, &issuer)
+                    {
                         Ok(true) => {
                             // Mark code as used so it cannot be replayed.
                             state.kernel.approvals().record_totp_code_used(totp_code);
@@ -443,7 +554,15 @@ async fn dashboard_login(
 }
 
 /// Check what auth mode the dashboard needs.
-async fn dashboard_auth_check(
+#[utoipa::path(
+    get,
+    path = "/api/auth/dashboard-check",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`", body = serde_json::Value)
+    )
+)]
+pub(crate) async fn dashboard_auth_check(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
 ) -> axum::response::Json<serde_json::Value> {
     let cfg = state.kernel.config_ref();
@@ -492,7 +611,15 @@ async fn dashboard_auth_check(
 /// Accepts the token via the `librefang_session` cookie, `Authorization:
 /// Bearer ...`, or `X-API-Key`. Always clears the cookie client-side so a
 /// caller who already lost their token can still wipe it locally.
-async fn dashboard_logout(
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Session invalidated and cookie cleared", body = serde_json::Value)
+    )
+)]
+pub(crate) async fn dashboard_logout(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
@@ -548,13 +675,13 @@ async fn dashboard_logout(
 }
 
 /// Request body for POST /api/auth/change-password.
-#[derive(serde::Deserialize)]
-struct ChangePasswordRequest {
-    current_password: String,
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub(crate) struct ChangePasswordRequest {
+    pub current_password: String,
     /// New password — optional, omit to keep the current password.
-    new_password: Option<String>,
+    pub new_password: Option<String>,
     /// New username — optional, omit to keep the current username.
-    new_username: Option<String>,
+    pub new_username: Option<String>,
 }
 
 /// Change the dashboard password and/or username.
@@ -562,7 +689,18 @@ struct ChangePasswordRequest {
 /// Verifies the current password, then updates whichever credentials are
 /// provided in the request body. At least one of `new_password` or
 /// `new_username` must be non-empty. All existing sessions are invalidated on success.
-async fn change_password(
+#[utoipa::path(
+    post,
+    path = "/api/auth/change-password",
+    tag = "auth",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 200, description = "Credentials updated and existing sessions invalidated", body = serde_json::Value),
+        (status = 400, description = "Missing required fields or password too short"),
+        (status = 401, description = "Current password is incorrect")
+    )
+)]
+pub(crate) async fn change_password(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<ChangePasswordRequest>,
 ) -> axum::response::Response {
@@ -760,10 +898,41 @@ fn sessions_path(home_dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Load persisted sessions from disk, dropping any that have already expired.
+///
+/// SECURITY (#3725): An older daemon revision wrote `sessions.json` at the
+/// default umask, which on most setups leaves the file world-readable.
+/// New writes go through `save_sessions` and land at 0600 from the first
+/// byte, but a file already on disk from the older revision keeps its
+/// permissive mode until something rewrites it. Tighten on load so a daemon
+/// upgraded onto a multi-user host stops leaking bearer tokens immediately
+/// instead of waiting for the next session mutation.
 fn load_sessions(
     home_dir: &std::path::Path,
 ) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
     let path = sessions_path(home_dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                tracing::warn!(
+                    path = %path.display(),
+                    mode = format!("{mode:o}"),
+                    "sessions.json is group/world-readable; tightening to 0600"
+                );
+                if let Err(e) =
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to tighten sessions.json permissions; tokens still readable until next save"
+                    );
+                }
+            }
+        }
+    }
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return std::collections::HashMap::new(),
@@ -854,14 +1023,15 @@ pub async fn build_router(
         channel_bridge::start_channel_bridge(kernel.clone()).await;
 
     // Initialize Prometheus metrics recorder if telemetry feature is enabled
-    // and the config has prometheus_enabled = true.
+    // and the config has prometheus_enabled = true. The handle is parked in a
+    // module-local `OnceLock` inside `crate::telemetry`; the `/api/metrics`
+    // route fetches it via `crate::telemetry::prometheus_handle()` rather than
+    // carrying a redundant copy on `AppState`.
     #[cfg(feature = "telemetry")]
-    let prom_handle = if kernel.config_ref().telemetry.prometheus_enabled {
+    if kernel.config_ref().telemetry.prometheus_enabled {
         info!("Initializing Prometheus metrics recorder");
-        Some(crate::telemetry::init_prometheus())
-    } else {
-        None
-    };
+        let _ = crate::telemetry::init_prometheus();
+    }
 
     let channels_config = kernel.config_ref().channels.clone();
     let persisted_sessions = load_sessions(kernel.home_dir());
@@ -889,10 +1059,22 @@ pub async fn build_router(
     let rl_cfg_early = kernel.config_ref().rate_limit.clone();
     let gcra_limiter_arc = rate_limiter::create_rate_limiter(rl_cfg_early.api_requests_per_minute);
 
+    // Compile the trusted-proxies allowlist once at boot. Stored on
+    // `AppState` so the GCRA middleware, the auth-login middleware, and
+    // both WS upgrade handlers (`agent_ws`, `terminal_ws`) share one
+    // parsed instance — without this, each WS upgrade re-parsed the
+    // raw config strings and re-emitted any malformed-entry warning.
+    let trusted_proxies_arc = {
+        let cfg = kernel.config_ref();
+        Arc::new(crate::client_ip::TrustedProxies::compile(
+            &cfg.trusted_proxies,
+        ))
+    };
+    let trust_forwarded_for_cached = kernel.config_ref().trust_forwarded_for;
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
-        peer_registry: kernel.peer_registry_ref().map(|r| Arc::new(r.clone())),
         bridge_manager: tokio::sync::Mutex::new(bridge),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -914,8 +1096,8 @@ pub async fn build_router(
         pending_a2a_agents: dashmap::DashMap::new(),
         auth_login_limiter: auth_login_limiter.clone(),
         gcra_limiter: gcra_limiter_arc.clone(),
-        #[cfg(feature = "telemetry")]
-        prometheus_handle: prom_handle,
+        trusted_proxies: trusted_proxies_arc.clone(),
+        trust_forwarded_for: trust_forwarded_for_cached,
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.
@@ -925,6 +1107,14 @@ pub async fn build_router(
             format!("http://{listen_addr}").parse().unwrap(),
             format!("http://localhost:{port}").parse().unwrap(),
             format!("http://127.0.0.1:{port}").parse().unwrap(),
+            // Tauri 2 mobile bundled webview origins. iOS WKWebView
+            // exposes the embedded dashboard via the `tauri://localhost`
+            // custom scheme; Android serves it through
+            // WebViewAssetLoader at `https://tauri.localhost`. Both have
+            // to clear the CORS check so `bundleMode.ts`'s rewritten
+            // `/api/*` requests against this daemon succeed.
+            "tauri://localhost".parse().unwrap(),
+            "https://tauri.localhost".parse().unwrap(),
         ];
         // Also allow common dev ports
         for p in [3000u16, 8080] {
@@ -1040,12 +1230,22 @@ pub async fn build_router(
         audit_log: Some(state.kernel.audit().clone()),
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
+    // Reuse the boot-compiled allowlist + cached master switch from
+    // `AppState` — these are also shared with `ws::agent_ws` and the
+    // terminal WS handler so per-IP rate-limiter keying, the auth-login
+    // limiter, and the per-IP WS slot key all read from the same parsed
+    // entries (and any malformed-entry warning fires once at boot, not
+    // on every request).
+    let trusted_proxies = state.trusted_proxies.clone();
+    let trust_forwarded_for = state.trust_forwarded_for;
     // Reuse the limiter Arc already stored in AppState (created above before
     // the AppState constructor so the background GC task can share it for
     // periodic retain_recent() eviction — see #3668).
     let gcra_limiter = rate_limiter::GcraState {
         limiter: state.gcra_limiter.clone(),
         retry_after_secs: rl_cfg.retry_after_secs,
+        trusted_proxies: trusted_proxies.clone(),
+        trust_forwarded_for,
     };
     let auth_rl_max_attempts = rl_cfg.auth_rate_limit_per_ip;
 
@@ -1138,7 +1338,12 @@ pub async fn build_router(
             rate_limiter::gcra_rate_limit,
         ))
         .layer(axum::middleware::from_fn_with_state(
-            (auth_login_limiter, auth_rl_max_attempts),
+            rate_limiter::AuthRateLimitState {
+                limiter: auth_login_limiter,
+                max_attempts: auth_rl_max_attempts,
+                trusted_proxies: trusted_proxies.clone(),
+                trust_forwarded_for,
+            },
             rate_limiter::auth_rate_limit_layer,
         ))
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
@@ -1218,6 +1423,17 @@ pub async fn run_daemon(
     daemon_info_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = listen_addr.parse()?;
+
+    // #3572: Refuse to start when the resolved bind is non-loopback AND no
+    // authentication is configured AND the operator has not opted in via
+    // LIBREFANG_ALLOW_NO_AUTH. The middleware already fails closed for
+    // non-loopback origins in the same configuration, but failing closed at
+    // boot makes the misconfiguration impossible to miss — instead of every
+    // unauthenticated request returning 401 indefinitely, the daemon refuses
+    // to come up and prints an actionable error.
+    if let Err(msg) = check_bind_auth_safety(&kernel, &addr) {
+        return Err(msg.into());
+    }
 
     // Acquire an exclusive file lock on `daemon.lock` so two daemons can never
     // open the same SQLite database simultaneously. This is a true cross-process
@@ -1347,15 +1563,24 @@ pub async fn run_daemon(
 
     // Config file hot-reload watcher (polls every 30 seconds).
     // Spawned after `build_router` so it can access `AppState` for bridge reload.
+    //
+    // Uses `tokio::fs::metadata` (issue #3377): the previous `std::fs::metadata`
+    // call was synchronous and ran on a tokio worker thread, so a slow filesystem
+    // (NFS, sleeping disk) blocked the worker for the duration of `stat()`. With
+    // a single-threaded runtime this stalled every other task on each 30s tick.
     {
         let k = kernel.clone();
         let st = state.clone();
         let config_path = kernel.home_dir().join("config.toml");
         let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
-            let mut last_modified = std::fs::metadata(&config_path)
-                .and_then(|m| m.modified())
-                .ok();
+            // Helper: async stat → mtime, swallowing all errors (file may not
+            // exist yet, FS may be unreachable). Identical semantics to the
+            // pre-#3377 `.and_then(|m| m.modified()).ok()` chain.
+            async fn read_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+                tokio::fs::metadata(path).await.ok()?.modified().ok()
+            }
+            let mut last_modified = read_mtime(&config_path).await;
             loop {
                 tokio::select! {
                     // Graceful shutdown signal: exit the loop so the task
@@ -1363,9 +1588,7 @@ pub async fn run_daemon(
                     _ = shutdown_rx.wait_for(|v| *v) => break,
                     _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
                 }
-                let current = std::fs::metadata(&config_path)
-                    .and_then(|m| m.modified())
-                    .ok();
+                let current = read_mtime(&config_path).await;
                 if current != last_modified && current.is_some() {
                     last_modified = current;
                     tracing::info!("Config file changed, reloading...");
@@ -1904,6 +2127,29 @@ mod observability_tests {
             "two daemons with distinct home_dirs must NOT share a compose project"
         );
     }
+
+    // #3725: a sessions.json file already on disk at world-readable
+    // permissions (i.e. left over from a daemon revision before the
+    // 0600-on-write fix) must be tightened on the next load so an
+    // upgrade closes the leak immediately.
+    #[cfg(unix)]
+    #[test]
+    fn load_sessions_tightens_permissive_legacy_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let path = sessions_path(home);
+        std::fs::write(&path, "{}").unwrap();
+        // Simulate the legacy world-readable file.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = load_sessions(home);
+        let after = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            after, 0o600,
+            "legacy permissive sessions.json must be tightened on load"
+        );
+    }
 }
 
 /// SECURITY: Restrict file permissions to owner-only (0600) on Unix.
@@ -2104,5 +2350,80 @@ mod derive_require_auth_for_reads_tests {
     #[test]
     fn some_true_is_preserved_even_when_no_auth_configured() {
         assert!(derive_require_auth_for_reads(Some(true), false));
+    }
+}
+
+#[cfg(test)]
+mod evaluate_bind_auth_safety_tests {
+    use super::{evaluate_bind_auth_safety, BindAuthCheck};
+    use std::net::SocketAddr;
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    // ── Loopback is always safe — auth posture is irrelevant ──────
+
+    #[test]
+    fn loopback_v4_is_ok_without_auth() {
+        let r = evaluate_bind_auth_safety(&addr("127.0.0.1:4545"), false, false);
+        assert_eq!(r, BindAuthCheck::Ok);
+    }
+
+    #[test]
+    fn loopback_v6_is_ok_without_auth() {
+        let r = evaluate_bind_auth_safety(&addr("[::1]:4545"), false, false);
+        assert_eq!(r, BindAuthCheck::Ok);
+    }
+
+    // ── Non-loopback bind requires auth or explicit opt-in ────────
+
+    #[test]
+    fn wildcard_v4_without_auth_refuses() {
+        let r = evaluate_bind_auth_safety(&addr("0.0.0.0:4545"), false, false);
+        match r {
+            BindAuthCheck::Refuse { reason } => {
+                assert!(reason.contains("0.0.0.0"), "got: {reason}");
+                assert!(
+                    reason.contains("api_key") || reason.contains("LIBREFANG_ALLOW_NO_AUTH"),
+                    "operator must learn how to fix: {reason}"
+                );
+            }
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wildcard_v6_without_auth_refuses() {
+        let r = evaluate_bind_auth_safety(&addr("[::]:4545"), false, false);
+        assert!(matches!(r, BindAuthCheck::Refuse { .. }));
+    }
+
+    #[test]
+    fn lan_address_without_auth_refuses() {
+        // RFC 1918 LAN bind reaches everyone on the subnet.
+        let r = evaluate_bind_auth_safety(&addr("192.168.1.10:4545"), false, false);
+        assert!(matches!(r, BindAuthCheck::Refuse { .. }));
+    }
+
+    #[test]
+    fn non_loopback_with_auth_is_ok() {
+        let r = evaluate_bind_auth_safety(&addr("0.0.0.0:4545"), true, false);
+        assert_eq!(r, BindAuthCheck::Ok);
+    }
+
+    #[test]
+    fn non_loopback_no_auth_with_explicit_opt_in_is_ok_with_warning() {
+        let r = evaluate_bind_auth_safety(&addr("0.0.0.0:4545"), false, true);
+        assert_eq!(r, BindAuthCheck::OkWithExplicitOptIn);
+    }
+
+    #[test]
+    fn opt_in_does_not_downgrade_when_auth_already_set() {
+        // When both auth is set AND LIBREFANG_ALLOW_NO_AUTH=1, the
+        // configuration is unambiguously safe — return Ok, not the
+        // "warn loudly" variant.
+        let r = evaluate_bind_auth_safety(&addr("0.0.0.0:4545"), true, true);
+        assert_eq!(r, BindAuthCheck::Ok);
     }
 }

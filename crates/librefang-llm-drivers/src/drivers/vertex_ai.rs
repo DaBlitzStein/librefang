@@ -126,6 +126,7 @@ impl TokenManager {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: format!("OAuth2 token exchange failed: {body}"),
+                code: None,
             });
         }
 
@@ -732,6 +733,11 @@ fn resolve_region(config: &DriverConfig) -> String {
 
 #[async_trait]
 impl LlmDriver for VertexAiDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "vertex_ai", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let url = self.endpoint_url(&request.model, false);
 
@@ -775,19 +781,20 @@ impl LlmDriver for VertexAiDriver {
                 return super::gemini::parse_and_convert_response(&resp_body);
             }
 
+            // Read Retry-After before the body consumes the response.
+            let retry_after_ms =
+                crate::retry_after::parse_retry_after_ms(resp.headers(), 1000 * (1 << attempt));
             let resp_body = resp.text().await.unwrap_or_default();
 
             if status.as_u16() == 429 {
                 last_error = Some(LlmError::RateLimited {
-                    retry_after_ms: 1000 * (1 << attempt),
+                    retry_after_ms,
                     message: None,
                 });
                 continue;
             }
             if status.as_u16() == 503 {
-                last_error = Some(LlmError::Overloaded {
-                    retry_after_ms: 1000 * (1 << attempt),
-                });
+                last_error = Some(LlmError::Overloaded { retry_after_ms });
                 continue;
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
@@ -804,12 +811,18 @@ impl LlmDriver for VertexAiDriver {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: super::gemini::parse_gemini_error(&resp_body),
+                code: None,
             });
         }
 
         Err(last_error.unwrap_or_else(|| LlmError::Http("Max retries exceeded".into())))
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "vertex_ai", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,
@@ -853,19 +866,20 @@ impl LlmDriver for VertexAiDriver {
                 return super::gemini::stream_gemini_sse(resp, tx).await;
             }
 
+            // Read Retry-After before the body consumes the response.
+            let retry_after_ms =
+                crate::retry_after::parse_retry_after_ms(resp.headers(), 1000 * (1 << attempt));
             let resp_body = resp.text().await.unwrap_or_default();
 
             if status.as_u16() == 429 {
                 last_error = Some(LlmError::RateLimited {
-                    retry_after_ms: 1000 * (1 << attempt),
+                    retry_after_ms,
                     message: None,
                 });
                 continue;
             }
             if status.as_u16() == 503 {
-                last_error = Some(LlmError::Overloaded {
-                    retry_after_ms: 1000 * (1 << attempt),
-                });
+                last_error = Some(LlmError::Overloaded { retry_after_ms });
                 continue;
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
@@ -882,6 +896,7 @@ impl LlmDriver for VertexAiDriver {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: super::gemini::parse_gemini_error(&resp_body),
+                code: None,
             });
         }
 

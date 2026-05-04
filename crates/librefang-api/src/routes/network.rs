@@ -8,6 +8,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/peers", axum::routing::get(list_peers))
         .route("/peers/{id}", axum::routing::get(get_peer))
         .route("/network/status", axum::routing::get(network_status))
+        .route(
+            "/network/trusted-peers",
+            axum::routing::get(network_trusted_peers),
+        )
         .route("/comms/topology", axum::routing::get(comms_topology))
         .route("/comms/events", axum::routing::get(comms_events))
         .route(
@@ -62,7 +66,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -79,36 +83,47 @@ use crate::types::ApiErrorResponse;
     path = "/api/peers",
     tag = "network",
     responses(
-        (status = 200, description = "List known OFP peers", body = serde_json::Value)
+        (status = 200, description = "List known OFP peers", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Peers are tracked in the wire module's PeerRegistry.
-    // The kernel doesn't directly hold a PeerRegistry, so we return an empty list
-    // unless one is available. The API server can be extended to inject a registry.
-    if let Some(ref peer_registry) = state.peer_registry {
-        let peers: Vec<serde_json::Value> = peer_registry
-            .all_peers()
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "node_id": p.node_id,
-                    "node_name": p.node_name,
-                    "address": p.address.to_string(),
-                    "state": format!("{:?}", p.state),
-                    "agents": p.agents.iter().map(|a| serde_json::json!({
-                        "id": a.id,
-                        "name": a.name,
-                    })).collect::<Vec<_>>(),
-                    "connected_at": p.connected_at.to_rfc3339(),
-                    "protocol_version": p.protocol_version,
+    // Peers are tracked in the wire module's PeerRegistry, owned by the kernel
+    // and lazily initialized when the OFP peer node starts. Read it live on every
+    // request — caching at boot would return a stale (or empty) snapshot if the
+    // OFP node initialized after AppState was constructed (#3644).
+    //
+    // All peers are returned in a single page — the registry is in-memory
+    // and small — so `offset=0` and `limit=None` always.
+    let items: Vec<serde_json::Value> =
+        if let Some(peer_registry) = state.kernel.peer_registry_ref() {
+            peer_registry
+                .all_peers()
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "node_id": p.node_id,
+                        "node_name": p.node_name,
+                        "address": p.address.to_string(),
+                        "state": format!("{:?}", p.state),
+                        "agents": p.agents.iter().map(|a| serde_json::json!({
+                            "id": a.id,
+                            "name": a.name,
+                        })).collect::<Vec<_>>(),
+                        "connected_at": p.connected_at.to_rfc3339(),
+                        "protocol_version": p.protocol_version,
+                    })
                 })
-            })
-            .collect();
-        Json(serde_json::json!({"peers": peers, "total": peers.len()}))
-    } else {
-        Json(serde_json::json!({"peers": [], "total": 0}))
-    }
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/peers/{id} — Get a single peer by node ID.
@@ -118,7 +133,7 @@ pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse
     tag = "network",
     params(("id" = String, Path, description = "Peer node ID")),
     responses(
-        (status = 200, description = "Peer details", body = serde_json::Value),
+        (status = 200, description = "Peer details", body = crate::types::JsonObject),
         (status = 404, description = "Peer not found")
     )
 )]
@@ -126,8 +141,8 @@ pub async fn get_peer(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let registry = match state.peer_registry {
-        Some(ref r) => r,
+    let registry = match state.kernel.peer_registry_ref() {
+        Some(r) => r,
         None => {
             return ApiErrorResponse::not_found("Peer networking is not enabled").into_json_tuple();
         }
@@ -159,7 +174,7 @@ pub async fn get_peer(
     path = "/api/network/status",
     tag = "network",
     responses(
-        (status = 200, description = "OFP network status summary", body = serde_json::Value)
+        (status = 200, description = "OFP network status summary", body = crate::types::JsonObject)
     )
 )]
 pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -167,7 +182,7 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     let enabled = cfg.network_enabled && !cfg.network.shared_secret.is_empty();
     drop(cfg);
 
-    let (node_id, listen_address, connected_peers, total_peers) =
+    let (node_id, listen_address, connected_peers, total_peers, identity_fingerprint, pinned_peers) =
         if let Some(peer_node) = state.kernel.peer_node_ref() {
             let registry = peer_node.registry();
             (
@@ -175,18 +190,67 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
                 peer_node.local_addr().to_string(),
                 registry.connected_count(),
                 registry.total_count(),
+                peer_node.identity_fingerprint(),
+                peer_node.pinned_peer_count(),
             )
         } else {
-            (String::new(), String::new(), 0, 0)
+            (String::new(), String::new(), 0, 0, None, 0)
         };
 
+    // SECURITY (#3873): Surface this node's Ed25519 identity fingerprint
+    // and the count of TOFU-pinned peers so operators can verify their
+    // own identity is loaded (not silently HMAC-only) and watch the pin
+    // map populate as peers are encountered. The fingerprint is the
+    // out-of-band-comparable value — share it on a side channel so a
+    // remote operator can check the value their kernel pinned.
     Json(serde_json::json!({
         "enabled": enabled,
         "node_id": node_id,
         "listen_address": listen_address,
         "connected_peers": connected_peers,
         "total_peers": total_peers,
+        "identity_fingerprint": identity_fingerprint,
+        "pinned_peers": pinned_peers,
     }))
+}
+
+/// SECURITY (#3873): GET /api/network/trusted-peers — list every TOFU-pinned
+/// peer this node will accept under each `node_id`. Operators read this to
+/// verify what their daemon trusts and out-of-band-compare fingerprints
+/// with remote operators before federating.
+#[utoipa::path(
+    get,
+    path = "/api/network/trusted-peers",
+    tag = "network",
+    responses(
+        (status = 200, description = "List TOFU-pinned peers", body = crate::types::JsonObject)
+    )
+)]
+pub async fn network_trusted_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    // The pin store is in-memory and small, so all entries are returned in a
+    // single page (`offset=0`, `limit=None`).
+    let items: Vec<serde_json::Value> = match state.kernel.peer_node_ref() {
+        Some(peer_node) => peer_node
+            .list_pinned_peers()
+            .into_iter()
+            .map(|(node_id, public_key, fingerprint)| {
+                serde_json::json!({
+                    "node_id": node_id,
+                    "public_key": public_key,
+                    "fingerprint": fingerprint,
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 #[utoipa::path(
@@ -194,11 +258,12 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     path = "/.well-known/agent.json",
     tag = "a2a",
     responses(
-        (status = 200, description = "Get the A2A agent card", body = serde_json::Value)
+        (status = 200, description = "Get the A2A agent card", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    // Read-only aggregation; cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
     let cfg = state.kernel.config_ref();
     let base_url = format!("http://{}", cfg.api_listen);
 
@@ -250,14 +315,15 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
     path = "/a2a/agents",
     tag = "a2a",
     responses(
-        (status = 200, description = "List all A2A agent cards", body = serde_json::Value)
+        (status = 200, description = "List all A2A agent cards", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    // Read-only iteration; cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
     let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
-    let cards: Vec<serde_json::Value> = agents
+    let items: Vec<serde_json::Value> = agents
         .iter()
         .map(|entry| {
             let card = librefang_runtime::a2a::build_agent_card(&entry.manifest, &base_url);
@@ -265,14 +331,14 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
         })
         .collect();
 
-    let total = cards.len();
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "agents": cards,
-            "total": total,
-        })),
-    )
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// POST /a2a/tasks/send — Submit a task to an agent via A2A.
@@ -280,9 +346,9 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
     post,
     path = "/a2a/tasks/send",
     tag = "a2a",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Submit a task to an agent via A2A", body = serde_json::Value)
+        (status = 200, description = "Submit a task to an agent via A2A", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_send_task(
@@ -432,7 +498,7 @@ pub async fn a2a_send_task(
         ("id" = String, Path, description = "Id"),
     ),
     responses(
-        (status = 200, description = "Get A2A task status", body = serde_json::Value)
+        (status = 200, description = "Get A2A task status", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_get_task(
@@ -459,7 +525,7 @@ pub async fn a2a_get_task(
         ("id" = String, Path, description = "Id"),
     ),
     responses(
-        (status = 200, description = "Cancel a tracked A2A task", body = serde_json::Value)
+        (status = 200, description = "Cancel a tracked A2A task", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_cancel_task(
@@ -492,7 +558,7 @@ pub async fn a2a_cancel_task(
     path = "/api/a2a/agents",
     tag = "a2a",
     responses(
-        (status = 200, description = "List discovered external A2A agents", body = serde_json::Value)
+        (status = 200, description = "List discovered external A2A agents", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -526,7 +592,14 @@ pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> imp
             "status": "pending",
         }));
     }
-    Json(serde_json::json!({"agents": items, "total": items.len()}))
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// Check whether a URL is safe to fetch (not targeting internal/private networks).
@@ -721,7 +794,7 @@ fn is_private_ip(ip: &IpAddr) -> bool {
         ("id" = String, Path, description = "Id"),
     ),
     responses(
-        (status = 200, description = "Get a specific external A2A agent", body = serde_json::Value)
+        (status = 200, description = "Get a specific external A2A agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_get_external_agent(
@@ -769,18 +842,30 @@ pub async fn a2a_get_external_agent(
     post,
     path = "/api/a2a/discover",
     tag = "a2a",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Discover an external A2A agent by URL", body = serde_json::Value)
+        (status = 200, description = "Discover an external A2A agent by URL", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_discover_external(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let url = match body["url"].as_str() {
+    let raw_url = match body["url"].as_str() {
         Some(u) => u.to_string(),
         None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
+    };
+    // Canonicalize once at the boundary so the pending key, the trust-list
+    // key inserted on approve, and every later trust-gate comparison all
+    // share the same string. Otherwise `https://x.com/` and `https://x.com`
+    // would split into two pending entries and the gate at /api/a2a/send
+    // would reject whichever variant the caller didn't approve. (#3786)
+    let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
+        Some(u) => u,
+        None => {
+            return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
+                .into_json_tuple();
+        }
     };
 
     // SSRF protection: validate URL before making any outbound request
@@ -855,10 +940,39 @@ pub async fn a2a_discover_external(
 
             let card_json = serde_json::to_value(&card).unwrap_or_default();
 
+            // SECURITY (Bug #3483): cap the pending registry to prevent unbounded
+            // growth. Updating an existing pending entry (same URL) is always
+            // allowed; only NEW URLs are blocked once the cap is reached.
+            const MAX_PENDING_A2A_AGENTS: usize = 1024;
+            if !state.pending_a2a_agents.contains_key(&url)
+                && state.pending_a2a_agents.len() >= MAX_PENDING_A2A_AGENTS
+            {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Pending A2A registry full ({} entries). Approve or remove existing entries first.",
+                            MAX_PENDING_A2A_AGENTS
+                        )
+                    })),
+                );
+            }
+
             // SECURITY (Bug #3786): Store in the PENDING list, not the trusted kernel
             // list. The agent cannot receive tasks until the operator explicitly
             // approves it via POST /api/a2a/agents/{url}/approve.
+            let card_name = card.name.clone();
             state.pending_a2a_agents.insert(url.clone(), card);
+
+            // Bug #3786: audit every discovery so silent agent enumeration is detectable.
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::A2aDiscovered,
+                format!("url={url} name={card_name}"),
+                "pending",
+                None,
+                Some("api".to_string()),
+            );
 
             (
                 StatusCode::ACCEPTED,
@@ -884,18 +998,27 @@ pub async fn a2a_discover_external(
     post,
     path = "/api/a2a/send",
     tag = "a2a",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Send a task to an external A2A agent", body = serde_json::Value)
+        (status = 200, description = "Send a task to an external A2A agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_send_external(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let url = match body["url"].as_str() {
+    let raw_url = match body["url"].as_str() {
         Some(u) => u.to_string(),
         None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
+    };
+    // Canonicalize before any trust-list comparison so case / port /
+    // trailing-slash variants all match the form stored at approve time.
+    let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
+        Some(u) => u,
+        None => {
+            return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
+                .into_json_tuple();
+        }
     };
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
@@ -910,6 +1033,27 @@ pub async fn a2a_send_external(
              Use POST /api/a2a/agents/{url}/approve to trust it first.",
         )
         .into_json_tuple();
+    }
+
+    // SECURITY (Bug #3786): Operator-approved trust gate. Without this check
+    // any caller with a valid API key can dispatch tasks to arbitrary URLs as
+    // long as SSRF allows them — defeating the whole approval workflow. Only
+    // URLs that have been explicitly approved (via /api/a2a/agents/{id}/approve
+    // or seeded via static config) may receive tasks.
+    {
+        let trusted = state
+            .kernel
+            .a2a_agents()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !trusted.iter().any(|(u, _)| u == &url) {
+            return ApiErrorResponse::bad_request(
+                "Target URL is not a trusted A2A agent. \
+                 Discover and approve it first via POST /api/a2a/discover \
+                 followed by POST /api/a2a/agents/{url}/approve.",
+            )
+            .into_json_tuple();
+        }
     }
 
     // SSRF protection: validate URL before making any outbound request
@@ -948,7 +1092,7 @@ pub async fn a2a_send_external(
         ("url" = String, Query, description = "URL of the external A2A agent"),
     ),
     responses(
-        (status = 200, description = "Get external A2A task status", body = serde_json::Value)
+        (status = 200, description = "Get external A2A task status", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_external_task_status(
@@ -956,12 +1100,39 @@ pub async fn a2a_external_task_status(
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let url = match params.get("url") {
+    let raw_url = match params.get("url") {
         Some(u) => u.clone(),
         None => {
             return ApiErrorResponse::bad_request("Missing 'url' query parameter").into_json_tuple()
         }
     };
+    // Canonicalize before the trust gate so cosmetic variants on the query
+    // string don't split the comparison from the form stored at approve.
+    let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
+        Some(u) => u,
+        None => {
+            return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
+                .into_json_tuple();
+        }
+    };
+
+    // SECURITY (Bug #3786): trust gate — only query task status from
+    // operator-approved A2A agents. Otherwise this endpoint doubles as an
+    // SSRF probe surface against any URL the global SSRF allowlist accepts.
+    {
+        let trusted = state
+            .kernel
+            .a2a_agents()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !trusted.iter().any(|(u, _)| u == &url) {
+            return ApiErrorResponse::bad_request(
+                "Target URL is not a trusted A2A agent. \
+                 Discover and approve it first via POST /api/a2a/discover.",
+            )
+            .into_json_tuple();
+        }
+    }
 
     // SSRF protection: validate URL before making any outbound request
     let ssrf_allowed = state
@@ -1007,7 +1178,7 @@ pub async fn a2a_external_task_status(
         ("id" = String, Path, description = "Discovery URL of the pending agent (URL-encoded)"),
     ),
     responses(
-        (status = 200, description = "Agent approved and promoted to trusted list", body = serde_json::Value),
+        (status = 200, description = "Agent approved and promoted to trusted list", body = crate::types::JsonObject),
         (status = 404, description = "No pending agent found for the given URL")
     )
 )]
@@ -1016,7 +1187,12 @@ pub async fn a2a_approve_external(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     // The path parameter may be URL-encoded; decode it for matching.
-    let url = crate::percent_decode(&id);
+    let decoded = crate::percent_decode(&id);
+    // Canonicalize so the lookup matches whatever form the discover
+    // handler used as the storage key. Without this, an operator who
+    // approves `https://x.com/` after discover stored `https://x.com`
+    // (or vice versa) would 404.
+    let url = librefang_runtime::a2a::canonicalize_a2a_url(&decoded).unwrap_or(decoded);
 
     match state.pending_a2a_agents.remove(&url) {
         Some((_, card)) => {
@@ -1026,6 +1202,7 @@ pub async fn a2a_approve_external(
                 "A2A agent approved by operator and promoted to trusted list."
             );
             let card_json = serde_json::to_value(&card).unwrap_or_default();
+            let card_name = card.name.clone();
             // Promote to kernel's trusted list.
             {
                 let mut agents = state
@@ -1040,6 +1217,17 @@ pub async fn a2a_approve_external(
                     agents.push((url.clone(), card));
                 }
             }
+            // Bug #3786: audit the trust promotion — this is the moment the
+            // agent gains the ability to receive tasks, so it must be in the
+            // operator's audit trail.
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::A2aTrusted,
+                format!("url={url} name={card_name}"),
+                "ok",
+                None,
+                Some("api".to_string()),
+            );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1087,9 +1275,9 @@ pub async fn a2a_approve_external(
     post,
     path = "/mcp",
     tag = "mcp",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Handle MCP JSON-RPC requests over HTTP", body = serde_json::Value)
+        (status = 200, description = "Handle MCP JSON-RPC requests over HTTP", body = crate::types::JsonObject)
     )
 )]
 pub async fn mcp_http(
@@ -1271,13 +1459,14 @@ pub async fn mcp_http(
     path = "/api/comms/topology",
     tag = "network",
     responses(
-        (status = 200, description = "Build agent topology graph", body = serde_json::Value)
+        (status = 200, description = "Build agent topology graph", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use librefang_types::comms::{EdgeKind, TopoEdge, TopoNode, Topology};
 
-    let agents = state.kernel.agent_registry().list();
+    // Read-only projection; cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
 
     let nodes: Vec<TopoNode> = agents
         .iter()
@@ -1547,6 +1736,10 @@ fn audit_to_comms_event(
 ///
 /// Sources from both the event bus (for lifecycle events with full context)
 /// and the audit log (for message/spawn/kill events that are always captured).
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents` (#3842). Events are returned in a single
+/// page capped by `limit` (default 100, max 500); `offset` is always 0.
 #[utoipa::path(
     get,
     path = "/api/comms/events",
@@ -1594,7 +1787,13 @@ pub async fn comms_events(
     comms_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     comms_events.truncate(limit);
 
-    Json(comms_events)
+    let total = comms_events.len();
+    Json(crate::types::PaginatedResponse {
+        items: comms_events,
+        total,
+        offset: 0,
+        limit: Some(limit),
+    })
 }
 
 /// GET /api/comms/events/stream — SSE stream of inter-agent communication events.
@@ -1605,7 +1804,7 @@ pub async fn comms_events(
     path = "/api/comms/events/stream",
     tag = "network",
     responses(
-        (status = 200, description = "SSE stream of inter-agent events", body = serde_json::Value)
+        (status = 200, description = "SSE stream of inter-agent events", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::response::Response {
@@ -1660,9 +1859,9 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
     post,
     path = "/api/comms/send",
     tag = "network",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Send a message between agents", body = serde_json::Value)
+        (status = 200, description = "Send a message between agents", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_send(
@@ -1741,9 +1940,9 @@ pub async fn comms_send(
     post,
     path = "/api/comms/task",
     tag = "network",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Post a task to the agent task queue", body = serde_json::Value)
+        (status = 200, description = "Post a task to the agent task queue", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_task(
@@ -1801,6 +2000,102 @@ pub(crate) fn remove_toml_section(content: &str, section: &str) -> String {
 mod tests {
     use super::{canonical_ip, is_cloud_metadata_ip, is_private_ip};
     use std::net::{IpAddr, Ipv4Addr};
+
+    // -----------------------------------------------------------------
+    // Regression test for #3644: /api/peers must reflect the live kernel
+    // PeerRegistry, not a boot-time snapshot. Previously AppState held
+    // `peer_registry: Option<Arc<PeerRegistry>>` populated once in
+    // `serve()` from `kernel.peer_registry_ref()`. If the OFP node
+    // initialized the registry *after* AppState was built (or never),
+    // the cached `Option::None` was permanent and `/api/peers` always
+    // returned an empty list even after peers connected.
+    //
+    // The fix removes the cache and reads `state.kernel.peer_registry_ref()`
+    // live in the handler. This test:
+    //   1. Boots a kernel with no OFP node started (registry == None).
+    //   2. Builds AppState.
+    //   3. Installs a registry into the kernel (simulating OFP startup
+    //      AFTER AppState construction).
+    //   4. Adds a peer to that registry.
+    //   5. Calls `list_peers` and asserts the peer is visible.
+    // Pre-fix this test would see `peers: []`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_peers_reflects_peers_added_after_appstate_boot() {
+        use crate::routes::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use chrono::Utc;
+        use http_body_util::BodyExt;
+        use librefang_types::config::KernelConfig;
+        use librefang_wire::registry::{PeerEntry, PeerRegistry, PeerState};
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-api-peer-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+
+        // No OFP node => registry is None at AppState-build time.
+        assert!(kernel.peer_registry_ref().is_none());
+
+        let state = Arc::new(AppState {
+            kernel: kernel.clone(),
+            started_at: std::time::Instant::now(),
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(
+                home_dir.join("data").join("webhooks.json"),
+            ),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            config_write_lock: tokio::sync::Mutex::new(()),
+            pending_a2a_agents: dashmap::DashMap::new(),
+            auth_login_limiter: Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
+            gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
+            trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+            trust_forwarded_for: false,
+        });
+
+        // Simulate OFP startup happening AFTER AppState construction.
+        let registry = PeerRegistry::new();
+        kernel
+            .install_peer_registry_for_test(registry.clone())
+            .expect("registry not yet set");
+
+        // Register a peer post-boot — the bug was these never appeared.
+        registry.add_peer(PeerEntry {
+            node_id: "node-abc".to_string(),
+            node_name: "test-peer".to_string(),
+            address: "127.0.0.1:9090".parse().unwrap(),
+            agents: Vec::new(),
+            state: PeerState::Connected,
+            connected_at: Utc::now(),
+            protocol_version: 1,
+        });
+
+        let resp = super::list_peers(State(state)).await.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["total"], 1,
+            "expected post-boot peer to appear, got {json}"
+        );
+        assert_eq!(json["items"][0]["node_id"], "node-abc");
+    }
 
     #[test]
     fn canonical_ip_unwraps_ipv4_mapped_v6() {

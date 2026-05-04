@@ -9,11 +9,11 @@ use librefang_types::agent::{PromptExperiment, PromptVersion};
 use sha2::{Digest, Sha256};
 
 use super::AppState;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_kernel::kernel_handle::prelude::*;
 use std::sync::Arc;
 
 use crate::types::ApiErrorResponse;
-pub fn routes() -> Router<Arc<AppState>> {
+pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/agents/{agent_id}/prompts/versions",
@@ -62,12 +62,23 @@ async fn list_prompt_versions(
                 .into_response()
         }
     };
-    match state.kernel.list_prompt_versions(agent_id) {
-        Ok(versions) => Json(versions).into_response(),
+    let body = match state.kernel.list_prompt_versions(agent_id) {
+        Ok(versions) => {
+            let total = versions.len();
+            Json(crate::types::PaginatedResponse {
+                items: versions,
+                total,
+                offset: 0,
+                limit: None,
+            })
+            .into_response()
+        }
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 async fn create_prompt_version(
@@ -90,12 +101,14 @@ async fn create_prompt_version(
     let mut hasher = Sha256::new();
     hasher.update(version.system_prompt.as_bytes());
     version.content_hash = format!("{:x}", hasher.finalize());
-    match state.kernel.create_prompt_version(version.clone()) {
+    let body = match state.kernel.create_prompt_version(&version) {
         Ok(_) => Json(version).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 async fn get_prompt_version(
@@ -135,11 +148,20 @@ async fn activate_prompt_version(
                 .into_response()
         }
     };
-    match state.kernel.set_active_prompt_version(&id, agent_id) {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e)
+    if let Err(e) = state.kernel.set_active_prompt_version(&id, agent_id) {
+        return ApiErrorResponse::internal(e)
             .into_json_tuple()
-            .into_response(),
+            .into_response();
+    }
+    // Read back the activated version so the caller can patch caches in place
+    // without an extra round-trip. If the version vanished between write and
+    // read (narrow race — concurrent delete) or the kernel implementation
+    // doesn't expose it (e.g. mock kernels in tests, or stores that accept
+    // activate without persisting versions), fall back to the legacy ack
+    // envelope so the activation still appears successful.
+    match state.kernel.get_prompt_version(&id) {
+        Ok(Some(version)) => Json(version).into_response(),
+        Ok(None) | Err(_) => Json(serde_json::json!({"success": true})).into_response(),
     }
 }
 
@@ -155,12 +177,23 @@ async fn list_experiments(
                 .into_response()
         }
     };
-    match state.kernel.list_experiments(agent_id) {
-        Ok(experiments) => Json(experiments).into_response(),
+    let body = match state.kernel.list_experiments(agent_id) {
+        Ok(experiments) => {
+            let total = experiments.len();
+            Json(crate::types::PaginatedResponse {
+                items: experiments,
+                total,
+                offset: 0,
+                limit: None,
+            })
+            .into_response()
+        }
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 async fn create_experiment(
@@ -183,12 +216,14 @@ async fn create_experiment(
     for variant in &mut experiment.variants {
         variant.id = uuid::Uuid::new_v4();
     }
-    match state.kernel.create_experiment(experiment.clone()) {
+    let body = match state.kernel.create_experiment(&experiment) {
         Ok(_) => Json(experiment).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 async fn get_experiment(
@@ -203,49 +238,65 @@ async fn get_experiment(
     }
 }
 
-async fn start_experiment(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    match state
-        .kernel
-        .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Running)
-    {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
+// Apply a status transition and return the post-mutation `PromptExperiment` so
+// callers (dashboard React Query hooks, SDK consumers) can `setQueryData`
+// directly instead of doing a follow-up GET. If the experiment vanished
+// between the status write and the snapshot read (narrow race — e.g. a
+// concurrent delete), fall back to the legacy `{"success": true}` ack so the
+// call still appears successful. Refs #3832.
+async fn transition_experiment(
+    state: &AppState,
+    id: &str,
+    status: librefang_types::agent::ExperimentStatus,
+) -> axum::response::Response {
+    if let Err(e) = state.kernel.update_experiment_status(id, status) {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    match state.kernel.get_experiment(id) {
+        Ok(Some(experiment)) => Json(experiment).into_response(),
+        Ok(None) => Json(serde_json::json!({"success": true})).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
     }
+}
+
+async fn start_experiment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    transition_experiment(
+        &state,
+        &id,
+        librefang_types::agent::ExperimentStatus::Running,
+    )
+    .await
 }
 
 async fn pause_experiment(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state
-        .kernel
-        .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Paused)
-    {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e)
-            .into_json_tuple()
-            .into_response(),
-    }
+    transition_experiment(
+        &state,
+        &id,
+        librefang_types::agent::ExperimentStatus::Paused,
+    )
+    .await
 }
 
 async fn complete_experiment(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state
-        .kernel
-        .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Completed)
-    {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e)
-            .into_json_tuple()
-            .into_response(),
-    }
+    transition_experiment(
+        &state,
+        &id,
+        librefang_types::agent::ExperimentStatus::Completed,
+    )
+    .await
 }
 
 async fn get_experiment_metrics(

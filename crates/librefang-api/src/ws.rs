@@ -21,7 +21,7 @@ use dashmap::DashMap;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use librefang_channels::types::SenderContext;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_runtime::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
 use librefang_runtime::llm_errors;
 use librefang_types::agent::{AgentId, SessionId};
@@ -374,6 +374,19 @@ pub async fn agent_ws(
     }
 
     if auth_required {
+        // SECURITY (#3610): Loud reject if a client still sends `?token=` in
+        // the WS URL. The credential leaks into proxy access logs and browser
+        // history; we removed support in #3610 but this fail-closed branch
+        // catches stale dashboards / scripted clients that haven't migrated
+        // to the `bearer.<token>` sub-protocol or `Authorization` header.
+        if ws_query_param(&uri, "token").is_some() {
+            warn!(
+                ip = %addr.ip(),
+                "WebSocket upgrade rejected: ?token= query param removed in #3610 — \
+                 use the Sec-WebSocket-Protocol bearer.<token> sub-protocol instead"
+            );
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
         // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
         let matches_any = |token: &str| -> bool {
             use subtle::ConstantTimeEq;
@@ -434,8 +447,25 @@ pub async fn agent_ws(
         }
     }
 
-    // SECURITY: Enforce per-IP WebSocket connection limit
-    let ip = addr.ip();
+    // SECURITY: Enforce per-IP WebSocket connection limit.
+    //
+    // When the daemon sits behind a trusted reverse proxy, the TCP peer
+    // is the proxy and every browser collapses onto the same per-IP
+    // bucket. Use the configured allowlist to swap the peer for the
+    // real client IP from forwarding headers — gated on
+    // `trust_forwarded_for` AND a peer match in `trusted_proxies`, so
+    // an unproxied direct hit can never spoof. See `client_ip` module.
+    //
+    // The compiled allowlist + master switch live on `AppState` (built
+    // once at boot in `server.rs`) so this upgrade path never re-parses
+    // the raw config strings — and never re-emits the malformed-entry
+    // warning per upgrade.
+    let ip = crate::client_ip::resolve_real_client_ip(
+        addr.ip(),
+        &headers,
+        &state.trusted_proxies,
+        state.trust_forwarded_for,
+    );
     let max_ws_per_ip = state.kernel.config_ref().rate_limit.max_ws_per_ip;
 
     let guard = match try_acquire_ws_slot(ip, max_ws_per_ip) {
@@ -571,15 +601,36 @@ async fn handle_agent_ws(
     )
     .await;
 
-    // Spawn background task: periodic agent list updates with change detection
+    // Spawn background task: event-driven agent list updates (#3513).
+    //
+    // Replaces the previous per-client 5s polling loop, which rebuilt and
+    // hashed the entire agent list for every connected dashboard tab on
+    // every tick (50 agents x 10 tabs = 500 manifest reads + serializations
+    // every 5s, even when nothing changed). We now subscribe to a single
+    // shared broadcast on `AgentRegistry` and only rebuild the snapshot when
+    // a real mutation fires. A 200ms debounce coalesces bursts (one user
+    // action can trigger several mutations in rapid succession), and a
+    // `last_hash` comparison preserves the existing belt-and-suspenders
+    // suppression for no-op mutations.
+    //
+    // Initial snapshot is sent once on connect so a freshly opened tab
+    // doesn't have to wait for the next mutation to populate the agent list.
     let sender_clone = Arc::clone(&sender);
     let state_clone = Arc::clone(&state);
     let update_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        use tokio::sync::broadcast::error::RecvError;
+
+        let mut rx = state_clone.kernel.agent_registry().subscribe_changes();
         let mut last_hash: u64 = 0;
-        loop {
-            interval.tick().await;
-            let agents: Vec<serde_json::Value> = state_clone
+
+        // Helper closure: snapshot, hash, and send on change.
+        // Returns Err(()) when the websocket peer is gone (terminate task).
+        async fn snapshot_and_send(
+            state: &Arc<AppState>,
+            sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
+            last_hash: &mut u64,
+        ) -> Result<(), ()> {
+            let agents: Vec<serde_json::Value> = state
                 .kernel
                 .agent_registry()
                 .list()
@@ -595,7 +646,9 @@ async fn handle_agent_ws(
                 })
                 .collect();
 
-            // Change detection: hash the agent list and only send on change
+            // Belt-and-suspenders: even though broadcasts only fire on real
+            // mutations, a no-op mutation (e.g. update_skills with the same
+            // list) still publishes — suppress those at the send boundary.
             let mut hasher = DefaultHasher::new();
             for a in &agents {
                 serde_json::to_string(a)
@@ -603,13 +656,13 @@ async fn handle_agent_ws(
                     .hash(&mut hasher);
             }
             let new_hash = hasher.finish();
-            if new_hash == last_hash {
-                continue; // No change — skip broadcast
+            if new_hash == *last_hash {
+                return Ok(());
             }
-            last_hash = new_hash;
+            *last_hash = new_hash;
 
             if send_json(
-                &sender_clone,
+                sender,
                 &serde_json::json!({
                     "type": "agents_updated",
                     "agents": agents,
@@ -617,6 +670,52 @@ async fn handle_agent_ws(
             )
             .await
             .is_err()
+            {
+                return Err(());
+            }
+            Ok(())
+        }
+
+        // 1) Initial snapshot — guarantees a freshly connected dashboard tab
+        //    sees the current agent list without waiting for a mutation.
+        if snapshot_and_send(&state_clone, &sender_clone, &mut last_hash)
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        // 2) Event loop: wait for a registry change, debounce, then snapshot.
+        const DEBOUNCE: Duration = Duration::from_millis(200);
+        loop {
+            // Block until something happens.
+            match rx.recv().await {
+                Ok(()) => {}
+                // Lagged means the channel buffer overflowed before we got
+                // to drain it — perfectly fine, just snapshot the current
+                // state and keep listening (we don't care about individual
+                // events, only that "something changed").
+                Err(RecvError::Lagged(_)) => {}
+                // Sender dropped (kernel teardown) — exit cleanly.
+                Err(RecvError::Closed) => break,
+            }
+
+            // 3) Debounce: drain further events that arrive within the
+            //    debounce window so a burst of N mutations only produces
+            //    one snapshot+send instead of N.
+            let deadline = tokio::time::Instant::now() + DEBOUNCE;
+            loop {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(RecvError::Lagged(_))) => continue,
+                    Ok(Err(RecvError::Closed)) => return,
+                    Err(_) => break, // debounce window elapsed
+                }
+            }
+
+            if snapshot_and_send(&state_clone, &sender_clone, &mut last_hash)
+                .await
+                .is_err()
             {
                 break; // Client disconnected
             }
@@ -701,6 +800,16 @@ async fn handle_agent_ws(
                 }
                 msg_times.push(now);
 
+                // Behaviour change (`trusted_proxies` + `trust_forwarded_for`):
+                // when both flags are configured AND the TCP peer matches the
+                // allowlist, `client_ip` is the resolved real client IP from
+                // forwarding headers, not `addr.ip()`. That value is forwarded
+                // into `SenderContext.user_id` below — meaning per-`user_id`
+                // kernel state (channel-sender keying, audit attribution,
+                // session continuity for code paths that key on it) re-keys
+                // from "proxy IP" to "real client IP" on the very first
+                // request after operators flip the flags on. No-op when the
+                // flags are off (defaults).
                 handle_text_message(
                     &sender,
                     &state,
@@ -867,7 +976,7 @@ async fn handle_text_message(
                     .filter_map(|a| serde_json::from_value(a.clone()).ok())
                     .collect();
                 if !refs.is_empty() {
-                    let image_blocks = crate::routes::resolve_attachments(&refs);
+                    let image_blocks = crate::routes::resolve_attachments(state, &refs);
                     if !image_blocks.is_empty() {
                         has_images = true;
                         crate::routes::inject_attachments_into_session(
@@ -926,6 +1035,13 @@ async fn handle_text_message(
                 state.kernel.clone() as Arc<dyn KernelHandle>;
             let sender_ctx = SenderContext {
                 channel: "webui".to_string(),
+                // Behaviour change (`trusted_proxies` + `trust_forwarded_for`):
+                // when both flags are configured AND the TCP peer matches the
+                // allowlist, this is the resolved real client IP, not the proxy
+                // peer. Any kernel-side per-`user_id` state — audit attribution,
+                // channel-sender keying, session continuity that keys on it —
+                // re-keys from proxy IP to real client IP the moment the flags
+                // flip on. No-op when the flags are off (defaults).
                 user_id: client_ip.to_string(),
                 display_name: "Web UI".to_string(),
                 is_group: false,
@@ -1669,7 +1785,10 @@ fn sanitize_text(s: &str) -> String {
 ///
 /// Uses the proper LLM error classifier from `librefang_runtime::llm_errors`
 /// for comprehensive 20-provider coverage with actionable advice.
-fn classify_streaming_error(err: &librefang_kernel::error::KernelError) -> String {
+// Accepts any `Display` error so this module does not have to depend on
+// `librefang_kernel::error::KernelError` directly. Keeping the API↔kernel
+// boundary thin (see #3744) — the function only ever formats the error.
+fn classify_streaming_error(err: &dyn std::fmt::Display) -> String {
     let inner = format!("{err}");
 
     // Check for agent-specific errors first (not LLM errors)
@@ -1892,6 +2011,25 @@ mod tests {
         assert_eq!(VerboseLevel::Off.label(), "off");
         assert_eq!(VerboseLevel::On.label(), "on");
         assert_eq!(VerboseLevel::Full.label(), "full");
+    }
+
+    // Regression for #3744: classify_streaming_error must accept any Display
+    // type, so this module no longer needs to import KernelError.
+    #[test]
+    fn test_classify_streaming_error_accepts_any_display() {
+        // A plain &str (not a KernelError) is sufficient.
+        let msg = classify_streaming_error(&"Agent not found");
+        assert!(msg.contains("Agent not found"));
+
+        // A custom Display impl also works.
+        struct E;
+        impl std::fmt::Display for E {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("quota exceeded")
+            }
+        }
+        let msg = classify_streaming_error(&E);
+        assert!(msg.to_lowercase().contains("quota"));
     }
 
     #[test]
@@ -2238,5 +2376,18 @@ mod tests {
         );
         let locality = detect_connection_locality(&addr, &headers);
         assert_eq!(locality.forwarded_ip.unwrap().to_string(), "1.1.1.1");
+    }
+
+    #[test]
+    fn issue_3610_query_token_visibility_helper() {
+        // Regression: ws_query_param still surfaces a `?token=` parameter so
+        // upgrade handlers can fail-closed on it (#3610). The helper itself is
+        // not the security boundary — the handler must reject — but if this
+        // ever returns None for a present `token` param the fail-closed gate
+        // would silently degrade.
+        let uri: Uri = "/api/terminal/ws?token=leaked".parse().unwrap();
+        assert_eq!(ws_query_param(&uri, "token").as_deref(), Some("leaked"));
+        let uri: Uri = "/api/terminal/ws?cols=120".parse().unwrap();
+        assert_eq!(ws_query_param(&uri, "token"), None);
     }
 }

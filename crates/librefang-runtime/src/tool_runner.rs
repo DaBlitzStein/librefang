@@ -3,7 +3,7 @@
 //! Provides filesystem, web, shell, and inter-agent tools. Agent tools
 //! (agent_send, agent_spawn, etc.) require a KernelHandle to be passed in.
 
-use crate::kernel_handle::KernelHandle;
+use crate::kernel_handle::prelude::*;
 use crate::mcp;
 use crate::web_search::{parse_ddg_results, WebToolsContext};
 use librefang_skills::registry::SkillRegistry;
@@ -412,7 +412,13 @@ pub async fn execute_tool_raw(
     let result = match tool_name {
         // Filesystem tools
         "file_read" => {
-            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            // #4434: widen with the channel bridge's download directory so
+            // agents can open Telegram/voice/etc. attachments the bridge
+            // saved outside their workspace_root.
+            if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
+                extra.push(dl);
+            }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_file_read(input, *workspace_root, &extra_refs).await
         }
@@ -443,7 +449,11 @@ pub async fn execute_tool_raw(
             tool_file_write(input, *workspace_root, &extra_refs).await
         }
         "file_list" => {
-            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            // #4434: see file_read above — bridge download dir is read-side allowlisted.
+            if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
+                extra.push(dl);
+            }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_file_list(input, *workspace_root, &extra_refs).await
         }
@@ -508,7 +518,14 @@ pub async fn execute_tool_raw(
             // apply_patch needs write access — restrict to rw named workspaces only.
             let extra = named_ws_prefixes_writable(*kernel, *caller_agent_id);
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_apply_patch(input, *workspace_root, &extra_refs).await
+            // SECURITY #3662 (defense-in-depth): also propagate the *canonical*
+            // read-only prefixes so `apply_patch_ext` can reject any resolved
+            // path that lands inside a read-only workspace, even if a future
+            // refactor of `additional_roots` accidentally widens the writable
+            // set.
+            let ro_prefixes = named_ws_prefixes_readonly(*kernel, *caller_agent_id);
+            let ro_refs: Vec<&Path> = ro_prefixes.iter().map(|p| p.as_path()).collect();
+            tool_apply_patch(input, *workspace_root, &extra_refs, &ro_refs).await
         }
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
@@ -807,6 +824,7 @@ pub async fn execute_tool_raw(
         "task_claim" => tool_task_claim(*kernel, *caller_agent_id).await,
         "task_complete" => tool_task_complete(input, *kernel, *caller_agent_id).await,
         "task_list" => tool_task_list(input, *kernel).await,
+        "task_status" => tool_task_status(input, *kernel).await,
         "event_publish" => tool_event_publish(input, *kernel).await,
 
         // Scheduling tools (delegate to CronScheduler via kernel handle)
@@ -822,14 +840,31 @@ pub async fn execute_tool_raw(
         "knowledge_query" => tool_knowledge_query(input, *kernel).await,
 
         // Image analysis tool
-        "image_analyze" => tool_image_analyze(input, *workspace_root).await,
+        "image_analyze" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_image_analyze(input, *workspace_root, &extra_refs).await
+        }
 
         // Media understanding tools
-        "media_describe" => tool_media_describe(input, *media_engine, *workspace_root).await,
-        "media_transcribe" => tool_media_transcribe(input, *media_engine, *workspace_root).await,
+        "media_describe" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_media_describe(input, *media_engine, *workspace_root, &extra_refs).await
+        }
+        "media_transcribe" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_media_transcribe(input, *media_engine, *workspace_root, &extra_refs).await
+        }
 
         // Media generation tools (MediaDriver-based)
-        "image_generate" => tool_image_generate(input, *media_drivers, *workspace_root).await,
+        "image_generate" => {
+            let upload_dir = kernel
+                .map(|k| k.effective_upload_dir())
+                .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+            tool_image_generate(input, *media_drivers, *workspace_root, &upload_dir).await
+        }
         "video_generate" => tool_video_generate(input, *media_drivers).await,
         "video_status" => tool_video_status(input, *media_drivers).await,
         "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root).await,
@@ -838,7 +873,11 @@ pub async fn execute_tool_raw(
         "text_to_speech" => {
             tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root).await
         }
-        "speech_to_text" => tool_speech_to_text(input, *media_engine, *workspace_root).await,
+        "speech_to_text" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_speech_to_text(input, *media_engine, *workspace_root, &extra_refs).await
+        }
 
         // Docker sandbox tool
         "docker_exec" => {
@@ -877,7 +916,11 @@ pub async fn execute_tool_raw(
         "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
 
         // Channel send tool (proactive outbound messaging)
-        "channel_send" => tool_channel_send(input, *kernel, *workspace_root, *sender_id).await,
+        "channel_send" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_channel_send(input, *kernel, *workspace_root, *sender_id, &extra_refs).await
+        }
 
         // Persistent process tools
         "process_start" => tool_process_start(input, *process_manager, *caller_agent_id).await,
@@ -951,7 +994,10 @@ pub async fn execute_tool_raw(
         "browser_screenshot" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_screenshot(input, mgr, aid).await
+                let upload_dir = kernel
+                    .map(|k| k.effective_upload_dir())
+                    .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+                crate::browser::tool_browser_screenshot(input, mgr, aid, &upload_dir).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -1665,6 +1711,17 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "status": { "type": "string", "description": "Filter by status: pending, in_progress, completed (optional)" }
                 }
+            }),
+        },
+        ToolDefinition {
+            name: "task_status".to_string(),
+            description: "Look up a single task on the shared queue by ID and return its status, result, title, assignee, created_at, and completed_at. Native counterpart of the comms_task_status MCP bridge tool — no MCP load required when polling for a delegated task's outcome. Any agent that knows the task_id can read it — task visibility is shared across all agents in the workspace, mirroring task_list / comms_task_status semantics.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "The task ID returned by task_post" }
+                },
+                "required": ["task_id"]
             }),
         },
         ToolDefinition {
@@ -2390,18 +2447,15 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
 // Filesystem tools
 // ---------------------------------------------------------------------------
 
-/// Resolve a file path through the workspace sandbox.
+/// Resolve a file path through the workspace sandbox, with optional
+/// additional canonical roots that should also be considered "inside the
+/// sandbox" — used to honor named workspaces declared in the agent's
+/// manifest.
 ///
 /// SECURITY: Returns an error when `workspace_root` is `None` to prevent
-/// unrestricted filesystem access. All file operations MUST be confined
-/// to the agent's workspace directory.
-fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<PathBuf, String> {
-    resolve_file_path_ext(raw_path, workspace_root, &[])
-}
-
-/// Like [`resolve_file_path`] but accepts additional canonical roots that
-/// should also be considered "inside the sandbox" — used to honor named
-/// workspaces declared in the agent's manifest.
+/// unrestricted filesystem access. All file operations MUST be confined to
+/// the agent's workspace directory or one of the explicitly allow-listed
+/// `additional_roots`.
 fn resolve_file_path_ext(
     raw_path: &str,
     workspace_root: Option<&Path>,
@@ -2443,6 +2497,19 @@ fn named_ws_prefixes_writable(
             .filter(|(_, mode)| *mode == librefang_types::agent::WorkspaceMode::ReadWrite)
             .map(|(p, _)| p)
             .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Like [`named_ws_prefixes`] but only returns prefixes for read-only
+/// workspaces. Used by `apply_patch` (#3662) to enforce a deny-list at the
+/// write call site in addition to the dispatch-level path check.
+fn named_ws_prefixes_readonly(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    match (kernel, caller_agent_id) {
+        (Some(k), Some(aid)) => k.readonly_workspace_prefixes(aid),
         _ => Vec::new(),
     }
 }
@@ -2578,11 +2645,17 @@ async fn tool_apply_patch(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
+    readonly_roots: &[&Path],
 ) -> Result<String, String> {
     let patch_str = input["patch"].as_str().ok_or("Missing 'patch' parameter")?;
     let root = workspace_root.ok_or("apply_patch requires a workspace root")?;
     let ops = crate::apply_patch::parse_patch(patch_str)?;
-    let result = crate::apply_patch::apply_patch(&ops, root, additional_roots).await;
+    // SECURITY #3662: defense-in-depth — pass readonly named-workspace prefixes
+    // through to `apply_patch_ext` so any resolved target path that lands
+    // inside a read-only workspace is rejected at the write site as well as
+    // at dispatch.
+    let result =
+        crate::apply_patch::apply_patch_ext(&ops, root, additional_roots, readonly_roots).await;
     if result.is_ok() {
         Ok(result.summary())
     } else {
@@ -3443,6 +3516,33 @@ async fn tool_task_list(
     serde_json::to_string_pretty(&tasks).map_err(|e| format!("Serialize error: {e}"))
 }
 
+async fn tool_task_status(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let task_id = input["task_id"]
+        .as_str()
+        .ok_or("Missing 'task_id' parameter")?;
+    match kh.task_get(task_id).await? {
+        Some(task) => {
+            // Project to the same six columns comms_task_status returns from
+            // the bridge SQL — keeps the native tool's contract tight even if
+            // task_get later grows additional fields.
+            let projected = serde_json::json!({
+                "status":       task.get("status").cloned().unwrap_or(serde_json::Value::Null),
+                "result":       task.get("result").cloned().unwrap_or(serde_json::Value::Null),
+                "title":        task.get("title").cloned().unwrap_or(serde_json::Value::Null),
+                "assigned_to":  task.get("assigned_to").cloned().unwrap_or(serde_json::Value::Null),
+                "created_at":   task.get("created_at").cloned().unwrap_or(serde_json::Value::Null),
+                "completed_at": task.get("completed_at").cloned().unwrap_or(serde_json::Value::Null),
+            });
+            serde_json::to_string_pretty(&projected).map_err(|e| format!("Serialize error: {e}"))
+        }
+        None => Ok(format!("Task '{task_id}' not found.")),
+    }
+}
+
 async fn tool_event_publish(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -3583,7 +3683,7 @@ async fn tool_knowledge_add_entity(
         updated_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_entity(entity).await?;
+    let id = kh.knowledge_add_entity(&entity).await?;
     Ok(format!("Entity '{name}' added with ID: {id}"))
 }
 
@@ -3617,7 +3717,7 @@ async fn tool_knowledge_add_relation(
         created_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_relation(relation).await?;
+    let id = kh.knowledge_add_relation(&relation).await?;
     Ok(format!(
         "Relation '{source}' --[{relation_str}]--> '{target}' added with ID: {id}"
     ))
@@ -4017,6 +4117,7 @@ async fn tool_channel_send(
     kernel: Option<&Arc<dyn KernelHandle>>,
     workspace_root: Option<&Path>,
     sender_id: Option<&str>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
 
@@ -4078,9 +4179,11 @@ async fn tool_channel_send(
             .await;
     }
 
-    // Local file attachment: read from disk and send as FileData
+    // Local file attachment: read from disk and send as FileData. Honor named
+    // workspace prefixes so agents can attach files that live under declared
+    // `[workspaces]` mounts.
     if let Some(raw_path) = file_path {
-        let resolved = resolve_file_path(raw_path, workspace_root)?;
+        let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
         let data = tokio::fs::read(&resolved)
             .await
             .map_err(|e| format!("Failed to read file '{}': {e}", resolved.display()))?;
@@ -4128,9 +4231,18 @@ async fn tool_channel_send(
             _ => "application/octet-stream",
         };
 
+        // `Bytes::from(Vec<u8>)` is O(1) — it takes ownership of the
+        // Vec's allocation without copying. Subsequent clones (retry,
+        // metering wrappers, fan-out) become refcount bumps. See #3553.
         return kh
             .send_channel_file_data(
-                &channel, recipient, data, &filename, mime_type, thread_id, account_id,
+                &channel,
+                recipient,
+                bytes::Bytes::from(data),
+                &filename,
+                mime_type,
+                thread_id,
+                account_id,
             )
             .await;
     }
@@ -4379,13 +4491,15 @@ async fn tool_a2a_send(
         .as_str()
         .ok_or("Missing 'message' parameter")?;
 
-    // Resolve agent URL: either directly provided or looked up by name
-    let url = if let Some(url) = input["agent_url"].as_str() {
+    // Resolve agent URL: either directly provided or looked up by name.
+    // Canonicalize early so the trust gate below sees the same string the
+    // approve flow stored.
+    let url = if let Some(raw) = input["agent_url"].as_str() {
         // SSRF protection
-        if crate::web_fetch::check_ssrf(url, &[]).is_err() {
+        if crate::web_fetch::check_ssrf(raw, &[]).is_err() {
             return Err("SSRF blocked: URL resolves to a private or metadata address".to_string());
         }
-        url.to_string()
+        crate::a2a::canonicalize_a2a_url(raw).unwrap_or_else(|| raw.to_string())
     } else if let Some(name) = input["agent_name"].as_str() {
         kh.get_a2a_agent_url(name)
             .ok_or_else(|| format!("No known A2A agent with name '{name}'. Use a2a_discover first or provide agent_url directly."))?
@@ -4394,12 +4508,28 @@ async fn tool_a2a_send(
     };
 
     // Taint sink: block secrets from being exfiltrated to an external A2A peer.
+    // Runs before the trust gate so a tainted-message attempt always reports
+    // the data-exfil reason (the test suite asserts this contract) — the
+    // trust gate is purely about target authorization and would mask the
+    // more serious finding.
     if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
         return Err(violation);
     }
     // Also gate the URL itself against query-string credential leaks.
     if let Some(violation) = check_taint_net_fetch(&url) {
         return Err(violation);
+    }
+
+    // SECURITY (Bug #3786): the HTTP route at `/api/a2a/send` enforces a
+    // trust gate that requires the URL to live in `kernel.list_a2a_agents()`.
+    // The agent-side tool path bypassed that gate entirely, so an LLM could
+    // exfiltrate to any non-private URL the SSRF allowlist accepted. Mirror
+    // the same check here.
+    let trusted_urls: Vec<String> = kh.list_a2a_agents().into_iter().map(|(_, u)| u).collect();
+    if !trusted_urls.iter().any(|u| u == &url) {
+        return Err(format!(
+            "A2A target '{url}' is not on the trusted-agent list. Discover and have an operator approve it via POST /api/a2a/agents/{{url}}/approve before agents may send to it."
+        ));
     }
 
     let session_id = input["session_id"].as_str();
@@ -4416,12 +4546,15 @@ async fn tool_a2a_send(
 async fn tool_image_analyze(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     let prompt = input["prompt"].as_str().unwrap_or("");
     // Route through the workspace sandbox so user-supplied paths cannot
-    // escape to arbitrary filesystem locations (e.g. /etc/passwd).
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    // escape to arbitrary filesystem locations (e.g. /etc/passwd). Named
+    // workspace prefixes are honored via `additional_roots` so agents can
+    // analyze images that live under declared `[workspaces]` mounts.
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
 
     let data = tokio::fs::read(&resolved)
         .await
@@ -4651,14 +4784,17 @@ async fn tool_media_describe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     // Route through the workspace sandbox so all media reads stay inside
     // the agent's dir — a plain `..` check would miss absolute paths like
-    // `/etc/passwd`.
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    // `/etc/passwd`. Named workspace prefixes are honored via
+    // `additional_roots` so agents can describe media that lives under
+    // declared `[workspaces]` mounts.
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
 
     // Read image file
     let data = tokio::fs::read(&resolved)
@@ -4700,14 +4836,17 @@ async fn tool_media_transcribe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     // Route through the workspace sandbox so all media reads stay inside
     // the agent's dir — a plain `..` check would miss absolute paths like
-    // `/etc/passwd`.
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    // `/etc/passwd`. Named workspace prefixes are honored via
+    // `additional_roots` so agents can transcribe audio under declared
+    // `[workspaces]` mounts.
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
 
     // Read audio file
     let data = tokio::fs::read(&resolved)
@@ -4753,6 +4892,7 @@ async fn tool_image_generate(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
     workspace_root: Option<&Path>,
+    upload_dir: &Path,
 ) -> Result<String, String> {
     let prompt = input["prompt"]
         .as_str()
@@ -4796,7 +4936,7 @@ async fn tool_image_generate(
 
         // Save images to workspace and uploads dir
         let saved_paths = save_media_images_to_workspace(&result.images, workspace_root);
-        let image_urls = save_media_images_to_uploads(&result.images);
+        let image_urls = save_media_images_to_uploads(&result.images, upload_dir);
 
         let response = serde_json::json!({
             "model": result.model,
@@ -4853,8 +4993,7 @@ async fn tool_image_generate(
     let mut image_urls: Vec<String> = Vec::new();
     {
         use base64::Engine;
-        let upload_dir = std::env::temp_dir().join("librefang_uploads");
-        let _ = std::fs::create_dir_all(&upload_dir);
+        let _ = std::fs::create_dir_all(upload_dir);
         for img in &result.images {
             let file_id = uuid::Uuid::new_v4().to_string();
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&img.data_base64)
@@ -4906,10 +5045,12 @@ fn save_media_images_to_workspace(
 }
 
 /// Save MediaImageResult images to uploads temp dir, returning /api/uploads/... URLs.
-fn save_media_images_to_uploads(images: &[librefang_types::media::GeneratedImage]) -> Vec<String> {
+fn save_media_images_to_uploads(
+    images: &[librefang_types::media::GeneratedImage],
+    upload_dir: &Path,
+) -> Vec<String> {
     use base64::Engine;
-    let upload_dir = std::env::temp_dir().join("librefang_uploads");
-    let _ = std::fs::create_dir_all(&upload_dir);
+    let _ = std::fs::create_dir_all(upload_dir);
     let mut urls = Vec::new();
     for img in images {
         // If provider returned a URL directly, use it as-is
@@ -5405,12 +5546,13 @@ async fn tool_speech_to_text(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let engine = media_engine.ok_or("Media engine not available for speech-to-text")?;
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     let _language = input["language"].as_str();
 
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
 
     // Read the audio file
     let data = tokio::fs::read(&resolved)
@@ -6091,8 +6233,6 @@ async fn tool_canvas_present(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel_handle::{AgentInfo, KernelHandle};
-    use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -6289,7 +6429,7 @@ mod tests {
             "recipient": "@user",
             "message": "here is the api_key=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"))
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
             .await
             .expect_err("channel_send must reject tainted message");
         assert!(
@@ -6310,7 +6450,7 @@ mod tests {
             "image_url": "https://example.com/cat.png",
             "message": "see attached. token=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"))
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
             .await
             .expect_err("image caption must be sink-checked");
         assert!(
@@ -6331,7 +6471,7 @@ mod tests {
             "poll_question": "guess my api_key=sk-abcdefghijklmnop",
             "poll_options": ["yes", "no"],
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"))
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
             .await
             .expect_err("poll question must be sink-checked");
         assert!(
@@ -6355,7 +6495,8 @@ mod tests {
         // This should NOT error with "Missing recipient" because sender_id is provided
         // It will error with "Channel file data send not available" because the mock kernel
         // doesn't implement channel_send, but that's expected
-        let result = tool_channel_send(&input, Some(&kernel), None, Some("12345_telegram")).await;
+        let result =
+            tool_channel_send(&input, Some(&kernel), None, Some("12345_telegram"), &[]).await;
         // The error should NOT be about missing recipient
         let err_msg = result.unwrap_err();
         assert!(
@@ -6376,7 +6517,7 @@ mod tests {
             // recipient intentionally omitted
             "message": "Hello!",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, None)
+        let err = tool_channel_send(&input, Some(&kernel), None, None, &[])
             .await
             .expect_err("channel_send must require recipient without sender_id");
         assert!(
@@ -6401,8 +6542,10 @@ mod tests {
         user_gate_override: Option<librefang_types::user_policy::UserToolGate>,
     }
 
-    #[async_trait]
-    impl KernelHandle for ApprovalKernel {
+    // ---- BEGIN role-trait impls (split from former `impl KernelHandle for ApprovalKernel`, #3746) ----
+
+    #[async_trait::async_trait]
+    impl AgentControl for ApprovalKernel {
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,
@@ -6423,6 +6566,12 @@ mod tests {
             Err("not used".to_string())
         }
 
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl MemoryAccess for ApprovalKernel {
         fn memory_store(
             &self,
             _key: &str,
@@ -6443,11 +6592,10 @@ mod tests {
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
+    }
 
-        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-            vec![]
-        }
-
+    #[async_trait::async_trait]
+    impl TaskQueue for ApprovalKernel {
         async fn task_post(
             &self,
             _title: &str,
@@ -6494,7 +6642,10 @@ mod tests {
         ) -> Result<bool, String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl EventBus for ApprovalKernel {
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -6502,17 +6653,20 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for ApprovalKernel {
         async fn knowledge_add_entity(
             &self,
-            _entity: librefang_types::memory::Entity,
+            _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
 
         async fn knowledge_add_relation(
             &self,
-            _relation: librefang_types::memory::Relation,
+            _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
@@ -6523,7 +6677,10 @@ mod tests {
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl ApprovalGate for ApprovalKernel {
         fn requires_approval(&self, tool_name: &str) -> bool {
             tool_name == "shell_exec"
         }
@@ -6565,8 +6722,22 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl KernelHandle for ForceHumanCapturingKernel {
+    // No-op role-trait impls (#3746) — mock relies on default bodies.
+    impl CronControl for ApprovalKernel {}
+    impl HandsControl for ApprovalKernel {}
+    impl A2ARegistry for ApprovalKernel {}
+    impl ChannelSender for ApprovalKernel {}
+    impl PromptStore for ApprovalKernel {}
+    impl WorkflowRunner for ApprovalKernel {}
+    impl GoalControl for ApprovalKernel {}
+    impl ToolPolicy for ApprovalKernel {}
+
+    // ---- END role-trait impls (#3746) ----
+
+    // ---- BEGIN role-trait impls (split from former `impl KernelHandle for ForceHumanCapturingKernel`, #3746) ----
+
+    #[async_trait::async_trait]
+    impl AgentControl for ForceHumanCapturingKernel {
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,
@@ -6574,15 +6745,25 @@ mod tests {
         ) -> Result<(String, String), String> {
             Err("not used".to_string())
         }
+
         async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         fn list_agents(&self) -> Vec<AgentInfo> {
             vec![]
         }
+
         fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
             Err("not used".to_string())
         }
+
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl MemoryAccess for ForceHumanCapturingKernel {
         fn memory_store(
             &self,
             _key: &str,
@@ -6591,6 +6772,7 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+
         fn memory_recall(
             &self,
             _key: &str,
@@ -6598,12 +6780,14 @@ mod tests {
         ) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
-        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-            vec![]
-        }
+    }
+
+    #[async_trait::async_trait]
+    impl TaskQueue for ForceHumanCapturingKernel {
         async fn task_post(
             &self,
             _title: &str,
@@ -6613,9 +6797,11 @@ mod tests {
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_complete(
             &self,
             _agent_id: &str,
@@ -6624,18 +6810,23 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+
         async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
             Err("not used".to_string())
         }
+
         async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
             Err("not used".to_string())
         }
+
         async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_update_status(
             &self,
             _task_id: &str,
@@ -6643,6 +6834,10 @@ mod tests {
         ) -> Result<bool, String> {
             Err("not used".to_string())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl EventBus for ForceHumanCapturingKernel {
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -6650,25 +6845,34 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for ForceHumanCapturingKernel {
         async fn knowledge_add_entity(
             &self,
-            _entity: librefang_types::memory::Entity,
+            _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn knowledge_add_relation(
             &self,
-            _relation: librefang_types::memory::Relation,
+            _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl ApprovalGate for ForceHumanCapturingKernel {
         fn requires_approval(&self, tool_name: &str) -> bool {
             tool_name == "shell_exec"
         }
@@ -6699,6 +6903,18 @@ mod tests {
                 .unwrap_or(librefang_types::user_policy::UserToolGate::Allow)
         }
     }
+
+    // No-op role-trait impls (#3746) — mock relies on default bodies.
+    impl CronControl for ForceHumanCapturingKernel {}
+    impl HandsControl for ForceHumanCapturingKernel {}
+    impl A2ARegistry for ForceHumanCapturingKernel {}
+    impl ChannelSender for ForceHumanCapturingKernel {}
+    impl PromptStore for ForceHumanCapturingKernel {}
+    impl WorkflowRunner for ForceHumanCapturingKernel {}
+    impl GoalControl for ForceHumanCapturingKernel {}
+    impl ToolPolicy for ForceHumanCapturingKernel {}
+
+    // ---- END role-trait impls (#3746) ----
 
     /// Regression: when the per-user gate returns `NeedsApproval`, the
     /// `DeferredToolExecution.force_human` flag MUST be set so the
@@ -6824,12 +7040,13 @@ mod tests {
         assert!(names.contains(&"memory_store"));
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"memory_list"));
-        // 6 collaboration tools
+        // 7 collaboration tools
         assert!(names.contains(&"agent_find"));
         assert!(names.contains(&"task_post"));
         assert!(names.contains(&"task_claim"));
         assert!(names.contains(&"task_complete"));
         assert!(names.contains(&"task_list"));
+        assert!(names.contains(&"task_status"));
         assert!(names.contains(&"event_publish"));
         // 5 new Phase 3 tools
         assert!(names.contains(&"schedule_create"));
@@ -6889,6 +7106,7 @@ mod tests {
             "task_claim",
             "task_complete",
             "task_list",
+            "task_status",
             "event_publish",
         ];
         for name in &collab_tools {
@@ -7070,10 +7288,16 @@ mod tests {
 
     struct NamedWsKernel {
         named: Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)>,
+        /// Optional channel-bridge download dir surfaced via
+        /// `KernelHandle::channel_file_download_dir` (#4434 regression test
+        /// hook). `None` matches the default trait behaviour.
+        download_dir: Option<std::path::PathBuf>,
     }
 
-    #[async_trait]
-    impl KernelHandle for NamedWsKernel {
+    // ---- BEGIN role-trait impls (split from former `impl KernelHandle for NamedWsKernel`, #3746) ----
+
+    #[async_trait::async_trait]
+    impl AgentControl for NamedWsKernel {
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,
@@ -7081,15 +7305,25 @@ mod tests {
         ) -> Result<(String, String), String> {
             Err("not used".to_string())
         }
+
         async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         fn list_agents(&self) -> Vec<AgentInfo> {
             vec![]
         }
+
         fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
             Err("not used".to_string())
         }
+
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl MemoryAccess for NamedWsKernel {
         fn memory_store(
             &self,
             _key: &str,
@@ -7098,6 +7332,7 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+
         fn memory_recall(
             &self,
             _key: &str,
@@ -7105,12 +7340,14 @@ mod tests {
         ) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
-        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-            vec![]
-        }
+    }
+
+    #[async_trait::async_trait]
+    impl TaskQueue for NamedWsKernel {
         async fn task_post(
             &self,
             _title: &str,
@@ -7120,9 +7357,11 @@ mod tests {
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_complete(
             &self,
             _agent_id: &str,
@@ -7131,18 +7370,23 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+
         async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
             Err("not used".to_string())
         }
+
         async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
             Err("not used".to_string())
         }
+
         async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_update_status(
             &self,
             _task_id: &str,
@@ -7150,6 +7394,10 @@ mod tests {
         ) -> Result<bool, String> {
             Err("not used".to_string())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl EventBus for NamedWsKernel {
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -7157,30 +7405,40 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for NamedWsKernel {
         async fn knowledge_add_entity(
             &self,
-            _entity: librefang_types::memory::Entity,
+            _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn knowledge_add_relation(
             &self,
-            _relation: librefang_types::memory::Relation,
+            _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+    }
+
+    impl ToolPolicy for NamedWsKernel {
         fn named_workspace_prefixes(
             &self,
             _agent_id: &str,
         ) -> Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)> {
             self.named.clone()
         }
+
         fn readonly_workspace_prefixes(&self, _agent_id: &str) -> Vec<std::path::PathBuf> {
             self.named
                 .iter()
@@ -7188,12 +7446,37 @@ mod tests {
                 .map(|(p, _)| p.clone())
                 .collect()
         }
+        fn channel_file_download_dir(&self) -> Option<std::path::PathBuf> {
+            self.download_dir.clone()
+        }
     }
+
+    // No-op role-trait impls (#3746) — mock relies on default bodies.
+    impl CronControl for NamedWsKernel {}
+    impl HandsControl for NamedWsKernel {}
+    impl ApprovalGate for NamedWsKernel {}
+    impl A2ARegistry for NamedWsKernel {}
+    impl ChannelSender for NamedWsKernel {}
+    impl PromptStore for NamedWsKernel {}
+    impl WorkflowRunner for NamedWsKernel {}
+    impl GoalControl for NamedWsKernel {}
+
+    // ---- END role-trait impls (#3746) ----
 
     fn make_named_ws_kernel(
         named: Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)>,
     ) -> Arc<dyn KernelHandle> {
-        Arc::new(NamedWsKernel { named })
+        Arc::new(NamedWsKernel {
+            named,
+            download_dir: None,
+        })
+    }
+
+    fn make_download_dir_kernel(download_dir: std::path::PathBuf) -> Arc<dyn KernelHandle> {
+        Arc::new(NamedWsKernel {
+            named: vec![],
+            download_dir: Some(download_dir),
+        })
     }
 
     #[tokio::test]
@@ -7287,6 +7570,155 @@ mod tests {
         assert!(!result.is_error, "got error: {}", result.content);
         assert!(result.content.contains("a.txt"));
         assert!(result.content.contains("b.txt"));
+    }
+
+    /// #4434: channel bridges save attachments to a shared download dir
+    /// (default `/tmp/librefang_uploads`) which lives outside any agent's
+    /// `workspace_root`. The runtime must widen `file_read`'s sandbox
+    /// accept-list with `KernelHandle::channel_file_download_dir()` so
+    /// agents can open the very files the bridge tells them about.
+    #[tokio::test]
+    async fn test_file_read_allows_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        let target = download_canon.join("attachment.txt");
+        std::fs::write(&target, "from-telegram").unwrap();
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": target.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000010"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        assert_eq!(result.content, "from-telegram");
+    }
+
+    /// Companion to the file_read test: file_list must also see into the
+    /// channel download dir so an agent can enumerate inbox attachments.
+    #[tokio::test]
+    async fn test_file_list_allows_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        std::fs::write(download_canon.join("one.pdf"), "1").unwrap();
+        std::fs::write(download_canon.join("two.pdf"), "2").unwrap();
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let result = execute_tool(
+            "test-id",
+            "file_list",
+            &serde_json::json!({"path": download_canon.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000011"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        assert!(result.content.contains("one.pdf"));
+        assert!(result.content.contains("two.pdf"));
+    }
+
+    /// Defense-in-depth: the download dir is a *read-side* allowlist only.
+    /// `file_write` still uses `named_ws_prefixes_writable`, so writes into
+    /// the bridge's directory must remain rejected.
+    #[tokio::test]
+    async fn test_file_write_rejects_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        let target = download_canon.join("smuggled.txt");
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "content": "should-not-land",
+            }),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000012"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error, "expected write to be rejected");
+        assert!(
+            !target.exists(),
+            "file should not have been written: {}",
+            target.display()
+        );
     }
 
     #[tokio::test]
@@ -8552,6 +8984,53 @@ mod tests {
         );
     }
 
+    /// Regression test for #4450: the media/image read-only tools must accept
+    /// paths inside named-workspace prefixes (the "additional_roots" allowlist),
+    /// not just the primary workspace root. Before the fix these tools called
+    /// the bare `resolve_file_path` wrapper which threaded `&[]` and produced
+    /// "resolves outside workspace" even when the agent had declared the mount
+    /// under `[workspaces]`.
+    #[tokio::test]
+    async fn test_media_tools_honor_named_workspace_prefixes() {
+        // Two disjoint dirs: `workspace_root` is the agent's primary workspace,
+        // `mount` is the named-workspace prefix. The test file lives only in
+        // `mount`, so success proves the prefix was honored.
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let mount = tempfile::tempdir().expect("mount tempdir");
+        let mount_canon = mount.path().canonicalize().expect("canonicalize mount");
+        let img_path = mount_canon.join("photo.png");
+        // Minimal PNG signature so detect_image_format() returns "png".
+        let png_bytes: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        std::fs::write(&img_path, png_bytes).expect("write png");
+
+        let raw_path = img_path.to_string_lossy().to_string();
+        let input = serde_json::json!({ "path": raw_path });
+
+        // Without prefixes -> rejected as outside the sandbox.
+        let denied = tool_image_analyze(&input, Some(workspace.path()), &[]).await;
+        assert!(
+            denied.is_err(),
+            "image_analyze should reject paths outside the workspace when \
+             no named-workspace prefixes are provided, got: {:?}",
+            denied
+        );
+        let err = denied.unwrap_err();
+        assert!(
+            err.contains("resolves outside workspace") || err.contains("Access denied"),
+            "expected sandbox rejection, got: {err}"
+        );
+
+        // With the mount as an additional root -> accepted.
+        let extra: &[&Path] = &[mount_canon.as_path()];
+        let ok = tool_image_analyze(&input, Some(workspace.path()), extra).await;
+        assert!(
+            ok.is_ok(),
+            "image_analyze must accept files under a named-workspace prefix, \
+             got: {:?}",
+            ok
+        );
+    }
+
     #[test]
     fn test_depth_limit_constant() {
         assert_eq!(MAX_AGENT_CALL_DEPTH, 5);
@@ -9455,8 +9934,10 @@ mod tests {
         should_fail_escalation: bool,
     }
 
-    #[async_trait]
-    impl KernelHandle for SpawnCheckKernel {
+    // ---- BEGIN role-trait impls (split from former `impl KernelHandle for SpawnCheckKernel`, #3746) ----
+
+    #[async_trait::async_trait]
+    impl AgentControl for SpawnCheckKernel {
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,
@@ -9501,6 +9982,12 @@ mod tests {
             Err("not used".to_string())
         }
 
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl MemoryAccess for SpawnCheckKernel {
         fn memory_store(
             &self,
             _key: &str,
@@ -9521,11 +10008,10 @@ mod tests {
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
+    }
 
-        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-            vec![]
-        }
-
+    #[async_trait::async_trait]
+    impl TaskQueue for SpawnCheckKernel {
         async fn task_post(
             &self,
             _title: &str,
@@ -9572,7 +10058,10 @@ mod tests {
         ) -> Result<bool, String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl EventBus for SpawnCheckKernel {
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -9580,17 +10069,20 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for SpawnCheckKernel {
         async fn knowledge_add_entity(
             &self,
-            _entity: librefang_types::memory::Entity,
+            _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
 
         async fn knowledge_add_relation(
             &self,
-            _relation: librefang_types::memory::Relation,
+            _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
@@ -9602,6 +10094,19 @@ mod tests {
             Err("not used".to_string())
         }
     }
+
+    // No-op role-trait impls (#3746) — mock relies on default bodies.
+    impl CronControl for SpawnCheckKernel {}
+    impl HandsControl for SpawnCheckKernel {}
+    impl ApprovalGate for SpawnCheckKernel {}
+    impl A2ARegistry for SpawnCheckKernel {}
+    impl ChannelSender for SpawnCheckKernel {}
+    impl PromptStore for SpawnCheckKernel {}
+    impl WorkflowRunner for SpawnCheckKernel {}
+    impl GoalControl for SpawnCheckKernel {}
+    impl ToolPolicy for SpawnCheckKernel {}
+
+    // ---- END role-trait impls (#3746) ----
 
     #[test]
     fn parse_poll_options_accepts_2_to_10_strings() {

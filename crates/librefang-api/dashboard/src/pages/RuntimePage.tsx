@@ -151,7 +151,7 @@ export function RuntimePage() {
   const allHealthy = healthChecks.length > 0 && healthChecks.every((c: HealthCheck) => OK_STATUSES.has(c.status));
   const lanes = queue?.lanes ?? [];
   const queueConfig = queue?.config;
-  const auditEntries = auditQuery.data?.entries ?? [];
+  const auditEntries = auditQuery.data?.items ?? auditQuery.data?.entries ?? [];
   const auditValid = auditVerifyQuery.data?.valid;
   const backups = backupsQuery.data?.backups ?? [];
   const taskStatus = taskStatusQuery.data;
@@ -554,6 +554,26 @@ export function RuntimePage() {
                 {auditValid !== undefined && (
                   <Badge variant={auditValid ? "success" : "error"} className="ml-auto">
                     {auditValid ? t("runtime.audit_valid") : t("runtime.audit_invalid")}
+                  </Badge>
+                )}
+                {/* External tip-anchor status (#3339): distinguishes
+                    "chain is self-consistent only" (anchor: none) from
+                    "chain matches the off-DB anchor" (anchor: ok) and
+                    flags forgery attempts (anchor: diverged). The badge
+                    only renders once verify has produced data so we
+                    don't show stale or speculative status. */}
+                {auditVerifyQuery.data?.anchor_status && (
+                  <Badge
+                    variant={
+                      auditVerifyQuery.data.anchor_status === "ok"
+                        ? "success"
+                        : auditVerifyQuery.data.anchor_status === "diverged"
+                          ? "error"
+                          : "warning"
+                    }
+                    title={auditVerifyQuery.data.anchor_path ?? undefined}
+                  >
+                    {t("runtime.audit_anchor", { defaultValue: "anchor" })}: {auditVerifyQuery.data.anchor_status}
                   </Badge>
                 )}
               </div>

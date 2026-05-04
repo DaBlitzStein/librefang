@@ -196,7 +196,7 @@ fn redacted_web(web: &librefang_types::config::WebConfig) -> serde_json::Value {
     path = "/api/status",
     tag = "system",
     responses(
-        (status = 200, description = "Daemon status", body = serde_json::Value)
+        (status = 200, description = "Daemon status", body = crate::types::JsonObject)
     )
 )]
 pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -267,10 +267,10 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     path = "/api/init",
     tag = "system",
     responses(
-        (status = 200, description = "Quick init result", body = serde_json::Value)
+        (status = 200, description = "Quick init result", body = crate::types::JsonObject)
     )
 )]
-pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::Response {
     let home = state.kernel.home_dir();
     let config_path = home.join("config.toml");
 
@@ -278,7 +278,8 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse
         return Json(serde_json::json!({
             "status": "already_initialized",
             "message": "config.toml already exists"
-        }));
+        }))
+        .into_response();
     }
 
     // Ensure directories exist
@@ -315,20 +316,38 @@ api_key_env = "{api_key_env}"
     );
 
     if let Err(e) = crate::atomic_write(&config_path, config_content.as_bytes()) {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": format!("Failed to write config: {e}")
-        }));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to write config: {e}")
+            })),
+        )
+            .into_response();
     }
 
-    // Reload config so kernel picks up new settings
-    let _ = state.kernel.reload_config().await;
+    // Reload config so kernel picks up new settings. Surface failures (#3374) —
+    // before this fix the result was swallowed and the handler reported success
+    // even though the running daemon kept the stale config.
+    if let Err(e) = state.kernel.reload_config().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "reload_failed",
+                "message": format!("init succeeded but reload failed: {e}"),
+                "provider": provider,
+                "model": model,
+            })),
+        )
+            .into_response();
+    }
 
     Json(serde_json::json!({
         "status": "initialized",
         "provider": provider,
         "model": model,
     }))
+    .into_response()
 }
 
 /// POST /api/shutdown — Graceful shutdown.
@@ -337,7 +356,7 @@ api_key_env = "{api_key_env}"
     path = "/api/shutdown",
     tag = "system",
     responses(
-        (status = 200, description = "Graceful daemon shutdown", body = serde_json::Value)
+        (status = 200, description = "Graceful daemon shutdown", body = crate::types::JsonObject)
     )
 )]
 pub async fn shutdown(
@@ -372,7 +391,7 @@ pub async fn shutdown(
     path = "/api/version",
     tag = "system",
     responses(
-        (status = 200, description = "Version information", body = serde_json::Value)
+        (status = 200, description = "Version information", body = crate::types::JsonObject)
     )
 )]
 pub async fn version() -> impl IntoResponse {
@@ -406,7 +425,7 @@ pub async fn version() -> impl IntoResponse {
     path = "/api/health",
     tag = "system",
     responses(
-        (status = 200, description = "Health check", body = serde_json::Value)
+        (status = 200, description = "Health check", body = crate::types::JsonObject)
     )
 )]
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -435,13 +454,83 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Health-detail derived-metrics cache (#3776)
+//
+// `query_model_performance()` runs a `GROUP BY model` over `usage_events`,
+// which can grow unbounded. The health endpoint is often probed every few
+// seconds by external monitors (Prometheus blackbox, k8s readiness, etc.) so
+// we memoize the derived snapshot for `HEALTH_METRICS_TTL` to keep the probe
+// cheap. The TTL is short enough that operators still see fresh data.
+// ---------------------------------------------------------------------------
+
+const HEALTH_METRICS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Clone)]
+struct LlmHealthSnapshot {
+    /// Total LLM calls aggregated across every model in `usage_events`.
+    total_calls: u64,
+    /// Call-count-weighted mean latency in milliseconds across all models.
+    avg_latency_ms: f64,
+    /// Highest single-call latency observed across all models.
+    max_latency_ms: u64,
+    /// Number of distinct models seen.
+    model_count: usize,
+}
+
+static LLM_HEALTH_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::time::Instant, LlmHealthSnapshot)>>,
+> = std::sync::OnceLock::new();
+
+fn llm_health_snapshot(state: &AppState) -> LlmHealthSnapshot {
+    let cell = LLM_HEALTH_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cell.lock() {
+        if let Some((ts, snap)) = guard.as_ref() {
+            if ts.elapsed() < HEALTH_METRICS_TTL {
+                return snap.clone();
+            }
+        }
+    }
+
+    let perf = state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_model_performance()
+        .unwrap_or_default();
+
+    let total_calls: u64 = perf.iter().map(|m| m.call_count).sum();
+    let weighted_sum: f64 = perf
+        .iter()
+        .map(|m| m.avg_latency_ms * m.call_count as f64)
+        .sum();
+    let avg_latency_ms = if total_calls > 0 {
+        weighted_sum / total_calls as f64
+    } else {
+        0.0
+    };
+    let max_latency_ms = perf.iter().map(|m| m.max_latency_ms).max().unwrap_or(0);
+
+    let snap = LlmHealthSnapshot {
+        total_calls,
+        avg_latency_ms,
+        max_latency_ms,
+        model_count: perf.len(),
+    };
+
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some((std::time::Instant::now(), snap.clone()));
+    }
+    snap
+}
+
 /// GET /api/health/detail — Full health diagnostics (requires auth).
 #[utoipa::path(
     get,
     path = "/api/health/detail",
     tag = "system",
     responses(
-        (status = 200, description = "Detailed health diagnostics", body = serde_json::Value)
+        (status = 200, description = "Detailed health diagnostics", body = crate::types::JsonObject)
     )
 )]
 pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -459,6 +548,35 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let hcfg = state.kernel.config_ref();
     let config_warnings = hcfg.validate();
     let status = if db_ok { "ok" } else { "degraded" };
+
+    // Budget snapshot — already aggregated by MeteringEngine (single-row SQL
+    // queries, all indexed). `daily_spend_percent` is `None` when no daily
+    // cap is configured so monitors don't false-fire on undefined ratios.
+    let budget_status = state
+        .kernel
+        .metering_ref()
+        .budget_status(&state.kernel.budget_config());
+    let daily_spend_percent = if budget_status.daily_limit > 0.0 {
+        Some(budget_status.daily_pct * 100.0)
+    } else {
+        None
+    };
+    let hourly_spend_percent = if budget_status.hourly_limit > 0.0 {
+        Some(budget_status.hourly_pct * 100.0)
+    } else {
+        None
+    };
+    let monthly_spend_percent = if budget_status.monthly_limit > 0.0 {
+        Some(budget_status.monthly_pct * 100.0)
+    } else {
+        None
+    };
+
+    // LLM call latency snapshot — cached for HEALTH_METRICS_TTL to avoid
+    // re-running the GROUP BY on every probe scrape. Only `count` and
+    // mean / max latency are surfaced; P50/P95 percentiles would require a
+    // histogram which the kernel does not currently maintain (see PR notes).
+    let llm = llm_health_snapshot(&state);
 
     Json(serde_json::json!({
         "status": status,
@@ -478,6 +596,24 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "config_warnings": config_warnings,
         "event_bus": {
             "dropped_events": state.kernel.event_bus_ref().dropped_count(),
+        },
+        "budget": {
+            "hourly_spend_usd": budget_status.hourly_spend,
+            "hourly_limit_usd": budget_status.hourly_limit,
+            "hourly_spend_percent": hourly_spend_percent,
+            "daily_spend_usd": budget_status.daily_spend,
+            "daily_limit_usd": budget_status.daily_limit,
+            "daily_spend_percent": daily_spend_percent,
+            "monthly_spend_usd": budget_status.monthly_spend,
+            "monthly_limit_usd": budget_status.monthly_limit,
+            "monthly_spend_percent": monthly_spend_percent,
+            "alert_threshold": budget_status.alert_threshold,
+        },
+        "llm": {
+            "total_calls": llm.total_calls,
+            "avg_latency_ms": llm.avg_latency_ms,
+            "max_latency_ms": llm.max_latency_ms,
+            "model_count": llm.model_count,
         },
     }))
 }
@@ -507,7 +643,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     path = "/api/metrics",
     tag = "system",
     responses(
-        (status = 200, description = "Prometheus text-format metrics", body = serde_json::Value)
+        (status = 200, description = "Prometheus text-format metrics", body = crate::types::JsonObject)
     )
 )]
 pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -519,8 +655,8 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str("# TYPE librefang_uptime_seconds gauge\n");
     out.push_str(&format!("librefang_uptime_seconds {uptime}\n\n"));
 
-    // Active agents
-    let agents = state.kernel.agent_registry().list();
+    // Active agents — read-only counter and projection; cheap Arc clones (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
     let active = agents
         .iter()
         .filter(|a| matches!(a.state, librefang_types::agent::AgentState::Running))
@@ -615,7 +751,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     // LibreFang metrics above with standard `metrics` crate counters/histograms
     // (e.g. HTTP request metrics from the telemetry middleware).
     #[cfg(feature = "telemetry")]
-    if let Some(handle) = &state.prometheus_handle {
+    if let Some(handle) = crate::telemetry::prometheus_handle() {
         out.push_str("# --- metrics-exporter-prometheus output ---\n");
         out.push_str(&handle.render());
     }
@@ -640,7 +776,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     path = "/api/config",
     tag = "system",
     responses(
-        (status = 200, description = "Get kernel configuration (secrets redacted)", body = serde_json::Value)
+        (status = 200, description = "Get kernel configuration (secrets redacted)", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1246,7 +1382,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     path = "/api/security",
     tag = "system",
     responses(
-        (status = 200, description = "Security feature status", body = serde_json::Value)
+        (status = 200, description = "Security feature status", body = crate::types::JsonObject)
     )
 )]
 pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1326,7 +1462,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
     path = "/api/migrate/detect",
     tag = "system",
     responses(
-        (status = 200, description = "Detect migratable framework installation", body = serde_json::Value)
+        (status = 200, description = "Detect migratable framework installation", body = crate::types::JsonObject)
     )
 )]
 pub async fn migrate_detect() -> impl IntoResponse {
@@ -1377,7 +1513,7 @@ pub async fn migrate_detect() -> impl IntoResponse {
     path = "/api/migrate/scan",
     tag = "system",
     responses(
-        (status = 200, description = "Scan directory for migratable workspace", body = serde_json::Value)
+        (status = 200, description = "Scan directory for migratable workspace", body = crate::types::JsonObject)
     )
 )]
 pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
@@ -1395,7 +1531,7 @@ pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoRespo
     path = "/api/migrate",
     tag = "system",
     responses(
-        (status = 200, description = "Run migration from another agent framework", body = serde_json::Value)
+        (status = 200, description = "Run migration from another agent framework", body = crate::types::JsonObject)
     )
 )]
 pub async fn run_migrate(
@@ -1496,7 +1632,7 @@ pub async fn run_migrate(
     path = "/api/config/reload",
     tag = "system",
     responses(
-        (status = 200, description = "Reload configuration from disk", body = serde_json::Value)
+        (status = 200, description = "Reload configuration from disk", body = crate::types::JsonObject)
     )
 )]
 pub async fn config_reload(
@@ -1640,7 +1776,7 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
     path = "/api/config/schema",
     tag = "system",
     responses(
-        (status = 200, description = "Get config structure schema", body = serde_json::Value)
+        (status = 200, description = "Get config structure schema", body = crate::types::JsonObject)
     )
 )]
 pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1849,7 +1985,7 @@ pub fn ui_options_overlay(
     path = "/api/config/set",
     tag = "system",
     responses(
-        (status = 200, description = "Set a single config value and persist", body = serde_json::Value)
+        (status = 200, description = "Set a single config value and persist", body = crate::types::JsonObject)
     )
 )]
 pub async fn config_set(
@@ -1920,6 +2056,33 @@ pub async fn config_set(
         );
     }
 
+    // SECURITY (#3458): Restrict /api/config/set to a curated allowlist of
+    // user-tunable config paths. Without this gate any caller authorized to
+    // change config (Owner role, post-auth) can clobber structured tables
+    // (e.g. overwrite `[channels]` with a string), corrupt nested credentials
+    // (`default_model.api_key`), or flip security-critical flags
+    // (`auth.bypass = true` style). The allowlist deliberately excludes:
+    //   - auth/credentials/api_key/users     (account takeover)
+    //   - default_model / providers / *.api_key  (silent provider hijack)
+    //   - approval / second_factor / totp_*  (2FA bypass)
+    //   - migration_state / schema_version   (DB corruption)
+    //   - network / shared_secret / cors_*   (federation hijack)
+    // Operators who genuinely need those paths must edit `config.toml` on
+    // disk — that path keeps an audit trail (file mtime, git, etc.) and
+    // requires shell access, raising the bar above a leaked API key.
+    if !is_writable_config_path(&path) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!(
+                    "config path '{path}' is not user-tunable via /api/config/set; \
+                     edit ~/.librefang/config.toml directly to change it"
+                )
+            })),
+        );
+    }
+
     let config_path = state.kernel.home_dir().join("config.toml");
     // Block path-traversal (`..`) but allow Windows drive-letter prefixes
     if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
@@ -1936,15 +2099,44 @@ pub async fn config_set(
     // Serialize concurrent writes to prevent read-modify-write races
     let _config_guard = state.config_write_lock.lock().await;
 
-    // Read existing config — use toml_edit to preserve comments and formatting
+    // Read existing config — use toml_edit to preserve comments and formatting.
+    // A read failure on an existing file (permission denied, hardware fault,
+    // …) MUST abort — falling back to "" would silently drop every other
+    // section in `config.toml` (agents, providers, taint rules, …) on the
+    // next write. Same protection as `users::persist_users` (#3368).
     let raw_content = if config_path.exists() {
-        std::fs::read_to_string(&config_path).unwrap_or_default()
+        match std::fs::read_to_string(&config_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "error": format!("could not read existing config.toml: {e}")
+                    })),
+                );
+            }
+        }
     } else {
         String::new()
     };
+    // Parse failure means the on-disk file is already corrupt — refuse to
+    // write rather than overwriting with an empty document, which would
+    // clobber every other section the operator is hand-editing (#3368).
     let mut doc: toml_edit::DocumentMut = match raw_content.parse() {
         Ok(d) => d,
-        Err(_) => toml_edit::DocumentMut::new(),
+        Err(e) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!(
+                        "config.toml has a syntax error and cannot be safely edited \
+                         from the dashboard. Fix the file manually first: {e}"
+                    )
+                })),
+            );
+        }
     };
 
     // null → remove key instead of writing empty string
@@ -2103,6 +2295,79 @@ pub async fn config_set(
     (StatusCode::OK, Json(body))
 }
 
+/// Allowlist of user-tunable config paths writable via POST /api/config/set
+/// (#3458). Anything not in this list MUST be edited on disk.
+///
+/// Each entry is matched against the dot-separated path the caller supplies.
+/// Trailing `.*` wildcards permit any single key under a section (used for
+/// per-channel toggles like `channels.telegram.enabled`).
+fn is_writable_config_path(path: &str) -> bool {
+    // Exact-match list — single user-tunable scalars.
+    const EXACT: &[&str] = &[
+        // UI / locale (no security impact).
+        "ui.theme",
+        "ui.locale",
+        "ui.timezone",
+        "ui.language",
+        "log_level",
+        // History trim cap (gotcha bound by MIN_HISTORY_MESSAGES on reload).
+        "max_history_messages",
+        // Approval policy display knobs (NOT the second_factor enforcement
+        // mode, NOT totp_* — those would let an Owner-role attacker silently
+        // turn off 2FA after an API-key leak).
+        "approval.auto_approve_autonomous",
+        "approval.auto_approve",
+        "approval.totp_grace_period_secs",
+    ];
+    if EXACT.contains(&path) {
+        return true;
+    }
+
+    // Section prefixes — any leaf under these prefixes is allowed. The
+    // section itself is NOT writable as a whole (would clobber the table),
+    // because validate_config_key_path requires the path to have a leaf.
+    const SECTION_PREFIXES: &[&str] = &[
+        // Per-channel enable/feature toggles. Excludes `*.token` /
+        // `*.shared_secret` because those keys are scrubbed below.
+        "channels.",
+        // Web search / fetch knobs (URLs and timeouts).
+        "web.",
+        // Rate-limit display knobs.
+        "rate_limit.",
+        // Queue / concurrency tuning.
+        "queue.",
+    ];
+    let in_section = SECTION_PREFIXES.iter().any(|pfx| {
+        path.starts_with(pfx) && path.len() > pfx.len() && !path[pfx.len()..].contains('.')
+            // Allow a single nested level too (e.g. "channels.telegram.enabled")
+            || path.starts_with(pfx) && {
+                let rest = &path[pfx.len()..];
+                rest.split('.').count() == 2
+            }
+    });
+    if !in_section {
+        return false;
+    }
+
+    // Within an allowed section, refuse keys that obviously carry secrets or
+    // override security-critical knobs even if the operator points us at one
+    // of the curated sections by name.
+    const SCRUB_SUFFIXES: &[&str] = &[
+        ".api_key",
+        ".token",
+        ".secret",
+        ".shared_secret",
+        ".password",
+        ".bypass",
+        ".admin",
+        ".owner",
+    ];
+    if SCRUB_SUFFIXES.iter().any(|s| path.ends_with(s)) {
+        return false;
+    }
+    true
+}
+
 /// Convert a serde_json::Value to a toml_edit::Value (format-preserving).
 fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::Value {
     match value {
@@ -2205,8 +2470,9 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         ],
     });
 
-    // Status (same logic as /api/status, without the heavy per-agent list)
-    let agent_entries = state.kernel.agent_registry().list();
+    // Status (same logic as /api/status, without the heavy per-agent list).
+    // Read-only iteration; cheap Arc clones over full manifest deep-copy (#3569).
+    let agent_entries = state.kernel.agent_registry().list_arcs();
     let agent_count = agent_entries.iter().filter(|e| !e.is_hand).count();
     let active_agent_count = agent_entries
         .iter()
@@ -2254,12 +2520,15 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
                 .unwrap_or_else(|e| e.into_inner());
             super::agents::effective_default_model(&cfg.default_model, dm_override.as_ref())
         };
-        let mut agent_entries_visible: Vec<_> = agent_entries.iter().collect();
+        let mut agent_entries_visible: Vec<&std::sync::Arc<librefang_types::agent::AgentEntry>> =
+            agent_entries.iter().collect();
         // Sort by last_active descending — matches AgentsPage default query order.
         agent_entries_visible.sort_by_key(|b| std::cmp::Reverse(b.last_active));
         agent_entries_visible
             .iter()
-            .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
+            // `e` here is &&Arc<AgentEntry>; deref through the ref + Arc to
+            // hand `enrich_agent_json` the `&AgentEntry` it expects.
+            .map(|e| super::agents::enrich_agent_json(e.as_ref(), &dm, &catalog, None))
             .collect()
     };
 
@@ -2549,6 +2818,42 @@ url = "https://search.example.com"
         let cfg: KernelConfig = toml::from_str(toml_src)
             .expect("init-template layout + appended [web.searxng] must parse (issue #4016)");
         assert_eq!(cfg.web.searxng.url, "https://search.example.com");
+    }
+
+    #[test]
+    fn issue_3458_writable_path_allowlist() {
+        // User-tunable scalars are accepted.
+        assert!(super::is_writable_config_path("ui.theme"));
+        assert!(super::is_writable_config_path("ui.locale"));
+        assert!(super::is_writable_config_path("max_history_messages"));
+        assert!(super::is_writable_config_path("log_level"));
+        assert!(super::is_writable_config_path("approval.auto_approve"));
+        assert!(super::is_writable_config_path(
+            "approval.totp_grace_period_secs"
+        ));
+
+        // Sectioned tunables — single leaf and one nested level both allowed.
+        assert!(super::is_writable_config_path("web.search_provider"));
+        assert!(super::is_writable_config_path("rate_limit.max_ws_per_ip"));
+        assert!(super::is_writable_config_path("channels.telegram.enabled"));
+
+        // Account / credential paths MUST be rejected.
+        assert!(!super::is_writable_config_path("default_model.api_key"));
+        assert!(!super::is_writable_config_path("api_key"));
+        assert!(!super::is_writable_config_path("users.alice.role"));
+        assert!(!super::is_writable_config_path("auth.bypass"));
+        assert!(!super::is_writable_config_path("approval.second_factor"));
+
+        // Secret-suffix scrub catches accidentally-exposed leaves inside
+        // an otherwise-allowed section.
+        assert!(!super::is_writable_config_path("channels.telegram.token"));
+        assert!(!super::is_writable_config_path("web.searxng.api_key"));
+        assert!(!super::is_writable_config_path("queue.shared_secret"));
+
+        // Unknown sections fall through to deny by default.
+        assert!(!super::is_writable_config_path("network.shared_secret"));
+        assert!(!super::is_writable_config_path("migration_state"));
+        assert!(!super::is_writable_config_path("nonsense.key"));
     }
 
     #[test]

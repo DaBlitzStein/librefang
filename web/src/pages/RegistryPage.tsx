@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, Github, ExternalLink, ArrowUpDown, Star } from 'lucide-react'
+import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, ExternalLink, ArrowUpDown, Star, Download, TrendingUp } from 'lucide-react'
+import { Github } from '../components/BrandIcons'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
 import { translations } from './../i18n'
@@ -12,6 +13,8 @@ import SiteHeader from '../components/SiteHeader'
 import Breadcrumbs from '../components/Breadcrumbs'
 import RegistryIcon from '../components/RegistryIcon'
 import { useFavorites } from '../lib/useFavorites'
+import { useMarketplace, type MarketplacePkg } from '../lib/useMarketplace'
+import { fmtNum } from '../lib/format'
 // Fixed top header needs content to start below its 64px band.
 
 interface RegistryPageProps {
@@ -47,9 +50,11 @@ function isPopular(item: Detail) {
   return item.tags?.includes('popular') ?? false
 }
 
-type SortKey = 'popular' | 'nameAsc' | 'nameDesc' | 'trending'
+type SortKey = 'popular' | 'nameAsc' | 'nameDesc' | 'trending' | 'downloads' | 'weekly'
 
-function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, number>): Detail[] {
+const SORT_KEYS: SortKey[] = ['popular', 'nameAsc', 'nameDesc', 'trending', 'downloads', 'weekly']
+
+function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, number>, marketplace: Map<string, MarketplacePkg>): Detail[] {
   const arr = [...items]
   switch (key) {
     case 'nameAsc':
@@ -63,6 +68,10 @@ function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, numbe
         if (ac !== bc) return bc - ac
         return a.name.localeCompare(b.name)
       })
+    case 'downloads':
+      return arr.sort((a, b) => (marketplace.get(b.id)?.total_downloads ?? 0) - (marketplace.get(a.id)?.total_downloads ?? 0))
+    case 'weekly':
+      return arr.sort((a, b) => (marketplace.get(b.id)?.weekly_downloads ?? 0) - (marketplace.get(a.id)?.weekly_downloads ?? 0))
     case 'popular':
     default:
       return arr.sort((a, b) => {
@@ -90,6 +99,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   const { data, isLoading, error, refetch, isFetching } = useRegistry()
   const queryClient = useQueryClient()
   const { isFavorite, toggle: toggleFavorite } = useFavorites()
+  const marketplace = useMarketplace(category)
   // Seed from ?category= so bookmarks / shared links preserve the filter.
   // The grid's filter treats query as a substring against id/name/desc/
   // category, so a category name in this slot filters to that chip.
@@ -100,7 +110,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   const [sortBy, setSortBy] = useState<SortKey>(() => {
     if (typeof window === 'undefined') return 'popular'
     const raw = new URLSearchParams(window.location.search).get('sort')
-    return (['popular', 'nameAsc', 'nameDesc', 'trending'] as SortKey[]).includes(raw as SortKey)
+    return SORT_KEYS.includes(raw as SortKey)
       ? (raw as SortKey)
       : 'popular'
   })
@@ -138,8 +148,15 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
     return m
   }, [trendingQuery.data])
 
+  // Enable the "Trending this week" sort only when at least one package has a
+  // non-zero weekly count — otherwise the option would just re-order by id.
+  const hasWeeklyData = useMemo(() => {
+    for (const pkg of marketplace.values()) if (pkg.weekly_downloads > 0) return true
+    return false
+  }, [marketplace])
+
   const filtered = useMemo(() => {
-    const sorted = sortItems(items, sortBy, trendingIds)
+    const sorted = sortItems(items, sortBy, trendingIds, marketplace)
     // Favorites always pin to the top within whatever sort the user picked.
     // Stable partition so relative order inside each group is preserved.
     const pinned: Detail[] = []
@@ -159,7 +176,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
           || (i.category || '').toLowerCase().includes(q)
           || (i.tags || []).some(tag => tag.toLowerCase().includes(q))
     })
-  }, [items, query, lang, sortBy, trendingIds, isFavorite, category])
+  }, [items, query, lang, sortBy, trendingIds, isFavorite, category, marketplace])
 
   const categories = useMemo(() => {
     const set = new Set<string>()
@@ -221,6 +238,12 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
               <option value="nameDesc">{t.registry?.sort?.nameDesc || 'Name Z–A'}</option>
               <option value="trending" disabled={!trendingQuery.data || trendingIds.size === 0}>
                 {t.registry?.sort?.trending || 'Most clicked'}
+              </option>
+              <option value="downloads" disabled={marketplace.size === 0}>
+                {t.registry?.sort?.downloads || 'Most downloaded'}
+              </option>
+              <option value="weekly" disabled={!hasWeeklyData}>
+                {t.registry?.sort?.weekly || 'Trending this week'}
               </option>
             </select>
           </label>
@@ -378,6 +401,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                 }).catch(() => { /* prefetch failure is silent */ })
               }
               const starred = isFavorite(category, item.id)
+              const mktPkg = marketplace.get(item.id)
               return (
                 <a
                   key={item.id}
@@ -403,7 +427,8 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                   >
                     <Star className="w-3.5 h-3.5" fill={starred ? 'currentColor' : 'none'} />
                   </button>
-                  <div className="flex items-start justify-between gap-2 mb-3 pr-6">
+                  {/* Header row: icon + name + arrow */}
+                  <div className="flex items-start justify-between gap-2 mb-2 pr-6">
                     <div className="flex items-center gap-2 min-w-0">
                       {item.icon && (
                         <span className="shrink-0 text-cyan-600 dark:text-cyan-400">
@@ -413,29 +438,88 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                       <h2 className="text-base font-bold text-slate-900 dark:text-white truncate">
                         {getLocalizedName(item, lang)}
                       </h2>
-                      {popular && <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />}
                     </div>
                     <ArrowRight className="w-3.5 h-3.5 text-gray-300 dark:text-gray-600 group-hover:text-cyan-500 transition-colors shrink-0 mt-1" />
                   </div>
-                  {item.category && (
-                    <div className="text-[10px] font-mono text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">
-                      {item.category}
-                    </div>
-                  )}
+
+                  {/* Meta row: category, version, popular — flex gap handles
+                      spacing so chips wrap cleanly on narrow viewports without
+                      orphaned separator dots. */}
+                  <div className="flex items-center gap-x-3 gap-y-1 mb-2.5 flex-wrap">
+                    {item.category && (
+                      <span className="text-[10px] font-mono text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                        {item.category}
+                      </span>
+                    )}
+                    {mktPkg?.latest_version && (
+                      <span className="text-[10px] font-mono text-cyan-600 dark:text-cyan-500 tabular-nums">
+                        v{mktPkg.latest_version}
+                      </span>
+                    )}
+                    {popular && (
+                      <span className="flex items-center gap-0.5 text-[10px] font-mono text-amber-500">
+                        <Sparkles className="w-2.5 h-2.5" /> popular
+                      </span>
+                    )}
+                  </div>
+
                   {desc && (
-                    <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed line-clamp-3">
+                    <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed line-clamp-2 mb-3">
                       {desc}
                     </p>
                   )}
-                  {item.tags && item.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-3">
+
+                  {/* Tags */}
+                  {item.tags && item.tags.filter(t => t !== 'popular').length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-3">
                       {item.tags.filter(tag => tag !== 'popular').slice(0, 4).map(tag => (
-                        <span key={tag} className="text-[10px] font-mono text-gray-500 border border-black/5 dark:border-white/5 px-1.5 py-0.5">
+                        <span key={tag} className="text-[10px] font-mono text-gray-400 dark:text-gray-500 border border-black/8 dark:border-white/8 px-1.5 py-0.5 rounded-sm">
                           {tag}
                         </span>
                       ))}
                     </div>
                   )}
+
+                  {/* Stats row. While marketplace data is still loading
+                      (`marketplace.size === 0`) we render an invisible
+                      placeholder of the same height so the card doesn't
+                      reflow when stats stream in. */}
+                  {marketplace.size === 0 ? (
+                    <div className="h-[28px]" aria-hidden="true" />
+                  ) : mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0 || mktPkg.weekly_downloads > 0) ? (
+                    <div className="flex items-center gap-3 pt-2.5 border-t border-black/8 dark:border-white/8">
+                      {mktPkg.total_downloads > 0 && (
+                        <span
+                          className="flex items-center gap-1 text-[11px] font-mono text-gray-500 dark:text-gray-400 tabular-nums"
+                          aria-label={`${mktPkg.total_downloads.toLocaleString()} ${t.registry?.downloads || 'downloads'}`}
+                          title={`${mktPkg.total_downloads.toLocaleString()} ${t.registry?.downloads || 'downloads'}`}
+                        >
+                          <Download className="w-3 h-3 text-cyan-500/70" aria-hidden="true" />
+                          {fmtNum(mktPkg.total_downloads)}
+                        </span>
+                      )}
+                      {mktPkg.weekly_downloads > 0 && (
+                        <span
+                          className="flex items-center gap-1 text-[11px] font-mono text-green-600 dark:text-green-500 tabular-nums"
+                          aria-label={`${mktPkg.weekly_downloads.toLocaleString()} ${t.registry?.thisWeek || 'this week'}`}
+                          title={`${mktPkg.weekly_downloads.toLocaleString()} ${t.registry?.thisWeek || 'this week'}`}
+                        >
+                          <TrendingUp className="w-3 h-3" aria-hidden="true" />
+                          {fmtNum(mktPkg.weekly_downloads)}
+                        </span>
+                      )}
+                      {mktPkg.stars > 0 && (
+                        <span
+                          className="flex items-center gap-1 text-[11px] font-mono text-amber-500/80 tabular-nums"
+                          aria-label={`${mktPkg.stars.toLocaleString()} ${t.registry?.stars || 'stars'}`}
+                          title={`${mktPkg.stars.toLocaleString()} ${t.registry?.stars || 'stars'}`}
+                        >
+                          <Star className="w-3 h-3" aria-hidden="true" />
+                          {fmtNum(mktPkg.stars)}
+                        </span>
+                      )}
+                    </div>
+                  ) : null}
                 </a>
               )
             })}

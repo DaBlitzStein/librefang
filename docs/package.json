@@ -15,12 +15,12 @@
     "format": "biome format src --write"
   },
   "dependencies": {
-    "@algolia/autocomplete-core": "1.19.3",
+    "@algolia/autocomplete-core": "1.19.8",
     "@giscus/react": "^3.1.0",
-    "@headlessui/react": "2.2.7",
+    "@headlessui/react": "2.2.10",
     "@mdx-js/loader": "3.1.1",
     "@mdx-js/react": "3.1.1",
-    "@next/mdx": "15.5.14",
+    "@next/mdx": "16.2.4",
     "@sindresorhus/slugify": "^2.2.1",
     "@tailwindcss/typography": "^0.5.16",
     "clsx": "^2.1.1",
@@ -28,43 +28,51 @@
     "flexsearch": "^0.8.205",
     "focus-visible": "^5.2.1",
     "hast-util-from-html": "^2.0.3",
-    "lucide-react": "^0.577.0",
+    "lucide-react": "^1.14.0",
     "marked": "16.2.1",
     "mdast-util-to-string": "^4.0.0",
     "mdx-annotations": "^0.1.4",
-    "motion": "12.23.12",
-    "next": "15.5.14",
+    "motion": "12.38.0",
+    "next": "15.5.15",
     "next-themes": "^0.4.6",
     "prism-react-renderer": "^2.4.1",
-    "react": "19.1.1",
-    "react-dom": "19.1.1",
+    "react": "19.2.5",
+    "react-dom": "19.2.5",
     "react-highlight-words": "^0.21.0",
     "remark": "^15.0.1",
     "remark-gfm": "^4.0.1",
     "remark-mdx": "3.1.1",
-    "shiki": "^2.5.0",
+    "shiki": "^4.0.2",
     "tailwind-merge": "^3.3.1",
     "unist-util-filter": "^5.0.1",
     "unist-util-visit": "^5.0.0",
-    "zustand": "5.0.8"
+    "zustand": "5.0.12"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.2.1",
+    "@tailwindcss/postcss": "^4.2.4",
     "@types/mdx": "^2.0.13",
-    "@types/node": "^22.0.0",
-    "@types/react": "19.1.12",
-    "@types/react-dom": "19.1.9",
+    "@types/node": "^25.6.0",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
     "@types/react-highlight-words": "^0.20.0",
     "acorn": "^8.15.0",
-    "autoprefixer": "^10.4.21",
-    "postcss": "^8.5.6",
+    "autoprefixer": "^10.5.0",
+    "postcss": "^8.5.13",
     "postcss-focus-visible": "^10.0.1",
     "simple-functional-loader": "^1.2.1",
-    "tailwindcss": "4.1.12",
+    "tailwindcss": "4.2.4",
     "typescript": "^5.7.0"
   },
   "engines": {
     "node": ">=18.0.0",
     "pnpm": ">=9.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "picomatch@<2.3.2": ">=2.3.2",
+      "picomatch@>=4.0.0 <4.0.4": ">=4.0.4",
+      "brace-expansion@>=2.0.0 <2.0.3": ">=2.0.3",
+      "postcss@<8.5.10": ">=8.5.10"
+    }
   }
 }

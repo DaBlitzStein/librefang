@@ -147,6 +147,21 @@ impl ChatGptTokenCache {
         let mut lock = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         *lock = Some(token);
     }
+
+    /// Drop a token that was just rejected by the API. Without this, the
+    /// post-lock re-check in `refresh_token()` would observe the still-TTL-
+    /// valid rejected token and return it as "fresh", causing the retry to
+    /// 401 again (#3625). Concurrent callers all racing on the same rejected
+    /// token converge on a single refresh: first invalidates → all see None
+    /// after the lock → leader refreshes → followers pick up the new token.
+    pub fn invalidate_if_matches(&self, rejected: &str) {
+        let mut lock = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = lock.as_ref() {
+            if t.token.as_str() == rejected {
+                *lock = None;
+            }
+        }
+    }
 }
 
 impl Default for ChatGptTokenCache {
@@ -322,11 +337,16 @@ impl ChatGptDriver {
                     return Err(LlmError::Api {
                         status: reqwest::StatusCode::FORBIDDEN.as_u16(),
                         message: body,
+                        code: None,
                     });
                 }
             }
             _ => return Ok(http_resp),
         }
+
+        // Drop the just-rejected token so the post-lock cache re-check in
+        // refresh_token() can't return it as "still valid" (#3625).
+        self.token_cache.invalidate_if_matches(token.token.as_str());
 
         let refreshed = self.refresh_token().await?;
         let http_resp = self
@@ -351,7 +371,7 @@ impl ChatGptDriver {
         let mut instructions: Option<String> = request.system.clone();
         let mut input_items = Vec::new();
 
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             let role_str = match msg.role {
                 Role::System => {
                     // Merge system messages into instructions
@@ -414,10 +434,19 @@ impl ChatGptDriver {
         // tool_accum: (call_id, name, arguments, arguments_done_emitted) indexed by output_index
         let mut tool_accum: Vec<(String, String, String, bool)> = Vec::new();
         let mut completed_response: Option<serde_json::Value> = None;
+        // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+        let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
+        // Set when a `tx.send(...)` fails — abort upstream stream on next
+        // iteration instead of fetching the rest for nobody (#3769).
+        let mut receiver_dropped = false;
 
         while let Some(chunk) = byte_stream.next().await {
+            if receiver_dropped {
+                tracing::debug!("streaming receiver dropped; cancelling ChatGPT LLM stream");
+                break;
+            }
             let bytes = chunk.map_err(|e| LlmError::Http(format!("SSE stream error: {e}")))?;
-            line_buf.push_str(&String::from_utf8_lossy(&bytes));
+            line_buf.push_str(&utf8.decode(&bytes));
 
             while let Some(newline_pos) = line_buf.find('\n') {
                 let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
@@ -451,11 +480,15 @@ impl ChatGptDriver {
                         if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
                             full_text.push_str(delta);
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::TextDelta {
                                         text: delta.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -465,11 +498,15 @@ impl ChatGptDriver {
                         if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
                             thinking_text.push_str(delta);
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ThinkingDelta {
                                         text: delta.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -479,11 +516,15 @@ impl ChatGptDriver {
                         if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
                             thinking_text.push_str(delta);
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ThinkingDelta {
                                         text: delta.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -524,9 +565,13 @@ impl ChatGptDriver {
                                     (call_id.clone(), name.clone(), String::new(), false);
 
                                 if let Some(tx) = tx {
-                                    let _ = tx
+                                    if tx
                                         .send(StreamEvent::ToolUseStart { id: call_id, name })
-                                        .await;
+                                        .await
+                                        .is_err()
+                                    {
+                                        receiver_dropped = true;
+                                    }
                                 }
                             }
                         }
@@ -543,11 +588,15 @@ impl ChatGptDriver {
                                 tool_accum[output_index].2.push_str(delta);
                             }
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ToolInputDelta {
                                         text: delta.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -568,13 +617,17 @@ impl ChatGptDriver {
                                 }
                             };
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ToolUseEnd {
                                         id: id.clone(),
                                         name: name.clone(),
                                         input: input.clone(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -603,13 +656,17 @@ impl ChatGptDriver {
                                             }
                                         };
                                         if let Some(tx) = tx {
-                                            let _ = tx
+                                            if tx
                                                 .send(StreamEvent::ToolUseEnd {
                                                     id: id.clone(),
                                                     name: name.clone(),
                                                     input,
                                                 })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                            {
+                                                receiver_dropped = true;
+                                            }
                                         }
                                     }
                                 }
@@ -634,15 +691,22 @@ impl ChatGptDriver {
                                     ..Default::default()
                                 };
                             }
-                            // Extract stop reason from status
-                            match resp_obj
+                            // Extract stop reason from status. Responses API
+                            // surfaces refusals via incomplete_details.reason
+                            // — treat as ContentFiltered (#3450).
+                            let status = resp_obj
                                 .get("status")
                                 .and_then(|s| s.as_str())
-                                .unwrap_or("completed")
-                            {
-                                "incomplete" => stop_reason = StopReason::MaxTokens,
-                                _ => stop_reason = StopReason::EndTurn,
-                            }
+                                .unwrap_or("completed");
+                            let incomplete_reason = resp_obj
+                                .get("incomplete_details")
+                                .and_then(|d| d.get("reason"))
+                                .and_then(|r| r.as_str());
+                            stop_reason = match (status, incomplete_reason) {
+                                (_, Some("content_filter")) => StopReason::ContentFiltered,
+                                ("incomplete", _) => StopReason::MaxTokens,
+                                _ => StopReason::EndTurn,
+                            };
                             completed_response = Some(resp_obj.clone());
                         }
                     }
@@ -656,6 +720,7 @@ impl ChatGptDriver {
                         return Err(LlmError::Api {
                             status: 500,
                             message: msg.to_string(),
+                            code: None,
                         });
                     }
 
@@ -666,6 +731,11 @@ impl ChatGptDriver {
                 }
             }
         }
+
+        // Drain any partial codepoint left in the decoder. No-op in
+        // a well-formed stream; on a truncated connection the residue
+        // surfaces as U+FFFD instead of vanishing (#3448).
+        line_buf.push_str(&utf8.finish());
 
         // Build content blocks
         let mut content_blocks = Vec::new();
@@ -888,6 +958,11 @@ fn should_refresh_after_forbidden(body: &str) -> bool {
 
 #[async_trait::async_trait]
 impl crate::llm_driver::LlmDriver for ChatGptDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "chatgpt", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let api_request = Self::build_responses_request(&request);
 
@@ -917,6 +992,7 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: body,
+                code: None,
             });
         }
 
@@ -925,6 +1001,11 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
         Self::stream_sse(http_resp, None).await
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "chatgpt", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,
@@ -944,6 +1025,7 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: body,
+                code: None,
             });
         }
 
@@ -986,6 +1068,23 @@ mod tests {
         let cached = cache.get();
         assert!(cached.is_some());
         assert_eq!(*cached.unwrap().token, "test-session-token");
+    }
+
+    #[test]
+    fn test_invalidate_if_matches_drops_only_matching_token() {
+        let cache = ChatGptTokenCache::new();
+        cache.set(CachedSessionToken {
+            token: Zeroizing::new("rejected".to_string()),
+            expires_at: Instant::now() + Duration::from_secs(86400),
+        });
+
+        // Different token in cache → no-op (e.g. another waiter already refreshed).
+        cache.invalidate_if_matches("some-other-token");
+        assert!(cache.get().is_some());
+
+        // Matching token → cache cleared so the next refresh actually runs.
+        cache.invalidate_if_matches("rejected");
+        assert!(cache.get().is_none());
     }
 
     #[test]
@@ -1068,13 +1167,13 @@ mod tests {
     fn test_build_responses_request_basic() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hello".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: Vec::new(),
+            }]),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 1024,
             temperature: 0.7,
             system: Some("You are helpful.".to_string()),
@@ -1098,7 +1197,7 @@ mod tests {
     fn test_build_responses_request_system_merged() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message {
                     role: Role::System,
                     content: MessageContent::Text("System prompt.".to_string()),
@@ -1111,8 +1210,8 @@ mod tests {
                     pinned: false,
                     timestamp: None,
                 },
-            ],
-            tools: Vec::new(),
+            ]),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 0,
             temperature: 1.0,
             system: None,
@@ -1135,13 +1234,13 @@ mod tests {
     fn test_build_responses_request_appends_json_response_format() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: Vec::new(),
+            }]),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 0,
             temperature: 1.0,
             system: Some("System prompt.".to_string()),
@@ -1163,13 +1262,13 @@ mod tests {
     fn test_build_responses_request_appends_json_schema_response_format() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: Vec::new(),
+            }]),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 0,
             temperature: 1.0,
             system: None,

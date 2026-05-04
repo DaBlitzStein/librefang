@@ -23,11 +23,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::middleware::UserRole;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
 use librefang_types::config::UserConfig;
 use librefang_types::user_policy::{
@@ -971,7 +971,7 @@ where
     let mut parsed: librefang_types::config::KernelConfig = toml::from_str(&new_toml)
         .map_err(|e| PersistError::Internal(format!("invalid config after edit: {e}")))?;
     parsed.clamp_bounds();
-    if let Err(errors) = librefang_kernel::config_reload::validate_config_for_reload(&parsed) {
+    if let Err(errors) = state.kernel.validate_config_for_reload(&parsed) {
         return Err(PersistError::BadRequest(format!(
             "invalid config: {}",
             errors.join("; ")
@@ -1224,7 +1224,7 @@ fn decode_field<T: serde::de::DeserializeOwned>(
     tag = "users",
     params(("name" = String, Path, description = "User name (case-sensitive)")),
     responses(
-        (status = 200, description = "Per-user policy slice", body = serde_json::Value),
+        (status = 200, description = "Per-user policy slice", body = crate::types::JsonObject),
         (status = 404, description = "Not found"),
     )
 )]
@@ -1270,9 +1270,9 @@ pub async fn get_user_policy(
     path = "/api/users/{name}/policy",
     tag = "users",
     params(("name" = String, Path, description = "User name (case-sensitive)")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Updated user policy slice", body = serde_json::Value),
+        (status = 200, description = "Updated user policy slice", body = crate::types::JsonObject),
         (status = 400, description = "Validation error"),
         (status = 404, description = "Not found"),
     )

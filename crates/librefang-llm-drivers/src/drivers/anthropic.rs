@@ -49,8 +49,14 @@ impl AnthropicDriver {
     ) -> Self {
         let client = match proxy_url {
             Some(url) => librefang_http::proxied_client_with_override(url).unwrap_or_else(|e| {
-                tracing::warn!(url, error = %e, "Invalid per-provider proxy URL, using global proxy");
-                librefang_http::proxied_client()
+                // Use the bounded fallback so a global client without a per-request
+                // total timeout cannot leave a request hanging indefinitely (#3756).
+                tracing::warn!(
+                    url,
+                    error = %e,
+                    "Invalid per-provider proxy URL; falling back to global proxy with bounded timeout"
+                );
+                librefang_http::proxied_client_fallback()
             }),
             None => librefang_http::proxied_client(),
         };
@@ -203,6 +209,45 @@ struct ApiErrorResponse {
 #[derive(Debug, Deserialize)]
 struct ApiErrorDetail {
     message: String,
+    /// Anthropic error `type` discriminator: `"rate_limit_error"`,
+    /// `"authentication_error"`, `"permission_error"`, `"not_found_error"`,
+    /// `"invalid_request_error"`, `"overloaded_error"`, `"api_error"`,
+    /// `"billing_error"` (#3745). Used to populate `LlmError::Api.code`.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+}
+
+/// Map Anthropic's `error.type` string to a typed [`ProviderErrorCode`] so
+/// `failover_reason()` can classify without substring-matching the human
+/// `message` (#3745). Returns `None` for unknown types — callers fall back
+/// to status-code-only classification.
+fn anthropic_error_code(
+    kind: Option<&str>,
+    status: u16,
+) -> Option<crate::llm_driver::llm_errors::ProviderErrorCode> {
+    use crate::llm_driver::llm_errors::ProviderErrorCode;
+    match kind {
+        Some("rate_limit_error") => Some(ProviderErrorCode::RateLimit),
+        Some("overloaded_error") => Some(ProviderErrorCode::ServerUnavailable),
+        Some("authentication_error") | Some("permission_error") => {
+            Some(ProviderErrorCode::AuthError)
+        }
+        Some("billing_error") => Some(ProviderErrorCode::CreditExhausted),
+        Some("not_found_error") => Some(ProviderErrorCode::ModelNotFound),
+        Some("invalid_request_error") => {
+            // Anthropic returns this for context-window overflows; the
+            // status is 400 in that case. Without a richer signal we fall
+            // back on status to disambiguate; only flag context overflow
+            // explicitly when status == 413.
+            if status == 413 {
+                Some(ProviderErrorCode::ContextLengthExceeded)
+            } else {
+                Some(ProviderErrorCode::BadRequest)
+            }
+        }
+        Some("api_error") => Some(ProviderErrorCode::ServerError),
+        _ => None,
+    }
 }
 
 /// Accumulator for content blocks during streaming.
@@ -346,6 +391,11 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
 
 #[async_trait]
 impl LlmDriver for AnthropicDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "anthropic", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let api_request = build_anthropic_request(&request);
 
@@ -398,12 +448,7 @@ impl LlmDriver for AnthropicDriver {
                         "Anthropic HTTP 429",
                     )
                 } else {
-                    resp.headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(std::time::Duration::from_secs)
-                        .unwrap_or(std::time::Duration::ZERO)
+                    crate::retry_after::parse_retry_after(resp.headers(), 0)
                 };
                 if attempt < max_retries {
                     let delay = standard_retry_delay(attempt + 1, retry_after);
@@ -415,27 +460,41 @@ impl LlmDriver for AnthropicDriver {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                // Honor the server-supplied Retry-After when surfacing
+                // the final error after retries are exhausted; fall
+                // back to 5 s when the header was absent, invalid, or
+                // pointed at a moment already in the past (which the
+                // parser collapses to ZERO).
+                let retry_after_ms =
+                    crate::retry_after::duration_to_ms_or_fallback(retry_after, 5000);
                 return Err(if status == 429 {
                     LlmError::RateLimited {
-                        retry_after_ms: 5000,
+                        retry_after_ms,
                         message: None,
                     }
                 } else {
-                    LlmError::Overloaded {
-                        retry_after_ms: 5000,
-                    }
+                    LlmError::Overloaded { retry_after_ms }
                 });
             }
 
             if !resp.status().is_success() {
+                // #3723: never silently swallow the body. If reading the
+                // payload fails, surface the IO error in the message so
+                // callers get something better than a blank string.
                 let body = resp.text().await.unwrap_or_else(|e| {
                     tracing::warn!("failed to read Anthropic error body: {e}");
-                    String::new()
+                    format!("<failed to read body: {e}>")
                 });
-                let message = serde_json::from_str::<ApiErrorResponse>(&body)
-                    .map(|e| e.error.message)
-                    .unwrap_or(body);
-                return Err(LlmError::Api { status, message });
+                let parsed = serde_json::from_str::<ApiErrorResponse>(&body).ok();
+                let code = parsed
+                    .as_ref()
+                    .and_then(|p| anthropic_error_code(p.error.kind.as_deref(), status));
+                let message = parsed.map(|p| p.error.message).unwrap_or(body);
+                return Err(LlmError::Api {
+                    status,
+                    message,
+                    code,
+                });
             }
 
             // Extract and log rate limit headers before consuming the response body.
@@ -468,9 +527,15 @@ impl LlmDriver for AnthropicDriver {
         Err(LlmError::Api {
             status: 0,
             message: "Max retries exceeded".to_string(),
+            code: None,
         })
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "anthropic", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,
@@ -530,12 +595,7 @@ impl LlmDriver for AnthropicDriver {
                         "Anthropic HTTP 429 (stream)",
                     )
                 } else {
-                    resp.headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(std::time::Duration::from_secs)
-                        .unwrap_or(std::time::Duration::ZERO)
+                    crate::retry_after::parse_retry_after(resp.headers(), 0)
                 };
                 if attempt < max_retries {
                     let delay = standard_retry_delay(attempt + 1, retry_after);
@@ -547,27 +607,41 @@ impl LlmDriver for AnthropicDriver {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                // Honor the server-supplied Retry-After when surfacing
+                // the final error after retries are exhausted; fall
+                // back to 5 s when the header was absent, invalid, or
+                // pointed at a moment already in the past (which the
+                // parser collapses to ZERO).
+                let retry_after_ms =
+                    crate::retry_after::duration_to_ms_or_fallback(retry_after, 5000);
                 return Err(if status == 429 {
                     LlmError::RateLimited {
-                        retry_after_ms: 5000,
+                        retry_after_ms,
                         message: None,
                     }
                 } else {
-                    LlmError::Overloaded {
-                        retry_after_ms: 5000,
-                    }
+                    LlmError::Overloaded { retry_after_ms }
                 });
             }
 
             if !resp.status().is_success() {
+                // #3723: never silently swallow the body. If reading the
+                // payload fails, surface the IO error in the message so
+                // callers get something better than a blank string.
                 let body = resp.text().await.unwrap_or_else(|e| {
                     tracing::warn!("failed to read Anthropic error body: {e}");
-                    String::new()
+                    format!("<failed to read body: {e}>")
                 });
-                let message = serde_json::from_str::<ApiErrorResponse>(&body)
-                    .map(|e| e.error.message)
-                    .unwrap_or(body);
-                return Err(LlmError::Api { status, message });
+                let parsed = serde_json::from_str::<ApiErrorResponse>(&body).ok();
+                let code = parsed
+                    .as_ref()
+                    .and_then(|p| anthropic_error_code(p.error.kind.as_deref(), status));
+                let message = parsed.map(|p| p.error.message).unwrap_or(body);
+                return Err(LlmError::Api {
+                    status,
+                    message,
+                    code,
+                });
             }
 
             // Extract and log rate limit headers before consuming the stream.
@@ -592,11 +666,22 @@ impl LlmDriver for AnthropicDriver {
             let mut blocks: Vec<ContentBlockAccum> = Vec::new();
             let mut stop_reason = StopReason::EndTurn;
             let mut usage = TokenUsage::default();
+            // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+            let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
+            // Set when a `tx.send(...)` fails — the consumer dropped the
+            // receiver, so we abort the upstream stream on the next loop
+            // iteration instead of fetching the rest of the SSE for nobody
+            // (#3769).
+            let mut receiver_dropped = false;
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
+                if receiver_dropped {
+                    tracing::debug!("streaming receiver dropped; cancelling Anthropic LLM stream");
+                    break;
+                }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push_str(&utf8.decode(&chunk));
 
                 while let Some(pos) = buffer.find("\n\n") {
                     let event_text = buffer[..pos].to_string();
@@ -643,12 +728,14 @@ impl LlmDriver for AnthropicDriver {
                                 "tool_use" => {
                                     let id = block["id"].as_str().unwrap_or("").to_string();
                                     let name = block["name"].as_str().unwrap_or("").to_string();
-                                    let _ = tx
-                                        .send(StreamEvent::ToolUseStart {
+                                    crate::send_or_mark_dropped!(
+                                        receiver_dropped,
+                                        tx,
+                                        StreamEvent::ToolUseStart {
                                             id: id.clone(),
                                             name: name.clone(),
-                                        })
-                                        .await;
+                                        }
+                                    );
                                     blocks.push(ContentBlockAccum::ToolUse {
                                         id,
                                         name,
@@ -672,11 +759,13 @@ impl LlmDriver for AnthropicDriver {
                                         {
                                             t.push_str(text);
                                         }
-                                        let _ = tx
-                                            .send(StreamEvent::TextDelta {
+                                        crate::send_or_mark_dropped!(
+                                            receiver_dropped,
+                                            tx,
+                                            StreamEvent::TextDelta {
                                                 text: text.to_string(),
-                                            })
-                                            .await;
+                                            }
+                                        );
                                     }
                                 }
                                 "input_json_delta" => {
@@ -688,11 +777,13 @@ impl LlmDriver for AnthropicDriver {
                                         {
                                             input_json.push_str(partial);
                                         }
-                                        let _ = tx
-                                            .send(StreamEvent::ToolInputDelta {
+                                        crate::send_or_mark_dropped!(
+                                            receiver_dropped,
+                                            tx,
+                                            StreamEvent::ToolInputDelta {
                                                 text: partial.to_string(),
-                                            })
-                                            .await;
+                                            }
+                                        );
                                     }
                                 }
                                 "thinking_delta" => {
@@ -702,11 +793,13 @@ impl LlmDriver for AnthropicDriver {
                                         {
                                             t.push_str(thinking);
                                         }
-                                        let _ = tx
-                                            .send(StreamEvent::ThinkingDelta {
+                                        crate::send_or_mark_dropped!(
+                                            receiver_dropped,
+                                            tx,
+                                            StreamEvent::ThinkingDelta {
                                                 text: thinking.to_string(),
-                                            })
-                                            .await;
+                                            }
+                                        );
                                     }
                                 }
                                 _ => {}
@@ -734,13 +827,15 @@ impl LlmDriver for AnthropicDriver {
                                         super::openai::malformed_tool_input(&e, input_json.len())
                                     }
                                 };
-                                let _ = tx
-                                    .send(StreamEvent::ToolUseEnd {
+                                crate::send_or_mark_dropped!(
+                                    receiver_dropped,
+                                    tx,
+                                    StreamEvent::ToolUseEnd {
                                         id: id.clone(),
                                         name: name.clone(),
                                         input,
-                                    })
-                                    .await;
+                                    }
+                                );
                             }
                         }
                         "message_delta" => {
@@ -750,6 +845,8 @@ impl LlmDriver for AnthropicDriver {
                                     "tool_use" => StopReason::ToolUse,
                                     "max_tokens" => StopReason::MaxTokens,
                                     "stop_sequence" => StopReason::StopSequence,
+                                    // Anthropic refusals (#3450).
+                                    "refusal" => StopReason::ContentFiltered,
                                     _ => StopReason::EndTurn,
                                 };
                             }
@@ -761,6 +858,11 @@ impl LlmDriver for AnthropicDriver {
                     }
                 }
             }
+
+            // End-of-stream: drain any partial codepoint the decoder is
+            // still buffering so a CJK character truncated by the final
+            // chunk surfaces as U+FFFD instead of vanishing (#3448).
+            buffer.push_str(&utf8.finish());
 
             // Build CompletionResponse from accumulated blocks
             let mut content = Vec::new();
@@ -808,6 +910,8 @@ impl LlmDriver for AnthropicDriver {
                 }
             }
 
+            // Best-effort final send — byte loop is done, nothing to abort
+            // even if the receiver has dropped (#3769).
             let _ = tx
                 .send(StreamEvent::ContentComplete { stop_reason, usage })
                 .await;
@@ -823,6 +927,7 @@ impl LlmDriver for AnthropicDriver {
         Err(LlmError::Api {
             status: 0,
             message: "Max retries exceeded".to_string(),
+            code: None,
         })
     }
 
@@ -1151,6 +1256,8 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
         "stop_sequence" => StopReason::StopSequence,
+        // Anthropic refusals (#3450).
+        "refusal" => StopReason::ContentFiltered,
         _ => StopReason::EndTurn,
     };
 
@@ -1367,8 +1474,8 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
-            tools: vec![tool_a, tool_b],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
+            tools: std::sync::Arc::new(vec![tool_a, tool_b]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1405,8 +1512,8 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
-            tools: vec![tool],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
+            tools: std::sync::Arc::new(vec![tool]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1445,14 +1552,14 @@ mod tests {
     fn multi_turn_rolling_window_stamps_last_three() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2"),
                 Message::assistant("a2"),
                 Message::user("u3 (last)"),
-            ],
-            tools: vec![],
+            ]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1494,15 +1601,15 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2"),
                 Message::assistant("a2"),
                 Message::user("u3"),
                 Message::assistant("a3 (last)"),
-            ],
-            tools: vec![tool.clone(), tool],
+            ]),
+            tools: std::sync::Arc::new(vec![tool.clone(), tool]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1548,8 +1655,8 @@ mod tests {
         }]);
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![tool_result_msg],
-            tools: vec![],
+            messages: std::sync::Arc::new(vec![tool_result_msg]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1584,8 +1691,8 @@ mod tests {
     fn system_block_always_stamped_when_caching_on() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")], // dummy: api requires >=1 user msg
-            tools: vec![],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]), // dummy: api requires >=1 user msg
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys-prompt".to_string()),
@@ -1620,12 +1727,12 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2 (last)"),
-            ],
-            tools: vec![tool],
+            ]),
+            tools: std::sync::Arc::new(vec![tool]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1666,8 +1773,8 @@ mod tests {
     fn ttl_default_omits_ttl_field_and_skips_beta_header() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
-            tools: vec![],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1698,8 +1805,8 @@ mod tests {
     fn test_messages_cache_control_absent_when_caching_off() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
-            tools: vec![],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1804,14 +1911,14 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2"),
                 Message::assistant("a2"),
                 Message::user("u3 (last)"),
-            ],
-            tools: vec![tool],
+            ]),
+            tools: std::sync::Arc::new(vec![tool]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1895,8 +2002,8 @@ mod tests {
     fn test_tools_cache_control_empty_tools_list() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
-            tools: vec![],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),

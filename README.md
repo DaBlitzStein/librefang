@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> | <a href="i18n/README.zh.md">中文</a> | <a href="i18n/README.ja.md">日本語</a> | <a href="i18n/README.ko.md">한국어</a> | <a href="i18n/README.es.md">Español</a> | <a href="i18n/README.de.md">Deutsch</a> | <a href="i18n/README.pl.md">Polski</a>
+  <a href="README.md">English</a> | <a href="i18n/README.zh.md">中文</a> | <a href="i18n/README.ja.md">日本語</a> | <a href="i18n/README.ko.md">한국어</a> | <a href="i18n/README.es.md">Español</a> | <a href="i18n/README.de.md">Deutsch</a> | <a href="i18n/README.pl.md">Polski</a> | <a href="i18n/README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -111,9 +111,9 @@ Build your own: define a `HAND.toml` + system prompt + `SKILL.md`. [Guide](https
 
 ```
 librefang-kernel            Orchestration, workflows, metering, RBAC, scheduler, budget
-librefang-runtime           Agent loop, 3 LLM drivers, 53 tools, WASM sandbox, MCP, A2A
+librefang-runtime           Agent loop, tool execution, WASM sandbox, MCP, A2A
 librefang-api               140+ REST/WS/SSE endpoints, OpenAI-compatible API, dashboard
-librefang-channels          40 messaging adapters with rate limiting, DM/group policies
+librefang-channels          45 messaging adapters with rate limiting, DM/group policies
 librefang-memory            SQLite persistence, vector embeddings, sessions, compaction
 librefang-types             Core types, taint tracking, Ed25519 signing, model catalog
 librefang-skills            60 bundled skills, SKILL.md parser, FangHub marketplace
@@ -205,6 +205,22 @@ cargo test --workspace                                   # 2,100+ tests
 cargo clippy --workspace --all-targets -- -D warnings    # Zero warnings
 cargo fmt --all -- --check                               # Format check
 ```
+
+### Committing changes
+
+Use `scripts/commit.sh` instead of `git commit` directly so staged Rust
+files are rustfmt-clean before the pre-commit hook gates them:
+
+```bash
+scripts/commit.sh -m "feat: add foo"
+scripts/commit.sh -F .git/COMMIT_EDITMSG
+```
+
+The wrapper runs `cargo fmt` on staged `*.rs` files, re-stages them, and
+holds a soft lock against parallel commits in the same worktree. All flags
+are forwarded to `git commit` unchanged. If `cargo` is unavailable the
+script skips formatting and warns; the pre-commit hook still gates the
+commit.
 
 ## Comparison
 

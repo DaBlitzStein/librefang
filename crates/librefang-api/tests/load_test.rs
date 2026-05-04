@@ -7,13 +7,57 @@
 
 use axum::Router;
 use librefang_api::middleware;
-use librefang_api::routes::{self, AppState};
-use librefang_kernel::LibreFangKernel;
-use librefang_types::config::{DefaultModelConfig, KernelConfig};
-use std::sync::Arc;
+use librefang_api::routes;
+use librefang_testing::TestAppState;
+use std::future::Future;
 use std::time::{Duration, Instant};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+
+// ---------------------------------------------------------------------------
+// Race-hardening helpers (#3817)
+// ---------------------------------------------------------------------------
+//
+// `load_concurrent_agent_spawns` and `load_spawn_kill_cycle` exercise the
+// kernel's concurrent agent lifecycle through the HTTP layer. The underlying
+// register/remove publish-order race in `AgentRegistry` was fixed in #4393
+// (kernel publishes into `agents` before `name_index` on register, and
+// unbinds `name_index` before retracting `agents` on remove), so an
+// immediate `GET /api/agents` after a successful POST/DELETE *should* see
+// the new state.
+//
+// In practice the read-after-write still goes through tokio's task
+// scheduler, the axum service stack, and an extra tcp round-trip. A bare
+// "fire requests then read once" assertion can race that pipeline on slow
+// or loaded CI runners. To make these tests robust we poll the assertion
+// target on a short interval until it converges or a generous timeout
+// fires — *not* `tokio::time::pause()`, because the kernel runs real I/O
+// (SQLite, tokio tasks) that a paused clock would deadlock.
+const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(40);
+
+/// Polls `f` every [`POLL_INTERVAL`] until it returns `Some(value)` or
+/// [`CONVERGENCE_TIMEOUT`] elapses, then returns the value (or panics with
+/// `label` for diagnostics).
+async fn poll_until<T, F, Fut>(label: &str, mut f: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        if let Some(v) = f().await {
+            return v;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "poll_until({label}) did not converge within {:?}",
+                CONVERGENCE_TIMEOUT
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Test infrastructure (mirrors api_integration_test.rs)
@@ -21,7 +65,7 @@ use tower_http::trace::TraceLayer;
 
 struct TestServer {
     base_url: String,
-    state: Arc<AppState>,
+    state: std::sync::Arc<librefang_api::routes::AppState>,
     _tmp: tempfile::TempDir,
 }
 
@@ -32,54 +76,9 @@ impl Drop for TestServer {
 }
 
 async fn start_test_server() -> TestServer {
-    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
-
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test-model".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-
-    let state = Arc::new(AppState {
-        kernel,
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
+    let test = TestAppState::new();
+    test.state.kernel.set_self_handle();
+    let state = test.state.clone();
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
@@ -140,10 +139,12 @@ async fn start_test_server() -> TestServer {
         axum::serve(listener, app).await.unwrap();
     });
 
+    let (_state, _tmp, _) = test.into_parts();
+
     TestServer {
         base_url: format!("http://{}", addr),
         state,
-        _tmp: tmp,
+        _tmp,
     }
 }
 
@@ -171,9 +172,6 @@ memory_write = ["self.*"]
 
 /// Test: Concurrent agent spawns — verify kernel handles parallel agent creation.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Flaky: concurrent spawn race in AgentRegistry — registry lock contention causes \
-            intermittent 409/500 under load. Root cause: #3817 (concurrent agent lifecycle \
-            races). Un-ignore after registry spawn serialization is fixed."]
 async fn load_concurrent_agent_spawns() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -213,16 +211,31 @@ async fn load_concurrent_agent_spawns() {
     );
     assert!(success >= n - 2, "Most agents should spawn successfully");
 
-    // Verify via list (paginated response: { items: [...], total, offset, limit })
-    let resp: serde_json::Value = client
-        .get(format!("{}/api/agents", server.base_url))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let count = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
+    // Verify via list (paginated response: { items: [...], total, offset, limit }).
+    //
+    // Even though the kernel `register` path publishes into `agents` before
+    // binding the name in `name_index` (see #4393), the read-after-write
+    // here still crosses the HTTP boundary. Poll until the listing
+    // converges to at least `success` entries rather than asserting on a
+    // single snapshot — that snapshot races task scheduling on loaded CI
+    // runners. See the helper comment block above.
+    let count = poll_until("agents-list-after-spawn", || async {
+        let resp: serde_json::Value = client
+            .get(format!("{}/api/agents", server.base_url))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let c = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
+        if c >= success {
+            Some(c)
+        } else {
+            None
+        }
+    })
+    .await;
     eprintln!("  [LOAD] Total agents after spawn: {count}");
     assert!(count >= success);
 }
@@ -527,10 +540,7 @@ async fn load_workflow_operations() {
         .json()
         .await
         .unwrap();
-    let wf_count = workflows["workflows"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
+    let wf_count = workflows["items"].as_array().map(|a| a.len()).unwrap_or(0);
     eprintln!(
         "  [LOAD] Listed {wf_count} workflows in {:.1}ms",
         start.elapsed().as_secs_f64() * 1000.0
@@ -540,10 +550,6 @@ async fn load_workflow_operations() {
 
 /// Test: Agent spawn + kill cycle — stress the registry.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Flaky: spawn/kill race in AgentRegistry — kill sometimes races with post-spawn \
-            initialization leaving dangling registry entries that fail the final count assert. \
-            Root cause: #3817 (concurrent agent lifecycle races). Un-ignore after kill-during-init \
-            guard is implemented."]
 async fn load_spawn_kill_cycle() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -585,16 +591,30 @@ async fn load_spawn_kill_cycle() {
         elapsed.as_millis() as f64 / cycles as f64
     );
 
-    // Verify all cleaned up (paginated response: { items: [...], total, offset, limit })
-    let resp: serde_json::Value = client
-        .get(format!("{}/api/agents", server.base_url))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let remaining = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
+    // Verify all cleaned up (paginated response: { items: [...], total, offset, limit }).
+    //
+    // The kernel `remove` path now unbinds `name_index` before retracting
+    // from `agents` (see #4393), so the post-DELETE registry should be
+    // monotonically consistent. Still, poll the HTTP listing until it
+    // settles at exactly the default assistant — a single snapshot
+    // assertion races scheduler/HTTP queueing on busy CI runners.
+    let remaining = poll_until("agents-list-after-kill", || async {
+        let resp: serde_json::Value = client
+            .get(format!("{}/api/agents", server.base_url))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let r = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
+        if r == 1 {
+            Some(r)
+        } else {
+            None
+        }
+    })
+    .await;
     assert_eq!(remaining, 1, "Only default assistant should remain");
 }
 

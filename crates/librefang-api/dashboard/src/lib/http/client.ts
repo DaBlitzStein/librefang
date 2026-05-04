@@ -20,6 +20,8 @@ export {
   // agents
   listAgents,
   getAgentDetail,
+  getAgentStats,
+  listAgentEvents,
   listAgentSessions,
   listAgentTemplates,
   listPromptVersions,
@@ -76,6 +78,7 @@ export {
   // network / peers / a2a
   getNetworkStatus,
   listPeers,
+  listTrustedPeers,
   listA2AAgents,
   getA2ATaskStatus,
   // plugins
@@ -88,6 +91,7 @@ export {
   // sessions
   listSessions,
   getSessionDetails,
+  loadAgentSession,
   // skills (local + hubs)
   listSkills,
   getSkillDetail,
@@ -186,6 +190,10 @@ export {
   postCommsTask,
   // attachments
   uploadAgentFile,
+  // chat — imperative (HTTP) send, fallback when WS unavailable
+  sendAgentMessage,
+  // registry — generic content creation (provider, hand, etc.)
+  createRegistryContent,
   // media
   generateImage,
   synthesizeSpeech,

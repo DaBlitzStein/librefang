@@ -2,6 +2,7 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   getNetworkStatus,
   listPeers,
+  listTrustedPeers,
   listA2AAgents,
 } from "../http/client";
 import { networkKeys, peerKeys, a2aKeys } from "./keys";
@@ -17,6 +18,7 @@ export const networkQueries = {
       queryFn: getNetworkStatus,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   peers: () =>
     queryOptions({
@@ -24,6 +26,15 @@ export const networkQueries = {
       queryFn: listPeers,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
+    }),
+  trustedPeers: () =>
+    queryOptions({
+      queryKey: networkKeys.trustedPeers(),
+      queryFn: listTrustedPeers,
+      staleTime: STALE_MS,
+      refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   a2aAgents: () =>
     queryOptions({
@@ -31,6 +42,7 @@ export const networkQueries = {
       queryFn: listA2AAgents,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 
@@ -40,6 +52,10 @@ export function useNetworkStatus(options: QueryOverrides = {}) {
 
 export function usePeers(options: QueryOverrides = {}) {
   return useQuery(withOverrides(networkQueries.peers(), options));
+}
+
+export function useTrustedPeers(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(networkQueries.trustedPeers(), options));
 }
 
 export function useA2AAgents(options: QueryOverrides = {}) {

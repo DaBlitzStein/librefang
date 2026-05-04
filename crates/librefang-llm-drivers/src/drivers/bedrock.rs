@@ -643,6 +643,13 @@ fn convert_response(resp: ConverseResponse) -> Result<CompletionResponse, LlmErr
         "end_turn" => StopReason::EndTurn,
         "max_tokens" => StopReason::MaxTokens,
         "tool_use" => StopReason::ToolUse,
+        // Bedrock Converse: guardrail-triggered refusals (#3450).
+        // `guardrail_intervened` is the documented value; `content_filtered`
+        // is included for forward-compat with future Bedrock surfaces or
+        // adapters that mirror the OpenAI/Azure naming. Either way, route
+        // to ContentFiltered so the agent loop stops instead of treating
+        // the empty turn as a successful EndTurn.
+        "guardrail_intervened" | "content_filtered" => StopReason::ContentFiltered,
         _ if !tool_calls.is_empty() => StopReason::ToolUse,
         _ => StopReason::EndTurn,
     };
@@ -697,6 +704,11 @@ fn classify_response_status(status: u16) -> StatusAction {
 
 #[async_trait]
 impl LlmDriver for BedrockDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "bedrock", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let (messages, system) = convert_messages(&request.messages, &request.system);
 
@@ -735,26 +747,32 @@ impl LlmDriver for BedrockDriver {
             match classify_response_status(status) {
                 StatusAction::Success => {}
                 StatusAction::Retry => {
+                    // Honor any server-supplied Retry-After header; fall
+                    // back to a 5 s default when missing/invalid.
+                    let retry_after_ms =
+                        crate::retry_after::parse_retry_after_ms(resp.headers(), 5000);
                     if attempt < max_retries {
                         let retry_ms = (attempt + 1) as u64 * 2000;
+                        // Wait at least the server's Retry-After, but
+                        // never less than the in-loop exponential
+                        // schedule.
+                        let wait_ms = retry_ms.max(retry_after_ms);
                         tracing::warn!(
                             status,
-                            retry_ms,
+                            wait_ms,
                             attempt,
                             "Bedrock transient failure, retrying"
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                         continue;
                     }
                     return Err(if status == 429 {
                         LlmError::RateLimited {
-                            retry_after_ms: 5000,
+                            retry_after_ms,
                             message: None,
                         }
                     } else {
-                        LlmError::Overloaded {
-                            retry_after_ms: 5000,
-                        }
+                        LlmError::Overloaded { retry_after_ms }
                     });
                 }
                 StatusAction::Auth => {
@@ -766,7 +784,11 @@ impl LlmDriver for BedrockDriver {
                     let message = serde_json::from_str::<BedrockErrorResponse>(&body_text)
                         .map(|e| e.message)
                         .unwrap_or(body_text);
-                    return Err(LlmError::Api { status, message });
+                    return Err(LlmError::Api {
+                        status,
+                        message,
+                        code: None,
+                    });
                 }
             }
 
@@ -788,6 +810,7 @@ impl LlmDriver for BedrockDriver {
         Err(LlmError::Api {
             status: 0,
             message: "Max retries exceeded".to_string(),
+            code: None,
         })
     }
     // stream() uses the default wrapper from LlmDriver trait — no override needed

@@ -142,9 +142,7 @@ impl CronScheduler {
                 LibreFangError::Internal(format!("Failed to create cron jobs dir: {e}"))
             })?;
         }
-        let tmp_path = self
-            .persist_path
-            .with_extension(format!("json.tmp.{}", std::process::id()));
+        let tmp_path = crate::persist_tmp_path(&self.persist_path);
         {
             use std::io::Write as _;
             let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
@@ -897,6 +895,35 @@ mod tests {
         let (_, sid_a) = cron_fire_session_override(agent, Some(SessionMode::New), job_id, t);
         let (_, sid_b) = cron_fire_session_override(agent, Some(SessionMode::New), job_id, t);
         assert_eq!(sid_a, sid_b);
+    }
+
+    /// Regression for #3657: pin the exact session id a `New`-mode cron fire
+    /// receives. The CLAUDE.md cron + session_mode note documents the
+    /// derivation as `SessionId::for_cron_run(agent, "<job_id>:<rfc3339_fire>")`
+    /// — if anyone changes the run_key shape (timestamp precision, separator,
+    /// ordering) without updating the doc, this test fails loudly. It also
+    /// guarantees the function actually routes through `for_cron_run` rather
+    /// than re-deriving via `for_channel("cron")`, which was the bug the
+    /// dispatcher change in #3597 fixed.
+    #[test]
+    fn fire_session_override_new_matches_for_cron_run_contract_3657() {
+        let agent = AgentId::new();
+        let job_id = CronJobId::new();
+        let fire_time = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let (mode, sid) =
+            cron_fire_session_override(agent, Some(SessionMode::New), job_id, fire_time);
+        assert_eq!(mode, Some(SessionMode::New));
+        let expected_run_key = format!(
+            "{}:{}",
+            job_id.0,
+            fire_time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        );
+        assert_eq!(
+            sid,
+            Some(SessionId::for_cron_run(agent, &expected_run_key)),
+            "New-mode cron fire must materialize SessionId::for_cron_run(agent, run_key); \
+             see CLAUDE.md cron + session_mode note"
+        );
     }
 
     /// Build a minimal valid `CronJob` with an `Every` schedule.
@@ -1862,6 +1889,118 @@ mod tests {
         });
         let res = sched.update_job(id, &updates);
         assert!(res.is_err());
+    }
+
+    /// Regression for #3648: two concurrent persists must never share a
+    /// staging path, otherwise the second `O_CREAT|O_TRUNC` clobbers the
+    /// first writer's tmp file mid-flight and rename produces a torn
+    /// JSON.  The pid+seq+nanos suffix ensures uniqueness within a
+    /// process and across daemons sharing a home_dir.
+    #[test]
+    fn persist_tmp_paths_are_unique_under_concurrency() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = AgentId::new();
+        let sched = std::sync::Arc::new(CronScheduler::new(tmp.path(), 100));
+        sched.add_job(make_job(agent), false).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let s = sched.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..20 {
+                    s.persist().unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final file must parse cleanly — no torn JSON.
+        let path = tmp.path().join("data").join("cron_jobs.json");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let _: Vec<JobMeta> =
+            serde_json::from_str(&raw).expect("torn JSON after concurrent persist");
+
+        // No leftover .tmp staging files in the parent dir.
+        let parent = path.parent().unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no .tmp.* staging files should remain after concurrent persist; found: {leftovers:?}"
+        );
+    }
+
+    /// Regression for #3515: when the persist destination is not writable
+    /// (here: `data/` exists as a regular file instead of a directory so
+    /// `create_dir_all` fails), `persist()` MUST surface the I/O error
+    /// rather than swallow it. The route layer relies on this `Err` to
+    /// translate into a 500 response, otherwise UI-driven cron updates
+    /// silently revert on the next daemon restart.
+    #[test]
+    fn persist_returns_error_when_data_dir_unwritable() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Pre-create `data` as a regular file so `create_dir_all` fails on
+        // the persist path's parent. This is portable across platforms
+        // (no need for chmod/permission tricks that don't work on
+        // Windows or as root in CI).
+        std::fs::write(tmp.path().join("data"), b"not a directory").unwrap();
+
+        let sched = CronScheduler::new(tmp.path(), 100);
+        let agent = AgentId::new();
+        sched.add_job(make_job(agent), false).unwrap();
+
+        let result = sched.persist();
+        assert!(
+            result.is_err(),
+            "persist() must surface I/O failure (got Ok). Without this signal \
+             the API layer cannot return 500 and silently reverts schedules \
+             on restart (#3515)."
+        );
+    }
+
+    /// Regression for #3515: an `update_job` that successfully patches the
+    /// in-memory state must not mask a subsequent `persist()` failure.
+    /// The two operations are independent — `update_job` returns Ok, then
+    /// `persist()` returns Err on a non-writable path — and the route
+    /// handler must observe both results separately.
+    #[test]
+    fn update_job_then_persist_failure_is_observable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = CronScheduler::new(tmp.path(), 100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+
+        // First persist succeeds (data/ does not yet exist as a file).
+        sched.persist().unwrap();
+
+        // Now sabotage the parent dir so future persists fail. We replace
+        // the existing data/ directory with a regular file of the same
+        // name. `create_dir_all` on the parent will then fail because
+        // a non-directory already occupies that path.
+        let data_dir = tmp.path().join("data");
+        std::fs::remove_dir_all(&data_dir).unwrap();
+        std::fs::write(&data_dir, b"sabotage").unwrap();
+
+        // In-memory update still succeeds (it doesn't touch disk).
+        let updates = serde_json::json!({ "name": "renamed-after-sabotage" });
+        let updated = sched
+            .update_job(id, &updates)
+            .expect("update_job must succeed in-memory");
+        assert_eq!(updated.name, "renamed-after-sabotage");
+
+        // But persist now fails — and the route handler must see this Err
+        // so it can return 500 instead of pretending the change was saved.
+        let persist_result = sched.persist();
+        assert!(
+            persist_result.is_err(),
+            "persist() after in-memory update must fail loudly when disk \
+             write is impossible (#3515)"
+        );
     }
 
     #[test]

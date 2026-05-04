@@ -246,7 +246,7 @@ impl QwenCodeDriver {
             parts.push(format!("[System]\n{sys}"));
         }
 
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             let role_label = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
@@ -691,6 +691,7 @@ impl QwenCodeDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 
@@ -807,8 +808,16 @@ impl QwenCodeDriver {
             output_tokens: 0,
             ..Default::default()
         };
+        // Set when a `tx.send(...)` fails — kill the child and stop reading
+        // stdout so the CLI doesn't keep producing tokens for nobody (#3769).
+        let mut receiver_dropped = false;
 
         while let Ok(Some(line)) = lines.next_line().await {
+            if receiver_dropped {
+                tracing::debug!("streaming receiver dropped; cancelling Qwen CLI stream");
+                let _ = child.kill().await;
+                break;
+            }
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -836,22 +845,26 @@ impl QwenCodeDriver {
                     "content" | "text" | "assistant" | "content_block_delta" => {
                         if let Some(ref content) = event.content {
                             full_text.push_str(content);
-                            let _ = tx
-                                .send(StreamEvent::TextDelta {
+                            crate::send_or_mark_dropped!(
+                                receiver_dropped,
+                                tx,
+                                StreamEvent::TextDelta {
                                     text: content.clone(),
-                                })
-                                .await;
+                                }
+                            );
                         }
                     }
                     "result" | "done" | "complete" => {
                         if let Some(ref result) = event.result {
                             if full_text.is_empty() {
                                 full_text = result.clone();
-                                let _ = tx
-                                    .send(StreamEvent::TextDelta {
+                                crate::send_or_mark_dropped!(
+                                    receiver_dropped,
+                                    tx,
+                                    StreamEvent::TextDelta {
                                         text: result.clone(),
-                                    })
-                                    .await;
+                                    }
+                                );
                             }
                         }
                         if let Some(usage) = event.usage {
@@ -865,11 +878,13 @@ impl QwenCodeDriver {
                     _ => {
                         if let Some(ref content) = event.content {
                             full_text.push_str(content);
-                            let _ = tx
-                                .send(StreamEvent::TextDelta {
+                            crate::send_or_mark_dropped!(
+                                receiver_dropped,
+                                tx,
+                                StreamEvent::TextDelta {
                                     text: content.clone(),
-                                })
-                                .await;
+                                }
+                            );
                         }
                     }
                 }
@@ -906,6 +921,7 @@ impl QwenCodeDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 
@@ -934,6 +950,11 @@ impl QwenCodeDriver {
 
 #[async_trait]
 impl LlmDriver for QwenCodeDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "qwen_code", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         // `prepared` cleans up its temp dir via `Drop`, so cancellation at
         // any await point below still releases the dir — no explicit
@@ -942,6 +963,11 @@ impl LlmDriver for QwenCodeDriver {
         self.complete_inner(&prepared, &request).await
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "qwen_code", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,
@@ -1052,13 +1078,13 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen3-coder".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::text("Hello"),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: vec![],
+            }]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: Some("You are helpful.".to_string()),
@@ -1093,7 +1119,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen-vl-max".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Text {
@@ -1107,8 +1133,8 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: vec![],
+            }]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1176,7 +1202,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen-vl-max".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
                     media_type: "image/png".to_string(),
@@ -1184,8 +1210,8 @@ mod tests {
                 }]),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: vec![],
+            }]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1271,7 +1297,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen-vl-max".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Text {
@@ -1286,8 +1312,8 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: vec![],
+            }]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1323,7 +1349,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen-vl-max".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
                     media_type: "image/png".to_string(),
@@ -1331,8 +1357,8 @@ mod tests {
                 }]),
                 pinned: false,
                 timestamp: None,
-            }],
-            tools: vec![],
+            }]),
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,

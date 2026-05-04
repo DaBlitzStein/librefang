@@ -1259,6 +1259,7 @@ impl App {
                 let preview: String = text.chars().take(80).collect();
                 self.chat.status_msg = Some(format!("[owner_notice] {preview}"));
             }
+            _ => {}
         }
     }
 
@@ -2050,7 +2051,7 @@ impl App {
                     let provider = kernel
                         .model_catalog_ref()
                         .read()
-                        .unwrap()
+                        .unwrap_or_else(|p| p.into_inner())
                         .find_model(model_id)
                         .map(|e| e.provider.clone());
                     let result = if let Some(ref prov) = provider {

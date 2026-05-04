@@ -98,6 +98,21 @@ pub struct UsageSummary {
     pub total_tool_calls: u64,
 }
 
+/// One row of a per-agent recent-events feed. Mirrors the columns on
+/// `usage_events` that operators care about when looking at a single
+/// agent's tail (model / latency / tokens / cost).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEventRow {
+    pub timestamp: String,
+    pub model: String,
+    pub provider: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+    pub tool_calls: u64,
+    pub latency_ms: u64,
+}
+
 /// Usage grouped by model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelUsage {
@@ -558,182 +573,145 @@ impl UsageStore {
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let agent_str = record.agent_id.0.to_string();
+        let has_provider = !record.provider.is_empty();
 
-        // ── Per-agent quota checks ──────────────────────────────────
-        if agent_max_hourly > 0.0 {
-            let cost: f64 = tx
+        // Each window collapses what was previously up to 3 separate `SUM(...)`
+        // queries (agent / global / provider) into one row of conditional
+        // sums (#3382). The full hot path drops from up to 10 round-trips per
+        // LLM call to 4 (3 cost windows + 1 token window) when every limit is
+        // configured, while preserving identical semantics.
+        struct WindowCosts {
+            agent: f64,
+            global: f64,
+            provider: f64,
+        }
+
+        // Helper closure: run one combined SUM query for a given time window.
+        // `where_clause` selects the rows for the window (e.g. `timestamp > datetime(...)`).
+        let window_costs = |where_clause: &str| -> LibreFangResult<WindowCosts> {
+            let sql = format!(
+                "SELECT \
+                    COALESCE(SUM(CASE WHEN agent_id = ?1 THEN cost_usd ELSE 0 END), 0.0), \
+                    COALESCE(SUM(cost_usd), 0.0), \
+                    COALESCE(SUM(CASE WHEN provider = ?2 THEN cost_usd ELSE 0 END), 0.0) \
+                 FROM usage_events WHERE {where_clause}"
+            );
+            let row: (f64, f64, f64) = tx
                 .query_row(
-                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE agent_id = ?1 AND timestamp > datetime('now', '-1 hour')",
-                    rusqlite::params![&agent_str],
-                    |row| row.get(0),
+                    &sql,
+                    rusqlite::params![&agent_str, &record.provider],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            if cost + record.cost_usd >= agent_max_hourly {
+            Ok(WindowCosts {
+                agent: row.0,
+                global: row.1,
+                provider: row.2,
+            })
+        };
+
+        let need_hourly = agent_max_hourly > 0.0
+            || global_max_hourly > 0.0
+            || (has_provider && provider_max_hourly > 0.0);
+        if need_hourly {
+            let costs = window_costs("timestamp > datetime('now', '-1 hour')")?;
+            if agent_max_hourly > 0.0 && costs.agent + record.cost_usd >= agent_max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
-                    record.agent_id, cost, record.cost_usd, agent_max_hourly
+                    record.agent_id, costs.agent, record.cost_usd, agent_max_hourly
                 )));
             }
-        }
-
-        if agent_max_daily > 0.0 {
-            let cost: f64 = tx
-                .query_row(
-                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of day')",
-                    rusqlite::params![&agent_str],
-                    |row| row.get(0),
-                )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            if cost + record.cost_usd >= agent_max_daily {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
-                    record.agent_id, cost, record.cost_usd, agent_max_daily
-                )));
-            }
-        }
-
-        if agent_max_monthly > 0.0 {
-            let cost: f64 = tx
-                .query_row(
-                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of month')",
-                    rusqlite::params![&agent_str],
-                    |row| row.get(0),
-                )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            if cost + record.cost_usd >= agent_max_monthly {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
-                    record.agent_id, cost, record.cost_usd, agent_max_monthly
-                )));
-            }
-        }
-
-        // ── Global budget checks ────────────────────────────────────
-        if global_max_hourly > 0.0 {
-            let cost: f64 = tx
-                .query_row(
-                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE timestamp > datetime('now', '-1 hour')",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            if cost + record.cost_usd >= global_max_hourly {
+            if global_max_hourly > 0.0 && costs.global + record.cost_usd >= global_max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
-                    cost, record.cost_usd, global_max_hourly
+                    costs.global, record.cost_usd, global_max_hourly
+                )));
+            }
+            if has_provider
+                && provider_max_hourly > 0.0
+                && costs.provider + record.cost_usd >= provider_max_hourly
+            {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Provider '{}' exceeded hourly cost budget: ${:.4} + ${:.4} / ${:.4}",
+                    record.provider, costs.provider, record.cost_usd, provider_max_hourly
                 )));
             }
         }
 
-        if global_max_daily > 0.0 {
-            let cost: f64 = tx
-                .query_row(
-                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE timestamp > datetime('now', 'start of day')",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            if cost + record.cost_usd >= global_max_daily {
+        let need_daily = agent_max_daily > 0.0
+            || global_max_daily > 0.0
+            || (has_provider && provider_max_daily > 0.0);
+        if need_daily {
+            let costs = window_costs("timestamp > datetime('now', 'start of day')")?;
+            if agent_max_daily > 0.0 && costs.agent + record.cost_usd >= agent_max_daily {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
+                    record.agent_id, costs.agent, record.cost_usd, agent_max_daily
+                )));
+            }
+            if global_max_daily > 0.0 && costs.global + record.cost_usd >= global_max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
-                    cost, record.cost_usd, global_max_daily
+                    costs.global, record.cost_usd, global_max_daily
+                )));
+            }
+            if has_provider
+                && provider_max_daily > 0.0
+                && costs.provider + record.cost_usd >= provider_max_daily
+            {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Provider '{}' exceeded daily cost budget: ${:.4} + ${:.4} / ${:.4}",
+                    record.provider, costs.provider, record.cost_usd, provider_max_daily
                 )));
             }
         }
 
-        if global_max_monthly > 0.0 {
-            let cost: f64 = tx
+        let need_monthly = agent_max_monthly > 0.0
+            || global_max_monthly > 0.0
+            || (has_provider && provider_max_monthly > 0.0);
+        if need_monthly {
+            let costs = window_costs("timestamp > datetime('now', 'start of month')")?;
+            if agent_max_monthly > 0.0 && costs.agent + record.cost_usd >= agent_max_monthly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
+                    record.agent_id, costs.agent, record.cost_usd, agent_max_monthly
+                )));
+            }
+            if global_max_monthly > 0.0 && costs.global + record.cost_usd >= global_max_monthly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
+                    costs.global, record.cost_usd, global_max_monthly
+                )));
+            }
+            if has_provider
+                && provider_max_monthly > 0.0
+                && costs.provider + record.cost_usd >= provider_max_monthly
+            {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Provider '{}' exceeded monthly cost budget: ${:.4} + ${:.4} / ${:.4}",
+                    record.provider, costs.provider, record.cost_usd, provider_max_monthly
+                )));
+            }
+        }
+
+        // Provider hourly token budget — separate aggregate (input+output tokens),
+        // kept as its own query because it sums different columns.
+        if has_provider && provider_max_tokens_per_hour > 0 {
+            let tokens: i64 = tx
                 .query_row(
-                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE timestamp > datetime('now', 'start of month')",
-                    [],
+                    "SELECT COALESCE(SUM(input_tokens) + SUM(output_tokens), 0) FROM usage_events
+                     WHERE provider = ?1 AND timestamp > datetime('now', '-1 hour')",
+                    rusqlite::params![&record.provider],
                     |row| row.get(0),
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            if cost + record.cost_usd >= global_max_monthly {
+            let current = tokens.max(0) as u64;
+            let incoming = record.input_tokens.saturating_add(record.output_tokens);
+            if current.saturating_add(incoming) >= provider_max_tokens_per_hour {
                 return Err(LibreFangError::QuotaExceeded(format!(
-                    "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
-                    cost, record.cost_usd, global_max_monthly
+                    "Provider '{}' exceeded hourly token budget: {} + {} / {}",
+                    record.provider, current, incoming, provider_max_tokens_per_hour
                 )));
-            }
-        }
-
-        // ── Per-provider budget checks ─────────────────────────────
-        // Only applies when the record carries a provider id.
-        if !record.provider.is_empty() {
-            if provider_max_hourly > 0.0 {
-                let cost: f64 = tx
-                    .query_row(
-                        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                         WHERE provider = ?1 AND timestamp > datetime('now', '-1 hour')",
-                        rusqlite::params![&record.provider],
-                        |row| row.get(0),
-                    )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                if cost + record.cost_usd >= provider_max_hourly {
-                    return Err(LibreFangError::QuotaExceeded(format!(
-                        "Provider '{}' exceeded hourly cost budget: ${:.4} + ${:.4} / ${:.4}",
-                        record.provider, cost, record.cost_usd, provider_max_hourly
-                    )));
-                }
-            }
-
-            if provider_max_daily > 0.0 {
-                let cost: f64 = tx
-                    .query_row(
-                        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                         WHERE provider = ?1 AND timestamp > datetime('now', 'start of day')",
-                        rusqlite::params![&record.provider],
-                        |row| row.get(0),
-                    )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                if cost + record.cost_usd >= provider_max_daily {
-                    return Err(LibreFangError::QuotaExceeded(format!(
-                        "Provider '{}' exceeded daily cost budget: ${:.4} + ${:.4} / ${:.4}",
-                        record.provider, cost, record.cost_usd, provider_max_daily
-                    )));
-                }
-            }
-
-            if provider_max_monthly > 0.0 {
-                let cost: f64 = tx
-                    .query_row(
-                        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                         WHERE provider = ?1 AND timestamp > datetime('now', 'start of month')",
-                        rusqlite::params![&record.provider],
-                        |row| row.get(0),
-                    )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                if cost + record.cost_usd >= provider_max_monthly {
-                    return Err(LibreFangError::QuotaExceeded(format!(
-                        "Provider '{}' exceeded monthly cost budget: ${:.4} + ${:.4} / ${:.4}",
-                        record.provider, cost, record.cost_usd, provider_max_monthly
-                    )));
-                }
-            }
-
-            if provider_max_tokens_per_hour > 0 {
-                let tokens: i64 = tx
-                    .query_row(
-                        "SELECT COALESCE(SUM(input_tokens) + SUM(output_tokens), 0) FROM usage_events
-                         WHERE provider = ?1 AND timestamp > datetime('now', '-1 hour')",
-                        rusqlite::params![&record.provider],
-                        |row| row.get(0),
-                    )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                let current = tokens.max(0) as u64;
-                let incoming = record.input_tokens.saturating_add(record.output_tokens);
-                if current.saturating_add(incoming) >= provider_max_tokens_per_hour {
-                    return Err(LibreFangError::QuotaExceeded(format!(
-                        "Provider '{}' exceeded hourly token budget: {} + {} / {}",
-                        record.provider, current, incoming, provider_max_tokens_per_hour
-                    )));
-                }
             }
         }
 
@@ -1256,6 +1234,85 @@ impl UsageStore {
             }
         }
         Ok(results)
+    }
+
+    /// Recent usage events for one agent — backs the dashboard's
+    /// agent-detail Logs tab so it shows turn-level operational data
+    /// (model / latency / tokens / cost) instead of the audit ledger,
+    /// which is mostly admin lifecycle entries. Newest first.
+    pub fn list_agent_events_recent(
+        &self,
+        agent_id: AgentId,
+        limit: u32,
+    ) -> LibreFangResult<Vec<AgentEventRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, model, provider, input_tokens, output_tokens,
+                        cost_usd, tool_calls, latency_ms
+                 FROM usage_events
+                 WHERE agent_id = ?1
+                 ORDER BY timestamp DESC
+                 LIMIT ?2",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![agent_id.0.to_string(), limit as i64],
+                |row| {
+                    Ok(AgentEventRow {
+                        timestamp: row.get(0)?,
+                        model: row.get(1)?,
+                        provider: row.get(2)?,
+                        input_tokens: row.get::<_, i64>(3)?.max(0) as u64,
+                        output_tokens: row.get::<_, i64>(4)?.max(0) as u64,
+                        cost_usd: row.get(5)?,
+                        tool_calls: row.get::<_, i64>(6)?.max(0) as u64,
+                        latency_ms: row.get::<_, i64>(7)?.max(0) as u64,
+                    })
+                },
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// 24h message counts per channel — backs the dashboard's Channels
+    /// page so each row can show `slack · 142 msgs/24h` per the design.
+    /// Single grouped SQL pass (uses idx_usage_channel_time).
+    pub fn channels_msgs_24h_bulk(
+        &self,
+    ) -> LibreFangResult<std::collections::HashMap<String, u64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel, COUNT(*)
+                 FROM usage_events
+                 WHERE channel IS NOT NULL AND channel != '' AND timestamp >= ?1
+                 GROUP BY channel",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (ch, n) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            out.insert(ch, n.max(0) as u64);
+        }
+        Ok(out)
     }
 
     /// Delete usage events older than the given number of days.
