@@ -288,7 +288,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
 
     // Detect best available provider
     let (provider, api_key_env) = if let Some((p, _model, env_var)) =
-        librefang_runtime::drivers::detect_available_provider()
+        librefang_kernel::drivers::detect_available_provider()
     {
         (p.to_string(), env_var.to_string())
     } else {
@@ -296,7 +296,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
     };
 
     // Resolve default model from catalog
-    let model = librefang_runtime::model_catalog::ModelCatalog::default()
+    let model = librefang_kernel::model_catalog::ModelCatalog::default()
         .default_model_for_provider(&provider)
         .unwrap_or_else(|| "auto".to_string());
 
@@ -369,7 +369,7 @@ pub async fn shutdown(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         "shutdown requested via API",
         "ok",
         user_id,
@@ -1643,7 +1643,7 @@ pub async fn config_reload(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         "config reload requested via API",
         "pending",
         user_id,
@@ -1795,11 +1795,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     //     Carries `{ select?, number_select?, min?, max?, step?, placeholder? }`.
     //
     // Replaces a 245-line hand-authored schema (issue #3048 follow-up).
-    let catalog = state
-        .kernel
-        .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.model_catalog_ref().load();
     let provider_options: Vec<String> = catalog
         .list_providers()
         .iter()
@@ -1984,6 +1980,7 @@ pub fn ui_options_overlay(
     post,
     path = "/api/config/set",
     tag = "system",
+    request_body(content = crate::types::JsonObject, description = "`{ \"path\": \"section.key\", \"value\": ... }`"),
     responses(
         (status = 200, description = "Set a single config value and persist", body = crate::types::JsonObject)
     )
@@ -2281,7 +2278,7 @@ pub async fn config_set(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         format!("config set: {path}"),
         "completed",
         user_id,
@@ -2511,7 +2508,8 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
     // Agents list — fully enriched (same fields as /api/agents) so AgentsPage
     // can use this snapshot directly instead of polling /api/agents separately.
     let agents: Vec<serde_json::Value> = {
-        let catalog = state.kernel.model_catalog_ref().read().ok();
+        let catalog_guard = state.kernel.model_catalog_ref().load();
+        let catalog: Option<&librefang_kernel::model_catalog::ModelCatalog> = Some(&catalog_guard);
         let dm = {
             let dm_override = state
                 .kernel
@@ -2528,7 +2526,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
             .iter()
             // `e` here is &&Arc<AgentEntry>; deref through the ref + Arc to
             // hand `enrich_agent_json` the `&AgentEntry` it expects.
-            .map(|e| super::agents::enrich_agent_json(e.as_ref(), &dm, &catalog, None))
+            .map(|e| super::agents::enrich_agent_json(e.as_ref(), &dm, catalog, None))
             .collect()
     };
 

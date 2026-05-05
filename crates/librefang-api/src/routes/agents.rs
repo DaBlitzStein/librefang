@@ -189,8 +189,8 @@ use axum::response::IntoResponse;
 use axum::Json;
 use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
+use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
@@ -288,7 +288,7 @@ async fn resolve_manifest(
                 tracing::warn!("Manifest signature verification failed: {e}");
                 state.kernel.audit().record(
                     "system",
-                    librefang_runtime::audit::AuditAction::AuthAttempt,
+                    librefang_kernel::audit::AuditAction::AuthAttempt,
                     "manifest signature verification failed",
                     format!("error: {e}"),
                 );
@@ -325,6 +325,11 @@ async fn resolve_manifest(
 }
 
 /// POST /api/agents — Spawn a new agent.
+///
+/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
+/// with the same key + same body replays the cached response instead
+/// of spawning a second agent. A different body under the same key is
+/// rejected with 409 Conflict.
 #[utoipa::path(
     post,
     path = "/api/agents",
@@ -332,20 +337,53 @@ async fn resolve_manifest(
     request_body = crate::types::SpawnRequest,
     responses(
         (status = 200, description = "Agent spawned", body = crate::types::SpawnResponse),
-        (status = 400, description = "Invalid manifest")
+        (status = 400, description = "Invalid manifest"),
+        (status = 409, description = "Idempotency-Key was reused with a different request body")
     )
 )]
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<SpawnRequest>,
-) -> impl IntoResponse {
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
     let l = super::resolve_lang(lang.as_ref());
+    let key = crate::idempotency::extract_key(&headers);
+    let body_bytes: Vec<u8> = body.to_vec();
+    let store = Arc::clone(&state.idempotency_store);
+    let inner_body = body_bytes.clone();
+
+    crate::idempotency::run_idempotent(
+        store.as_ref(),
+        key.as_deref(),
+        &body_bytes,
+        move || async move { spawn_agent_inner(state, l, &inner_body).await },
+    )
+    .await
+}
+
+/// Inner handler — produces a `(StatusCode, Vec<u8>)` snapshot suitable
+/// for caching by the Idempotency-Key middleware. JSON-encodes once
+/// here so the cached and replay paths share the exact same bytes.
+async fn spawn_agent_inner(
+    state: Arc<AppState>,
+    l: &'static str,
+    body_bytes: &[u8],
+) -> (StatusCode, Vec<u8>) {
+    let req: SpawnRequest = match serde_json::from_slice(body_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                format!("Invalid JSON body: {e}"),
+            );
+        }
+    };
 
     let resolved = match resolve_manifest(&state, &req, l).await {
         Ok(r) => r,
         Err(e) => {
-            // Map specific errors to appropriate HTTP status codes
             let (status, code) = if e.message.contains("too large") {
                 (StatusCode::PAYLOAD_TOO_LARGE, "manifest_too_large")
             } else if e.message.contains("not found") && e.message.contains("Template") {
@@ -355,26 +393,19 @@ pub async fn spawn_agent(
             } else {
                 (StatusCode::BAD_REQUEST, "invalid_manifest")
             };
-            return ApiErrorResponse {
-                error: e.message,
-                code: Some(code.to_string()),
-                r#type: Some(code.to_string()),
-                details: None,
-                status,
-            }
-            .into_response();
+            return json_error(status, code, e.message);
         }
     };
 
     match state.kernel.spawn_agent(resolved.manifest) {
-        Ok(id) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!(SpawnResponse {
+        Ok(id) => {
+            let body = serde_json::to_vec(&SpawnResponse {
                 agent_id: id.to_string(),
                 name: resolved.name,
-            })),
-        )
-            .into_response(),
+            })
+            .unwrap_or_else(|_| b"{}".to_vec());
+            (StatusCode::CREATED, body)
+        }
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
             let t = ErrorTranslator::new(l);
@@ -384,16 +415,26 @@ pub async fn spawn_agent(
                 ) => (StatusCode::CONFLICT, "agent_already_exists"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed"),
             };
-            ApiErrorResponse {
-                error: t.t_args("api-error-agent-error", &[("error", &e.to_string())]),
-                code: Some(code.to_string()),
-                r#type: Some(code.to_string()),
-                details: None,
+            json_error(
                 status,
-            }
-            .into_response()
+                code,
+                t.t_args("api-error-agent-error", &[("error", &e.to_string())]),
+            )
         }
     }
+}
+
+/// Shape an `ApiErrorResponse`-compatible JSON envelope into the
+/// `(status, bytes)` tuple the idempotency middleware caches.
+/// Mirrors `ApiErrorResponse::into_response` so callers see the same
+/// shape they did before this handler split.
+fn json_error(status: StatusCode, code: &str, error: String) -> (StatusCode, Vec<u8>) {
+    let body = serde_json::json!({
+        "error": error,
+        "code": code,
+        "type": code,
+    });
+    (status, serde_json::to_vec(&body).unwrap_or_default())
 }
 
 // ---------------------------------------------------------------------------
@@ -743,9 +784,7 @@ pub async fn bulk_stop_agents(
 pub(crate) fn enrich_agent_json(
     e: &librefang_types::agent::AgentEntry,
     dm: &librefang_types::config::DefaultModelConfig,
-    catalog: &Option<
-        std::sync::RwLockReadGuard<'_, librefang_runtime::model_catalog::ModelCatalog>,
-    >,
+    catalog: Option<&librefang_kernel::model_catalog::ModelCatalog>,
     bulk_stats: Option<&std::collections::HashMap<String, (u64, f64)>>,
 ) -> serde_json::Value {
     let provider = if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default"
@@ -761,7 +800,6 @@ pub(crate) fn enrich_agent_json(
     };
 
     let (tier, auth_status, supports_thinking) = catalog
-        .as_ref()
         .map(|cat| {
             let model_entry = cat.find_model(model);
             let tier = model_entry
@@ -871,7 +909,8 @@ pub async fn list_agents(
             }
         }
     }
-    let catalog = state.kernel.model_catalog_ref().read().ok();
+    let catalog_guard = state.kernel.model_catalog_ref().load();
+    let catalog: Option<&librefang_kernel::model_catalog::ModelCatalog> = Some(&catalog_guard);
     let dm = {
         let dm_override = state
             .kernel
@@ -977,7 +1016,7 @@ pub async fn list_agents(
     // helper expects without forcing a manifest deep-clone (#3569).
     let items: Vec<serde_json::Value> = agents
         .iter()
-        .map(|e| enrich_agent_json(e.as_ref(), &dm, &catalog, bulk_stats.as_ref()))
+        .map(|e| enrich_agent_json(e.as_ref(), &dm, catalog, bulk_stats.as_ref()))
         .collect();
 
     Json(PaginatedResponse {
@@ -1356,7 +1395,7 @@ pub fn resolve_attachments(
             match std::fs::read(&file_path) {
                 Ok(data) => {
                     let header = format!("[Attached PDF: {} ({} bytes)]", filename, data.len());
-                    let body = match librefang_runtime::pdf_text::extract_text_from_pdf(&data) {
+                    let body = match librefang_kernel::pdf_text::extract_text_from_pdf(&data) {
                         Ok(text) => text,
                         Err(e) => {
                             tracing::warn!(
@@ -1522,7 +1561,7 @@ pub async fn resolve_url_attachments(
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
-    let client = librefang_runtime::http_client::proxied_client_builder()
+    let client = librefang_kernel::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("HTTP client build");
@@ -1718,7 +1757,8 @@ pub async fn send_message(
             } else {
                 &entry.manifest.model.provider
             };
-            if let Some(catalog) = state.kernel.model_catalog_ref().read().ok().as_ref() {
+            {
+                let catalog = state.kernel.model_catalog_ref().load();
                 if let Some(p) = catalog.get_provider(provider) {
                     if !p.auth_status.is_available() {
                         return crate::extensions::with_agent_id(
@@ -1883,14 +1923,32 @@ pub async fn send_message(
         }
         Err(e) => {
             tracing::warn!("send_message failed for agent {id}: {e}");
-            let (status, code) = if format!("{e}").contains("Agent not found") {
-                (StatusCode::NOT_FOUND, "agent_not_found")
-            } else if format!("{e}").contains("quota") || format!("{e}").contains("Quota") {
-                (StatusCode::TOO_MANY_REQUESTS, "budget_exceeded")
-            } else if format!("{e}").contains("belongs to a different agent") {
-                (StatusCode::BAD_REQUEST, "session_agent_mismatch")
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, "message_delivery_failed")
+            // #3541: replace the legacy `format!("{e}").contains(...)`
+            // grep with a typed match on the kernel error surface. The two
+            // categories with dedicated variants (`AgentNotFound`,
+            // `QuotaExceeded`) become structural matches; the
+            // session-mismatch path still flows through
+            // `LibreFangError::Internal(_)` at the kernel side (see
+            // `crates/librefang-kernel/src/kernel/mod.rs:6446 / :8099 /
+            // :9454 / :9486`) so it remains a substring check scoped to
+            // that variant — eliminating that last grep needs a kernel
+            // emit-site refactor to a typed `SessionAgentMismatch`
+            // variant, tracked as #3541 follow-up.
+            use crate::error::KernelError;
+            use librefang_types::error::LibreFangError;
+            let (status, code) = match &e {
+                KernelError::LibreFang(LibreFangError::AgentNotFound(_)) => {
+                    (StatusCode::NOT_FOUND, "agent_not_found")
+                }
+                KernelError::LibreFang(LibreFangError::QuotaExceeded(_)) => {
+                    (StatusCode::TOO_MANY_REQUESTS, "budget_exceeded")
+                }
+                KernelError::LibreFang(LibreFangError::Internal(msg))
+                    if msg.contains("belongs to a different agent") =>
+                {
+                    (StatusCode::BAD_REQUEST, "session_agent_mismatch")
+                }
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, "message_delivery_failed"),
             };
             let t = ErrorTranslator::new(l);
             ApiErrorResponse {
@@ -2022,6 +2080,16 @@ pub async fn get_agent_session(
             for m in &session.messages {
                 let mut tools: Vec<serde_json::Value> = Vec::new();
                 let mut msg_images: Vec<serde_json::Value> = Vec::new();
+                // Extended-thinking traces are flattened the same way text /
+                // tool_use / images already are. The dashboard renders these
+                // in a collapsible drawer; without surfacing them here, the
+                // reload path silently loses reasoning that was visible during
+                // streaming. Multiple thinking blocks in a single turn are
+                // joined with a blank line so the drawer reads naturally —
+                // matches the live `thinking_delta` accumulation on the WS
+                // path. `redacted_thinking` is not modeled separately yet and
+                // would fall through the catch-all, same as today.
+                let mut thinkings: Vec<String> = Vec::new();
                 let content = match &m.content {
                     librefang_types::message::MessageContent::Text(t) => t.clone(),
                     librefang_types::message::MessageContent::Blocks(blocks) => {
@@ -2030,6 +2098,12 @@ pub async fn get_agent_session(
                             match b {
                                 librefang_types::message::ContentBlock::Text { text, .. } => {
                                     texts.push(text.clone());
+                                }
+                                librefang_types::message::ContentBlock::Thinking {
+                                    thinking,
+                                    ..
+                                } => {
+                                    thinkings.push(thinking.clone());
                                 }
                                 librefang_types::message::ContentBlock::Image {
                                     media_type,
@@ -2098,8 +2172,13 @@ pub async fn get_agent_session(
                         texts.join("\n")
                     }
                 };
-                // Skip messages that are purely tool results (User role with only ToolResult blocks)
-                if content.is_empty() && tools.is_empty() {
+                // Skip messages that are purely tool results (User role with only ToolResult blocks).
+                // A turn whose `MessageContent::Blocks` contains ONLY `Thinking` (e.g. an
+                // aborted/cancelled response, or a server filter that stripped the visible
+                // text) must NOT be dropped here — the dashboard's `hasThinking` branch
+                // explicitly renders thinking-only turns. Gating on `thinkings.is_empty()`
+                // keeps the original tool-result-only skip semantics intact.
+                if content.is_empty() && tools.is_empty() && thinkings.is_empty() {
                     continue;
                 }
                 let msg_idx = built_messages.len();
@@ -2118,6 +2197,12 @@ pub async fn get_agent_session(
                 }
                 if !msg_images.is_empty() {
                     msg["images"] = serde_json::Value::Array(msg_images);
+                }
+                if !thinkings.is_empty() {
+                    // Joined the same way the dashboard's history mapper joins
+                    // thinking deltas during live streaming — a blank line
+                    // between blocks keeps the collapsible drawer readable.
+                    msg["thinking"] = serde_json::Value::String(thinkings.join("\n\n"));
                 }
                 // Expose the real message timestamp so the dashboard can
                 // render historical times correctly on resume instead of
@@ -2536,7 +2621,7 @@ pub async fn send_message_stream(
 ) -> axum::response::Response {
     use axum::response::sse::{Event, Sse};
     use futures::stream;
-    use librefang_runtime::llm_driver::StreamEvent;
+    use librefang_kernel::llm_driver::StreamEvent;
 
     let (err_too_large, err_invalid_id, err_not_found, err_streaming_failed) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -2739,7 +2824,7 @@ pub async fn attach_session_stream(
 ) -> axum::response::Response {
     use axum::response::sse::{Event, Sse};
     use futures::stream;
-    use librefang_runtime::llm_driver::StreamEvent;
+    use librefang_kernel::llm_driver::StreamEvent;
     use tokio::sync::broadcast::error::RecvError;
 
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -2938,7 +3023,7 @@ pub async fn list_agent_sessions(
     path = "/api/agents/{id}/sessions",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Optional label for the new session"),
+    request_body(content = crate::types::JsonObject, description = "Optional label for the new session"),
     responses(
         (status = 200, description = "Create a new session for an agent", body = crate::types::JsonObject)
     )
@@ -3165,7 +3250,7 @@ pub async fn export_session_trajectory(
                 .into_response();
         }
         Err(crate::error::KernelError::LibreFang(
-            librefang_types::error::LibreFangError::Memory(msg),
+            librefang_types::error::LibreFangError::Memory { message: msg, .. },
         )) if msg.contains("not found") || msg.contains("does not belong") => {
             return (
                 StatusCode::NOT_FOUND,
@@ -3218,7 +3303,7 @@ pub async fn export_session_trajectory(
     path = "/api/agents/{id}/sessions/import",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Exported session JSON"),
+    request_body(content = crate::types::JsonObject, description = "Exported session JSON"),
     responses(
         (status = 200, description = "Session imported successfully", body = crate::types::JsonObject)
     )
@@ -3576,7 +3661,7 @@ pub async fn stop_session(
     path = "/api/agents/{id}/model",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Model name and optional provider"),
+    request_body(content = crate::types::JsonObject, description = "Model name and optional provider"),
     responses(
         (status = 200, description = "Change an agent's LLM model", body = crate::types::JsonObject)
     )
@@ -3898,7 +3983,7 @@ pub async fn get_agent_skills(
     path = "/api/agents/{id}/skills",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Array of skill names"),
+    request_body(content = crate::types::JsonArray, description = "Array of skill names"),
     responses(
         (status = 200, description = "Update an agent's skill allowlist", body = crate::types::JsonObject)
     )
@@ -3986,7 +4071,7 @@ pub async fn get_agent_mcp_servers(
             .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
         for tool in mcp_tools.iter() {
-            if let Some(server) = librefang_runtime::mcp::resolve_mcp_server_from_known(
+            if let Some(server) = librefang_kernel::mcp::resolve_mcp_server_from_known(
                 &tool.name,
                 configured_servers.iter().map(String::as_str),
             ) {
@@ -4017,7 +4102,7 @@ pub async fn get_agent_mcp_servers(
     path = "/api/agents/{id}/mcp_servers",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Array of MCP server names"),
+    request_body(content = crate::types::JsonArray, description = "Array of MCP server names"),
     responses(
         (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject)
     )
@@ -4076,7 +4161,7 @@ pub async fn set_agent_mcp_servers(
     path = "/api/agents/{id}",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Partial agent fields to update"),
+    request_body(content = crate::types::JsonObject, description = "Partial agent fields to update"),
     responses(
         (status = 200, description = "Partially update an agent (name, description, model, system prompt)", body = crate::types::JsonObject)
     )
@@ -6097,7 +6182,7 @@ pub async fn inject_message(
     params(("id" = String, Path, description = "Agent ID")),
     request_body = crate::types::PushMessageRequest,
     responses(
-        (status = 200, description = "Message pushed to channel", body = serde_json::Value),
+        (status = 200, description = "Message pushed to channel", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent ID or missing required fields"),
         (status = 404, description = "Agent not found"),
         (status = 502, description = "Channel adapter rejected the message")
@@ -6157,6 +6242,7 @@ pub async fn push_message(
                 .kernel
                 .send_channel_message(&req.channel, &req.recipient, &req.message, thread_id, None)
                 .await
+                .map_err(|e| e.to_string())
         }
     };
 
@@ -6685,7 +6771,7 @@ mod tests {
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Aggregated agent metrics", body = serde_json::Value),
+        (status = 200, description = "Aggregated agent metrics", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent ID"),
         (status = 404, description = "Agent not found")
     )
@@ -6818,7 +6904,7 @@ pub async fn agent_metrics(
         ("offset" = Option<usize>, Query, description = "Pagination offset over filtered entries")
     ),
     responses(
-        (status = 200, description = "Recent agent execution log entries", body = serde_json::Value),
+        (status = 200, description = "Recent agent execution log entries", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent ID"),
         (status = 404, description = "Agent not found")
     )
@@ -6925,6 +7011,11 @@ mod monitoring_tests {
         };
 
         let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let idempotency_store: Arc<
+            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
+        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.memory_substrate().usage_conn(),
+        ));
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
@@ -6933,13 +7024,13 @@ mod monitoring_tests {
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             clawhub_cache: dashmap::DashMap::new(),
             skillhub_cache: dashmap::DashMap::new(),
-            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
             provider_test_cache: dashmap::DashMap::new(),
             webhook_store: crate::webhook_store::WebhookStore::load(
                 home_dir.join("data").join("webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            media_drivers: librefang_kernel::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -6949,6 +7040,7 @@ mod monitoring_tests {
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
+            idempotency_store,
         });
         (state, tmp)
     }

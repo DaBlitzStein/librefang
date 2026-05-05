@@ -192,6 +192,15 @@ impl TestAppState {
     fn build_state(kernel: Arc<LibreFangKernel>, tmp: &TempDir) -> Arc<AppState> {
         let channels_config = kernel.config_ref().channels.clone();
 
+        // Idempotency-Key replay store (#3637) — wired against the
+        // substrate's shared SQLite connection so tests exercise the
+        // same persistence path as production.
+        let idempotency_store: Arc<
+            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
+        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.memory_substrate().usage_conn(),
+        ));
+
         Arc::new(AppState {
             kernel,
             started_at: Instant::now(),
@@ -220,6 +229,7 @@ impl TestAppState {
             // per-IP rate-limiter / WS slot keying always uses the TCP peer.
             trusted_proxies: Arc::new(librefang_api::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
+            idempotency_store,
         })
     }
 }

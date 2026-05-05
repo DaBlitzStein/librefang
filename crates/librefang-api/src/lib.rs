@@ -112,6 +112,7 @@ pub mod client_ip;
 pub mod error;
 pub mod extensions;
 pub mod extractors;
+pub mod idempotency;
 pub mod mcp_oauth;
 pub mod middleware;
 pub mod oauth;

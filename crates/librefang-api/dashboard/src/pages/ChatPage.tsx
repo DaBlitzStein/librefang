@@ -535,22 +535,25 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
-            let content: string;
-            if (typeof msg.content === "string") {
-              content = msg.content;
-            } else if (Array.isArray(msg.content)) {
-              // Extract only text blocks — skip tool_use/tool_result
-              content = (msg.content as Array<Record<string, unknown>>)
-                .filter((b) => b.type === "text" && typeof b.text === "string")
-                .map((b) => b.text as string)
-                .join("\n");
-            } else {
-              content = msg.content == null ? "" : String(msg.content);
-            }
+            // The agent-scoped session endpoint (which this page uses)
+            // flattens `MessageContent::Blocks` server-side: visible text
+            // joins via `\n`, thinking is surfaced through a separate
+            // `thinking` field, tool_use lands in `tools`, and images in
+            // `images`. So `msg.content` is always a string here. The
+            // `extractAssistantHistoryParts` helper in `lib/chat.ts`
+            // exists for the raw-blocks endpoint (`/api/sessions/{id}`,
+            // unused on this page).
+            const text = typeof msg.content === "string" ? msg.content : "";
+            const thinking = msg.thinking ?? "";
 
             const hasTools = msg.tools && msg.tools.length > 0;
             const hasImages = msg.images && msg.images.length > 0;
-            if (!content.trim() && !hasTools && !hasImages) return [];
+            const hasThinking = thinking.trim().length > 0;
+            // Drop messages with no displayable content. Thinking counts:
+            // a turn that produced only reasoning (no visible text or tools)
+            // should still render as an assistant turn with the collapsible
+            // thinking drawer, otherwise reload silently loses it.
+            if (!text.trim() && !hasTools && !hasImages && !hasThinking) return [];
 
             return [{
               id: `hist-${idx}`,
@@ -559,7 +562,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 : msg.role === "System"
                   ? "system"
                   : "assistant",
-              content,
+              content: text,
               // Use the real server-side timestamp when available so
               // resumed sessions render the original send time instead of
               // the page-load time. Fall back to `now` only for messages
@@ -571,6 +574,13 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 filename: img.filename,
                 content_type: img.content_type,
               })),
+              thinking: hasThinking ? thinking : undefined,
+              // Collapsed by default on history reload — long sessions with
+              // many reasoning turns would otherwise be a wall of text. Live
+              // streaming keeps its expanded default so the user can watch
+              // reasoning happen in real time. `|| undefined` keeps the
+              // field absent when there's nothing to collapse.
+              thinkingCollapsed: hasThinking || undefined,
             }];
           });
           // Refresh the cache unconditionally — the data is still correct
@@ -1160,16 +1170,24 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             <button
               type="button"
               onClick={() => setThinkingExpanded((v) => !v)}
+              aria-expanded={thinkingExpanded}
+              aria-controls={`thinking-block-${message.id}`}
               className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border-subtle bg-surface text-[10px] font-medium text-text-dim hover:text-text hover:border-border transition-colors"
             >
-              <Brain className="h-3 w-3" />
+              <Brain className="h-3 w-3" aria-hidden="true" />
               <span>{t("chat.thinking_label")}</span>
               <ChevronDown
                 className={`h-3 w-3 transition-transform ${thinkingExpanded ? "rotate-180" : ""}`}
+                aria-hidden="true"
               />
             </button>
             {thinkingExpanded && (
-              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim break-words prose-sm">
+              <div
+                id={`thinking-block-${message.id}`}
+                role="region"
+                aria-label={t("chat.thinking_label")}
+                className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim break-words prose-sm"
+              >
                 <MarkdownContent>{message.thinking ?? ""}</MarkdownContent>
               </div>
             )}
