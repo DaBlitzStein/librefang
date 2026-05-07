@@ -4627,6 +4627,7 @@ dependencies = [
 name = "librefang-kernel-metering"
 version = "2026.5.8-beta.10"
 dependencies = [
+ "arc-swap",
  "librefang-memory",
  "librefang-runtime",
  "librefang-types",

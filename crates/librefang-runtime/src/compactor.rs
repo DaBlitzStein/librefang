@@ -1098,6 +1098,7 @@ mod tests {
                         output_tokens: 50,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -1171,6 +1172,7 @@ mod tests {
                         output_tokens: 50,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -1281,6 +1283,7 @@ mod tests {
                         output_tokens: 100,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -1498,6 +1501,7 @@ mod tests {
                         output_tokens: 20,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
