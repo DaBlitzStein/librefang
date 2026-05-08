@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use crate::KernelApi;
 use librefang_channels::types::SenderContext;
 use librefang_runtime::agent_loop::{run_agent_loop, AgentLoopResult};
 use librefang_runtime::kernel_handle::prelude::*;
@@ -421,6 +422,7 @@ impl LibreFangKernel {
             let bc = self.budget_config();
             if let Some(pb) = bc.providers.get(provider.as_str()) {
                 self.metering
+                    .engine
                     .check_provider_budget(provider, pb)
                     .map_err(KernelError::LibreFang)?;
             }
@@ -841,8 +843,9 @@ impl LibreFangKernel {
             let provider = &entry.manifest.model.provider;
             let bc = self.budget_config();
             if let Some(pb) = bc.providers.get(provider.as_str()) {
-                if let Err(e) = self.metering.check_provider_budget(provider, pb) {
-                    self.scheduler
+                if let Err(e) = self.metering.engine.check_provider_budget(provider, pb) {
+                    self.agents
+                        .scheduler
                         .release_reservation(agent_id, token_reservation);
                     usd_reservation.release();
                     return Err(KernelError::LibreFang(e));

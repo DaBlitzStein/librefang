@@ -13,7 +13,7 @@
 //! visibility surgery.
 
 use super::*;
-use crate::MeteringSubsystemApi;
+use crate::{KernelApi, MeteringSubsystemApi};
 
 impl LibreFangKernel {
     /// Spawn a new agent from a manifest, optionally linking to a parent agent.
