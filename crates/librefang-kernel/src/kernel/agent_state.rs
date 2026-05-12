@@ -528,34 +528,6 @@ impl LibreFangKernel {
         Ok(())
     }
 
-    /// Update an agent's schedule mode and restart its background loop so
-    /// the change takes effect immediately, without a daemon restart.
-    ///
-    /// Steps:
-    /// 1. Persist the new `ScheduleMode` to the in-memory registry entry
-    ///    (snapshots the previous schedule for rollback on persist failure).
-    /// 2. Save the updated manifest to SQLite. Rollback the registry edit if
-    ///    this fails so the runtime state and the persisted state cannot
-    ///    drift.
-    /// 3. Write the updated manifest back to `agent.toml` on disk so the
-    ///    on-disk source-of-truth doesn't override the dashboard change on
-    ///    next boot (refs #996, #1018). Best-effort — failure is logged but
-    ///    does not propagate; the authoritative copy lives in SQLite.
-    /// 4. Stop any currently-running background loop for the agent
-    ///    (idempotent — no-op if none is running). This is required for the
-    ///    Continuous → Reactive and Periodic → Reactive transitions to
-    ///    actually stop ticking.
-    /// 5. Start the new background loop if the new schedule is non-Reactive.
-    ///    Reactive agents have no background loop, so step 4 alone is the
-    ///    full transition.
-    ///
-    /// This is the kernel-level wrapper around
-    /// [`AgentRegistry::update_schedule`]; callers (notably the dashboard
-    /// PATCH handler) should go through here rather than mutating the
-    /// registry directly, otherwise the runtime keeps running the previous
-    /// schedule until the daemon restarts (#4984). Persistence (SQLite +
-    /// disk) is handled internally, so callers do not need a follow-up
-    /// `save_agent` / `persist_manifest_to_disk` pair.
     pub fn set_agent_schedule(
         self: &Arc<Self>,
         agent_id: AgentId,
@@ -580,8 +552,6 @@ impl LibreFangKernel {
 
         if let Some(entry) = self.agents.registry.get(agent_id) {
             if let Err(e) = self.memory.substrate.save_agent(&entry) {
-                // Rollback the in-memory schedule so persisted + runtime
-                // state stay in sync.
                 let _ = self
                     .agents
                     .registry
@@ -590,22 +560,9 @@ impl LibreFangKernel {
             }
         }
 
-        // Mirror the SQLite write to `agent.toml` on disk so a daemon
-        // restart doesn't replay the stale on-disk manifest over the
-        // dashboard edit (#996, #1018). Best-effort: failures are logged
-        // inside `persist_manifest_to_disk`.
         self.persist_manifest_to_disk(agent_id);
-
-        // Stop the previous loop (no-op if none was running, e.g. agent was
-        // previously Reactive) so a Reactive transition actually halts the
-        // ticker, and a Continuous-N → Continuous-M transition picks up the
-        // new interval rather than continuing on the old one.
         self.workflows.background.stop_agent(agent_id);
 
-        // Start the new loop. start_background_for_agent is itself a no-op
-        // for `ScheduleMode::Reactive`, so we don't need to branch here —
-        // but Proactive triggers ARE registered inside that call, so the
-        // call must happen for every non-Reactive mode.
         if !matches!(schedule, librefang_types::agent::ScheduleMode::Reactive) {
             Arc::clone(self).start_background_for_agent(agent_id, &agent_name, &schedule);
         }
@@ -615,6 +572,34 @@ impl LibreFangKernel {
             agent = %agent_name,
             "Agent schedule updated and background loop restarted",
         );
+        Ok(())
+    }
+
+    /// Update an agent's channel allowlist. Empty = all channels (backward compat).
+    pub fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
+        let prev_channels = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.channels.clone());
+
+        self.agents
+            .registry
+            .update_channels(agent_id, channels.clone())
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
+                if let Some(p_channels) = prev_channels {
+                    let _ = self.agents.registry.update_channels(agent_id, p_channels);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
+        }
+
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
+        info!(agent_id = %agent_id, channels = ?channels, "Agent channels updated");
         Ok(())
     }
 
