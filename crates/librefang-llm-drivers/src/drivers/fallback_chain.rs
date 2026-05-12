@@ -131,13 +131,14 @@ impl FallbackChain {
                 Err(e) => {
                     let reason = e.failover_reason();
 
-                    if matches!(reason, FailoverReason::RateLimit(_))
-                        && attempts < MAX_RATE_LIMIT_RETRIES
-                    {
-                        // Extract the suggested retry delay from RateLimited or
-                        // Overloaded variants (both now classify as RateLimit);
-                        // fall back to the configured default when the hint is
-                        // absent or zero.
+                    let retryable = matches!(
+                        reason,
+                        FailoverReason::RateLimit(_)
+                            | FailoverReason::HttpError
+                            | FailoverReason::Timeout
+                    );
+
+                    if retryable && attempts < MAX_RATE_LIMIT_RETRIES {
                         let sleep_ms = match &e {
                             LlmError::RateLimited { retry_after_ms, .. } if *retry_after_ms > 0 => {
                                 *retry_after_ms
@@ -154,7 +155,7 @@ impl FallbackChain {
                             attempt = attempts + 1,
                             sleep_ms,
                             reason = ?reason,
-                            "FallbackChain: rate-limited, sleeping before retry"
+                            "FallbackChain: transient error, retrying before failover"
                         );
 
                         tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
@@ -162,8 +163,6 @@ impl FallbackChain {
                         continue;
                     }
 
-                    // Any other reason (or rate-limit retries exhausted): return error
-                    // to the outer loop which will decide whether to skip or propagate.
                     return Err(e);
                 }
             }
