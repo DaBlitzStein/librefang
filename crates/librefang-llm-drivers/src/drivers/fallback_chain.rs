@@ -127,7 +127,8 @@ impl FallbackChain {
             }
 
             match entry.driver.complete(req).await {
-                Ok(resp) => {
+                Ok(mut resp) => {
+                    resp.actual_provider = Some(entry.provider_name.clone());
                     return Ok(resp);
                 }
                 Err(e) => {
@@ -179,7 +180,8 @@ impl LlmDriver for FallbackChain {
 
         for entry in &self.entries {
             match self.try_entry(entry, request.clone()).await {
-                Ok(resp) => {
+                Ok(mut resp) => {
+                    resp.actual_provider = Some(entry.provider_name.clone());
                     return Ok(resp);
                 }
                 Err(e) => {
@@ -278,8 +280,9 @@ impl LlmDriver for FallbackChain {
             // Stream does not get rate-limit retry (streaming mid-response retry
             // is not supported); any error here triggers the skip/propagate logic.
             match entry.driver.stream(req, intercept_tx).await {
-                Ok(resp) => {
+                Ok(mut resp) => {
                     let _ = relay_handle.await;
+                    resp.actual_provider = Some(entry.provider_name.clone());
                     return Ok(resp);
                 }
                 Err(e) => {
@@ -352,6 +355,7 @@ mod tests {
                 output_tokens: 3,
                 ..Default::default()
             },
+            actual_provider: None,
         }
     }
 
