@@ -559,21 +559,6 @@ export function AgentsPage() {
 
   const providersQuery = useProviders();
 
-  // Global skill registry — used to cross-reference descriptions for the
-  // names listed in the agent's `skills` allowlist (issue #4925). The
-  // hook is gated on detail-panel selection so the list isn't fetched
-  // when no agent is open. `staleTime` from `useSkills` defaults to
-  // 30s, matching SkillsPage, so opening multiple agents in quick
-  // succession reuses the cache.
-  const skillsQuery = useSkills({ enabled: !!detailAgent });
-  const skillDescriptionByName = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const s of skillsQuery.data ?? []) {
-      if (s.description) map.set(s.name, s.description);
-    }
-    return map;
-  }, [skillsQuery.data]);
-
   const configuredProviders = useMemo(
     () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
     [providersQuery.data],
@@ -1327,18 +1312,11 @@ export function AgentsPage() {
               <>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {available.map((s) => (
-                    <div
+                    <AgentSkillItem
                       key={s}
-                      className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
-                        <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                          {skillDescMap.get(s) ?? t("agents.detail.skill_included", { defaultValue: "included" })}
-                        </div>
-                      </div>
-                      <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
-                    </div>
+                      name={s}
+                      description={skillDescMap.get(s)}
+                    />
                   ))}
                 </div>
                 <button
@@ -1399,19 +1377,12 @@ export function AgentsPage() {
                   {available
                     .filter((s) => !draft.includes(s))
                     .map((s) => (
-                      <div
+                      <AgentSkillItem
                         key={s}
+                        name={s}
+                        description={skillDescMap.get(s)}
                         onClick={() => handleToggleSkill(s)}
-                        className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
-                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                            {skillDescMap.get(s) ?? t("agents.detail.skill_click_assign", { defaultValue: "click to assign" })}
-                          </div>
-                        </div>
-                        <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
-                      </div>
+                      />
                     ))}
                 </div>
               </>
