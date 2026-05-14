@@ -533,8 +533,6 @@ export function AgentsPage() {
     enabled: !!detailAgent && agentTab === "channels",
   });
   const setAgentChannelsMutation = useSetAgentChannels();
-  // Full skills list for description cross-reference in Skills tab
-  const allSkillsQuery = useSkills({ enabled: !!detailAgent && agentTab === "skills" });
   // Full MCP servers list for description cross-reference in MCP tab
   const allMcpServersQuery = useMcpServers({ enabled: !!detailAgent && agentTab === "mcp" });
   // Per-agent session list — Conversation tab uses this directly. The
@@ -1267,14 +1265,7 @@ export function AgentsPage() {
 
   // ---------- Skills tab — local draft + explicit Save button
 
-  // Cross-reference full skills list for descriptions
-  const skillDescMap = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const s of allSkillsQuery.data ?? []) {
-      if (s.name && s.description) map.set(s.name, s.description);
-    }
-    return map;
-  }, [allSkillsQuery.data]);
+  // Use upstream's skillDescriptionByName for skill descriptions
 
   // Cross-reference MCP servers for connection info
   const mcpDescMap = useMemo(() => {
@@ -1366,18 +1357,11 @@ export function AgentsPage() {
               <>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {available.map((s) => (
-                    <div
+                    <AgentSkillItem
                       key={s}
-                      className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
-                        <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                          {skillDescMap.get(s) ?? t("agents.detail.skill_included", { defaultValue: "included" })}
-                        </div>
-                      </div>
-                      <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
-                    </div>
+                      name={s}
+                      description={skillDescriptionByName.get(s)}
+                    />
                   ))}
                 </div>
                 <button
@@ -1415,7 +1399,7 @@ export function AgentsPage() {
                     <div className="min-w-0 flex-1">
                       <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
                       <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                        {skillDescMap.get(s) ?? t("agents.detail.skill_assigned", { defaultValue: "assigned" })}
+                        {skillDescriptionByName.get(s) ?? t("agents.detail.skill_assigned", { defaultValue: "assigned" })}
                       </div>
                     </div>
                     <button
@@ -1438,19 +1422,12 @@ export function AgentsPage() {
                   {available
                     .filter((s) => !draft.includes(s))
                     .map((s) => (
-                      <div
+                      <AgentSkillItem
                         key={s}
+                        name={s}
+                        description={skillDescriptionByName.get(s)}
                         onClick={() => handleToggleSkill(s)}
-                        className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
-                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                            {skillDescMap.get(s) ?? t("agents.detail.skill_click_assign", { defaultValue: "click to assign" })}
-                          </div>
-                        </div>
-                        <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
-                      </div>
+                      />
                     ))}
                 </div>
               </>
