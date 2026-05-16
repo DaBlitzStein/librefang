@@ -1877,8 +1877,40 @@ impl ChannelAdapter for TelegramAdapter {
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        // Validate token first (fail fast) and store bot username for mention detection
-        let bot_name = self.validate_token().await?;
+        // Validate token with exponential backoff — transient DNS / network errors
+        // on startup (e.g., container not yet online) should not permanently kill
+        // the bridge.  We retry up to 10 times before propagating the error.
+        let bot_name = {
+            let max_attempts: u32 = 10;
+            let max_backoff = Duration::from_secs(60);
+            let mut backoff = Duration::from_secs(2);
+            let mut last_err: Box<dyn std::error::Error + Send + Sync> =
+                "validate_token: no attempt made".into();
+            let mut succeeded = false;
+            let mut result_name = String::new();
+            for attempt in 1..=max_attempts {
+                match self.validate_token().await {
+                    Ok(name) => {
+                        result_name = name;
+                        succeeded = true;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Telegram validate_token attempt {attempt}/{max_attempts} failed: {e}, \
+                             retrying in {backoff:?}"
+                        );
+                        last_err = e;
+                        tokio::time::sleep(backoff).await;
+                        backoff = std::cmp::min(backoff * 2, max_backoff);
+                    }
+                }
+            }
+            if !succeeded {
+                return Err(last_err);
+            }
+            result_name
+        };
         let _ = self.bot_username.set(bot_name.clone());
         info!("Telegram bot @{bot_name} connected");
 
