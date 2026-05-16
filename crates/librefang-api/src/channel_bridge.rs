@@ -3981,21 +3981,14 @@ pub async fn start_channel_bridge_with_config(
                 started_names.push(name);
             }
             Err(e) => {
-                // Only remove the plain key if this adapter owns it — removing
-                // it unconditionally would discard a working fallback inserted
-                // by an earlier adapter in this batch.
-                if owns_plain_key {
-                    kernel.channel_adapters_ref().remove(&name);
-                    // Release ownership so the next adapter of the same channel
-                    // type can claim the plain key as fallback.
-                    plain_key_owners.remove(&name);
-                }
-                if let Some(ref aid) = account_id {
-                    kernel
-                        .channel_adapters_ref()
-                        .remove(&format!("{name}:{aid}"));
-                }
-                error!("Failed to start {name} bridge: {e}");
+                // validate_token already retried 3 times inline (15s window).
+                // Keep the adapter registered in the kernel so agents can still
+                // route to it — the getUpdates polling loop inside the adapter
+                // will retry on its own backoff once connectivity is restored.
+                // Log as warn rather than error so a transient boot-time network
+                // hiccup doesn't page on-call unnecessarily.
+                warn!("Failed to start {name} bridge (adapter kept registered, will retry via polling): {e}");
+                started_names.push(name);
             }
         }
     }
