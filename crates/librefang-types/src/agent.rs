@@ -974,8 +974,16 @@ pub struct AgentManifest {
     /// LLM model configuration.
     pub model: ModelConfig,
     /// Fallback model chain — tried in order if the primary model fails.
-    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
-    pub fallback_models: Vec<FallbackModel>,
+    ///
+    /// - `None`  (key absent from agent.toml) → inherit global `[[fallback_providers]]`
+    /// - `Some([])` (key present but empty)   → no fallback at all (agent opts out)
+    /// - `Some([…])`                           → use only these agent-level fallbacks
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::option_vec_lenient"
+    )]
+    pub fallback_models: Option<Vec<FallbackModel>>,
     /// Resource quotas.
     pub resources: ResourceQuota,
     /// Priority level.
@@ -1411,7 +1419,7 @@ impl Default for AgentManifest {
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),
             model: ModelConfig::default(),
-            fallback_models: Vec::new(),
+            fallback_models: None,
             resources: ResourceQuota::default(),
             priority: Priority::default(),
             capabilities: ManifestCapabilities::default(),
@@ -2341,19 +2349,19 @@ mod tests {
     fn test_manifest_with_new_fields() {
         let manifest = AgentManifest {
             profile: Some(ToolProfile::Coding),
-            fallback_models: vec![FallbackModel {
+            fallback_models: Some(vec![FallbackModel {
                 provider: "groq".to_string(),
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
                 extra_params: std::collections::HashMap::new(),
-            }],
+            }]),
             ..Default::default()
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let back: AgentManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.profile, Some(ToolProfile::Coding));
-        assert_eq!(back.fallback_models.len(), 1);
+        assert_eq!(back.fallback_models.as_ref().map_or(0, |v| v.len()), 1);
     }
 
     #[test]

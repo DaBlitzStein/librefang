@@ -82,6 +82,74 @@ where
     deserializer.deserialize_any(VecLenientVisitor(PhantomData))
 }
 
+/// Deserialize an `Option<Vec<T>>` where:
+///
+/// - A missing key (`None` / `unit`) deserializes as `None` (field was not set).
+/// - An empty sequence `[]` deserializes as `Some(vec![])` (field was explicitly set to empty).
+/// - A non-empty sequence deserializes as `Some(vec![…])`.
+/// - Any other non-sequence type (map, int, bool, string) deserializes as `None` (lenient compat).
+///
+/// This lets callers distinguish "key absent" from "key explicitly set to []".
+pub fn option_vec_lenient<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct OptionVecLenientVisitor<T>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> de::Visitor<'de> for OptionVecLenientVisitor<T> {
+        type Value = Option<Vec<T>>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("an optional sequence")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut vec = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(item) = seq.next_element()? {
+                vec.push(item);
+            }
+            Ok(Some(vec))
+        }
+
+        // Non-sequence types: treat as "not set" for backward compat
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            while let Some((_, _)) = map.next_entry::<de::IgnoredAny, de::IgnoredAny>()? {}
+            Ok(None)
+        }
+
+        fn visit_i64<E: de::Error>(self, _v: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_u64<E: de::Error>(self, _v: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E: de::Error>(self, _v: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_str<E: de::Error>(self, _v: &str) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_bool<E: de::Error>(self, _v: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(OptionVecLenientVisitor(PhantomData))
+}
+
 /// Deserialize a `HashMap<K, V>` leniently: if the stored value is not a map
 /// (e.g., it's a sequence, integer, string, bool, or null), return an empty
 /// HashMap instead of failing.
