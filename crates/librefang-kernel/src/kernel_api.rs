@@ -464,11 +464,13 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         model: &str,
         explicit_provider: Option<&str>,
     ) -> KernelResult<()>;
+    /// Returns a per-agent partial-failure list `(agent_name, error)`;
+    /// empty means every eligible agent migrated cleanly.
     fn sync_default_model_agents(
         &self,
         old_provider: &str,
         dm: &librefang_types::config::DefaultModelConfig,
-    );
+    ) -> Vec<(String, String)>;
     fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>;
     fn update_hand_agent_runtime_override(
         &self,
@@ -1210,8 +1212,8 @@ impl KernelApi for LibreFangKernel {
         &self,
         old_provider: &str,
         dm: &librefang_types::config::DefaultModelConfig,
-    ) {
-        Self::sync_default_model_agents(self, old_provider, dm);
+    ) -> Vec<(String, String)> {
+        Self::sync_default_model_agents(self, old_provider, dm)
     }
     fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
         <Self as crate::AgentSubsystemApi>::traces(self)
