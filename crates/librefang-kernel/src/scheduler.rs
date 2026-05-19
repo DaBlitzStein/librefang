@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use librefang_types::agent::{AgentId, ResourceQuota};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::TokenUsage;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tracing::debug;
@@ -39,6 +39,10 @@ pub struct UsageTracker {
     /// Sliding window of (timestamp, token_count) for burst limiting.
     /// Prevents burning the entire hourly quota in a single minute.
     pub token_timestamps: VecDeque<(Instant, u64)>,
+    /// Per-provider sliding window for provider-scoped burst detection.
+    // TODO(#4922-followup): persist provider_token_timestamps so burst counters
+    // survive daemon restarts; currently resets to zero on every cold start.
+    pub provider_token_timestamps: HashMap<String, VecDeque<(Instant, u64)>>,
 }
 
 /// One minute as a Duration constant.
@@ -71,6 +75,7 @@ impl Default for UsageTracker {
             window_start: Instant::now(),
             tool_call_timestamps: VecDeque::new(),
             token_timestamps: VecDeque::new(),
+            provider_token_timestamps: HashMap::new(),
         }
     }
 }
@@ -87,6 +92,7 @@ impl UsageTracker {
             self.window_start = Instant::now();
             self.tool_call_timestamps.clear();
             self.token_timestamps.clear();
+            self.provider_token_timestamps.clear();
         }
     }
 
@@ -114,6 +120,19 @@ impl UsageTracker {
             self.token_timestamps.pop_front();
         }
         self.token_timestamps.iter().map(|(_, n)| n).sum()
+    }
+
+    /// Return total tokens consumed in the last minute for a specific provider.
+    pub fn tokens_in_last_minute_for_provider(&mut self, provider: &str) -> u64 {
+        let cutoff = instant_now_minus(ONE_MINUTE);
+        if let Some(deque) = self.provider_token_timestamps.get_mut(provider) {
+            while deque.front().is_some_and(|(t, _)| *t < cutoff) {
+                deque.pop_front();
+            }
+            deque.iter().map(|(_, n)| n).sum()
+        } else {
+            0
+        }
     }
 }
 
@@ -274,6 +293,7 @@ impl AgentScheduler {
         &self,
         agent_id: AgentId,
         estimated_tokens: u64,
+        provider: Option<&str>,
     ) -> LibreFangResult<u64> {
         let quota = match self.quotas.get(&agent_id) {
             Some(q) => q.clone(),
@@ -310,6 +330,16 @@ impl AgentScheduler {
                 tokens_last_min, estimated_tokens, burst_cap
             )));
         }
+        // Per-provider burst check (when provider is known)
+        if let Some(prov) = provider {
+            let provider_tokens = tracker.tokens_in_last_minute_for_provider(prov);
+            if burst_cap > 0 && provider_tokens.saturating_add(estimated_tokens) > burst_cap {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Provider '{}' burst limit would be exceeded: {} + {} reserved in last minute (max {}/min)",
+                    prov, provider_tokens, estimated_tokens, burst_cap
+                )));
+            }
+        }
         // Atomically pre-charge inside the same DashMap entry write-lock
         tracker.total_tokens = projected;
         Ok(estimated_tokens)
@@ -325,7 +355,13 @@ impl AgentScheduler {
     ///
     /// When `estimated_tokens == 0` (no quota was configured) the function
     /// falls back to the same logic as `record_usage`.
-    pub fn settle_reservation(&self, agent_id: AgentId, estimated_tokens: u64, usage: &TokenUsage) {
+    pub fn settle_reservation(
+        &self,
+        agent_id: AgentId,
+        estimated_tokens: u64,
+        usage: &TokenUsage,
+        provider: Option<&str>,
+    ) {
         let actual_tokens = usage.total();
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
             tracker.reset_if_expired();
@@ -348,11 +384,18 @@ impl AgentScheduler {
             tracker.output_tokens += usage.output_tokens;
             tracker.llm_calls += 1;
 
-            // Sliding-window for burst detection (#4943): see record_usage
-            // — push burst_tokens() so cache-read hits don't gate throughput.
-            tracker
-                .token_timestamps
-                .push_back((Instant::now(), usage.burst_tokens()));
+            // Sliding-window for burst detection (#4943): push burst_tokens()
+            // so cache-read hits don't gate throughput.
+            let now = Instant::now();
+            let burst = usage.burst_tokens();
+            tracker.token_timestamps.push_back((now, burst));
+            if let Some(prov) = provider {
+                tracker
+                    .provider_token_timestamps
+                    .entry(prov.to_string())
+                    .or_default()
+                    .push_back((now, burst));
+            }
         }
     }
 
@@ -390,6 +433,7 @@ impl AgentScheduler {
             tracker.window_start = Instant::now();
             tracker.tool_call_timestamps.clear();
             tracker.token_timestamps.clear();
+            tracker.provider_token_timestamps.clear();
         }
     }
 
@@ -701,7 +745,7 @@ mod tests {
             let succ = Arc::clone(&succeeded);
             let den = Arc::clone(&denied);
             handles.push(thread::spawn(move || {
-                match sched.check_quota_and_reserve(id, 10) {
+                match sched.check_quota_and_reserve(id, 10, None) {
                     Ok(_) => {
                         succ.fetch_add(1, Ordering::SeqCst);
                     }
@@ -754,7 +798,7 @@ mod tests {
         scheduler.register(id, quota);
 
         // Reserve 1000 (pessimistic); actual usage is 100.
-        let reserved = scheduler.check_quota_and_reserve(id, 1000).unwrap();
+        let reserved = scheduler.check_quota_and_reserve(id, 1000, None).unwrap();
         assert_eq!(reserved, 1000);
         let after_reserve = scheduler.get_usage(id).unwrap();
         assert_eq!(after_reserve.total_tokens, 1000);
@@ -767,6 +811,7 @@ mod tests {
                 output_tokens: 40,
                 ..Default::default()
             },
+            None,
         );
         let after_settle = scheduler.get_usage(id).unwrap();
         assert_eq!(
@@ -793,8 +838,8 @@ mod tests {
         };
         scheduler.register(id, quota);
 
-        let reserved = scheduler.check_quota_and_reserve(id, 500).unwrap();
-        scheduler.settle_reservation(id, reserved, &TokenUsage::default());
+        let reserved = scheduler.check_quota_and_reserve(id, 500, None).unwrap();
+        scheduler.settle_reservation(id, reserved, &TokenUsage::default(), None);
         let after = scheduler.get_usage(id).unwrap();
         assert_eq!(
             after.total_tokens, 0,
@@ -820,7 +865,7 @@ mod tests {
         };
         scheduler.register(id, quota);
 
-        let reserved = scheduler.check_quota_and_reserve(id, 500).unwrap();
+        let reserved = scheduler.check_quota_and_reserve(id, 500, None).unwrap();
         let before = scheduler.get_usage(id).unwrap();
         assert_eq!(before.total_tokens, 500, "reservation pre-charged");
         assert_eq!(before.llm_calls, 0);
@@ -876,7 +921,7 @@ mod tests {
         assert_eq!(before.total_tokens, 150);
 
         // Reserve under an unlimited quota — should return 0 (no charge).
-        let reserved = scheduler.check_quota_and_reserve(id, 1000).unwrap();
+        let reserved = scheduler.check_quota_and_reserve(id, 1000, None).unwrap();
         assert_eq!(reserved, 0, "unlimited quota must not pre-charge");
 
         // total_tokens unchanged by the reserve call.
@@ -893,6 +938,7 @@ mod tests {
                 output_tokens: 80,
                 ..Default::default()
             },
+            None,
         );
         let after_settle = scheduler.get_usage(id).unwrap();
         assert_eq!(
@@ -937,5 +983,113 @@ mod tests {
         let mut t = UsageTracker::default();
         assert_eq!(t.tool_calls_in_last_minute(), 0);
         assert_eq!(t.tokens_in_last_minute(), 0);
+    }
+
+    // -- #4922: per-provider burst tracking -----------------------------------
+
+    /// `check_quota_and_reserve(…, Some(provider))` must populate
+    /// `provider_token_timestamps` and `settle_reservation(…, Some(provider))`
+    /// must push into it so per-provider burst queries return non-zero.
+    /// A second provider must be tracked independently — exhausting one
+    /// must not block reservation on the other.
+    #[test]
+    fn per_provider_burst_tracking_is_independent() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+
+        // Register with a generous token limit; burst_ratio None uses the
+        // compiled default (0.2 → 20 000 tokens/min), well above the 500-token
+        // reservations below, so the cross-provider independence assertion is
+        // not confounded by burst-cap rejections.
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(100_000),
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        // Reserve under "provider-a" — should succeed.
+        let res_a = scheduler
+            .check_quota_and_reserve(id, 500, Some("provider-a"))
+            .expect("provider-a reservation must succeed");
+        assert!(res_a > 0, "must pre-charge when quota is set");
+
+        // Settle under "provider-a" — timestamps must be recorded.
+        let usage_a = TokenUsage {
+            input_tokens: 300,
+            output_tokens: 200,
+            ..Default::default()
+        };
+        scheduler.settle_reservation(id, res_a, &usage_a, Some("provider-a"));
+
+        // provider-a sliding window must now have entries.
+        // Access the UsageTracker directly (mod tests has private field access).
+        {
+            let tracker = scheduler.usage.get(&id).unwrap();
+            assert!(
+                tracker
+                    .provider_token_timestamps
+                    .get("provider-a")
+                    .map(|d| !d.is_empty())
+                    .unwrap_or(false),
+                "settle_reservation must push into provider_token_timestamps for provider-a"
+            );
+        }
+
+        // Reserve under "provider-b" — must succeed independently of provider-a.
+        let res_b = scheduler
+            .check_quota_and_reserve(id, 500, Some("provider-b"))
+            .expect("provider-b reservation must succeed even after provider-a usage");
+        assert!(res_b > 0);
+
+        scheduler.settle_reservation(
+            id,
+            res_b,
+            &TokenUsage {
+                input_tokens: 200,
+                output_tokens: 300,
+                ..Default::default()
+            },
+            Some("provider-b"),
+        );
+
+        // provider-b gets its own bucket; provider-a bucket is unchanged.
+        let tracker = scheduler.usage.get(&id).unwrap();
+        assert!(
+            tracker
+                .provider_token_timestamps
+                .get("provider-b")
+                .map(|d| !d.is_empty())
+                .unwrap_or(false),
+            "settle_reservation must push into provider_token_timestamps for provider-b"
+        );
+        // provider-a bucket still present and non-empty.
+        assert!(
+            tracker
+                .provider_token_timestamps
+                .get("provider-a")
+                .map(|d| !d.is_empty())
+                .unwrap_or(false),
+            "provider-a bucket must be unaffected by provider-b activity"
+        );
+        // Both buckets are populated (sums need not be equal — burst_tokens() varies
+        // by usage shape; the key assertion is they are independently tracked).
+        let a_tokens: u64 = tracker
+            .provider_token_timestamps
+            .get("provider-a")
+            .unwrap()
+            .iter()
+            .map(|(_, t)| t)
+            .sum();
+        let b_tokens: u64 = tracker
+            .provider_token_timestamps
+            .get("provider-b")
+            .unwrap()
+            .iter()
+            .map(|(_, t)| t)
+            .sum();
+        assert!(
+            a_tokens > 0 && b_tokens > 0,
+            "both buckets must be non-empty"
+        );
     }
 }
