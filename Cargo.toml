@@ -71,8 +71,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 # 0.32.1 leaves two copies of `opentelemetry::trace::Tracer` in the
 # tree and breaks `SdkTracer: Tracer` trait bounds in telemetry.rs.
 # dependabot bump #4947 violated this constraint and was reverted.
-opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 # `default-features = false` is critical: opentelemetry-otlp's default feature
 # set enables `http-proto` + `reqwest-blocking-client`, which forces
 # `opentelemetry-http` to pull `reqwest = "0.12"` alongside the workspace
@@ -88,7 +88,7 @@ tracing-opentelemetry = "0.33"
 # note above). 0.31 aligns with `opentelemetry = "0.31"` and uses `http = 1`,
 # matching the workspace `reqwest = "0.13"` http stack — no second http/reqwest
 # tree is introduced.
-opentelemetry-http = "0.31"
+opentelemetry-http = "0.32"
 
 # Prometheus metrics
 metrics = "0.24"
