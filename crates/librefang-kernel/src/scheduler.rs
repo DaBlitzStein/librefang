@@ -40,6 +40,8 @@ pub struct UsageTracker {
     /// Prevents burning the entire hourly quota in a single minute.
     pub token_timestamps: VecDeque<(Instant, u64)>,
     /// Per-provider sliding window for provider-scoped burst detection.
+    // TODO(#4922-followup): persist provider_token_timestamps so burst counters
+    // survive daemon restarts; currently resets to zero on every cold start.
     pub provider_token_timestamps: HashMap<String, VecDeque<(Instant, u64)>>,
 }
 
@@ -981,5 +983,113 @@ mod tests {
         let mut t = UsageTracker::default();
         assert_eq!(t.tool_calls_in_last_minute(), 0);
         assert_eq!(t.tokens_in_last_minute(), 0);
+    }
+
+    // -- #4922: per-provider burst tracking -----------------------------------
+
+    /// `check_quota_and_reserve(…, Some(provider))` must populate
+    /// `provider_token_timestamps` and `settle_reservation(…, Some(provider))`
+    /// must push into it so per-provider burst queries return non-zero.
+    /// A second provider must be tracked independently — exhausting one
+    /// must not block reservation on the other.
+    #[test]
+    fn per_provider_burst_tracking_is_independent() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+
+        // Register with a generous token limit; burst_ratio None uses the
+        // compiled default (0.2 → 20 000 tokens/min), well above the 500-token
+        // reservations below, so the cross-provider independence assertion is
+        // not confounded by burst-cap rejections.
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(100_000),
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        // Reserve under "provider-a" — should succeed.
+        let res_a = scheduler
+            .check_quota_and_reserve(id, 500, Some("provider-a"))
+            .expect("provider-a reservation must succeed");
+        assert!(res_a > 0, "must pre-charge when quota is set");
+
+        // Settle under "provider-a" — timestamps must be recorded.
+        let usage_a = TokenUsage {
+            input_tokens: 300,
+            output_tokens: 200,
+            ..Default::default()
+        };
+        scheduler.settle_reservation(id, res_a, &usage_a, Some("provider-a"));
+
+        // provider-a sliding window must now have entries.
+        // Access the UsageTracker directly (mod tests has private field access).
+        {
+            let tracker = scheduler.usage.get(&id).unwrap();
+            assert!(
+                tracker
+                    .provider_token_timestamps
+                    .get("provider-a")
+                    .map(|d| !d.is_empty())
+                    .unwrap_or(false),
+                "settle_reservation must push into provider_token_timestamps for provider-a"
+            );
+        }
+
+        // Reserve under "provider-b" — must succeed independently of provider-a.
+        let res_b = scheduler
+            .check_quota_and_reserve(id, 500, Some("provider-b"))
+            .expect("provider-b reservation must succeed even after provider-a usage");
+        assert!(res_b > 0);
+
+        scheduler.settle_reservation(
+            id,
+            res_b,
+            &TokenUsage {
+                input_tokens: 200,
+                output_tokens: 300,
+                ..Default::default()
+            },
+            Some("provider-b"),
+        );
+
+        // provider-b gets its own bucket; provider-a bucket is unchanged.
+        let tracker = scheduler.usage.get(&id).unwrap();
+        assert!(
+            tracker
+                .provider_token_timestamps
+                .get("provider-b")
+                .map(|d| !d.is_empty())
+                .unwrap_or(false),
+            "settle_reservation must push into provider_token_timestamps for provider-b"
+        );
+        // provider-a bucket still present and non-empty.
+        assert!(
+            tracker
+                .provider_token_timestamps
+                .get("provider-a")
+                .map(|d| !d.is_empty())
+                .unwrap_or(false),
+            "provider-a bucket must be unaffected by provider-b activity"
+        );
+        // Both buckets are populated (sums need not be equal — burst_tokens() varies
+        // by usage shape; the key assertion is they are independently tracked).
+        let a_tokens: u64 = tracker
+            .provider_token_timestamps
+            .get("provider-a")
+            .unwrap()
+            .iter()
+            .map(|(_, t)| t)
+            .sum();
+        let b_tokens: u64 = tracker
+            .provider_token_timestamps
+            .get("provider-b")
+            .unwrap()
+            .iter()
+            .map(|(_, t)| t)
+            .sum();
+        assert!(
+            a_tokens > 0 && b_tokens > 0,
+            "both buckets must be non-empty"
+        );
     }
 }

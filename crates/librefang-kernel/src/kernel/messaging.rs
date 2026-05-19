@@ -1014,19 +1014,18 @@ impl LibreFangKernel {
         // race where N concurrent callers all pass the check before any of
         // them calls record_usage (#3736).
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
-        let token_reservation =
-            match self
-                .agents
-                .scheduler
-                .check_quota_and_reserve(agent_id, estimated_tokens, None)
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    // Roll back the USD reservation — the call never dispatched.
-                    usd_reservation.release();
-                    return Err(KernelError::LibreFang(e));
-                }
-            };
+        let token_reservation = match self.agents.scheduler.check_quota_and_reserve(
+            agent_id,
+            estimated_tokens,
+            Some(&entry.manifest.model.provider),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                // Roll back the USD reservation — the call never dispatched.
+                usd_reservation.release();
+                return Err(KernelError::LibreFang(e));
+            }
+        };
 
         // Skip suspended agents — cron/triggers should not dispatch to them
         if entry.state == AgentState::Suspended {
@@ -1094,7 +1093,7 @@ impl LibreFangKernel {
                     agent_id,
                     token_reservation,
                     &result.total_usage,
-                    None,
+                    Some(&entry.manifest.model.provider),
                 );
                 usd_reservation.settle();
                 // Record tool calls for rate limiting
@@ -1904,7 +1903,11 @@ impl LibreFangKernel {
         let token_reservation = self
             .agents
             .scheduler
-            .check_quota_and_reserve(agent_id, estimated_tokens, None)
+            .check_quota_and_reserve(
+                agent_id,
+                estimated_tokens,
+                Some(&entry.manifest.model.provider),
+            )
             .map_err(KernelError::LibreFang)?;
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
@@ -1952,7 +1955,7 @@ impl LibreFangKernel {
                             agent_id,
                             token_reservation,
                             &result.total_usage,
-                            None,
+                            Some(&entry_clone.manifest.model.provider),
                         );
                         let _ = kernel_clone
                             .agents
@@ -2781,7 +2784,7 @@ impl LibreFangKernel {
                         agent_id,
                         token_reservation,
                         &result.total_usage,
-                        None,
+                        Some(&manifest.model.provider),
                     );
                     // Record tool calls for rate limiting
                     let tool_count = result.decision_traces.len() as u32;
