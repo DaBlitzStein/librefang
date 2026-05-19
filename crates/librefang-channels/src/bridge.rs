@@ -5363,15 +5363,21 @@ async fn dispatch_with_blocks(
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides);
 
-    // Streaming path: when the adapter supports progressive output, flatten
-    // enriched text blocks into a string and stream the response back.
-    // This ensures file/voice/audio attachments go through the same streaming
-    // pipeline as plain text messages, so Telegram (and other streaming-capable
-    // adapters) receive the full enriched content via the streaming path (#5195).
-    if adapter.supports_streaming() {
-        // Flatten all Text content blocks into the user message string so the
-        // kernel receives the enriched file content (saved path, transcription,
-        // caption, etc.) even though the streaming API only accepts &str.
+    // Streaming path: when the adapter supports progressive output AND every
+    // content block is text, flatten to a string and stream the response back.
+    // This handles file/voice/audio enrichment (whose payload is text) and
+    // matches the plain-text streaming pipeline (#5195).
+    //
+    // When ANY block is non-Text (e.g. Image, ImageFile from a Telegram photo),
+    // the streaming API (`send_message_streaming_with_sender_status` —
+    // `&str`-only) would drop the visual payload entirely. Those calls fall
+    // through to the non-streaming `send_message_with_blocks_and_sender` path
+    // below, which preserves the full `Vec<ContentBlock>` so the LLM actually
+    // receives the image bytes (#5195 regression fix).
+    let all_blocks_are_text = blocks
+        .iter()
+        .all(|b| matches!(b, ContentBlock::Text { .. }));
+    if adapter.supports_streaming() && all_blocks_are_text {
         let text: String = blocks
             .iter()
             .filter_map(|b| {
