@@ -249,6 +249,31 @@ impl OpenAIDriver {
             let mut i = 0;
             while i < blocks.len() {
                 let (bytes, mime, filename) = match &blocks[i] {
+                    // Image / ImageFile blocks whose mime starts with
+                    // "image/" are visual content (photos, screenshots).
+                    // Moonshot's file-upload API does OCR / text extraction
+                    // and rejects raw photos with
+                    // `text extract error: 没有解析出内容`. Skip the upload
+                    // path entirely; `build_request` serialises these as
+                    // `OaiContentPart::ImageUrl` (data: URL base64) and
+                    // Moonshot's vision-capable chat-completions endpoint
+                    // handles them directly. Non-image MIMEs (PDF, text/*)
+                    // that landed in an Image block via a misclassified
+                    // upload still fall through to the file API.
+                    ContentBlock::Image { media_type, data }
+                        if media_type.starts_with("image/") =>
+                    {
+                        let _ = data;
+                        i += 1;
+                        continue;
+                    }
+                    ContentBlock::ImageFile { media_type, path }
+                        if media_type.starts_with("image/") =>
+                    {
+                        let _ = path;
+                        i += 1;
+                        continue;
+                    }
                     ContentBlock::Image { media_type, data } => {
                         let decoded = base64::engine::general_purpose::STANDARD
                             .decode(data)
