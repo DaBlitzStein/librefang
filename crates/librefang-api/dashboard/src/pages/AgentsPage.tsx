@@ -790,6 +790,27 @@ export function AgentsPage() {
     setChannelsDraft(null);
   }, [detailAgent?.id]);
 
+  // Initialize drafts ONCE on first successful query load to avoid the
+  // `draft ?? serverData` race where a late query response can overwrite
+  // in-progress user edits.
+  useEffect(() => {
+    if (skillsDraft === null && agentSkillsQuery.data) {
+      setSkillsDraft([...(agentSkillsQuery.data.assigned ?? [])].sort());
+    }
+  }, [agentSkillsQuery.data, skillsDraft]);
+
+  useEffect(() => {
+    if (mcpDraft === null && agentMcpServersQuery.data) {
+      setMcpDraft([...(agentMcpServersQuery.data.assigned ?? [])].sort());
+    }
+  }, [agentMcpServersQuery.data, mcpDraft]);
+
+  useEffect(() => {
+    if (channelsDraft === null && agentChannelsQuery.data) {
+      setChannelsDraft([...(agentChannelsQuery.data.assigned ?? [])].sort());
+    }
+  }, [agentChannelsQuery.data, channelsDraft]);
+
   const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
     // Row-embedded stats from /api/agents (single grouped SQL pass). The
@@ -1290,8 +1311,9 @@ export function AgentsPage() {
     const isDisabled = mode === "none";
     const isLoading = agentSkillsQuery.isLoading;
 
-    // Initialize draft from server state on first load
-    const draft = skillsDraft ?? serverAssigned;
+    // Draft is initialized via useEffect on first load; fall back to empty
+    // array (not serverAssigned) to avoid the query-race overwrite.
+    const draft = skillsDraft ?? [];
     const isDirty = skillsDraft !== null &&
       (draft.length !== serverAssigned.length || draft.some((s) => !serverAssigned.includes(s)));
 
@@ -1440,20 +1462,18 @@ export function AgentsPage() {
             </button>
           </>
         )}
-        {isDirty && (
-          <div className="flex justify-end mt-2">
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={handleSave}
-              disabled={setAgentSkillsMutation.isPending}
-            >
-              {setAgentSkillsMutation.isPending
-                ? t("common.saving", { defaultValue: "Saving..." })
-                : t("common.save", { defaultValue: "Save" })}
-            </Button>
-          </div>
-        )}
+        <div className="flex justify-end mt-2">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleSave}
+            disabled={!isDirty || setAgentSkillsMutation.isPending}
+          >
+            {setAgentSkillsMutation.isPending
+              ? t("common.saving", { defaultValue: "Saving..." })
+              : t("common.save", { defaultValue: "Save" })}
+          </Button>
+        </div>
       </div>
     );
   };
@@ -1467,7 +1487,7 @@ export function AgentsPage() {
     const usesAll = mode === "all";
     const isLoading = agentMcpServersQuery.isLoading;
 
-    const draft = mcpDraft ?? serverAssigned;
+    const draft = mcpDraft ?? [];
     const isDirty = mcpDraft !== null &&
       (draft.length !== serverAssigned.length || draft.some((s) => !serverAssigned.includes(s)));
 
@@ -1617,20 +1637,18 @@ export function AgentsPage() {
             </button>
           </>
         )}
-        {isDirty && (
-          <div className="flex justify-end mt-2">
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={handleSave}
-              disabled={setAgentMcpServersMutation.isPending}
-            >
-              {setAgentMcpServersMutation.isPending
-                ? t("common.saving", { defaultValue: "Saving..." })
-                : t("common.save", { defaultValue: "Save" })}
-            </Button>
-          </div>
-        )}
+        <div className="flex justify-end mt-2">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleSave}
+            disabled={!isDirty || setAgentMcpServersMutation.isPending}
+          >
+            {setAgentMcpServersMutation.isPending
+              ? t("common.saving", { defaultValue: "Saving..." })
+              : t("common.save", { defaultValue: "Save" })}
+          </Button>
+        </div>
       </div>
     );
   };
@@ -1644,7 +1662,7 @@ export function AgentsPage() {
     const usesAll = mode === "all";
     const isLoading = agentChannelsQuery.isLoading;
 
-    const draft = channelsDraft ?? serverAssigned;
+    const draft = channelsDraft ?? [];
     const isDirty = channelsDraft !== null &&
       (draft.length !== serverAssigned.length || draft.some((c) => !serverAssigned.includes(c)));
 
@@ -1817,20 +1835,18 @@ export function AgentsPage() {
             </button>
           </>
         )}
-        {isDirty && (
-          <div className="flex justify-end mt-2">
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={handleSave}
-              disabled={setAgentChannelsMutation.isPending}
-            >
-              {setAgentChannelsMutation.isPending
-                ? t("common.saving", { defaultValue: "Saving..." })
-                : t("common.save", { defaultValue: "Save" })}
-            </Button>
-          </div>
-        )}
+        <div className="flex justify-end mt-2">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleSave}
+            disabled={!isDirty || setAgentChannelsMutation.isPending}
+          >
+            {setAgentChannelsMutation.isPending
+              ? t("common.saving", { defaultValue: "Saving..." })
+              : t("common.save", { defaultValue: "Save" })}
+          </Button>
+        </div>
       </div>
     );
   };
