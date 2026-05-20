@@ -2213,7 +2213,6 @@ fn apply_channel_proxy<A>(
 // EmailCredentials + resolve_email_credentials removed alongside the
 // in-process adapter. See SIDECAR_CATALOG in routes/channels.rs.
 
-
 /// Start the channel bridge for all configured channels based on kernel config.
 ///
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
@@ -2638,21 +2637,13 @@ pub async fn start_channel_bridge_with_config(
                 started_names.push(name);
             }
             Err(e) => {
-                // Only remove the plain key if this adapter owns it — removing
-                // it unconditionally would discard a working fallback inserted
-                // by an earlier adapter in this batch.
-                if owns_plain_key {
-                    kernel.channel_adapters_ref().remove(&name);
-                    // Release ownership so the next adapter of the same channel
-                    // type can claim the plain key as fallback.
-                    plain_key_owners.remove(&name);
-                }
-                if let Some(ref aid) = account_id {
-                    kernel
-                        .channel_adapters_ref()
-                        .remove(&format!("{name}:{aid}"));
-                }
-                error!("Failed to start {name} bridge: {e}");
+                // Keep the adapter registered so it can be retried on the
+                // next hot-reload cycle — removing it on transient startup
+                // failures (e.g. network blip during token validation) would
+                // make it permanently unavailable until the daemon restarts
+                // (#5111).
+                warn!("Failed to start {name} bridge (will retry on next reload): {e}");
+                started_names.push(name);
             }
         }
     }
