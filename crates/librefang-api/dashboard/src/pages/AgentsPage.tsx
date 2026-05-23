@@ -227,8 +227,7 @@ export function AgentsPage() {
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "mcp" | "channels" | "schedule" | "logs"
-  >("conversation");
+    "conversation" | "memory" | "skills" | "mcp" | "tools" | "schedule" | "logs"  >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
   // popping a drawer; the drawer is only opened when the user explicitly
@@ -263,6 +262,7 @@ export function AgentsPage() {
   const cloneMutation = useCloneAgent();
   const resetSessionMutation = useResetAgentSession();
   const updateToolsMutation = useUpdateAgentTools();
+  const setAgentChannelsMutation = useSetAgentChannels();
   const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
 
@@ -394,7 +394,8 @@ export function AgentsPage() {
   const toolsListQuery = useTools({
     enabled:
       (showToolsEditor && !!toolsEditorAgentId) ||
-      (showCreate && createMode === "form"),
+      (showCreate && createMode === "form") ||
+      (!!detailAgent && agentTab === "tools"),
   });
   const agentToolsQuery = useAgentTools(toolsEditorAgentId ?? "", { enabled: showToolsEditor && !!toolsEditorAgentId });
   const toolsEditorLoading = showToolsEditor && !!toolsEditorAgentId && (toolsListQuery.isLoading || agentToolsQuery.isLoading);
@@ -508,24 +509,11 @@ export function AgentsPage() {
   // (global audit) only had admin lifecycle entries, leaving the tab
   // blank for almost every agent.
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
-  // Per-agent MCP server assignment — backs the MCP tab. Fetches
-  // both the agent's assigned allowlist and all available MCP servers
-  // from the kernel so the tab can show the full picture.
-  const agentMcpServersQuery = useAgentMcpServers(detailAgent?.id ?? "", {
-    enabled: !!detailAgent && agentTab === "mcp",
-  });
-  const setAgentMcpServersMutation = useSetAgentMcpServers();
-  const agentSkillsQuery = useAgentSkills(detailAgent?.id ?? "", {
-    enabled: !!detailAgent && agentTab === "skills",
-  });
-  const setAgentSkillsMutation = useSetAgentSkills();
-  const agentChannelsQuery = useAgentChannels(detailAgent?.id ?? "", {
-    enabled: !!detailAgent && agentTab === "channels",
-  });
-  const setAgentChannelsMutation = useSetAgentChannels();
-  // Full MCP servers list for description cross-reference in MCP tab
-  const allMcpServersQuery = useMcpServers({ enabled: !!detailAgent && agentTab === "mcp" });
-  // Per-agent session list — Conversation tab uses this directly. The
+  // Per-agent tool config — Tools tab. Gated on the tab being active so
+  // we don't hit /api/agents/{id}/tools on every page load.
+  const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "tools",
+  });  // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
   // agent's latest session was often not in the page.
   const agentSessionsQuery = useAgentSessions(detailAgent?.id ?? "");
@@ -886,9 +874,7 @@ export function AgentsPage() {
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
       { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
       { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
-      { id: "mcp",          label: t("agents.tab.mcp",          { defaultValue: "MCP" }),          Icon: Plug },
-      { id: "channels",     label: t("agents.tab.channels",     { defaultValue: "Channels" }),     Icon: Radio },
-      { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
+      { id: "tools",        label: t("agents.tab.tools",        { defaultValue: "Tools" }),        Icon: Wrench },      { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
     ];
 
@@ -1132,10 +1118,9 @@ export function AgentsPage() {
       case "conversation":      return renderConversationTab(agent);
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
-      case "mcp":               return renderMcpTab(agent);
-      case "channels":          return renderChannelsTab(agent);
-      case "schedule":          return renderScheduleTab(agent);
+      case "tools":             return renderToolsTab(agent);      case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
+      case "mcp":               return renderSkillsTab(agent);
     }
   };
 
@@ -1486,6 +1471,155 @@ export function AgentsPage() {
               : t("common.save", { defaultValue: "Save" })}
           </Button>
         </div>
+      </div>
+    );
+  };
+
+  // ---------- Tools tab — grouped builtin + MCP tool list with allow/block toggles
+  const renderToolsTab = (agent: AgentDetail) => {
+    const allTools = toolsListQuery.data ?? [];
+    const agentToolCfg = tabAgentToolsQuery.data;
+    const isLoading = toolsListQuery.isLoading || tabAgentToolsQuery.isLoading;
+
+    // Group tools by source. MCP tools are named `mcp_{server}_{tool}` so
+    // we derive the server from the prefix when the API-level `mcp_server`
+    // field is absent (backwards compat with older daemons).
+    type ToolEntry = ToolDefinition & { _group: string };
+    const grouped = new Map<string, ToolEntry[]>();
+    for (const tool of allTools) {
+      let group: string;
+      if (tool.source === "builtin" || (!tool.source && !tool.name.startsWith("mcp_"))) {
+        group = "Builtin";
+      } else {
+        const server = tool.mcp_server
+          ?? tool.name.replace(/^mcp_/, "").split("_")[0]
+          ?? "mcp";
+        group = `MCP: ${server}`;
+      }
+      if (!grouped.has(group)) grouped.set(group, []);
+      grouped.get(group)!.push({ ...tool, _group: group });
+    }
+    // Sort groups: Builtin first, then MCP servers alphabetically.
+    const sortedGroups = [...grouped.entries()].sort(([a], [b]) => {
+      if (a === "Builtin") return -1;
+      if (b === "Builtin") return 1;
+      return a.localeCompare(b);
+    });
+
+    const allowlist = agentToolCfg?.tool_allowlist ?? [];
+    const blocklist = agentToolCfg?.tool_blocklist ?? [];
+    const declared = agentToolCfg?.capabilities_tools ?? [];
+
+    const isAllowed = (name: string) => allowlist.length > 0 && allowlist.includes(name);
+    const isBlocked = (name: string) => blocklist.includes(name);
+    const isDeclared = (name: string) =>
+      declared.length === 0 || declared.includes("*") || declared.includes(name);
+
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.tools_label", { defaultValue: "Tools" })}
+            {" · "}
+            {isLoading ? "…" : allTools.length}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={<Wrench className="h-3.5 w-3.5" />}
+            onClick={() => {
+              setToolsEditorAgentId(agent.id);
+              setShowToolsEditor(true);
+            }}
+          >
+            {t("agents.detail.tools_configure", { defaultValue: "Configure" })}
+          </Button>
+        </div>
+
+        {isLoading ? (
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
+        ) : allTools.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_tools", { defaultValue: "No tools available." })}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {sortedGroups.map(([groupName, groupTools]) => (
+              <div key={groupName} className="flex flex-col gap-1.5">
+                <div className="text-[10px] uppercase font-semibold tracking-[0.06em] text-text-dim/70 flex items-center gap-1.5">
+                  {groupName.startsWith("MCP:") ? (
+                    <Cpu className="h-3 w-3" />
+                  ) : (
+                    <Wrench className="h-3 w-3" />
+                  )}
+                  {groupName}
+                  <span className="font-mono text-[9px] text-text-dim/50">· {groupTools.length}</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {groupTools.map((tool) => {
+                    const allowed = isAllowed(tool.name);
+                    const blocked = isBlocked(tool.name);
+                    const active = isDeclared(tool.name) && !blocked;
+                    return (
+                      <div
+                        key={tool.name}
+                        className={`flex flex-col gap-0.5 rounded-md border px-3 py-2 transition-colors ${
+                          blocked
+                            ? "border-error/20 bg-error/5 opacity-60"
+                            : allowed
+                              ? "border-brand/30 bg-brand/5"
+                              : active
+                                ? "border-border-subtle bg-main/40"
+                                : "border-border-subtle bg-main/20 opacity-70"
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="font-mono text-[11.5px] font-medium text-text-main truncate flex-1 min-w-0">
+                            {tool.name}
+                          </span>
+                          {blocked && (
+                            <span className="inline-flex items-center rounded px-1 py-0.5 text-[9px] font-semibold bg-error/10 text-error shrink-0">
+                              blocked
+                            </span>
+                          )}
+                          {allowed && !blocked && (
+                            <span className="inline-flex items-center rounded px-1 py-0.5 text-[9px] font-semibold bg-brand/10 text-brand shrink-0">
+                              allowed
+                            </span>
+                          )}
+                          {groupName === "Builtin" && (
+                            <span className="inline-flex items-center rounded px-1 py-0.5 text-[9px] font-semibold bg-main text-text-dim/60 shrink-0">
+                              builtin
+                            </span>
+                          )}
+                        </div>
+                        {tool.description && (
+                          <span className="font-mono text-[10.5px] text-text-dim/70 leading-snug line-clamp-2">
+                            {tool.description}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!isLoading && (declared.length > 0 || allowlist.length > 0 || blocklist.length > 0) && (
+          <div className="rounded-md border border-border-subtle bg-main/40 px-3 py-2 text-[10.5px] text-text-dim/70 font-mono">
+            {declared.length > 0 && (
+              <span>{declared.length} declared</span>
+            )}
+            {allowlist.length > 0 && (
+              <span>{declared.length > 0 ? " · " : ""}{allowlist.length} allowed</span>
+            )}
+            {blocklist.length > 0 && (
+              <span>{(declared.length > 0 || allowlist.length > 0) ? " · " : ""}{blocklist.length} blocked</span>
+            )}
+          </div>
+        )}
       </div>
     );
   };
