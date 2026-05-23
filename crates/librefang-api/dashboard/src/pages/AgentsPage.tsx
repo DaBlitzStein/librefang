@@ -227,7 +227,7 @@ export function AgentsPage() {
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "mcp" | "tools" | "schedule" | "logs"  >("conversation");
+    "conversation" | "memory" | "skills" | "mcp" | "tools" | "channels" | "schedule" | "logs"  >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
   // popping a drawer; the drawer is only opened when the user explicitly
@@ -263,6 +263,12 @@ export function AgentsPage() {
   const resetSessionMutation = useResetAgentSession();
   const updateToolsMutation = useUpdateAgentTools();
   const setAgentChannelsMutation = useSetAgentChannels();
+  const agentChannelsQuery = useAgentChannels(detailAgent?.id ?? "", { enabled: !!detailAgent });
+  const setAgentMcpServersMutation = useSetAgentMcpServers();
+  const agentMcpServersQuery = useAgentMcpServers(detailAgent?.id ?? "", { enabled: !!detailAgent });
+  const agentSkillsQuery = useAgentSkills(detailAgent?.id ?? "", { enabled: !!detailAgent });
+  const setAgentSkillsMutation = useSetAgentSkills();
+  const allMcpServersQuery = useMcpServers({ enabled: !!detailAgent });
   const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
 
@@ -1118,9 +1124,11 @@ export function AgentsPage() {
       case "conversation":      return renderConversationTab(agent);
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
-      case "tools":             return renderToolsTab(agent);      case "schedule":          return renderScheduleTab(agent);
+      case "tools":             return renderToolsTab(agent);
+      case "mcp":               return renderMcpTab(agent);
+      case "channels":          return renderChannelsTab(agent);
+      case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
-      case "mcp":               return renderSkillsTab(agent);
     }
   };
 
