@@ -2778,6 +2778,7 @@ pub async fn get_agent(
             "channels": entry.manifest.channels,
             "channels_mode": if entry.manifest.channels.is_empty() { "all" } else { "allowlist" },
             "fallback_models": entry.manifest.fallback_models,
+            "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
         })),
     )
@@ -4747,6 +4748,16 @@ pub async fn patch_agent(
                 );
             }
         }
+    }
+
+    if let Some(auto_evolve) = body.get("auto_evolve").and_then(|v| v.as_bool()) {
+        let _ = state
+            .kernel
+            .agent_registry()
+            .with_entry_mut(agent_id, |entry| {
+                entry.manifest.auto_evolve = auto_evolve;
+                entry.last_active = chrono::Utc::now();
+            });
     }
 
     // Persist updated entry to SQLite (skipped when the schedule branch
