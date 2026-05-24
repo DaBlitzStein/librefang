@@ -4754,10 +4754,7 @@ pub async fn patch_agent(
         let _ = state
             .kernel
             .agent_registry()
-            .with_entry_mut(agent_id, |entry| {
-                entry.manifest.auto_evolve = auto_evolve;
-                entry.last_active = chrono::Utc::now();
-            });
+            .update_auto_evolve(agent_id, auto_evolve);
     }
 
     // Persist updated entry to SQLite (skipped when the schedule branch
