@@ -171,7 +171,6 @@ impl SetupWizard {
             skills: intent.skills.clone(),
             skills_disabled: false,
             mcp_servers: vec![],
-            mcp_disabled: false,
             metadata: HashMap::new(),
             tags: vec![],
             routing: None,
@@ -181,7 +180,7 @@ impl SetupWizard {
             generate_identity_files: true,
             workspaces: HashMap::new(),
             profile: None,
-            fallback_models: None,
+            fallback_models: vec![],
             exec_policy: None,
             tool_allowlist: vec![],
             tool_blocklist: vec![],
@@ -203,13 +202,6 @@ impl SetupWizard {
             max_history_messages: None,
             max_concurrent_invocations: None,
             cache_context: false,
-            tool_exec_backend: None,
-            skill_workshop: librefang_types::agent::SkillWorkshopConfig::default(),
-            proactive_memory: librefang_types::memory::ProactiveMemoryOverrides::default(),
-            compaction: None,
-            triggers: vec![],
-            reconcile_orphans: librefang_types::agent::OrphanPolicy::default(),
-            async_tasks: librefang_types::agent::AsyncTasksConfig::default(),
         };
 
         let skills_to_install: Vec<String> = intent

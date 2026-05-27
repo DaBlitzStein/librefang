@@ -16,8 +16,8 @@
 use chrono::Utc;
 use librefang_types::config::MemoryDecayConfig;
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::Connection;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Run time-based decay on the memories table.
@@ -32,14 +32,16 @@ use tracing::{debug, info};
 ///
 /// Returns the number of memories soft-deleted.
 pub fn run_decay(
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &Arc<Mutex<Connection>>,
     config: &MemoryDecayConfig,
 ) -> LibreFangResult<usize> {
     if !config.enabled {
         return Ok(0);
     }
 
-    let db = pool.get().map_err(LibreFangError::memory)?;
+    let db = conn
+        .lock()
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
     let now = Utc::now();
     let now_unix = now.timestamp();
@@ -57,7 +59,7 @@ pub fn run_decay(
                    AND datetime(accessed_at) < datetime(?2)",
                 rusqlite::params!["session_memory", cutoff_str, now_unix],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         if deleted > 0 {
             debug!(scope = "SESSION", deleted, cutoff = %cutoff_str, "Soft-deleted stale memories");
         }
@@ -76,7 +78,7 @@ pub fn run_decay(
                    AND datetime(accessed_at) < datetime(?2)",
                 rusqlite::params!["agent_memory", cutoff_str, now_unix],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         if deleted > 0 {
             debug!(scope = "AGENT", deleted, cutoff = %cutoff_str, "Soft-deleted stale memories");
         }
@@ -100,13 +102,15 @@ pub fn run_decay(
 ///
 /// Returns the number of rows hard-deleted.
 pub fn prune_soft_deleted_memories(
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &Arc<Mutex<Connection>>,
     older_than_days: u64,
 ) -> LibreFangResult<usize> {
     if older_than_days == 0 {
         return Ok(0);
     }
-    let db = pool.get().map_err(LibreFangError::memory)?;
+    let db = conn
+        .lock()
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
     let cutoff = Utc::now().timestamp() - (older_than_days as i64) * 86_400;
     let pruned = db
         .execute(
@@ -114,7 +118,7 @@ pub fn prune_soft_deleted_memories(
              WHERE deleted = 1 AND deleted_at IS NOT NULL AND deleted_at < ?1",
             rusqlite::params![cutoff],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
     if pruned > 0 {
         info!(
             pruned,
@@ -128,16 +132,6 @@ pub fn prune_soft_deleted_memories(
 mod tests {
     use super::*;
     use crate::migration::run_migrations;
-    use r2d2::Pool;
-    use r2d2_sqlite::SqliteConnectionManager;
-    use rusqlite::Connection;
-
-    fn make_pool() -> Pool<SqliteConnectionManager> {
-        let manager = SqliteConnectionManager::memory();
-        let pool = Pool::builder().max_size(1).build(manager).unwrap();
-        run_migrations(&pool.get().unwrap()).unwrap();
-        pool
-    }
 
     /// Helper: insert a memory with a specific scope and accessed_at timestamp.
     fn insert_memory(conn: &Connection, id: &str, scope: &str, accessed_at: &str) {
@@ -169,8 +163,8 @@ mod tests {
 
     #[test]
     fn test_decay_deletes_old_session_memories() {
-        let pool = make_pool();
-        let conn = pool.get().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
 
         // Insert a session memory with old accessed_at (10 days ago)
         let old_time = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
@@ -182,8 +176,7 @@ mod tests {
 
         assert_eq!(count_memories(&conn), 2);
 
-        // conn returned to pool here; use pool for function calls
-        drop(conn);
+        let shared = Arc::new(Mutex::new(conn));
         let config = MemoryDecayConfig {
             enabled: true,
             session_ttl_days: 7,
@@ -191,10 +184,10 @@ mod tests {
             decay_interval_hours: 1,
         };
 
-        let deleted = run_decay(&pool, &config).unwrap();
+        let deleted = run_decay(&shared, &config).unwrap();
         assert_eq!(deleted, 1);
 
-        let db = pool.get().unwrap();
+        let db = shared.lock().unwrap();
         assert_eq!(count_memories(&db), 1);
 
         // Verify the remaining memory is the recent one
@@ -208,8 +201,8 @@ mod tests {
 
     #[test]
     fn test_decay_preserves_user_memories() {
-        let pool = make_pool();
-        let conn = pool.get().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
 
         // Insert a USER memory with very old accessed_at (100 days ago)
         let old_time = (Utc::now() - chrono::Duration::days(100)).to_rfc3339();
@@ -217,8 +210,7 @@ mod tests {
 
         assert_eq!(count_memories(&conn), 1);
 
-        // conn returned to pool here; use pool for function calls
-        drop(conn);
+        let shared = Arc::new(Mutex::new(conn));
         let config = MemoryDecayConfig {
             enabled: true,
             session_ttl_days: 7,
@@ -226,17 +218,17 @@ mod tests {
             decay_interval_hours: 1,
         };
 
-        let deleted = run_decay(&pool, &config).unwrap();
+        let deleted = run_decay(&shared, &config).unwrap();
         assert_eq!(deleted, 0);
 
-        let db = pool.get().unwrap();
+        let db = shared.lock().unwrap();
         assert_eq!(count_memories(&db), 1);
     }
 
     #[test]
     fn test_decay_deletes_old_agent_memories() {
-        let pool = make_pool();
-        let conn = pool.get().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
 
         // Insert an AGENT memory accessed 40 days ago (> 30 day TTL)
         let old_time = (Utc::now() - chrono::Duration::days(40)).to_rfc3339();
@@ -248,8 +240,7 @@ mod tests {
 
         assert_eq!(count_memories(&conn), 2);
 
-        // conn returned to pool here; use pool for function calls
-        drop(conn);
+        let shared = Arc::new(Mutex::new(conn));
         let config = MemoryDecayConfig {
             enabled: true,
             session_ttl_days: 7,
@@ -257,23 +248,22 @@ mod tests {
             decay_interval_hours: 1,
         };
 
-        let deleted = run_decay(&pool, &config).unwrap();
+        let deleted = run_decay(&shared, &config).unwrap();
         assert_eq!(deleted, 1);
 
-        let db = pool.get().unwrap();
+        let db = shared.lock().unwrap();
         assert_eq!(count_memories(&db), 1);
     }
 
     #[test]
     fn test_decay_disabled_does_nothing() {
-        let pool = make_pool();
-        let conn = pool.get().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
 
         let old_time = (Utc::now() - chrono::Duration::days(100)).to_rfc3339();
         insert_memory(&conn, "old-session", "session_memory", &old_time);
 
-        // conn returned to pool here; use pool for function calls
-        drop(conn);
+        let shared = Arc::new(Mutex::new(conn));
         let config = MemoryDecayConfig {
             enabled: false,
             session_ttl_days: 7,
@@ -281,17 +271,17 @@ mod tests {
             decay_interval_hours: 1,
         };
 
-        let deleted = run_decay(&pool, &config).unwrap();
+        let deleted = run_decay(&shared, &config).unwrap();
         assert_eq!(deleted, 0);
 
-        let db = pool.get().unwrap();
+        let db = shared.lock().unwrap();
         assert_eq!(count_memories(&db), 1);
     }
 
     #[test]
     fn test_access_resets_decay_timer() {
-        let pool = make_pool();
-        let conn = pool.get().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
 
         // Insert a session memory with old accessed_at (10 days ago)
         let old_time = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
@@ -305,8 +295,7 @@ mod tests {
         )
         .unwrap();
 
-        // conn returned to pool here; use pool for function calls
-        drop(conn);
+        let shared = Arc::new(Mutex::new(conn));
         let config = MemoryDecayConfig {
             enabled: true,
             session_ttl_days: 7,
@@ -315,14 +304,14 @@ mod tests {
         };
 
         // Should NOT be decayed because accessed_at was refreshed
-        let deleted = run_decay(&pool, &config).unwrap();
+        let deleted = run_decay(&shared, &config).unwrap();
         assert_eq!(deleted, 0);
     }
 
     #[test]
     fn test_decay_mixed_scopes() {
-        let pool = make_pool();
-        let conn = pool.get().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
 
         let old_time = (Utc::now() - chrono::Duration::days(50)).to_rfc3339();
 
@@ -333,8 +322,7 @@ mod tests {
 
         assert_eq!(count_memories(&conn), 3);
 
-        // conn returned to pool here; use pool for function calls
-        drop(conn);
+        let shared = Arc::new(Mutex::new(conn));
         let config = MemoryDecayConfig {
             enabled: true,
             session_ttl_days: 7,
@@ -342,11 +330,11 @@ mod tests {
             decay_interval_hours: 1,
         };
 
-        let deleted = run_decay(&pool, &config).unwrap();
+        let deleted = run_decay(&shared, &config).unwrap();
         // session_memory and agent_memory should be deleted, user_memory preserved
         assert_eq!(deleted, 2);
 
-        let db = pool.get().unwrap();
+        let db = shared.lock().unwrap();
         assert_eq!(count_memories(&db), 1);
 
         let remaining_id: String = db
@@ -367,22 +355,21 @@ mod tests {
 
     #[test]
     fn test_decay_soft_deletes_does_not_hard_delete() {
-        let pool = make_pool();
-        let conn = pool.get().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
         let old_time = (Utc::now() - chrono::Duration::days(40)).to_rfc3339();
         insert_memory(&conn, "stale", "agent_memory", &old_time);
 
-        // conn returned to pool here; use pool for function calls
-        drop(conn);
+        let shared = Arc::new(Mutex::new(conn));
         let config = MemoryDecayConfig {
             enabled: true,
             session_ttl_days: 7,
             agent_ttl_days: 30,
             decay_interval_hours: 1,
         };
-        run_decay(&pool, &config).unwrap();
+        run_decay(&shared, &config).unwrap();
 
-        let db = pool.get().unwrap();
+        let db = shared.lock().unwrap();
         // Row is still present, just flagged.
         assert_eq!(count_total(&db), 1);
         assert_eq!(count_memories(&db), 0);
@@ -401,8 +388,8 @@ mod tests {
 
     #[test]
     fn test_prune_soft_deleted_memories_hard_deletes_old() {
-        let pool = make_pool();
-        let conn = pool.get().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
 
         let now_unix = Utc::now().timestamp();
         let old_unix = now_unix - 60 * 86_400; // 60 days ago
@@ -430,12 +417,11 @@ mod tests {
 
         assert_eq!(count_total(&conn), 3);
 
-        // conn returned to pool here; use pool for function calls
-        drop(conn);
-        let pruned = prune_soft_deleted_memories(&pool, 30).unwrap();
+        let shared = Arc::new(Mutex::new(conn));
+        let pruned = prune_soft_deleted_memories(&shared, 30).unwrap();
         assert_eq!(pruned, 1, "only the 60-day-old soft-deleted row should go");
 
-        let db = pool.get().unwrap();
+        let db = shared.lock().unwrap();
         assert_eq!(count_total(&db), 2);
         // The alive row and the recent-soft row remain.
         let ids: Vec<String> = db
@@ -450,12 +436,11 @@ mod tests {
 
     #[test]
     fn test_prune_soft_deleted_memories_zero_disabled() {
-        let pool = make_pool();
-        let conn = pool.get().unwrap();
-        // conn returned to pool here; use pool for function calls
-        drop(conn);
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let shared = Arc::new(Mutex::new(conn));
         // Even if there's nothing to prune, 0 must short-circuit and not error.
-        let pruned = prune_soft_deleted_memories(&pool, 0).unwrap();
+        let pruned = prune_soft_deleted_memories(&shared, 0).unwrap();
         assert_eq!(pruned, 0);
     }
 }

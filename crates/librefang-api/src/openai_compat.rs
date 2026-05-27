@@ -12,8 +12,8 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::kernel_handle::prelude::*;
-use librefang_kernel::llm_driver::StreamEvent;
+use librefang_runtime::kernel_handle::prelude::*;
+use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role, StopReason};
 use serde::{Deserialize, Serialize};
@@ -330,7 +330,7 @@ pub async fn chat_completions(
     }
 
     // Non-streaming response
-    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
+    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     match state
         .kernel
         .send_message_with_handle(agent_id, &last_user_msg, Some(kernel_handle))
@@ -385,11 +385,10 @@ async fn stream_response(
     request_id: String,
     created: u64,
 ) -> Result<axum::response::Response, String> {
-    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
+    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
 
     let (mut rx, _handle) = state
         .kernel
-        .clone()
         .send_message_streaming_with_routing(agent_id, message, Some(kernel_handle))
         .await
         .map_err(|e| format!("Streaming setup failed: {e}"))?;

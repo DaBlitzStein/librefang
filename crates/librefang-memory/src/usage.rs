@@ -3,10 +3,9 @@
 use chrono::Utc;
 use librefang_types::agent::{AgentId, SessionId, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 /// A single usage event recording an LLM call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -185,18 +184,21 @@ pub struct DailyBreakdown {
 /// Usage store backed by SQLite.
 #[derive(Clone)]
 pub struct UsageStore {
-    pool: Pool<SqliteConnectionManager>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl UsageStore {
     /// Create a new usage store wrapping the given connection.
-    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { pool }
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
     }
 
     /// Record a usage event.
     pub fn record(&self, record: &UsageRecord) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         Self::insert_record(&conn, record)
     }
 
@@ -228,7 +230,7 @@ impl UsageStore {
                 record.session_id.map(|s| s.0.to_string()),
             ],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -247,8 +249,8 @@ impl UsageStore {
         max_monthly: f64,
     ) -> LibreFangResult<()> {
         let mut conn = self
-            .pool
-            .get()
+            .conn
+            .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         // IMMEDIATE transaction acquires a reserved lock up-front, ensuring no
@@ -257,7 +259,7 @@ impl UsageStore {
         // exceeded), so every error path is safe.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let agent_str = record.agent_id.0.to_string();
 
@@ -270,7 +272,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -288,7 +290,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -306,7 +308,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_monthly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -318,7 +320,8 @@ impl UsageStore {
         // All checks passed — insert the record within the same transaction
         Self::insert_record(&tx, record)?;
 
-        tx.commit().map_err(LibreFangError::memory)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -333,13 +336,13 @@ impl UsageStore {
         max_monthly: f64,
     ) -> LibreFangResult<()> {
         let mut conn = self
-            .pool
-            .get()
+            .conn
+            .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         // Check global hourly budget
         if max_hourly > 0.0 {
@@ -350,7 +353,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -368,7 +371,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -386,7 +389,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_monthly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -398,7 +401,8 @@ impl UsageStore {
         // All checks passed — insert the record
         Self::insert_record(&tx, record)?;
 
-        tx.commit().map_err(LibreFangError::memory)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -416,13 +420,13 @@ impl UsageStore {
         global_max_monthly: f64,
     ) -> LibreFangResult<()> {
         let mut conn = self
-            .pool
-            .get()
+            .conn
+            .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let agent_str = record.agent_id.0.to_string();
 
@@ -435,7 +439,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= agent_max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -452,7 +456,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= agent_max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -469,7 +473,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= agent_max_monthly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -487,7 +491,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= global_max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -504,7 +508,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= global_max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -521,7 +525,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= global_max_monthly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -533,7 +537,8 @@ impl UsageStore {
         // All checks passed — insert the record
         Self::insert_record(&tx, record)?;
 
-        tx.commit().map_err(LibreFangError::memory)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -559,13 +564,13 @@ impl UsageStore {
         provider_max_tokens_per_hour: u64,
     ) -> LibreFangResult<()> {
         let mut conn = self
-            .pool
-            .get()
+            .conn
+            .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let agent_str = record.agent_id.0.to_string();
         let has_provider = !record.provider.is_empty();
@@ -597,7 +602,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str, &record.provider],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             Ok(WindowCosts {
                 agent: row.0,
                 global: row.1,
@@ -699,7 +704,7 @@ impl UsageStore {
                     rusqlite::params![&record.provider],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let current = tokens.max(0) as u64;
             let incoming = record.input_tokens.saturating_add(record.output_tokens);
             if current.saturating_add(incoming) >= provider_max_tokens_per_hour {
@@ -713,13 +718,17 @@ impl UsageStore {
         // All checks passed — insert the record
         Self::insert_record(&tx, record)?;
 
-        tx.commit().map_err(LibreFangError::memory)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
     /// Query total cost in the last hour for an agent.
     pub fn query_hourly(&self, agent_id: AgentId) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -727,13 +736,16 @@ impl UsageStore {
                 rusqlite::params![agent_id.0.to_string()],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Query total cost today for an agent.
     pub fn query_daily(&self, agent_id: AgentId) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -741,13 +753,16 @@ impl UsageStore {
                 rusqlite::params![agent_id.0.to_string()],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Query total cost in the current calendar month for an agent.
     pub fn query_monthly(&self, agent_id: AgentId) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -755,13 +770,16 @@ impl UsageStore {
                 rusqlite::params![agent_id.0.to_string()],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Query total cost for a specific provider in the last hour.
     pub fn query_provider_hourly(&self, provider: &str) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -769,13 +787,16 @@ impl UsageStore {
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Query total cost for a specific provider today.
     pub fn query_provider_daily(&self, provider: &str) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -783,13 +804,16 @@ impl UsageStore {
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Query total cost for a specific provider in the current calendar month.
     pub fn query_provider_monthly(&self, provider: &str) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -797,13 +821,16 @@ impl UsageStore {
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Query total tokens (input + output) for a specific provider in the last hour.
     pub fn query_provider_tokens_hourly(&self, provider: &str) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let tokens: i64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(input_tokens) + SUM(output_tokens), 0) FROM usage_events
@@ -811,41 +838,8 @@ impl UsageStore {
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(tokens.max(0) as u64)
-    }
-
-    /// Distinct provider identifiers observed in `usage_events` over the
-    /// current calendar month (UTC). Returned sorted ascending so the
-    /// caller can rely on stable ordering when merging with the operator's
-    /// `[budget.providers]` configuration map (#5650).
-    ///
-    /// Rows with an empty provider string are excluded — those are pre-#4807
-    /// usage entries that pre-date provider attribution and would otherwise
-    /// surface in the dashboard as an unnamed row the operator can't act on.
-    ///
-    /// Month window mirrors the longest `query_provider_*` rollup, so any
-    /// provider that contributed spend within the time horizon the
-    /// `[budget.providers]` table can cap is discoverable. Anything older
-    /// is operationally inert — no monthly cap applies to it.
-    pub fn query_distinct_providers(&self) -> LibreFangResult<Vec<String>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT DISTINCT provider FROM usage_events
-                 WHERE provider IS NOT NULL AND provider <> ''
-                   AND timestamp > datetime('now', 'start of month')
-                 ORDER BY provider ASC",
-            )
-            .map_err(LibreFangError::memory)?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(LibreFangError::memory)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(LibreFangError::memory)?);
-        }
-        Ok(out)
     }
 
     // ── Per-user spend rollup (RBAC M5) ─────────────────────────────────
@@ -870,7 +864,10 @@ impl UsageStore {
 
     /// Total cost in the last hour (UTC sliding window) for a single user.
     pub fn query_user_hourly(&self, user_id: UserId) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -878,13 +875,16 @@ impl UsageStore {
                 rusqlite::params![user_id.to_string()],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Total cost today (UTC calendar day, see module-level note) for a single user.
     pub fn query_user_daily(&self, user_id: UserId) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -892,13 +892,16 @@ impl UsageStore {
                 rusqlite::params![user_id.to_string()],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Total cost in the current UTC calendar month (see module-level note) for a single user.
     pub fn query_user_monthly(&self, user_id: UserId) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -906,7 +909,7 @@ impl UsageStore {
                 rusqlite::params![user_id.to_string()],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
@@ -916,7 +919,10 @@ impl UsageStore {
     /// ranking is meant for human attribution, not totals. `limit` caps
     /// the result set; pass `None` for "no limit".
     pub fn query_user_ranking(&self, limit: Option<u32>) -> LibreFangResult<Vec<UserSpendRanking>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         // Aggregate three time windows in a single round-trip via
         // CASE-when sums, then sort by daily desc — the interesting
@@ -943,7 +949,9 @@ impl UsageStore {
             None => -1,
         };
 
-        let mut stmt = conn.prepare(RANKING_SQL).map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(RANKING_SQL)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map(rusqlite::params![bound_limit], |row| {
                 Ok(UserSpendRanking {
@@ -954,14 +962,17 @@ impl UsageStore {
                     call_count: row.get::<_, i64>(4)?.max(0) as u64,
                 })
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let out: Vec<UserSpendRanking> = rows.filter_map(|r| r.ok()).collect();
         Ok(out)
     }
 
     /// Query total cost across all agents for the current hour.
     pub fn query_global_hourly(&self) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -969,13 +980,16 @@ impl UsageStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Query total cost across all agents for the current calendar month.
     pub fn query_global_monthly(&self) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -983,13 +997,16 @@ impl UsageStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
     /// Query usage summary, optionally filtered by agent.
     pub fn query_summary(&self, agent_id: Option<AgentId>) -> LibreFangResult<UsageSummary> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match agent_id {
             Some(aid) => (
@@ -1019,14 +1036,17 @@ impl UsageStore {
                     total_tool_calls: row.get::<_, i64>(4)? as u64,
                 })
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         Ok(summary)
     }
 
     /// Query usage grouped by model.
     pub fn query_by_model(&self) -> LibreFangResult<Vec<ModelUsage>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut stmt = conn
             .prepare(
@@ -1034,7 +1054,7 @@ impl UsageStore {
                         COALESCE(SUM(output_tokens), 0), COUNT(*)
                  FROM usage_events GROUP BY model ORDER BY SUM(cost_usd) DESC",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -1046,18 +1066,21 @@ impl UsageStore {
                     call_count: row.get::<_, i64>(4)? as u64,
                 })
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(row.map_err(LibreFangError::memory)?);
+            results.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
         }
         Ok(results)
     }
 
     /// Query model performance metrics including latency statistics.
     pub fn query_model_performance(&self) -> LibreFangResult<Vec<ModelPerformance>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut stmt = conn
             .prepare(
@@ -1073,7 +1096,7 @@ impl UsageStore {
                  GROUP BY model 
                  ORDER BY SUM(cost_usd) DESC",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -1098,18 +1121,21 @@ impl UsageStore {
                     avg_latency_per_call: avg_latency_ms,
                 })
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(row.map_err(LibreFangError::memory)?);
+            results.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
         }
         Ok(results)
     }
 
     /// Query daily usage breakdown for the last N days.
     pub fn query_daily_breakdown(&self, days: u32) -> LibreFangResult<Vec<DailyBreakdown>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut stmt = conn
             .prepare(&format!(
@@ -1122,7 +1148,7 @@ impl UsageStore {
                      GROUP BY day
                      ORDER BY day ASC"
             ))
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -1133,29 +1159,35 @@ impl UsageStore {
                     calls: row.get::<_, i64>(3)? as u64,
                 })
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(row.map_err(LibreFangError::memory)?);
+            results.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
         }
         Ok(results)
     }
 
     /// Query the timestamp of the earliest usage event.
     pub fn query_first_event_date(&self) -> LibreFangResult<Option<String>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let result: Option<String> = conn
             .query_row("SELECT MIN(timestamp) FROM usage_events", [], |row| {
                 row.get(0)
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(result)
     }
 
     /// Query today's total cost across all agents.
     pub fn query_today_cost(&self) -> LibreFangResult<f64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -1163,7 +1195,7 @@ impl UsageStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(cost)
     }
 
@@ -1174,7 +1206,10 @@ impl UsageStore {
     /// the N+1 pattern in `/api/budget/agents`, which was responsible for up
     /// to 1200 queries/min under typical dashboard polling. See #3684.
     pub fn query_all_agents_daily(&self) -> LibreFangResult<Vec<(AgentId, f64)>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare(
                 "SELECT agent_id, SUM(cost_usd) as total_cost
@@ -1183,17 +1218,17 @@ impl UsageStore {
                  GROUP BY agent_id
                  ORDER BY total_cost DESC",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map([], |row| {
                 let id_str: String = row.get(0)?;
                 let cost: f64 = row.get(1)?;
                 Ok((id_str, cost))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let mut results = Vec::new();
         for row in rows {
-            let (id_str, cost) = row.map_err(LibreFangError::memory)?;
+            let (id_str, cost) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if let Ok(agent_id) = id_str.parse::<AgentId>() {
                 results.push((agent_id, cost));
             }
@@ -1210,7 +1245,10 @@ impl UsageStore {
         agent_id: AgentId,
         limit: u32,
     ) -> LibreFangResult<Vec<AgentEventRow>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare(
                 "SELECT timestamp, model, provider, input_tokens, output_tokens,
@@ -1220,7 +1258,7 @@ impl UsageStore {
                  ORDER BY timestamp DESC
                  LIMIT ?2",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map(
                 rusqlite::params![agent_id.0.to_string(), limit as i64],
@@ -1237,10 +1275,10 @@ impl UsageStore {
                     })
                 },
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(row.map_err(LibreFangError::memory)?);
+            out.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
         }
         Ok(out)
     }
@@ -1251,7 +1289,10 @@ impl UsageStore {
     pub fn channels_msgs_24h_bulk(
         &self,
     ) -> LibreFangResult<std::collections::HashMap<String, u64>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
         let mut stmt = conn
             .prepare(
@@ -1260,15 +1301,15 @@ impl UsageStore {
                  WHERE channel IS NOT NULL AND channel != '' AND timestamp >= ?1
                  GROUP BY channel",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map(rusqlite::params![cutoff], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let mut out = std::collections::HashMap::new();
         for row in rows {
-            let (ch, n) = row.map_err(LibreFangError::memory)?;
+            let (ch, n) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             out.insert(ch, n.max(0) as u64);
         }
         Ok(out)
@@ -1276,7 +1317,10 @@ impl UsageStore {
 
     /// Delete usage events older than the given number of days.
     pub fn cleanup_old(&self, days: u32) -> LibreFangResult<usize> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let deleted = conn
             .execute(
                 &format!(
@@ -1284,7 +1328,7 @@ impl UsageStore {
                 ),
                 [],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(deleted)
     }
 }
@@ -1295,10 +1339,9 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn setup() -> UsageStore {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
-        run_migrations(&pool.get().unwrap()).unwrap();
-        UsageStore::new(pool)
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        UsageStore::new(Arc::new(Mutex::new(conn)))
     }
 
     #[test]

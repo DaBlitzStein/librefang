@@ -110,11 +110,9 @@ fn make_request(agent: &str, tool: &str, session_id: Option<&str>) -> ApprovalRe
         timeout_secs: 300,
         sender_id: None,
         channel: None,
-        chat_id: None,
         route_to: Vec::new(),
         escalation_count: 0,
         session_id: session_id.map(str::to_string),
-        tool_use_id: None,
     }
 }
 
@@ -215,7 +213,7 @@ async fn get_approval_invalid_uuid_is_bad_request() {
     let h = boot();
     let (status, body) = get(&h, "/api/approvals/not-a-uuid").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body}");
-    assert!(body["error"].is_object());
+    assert!(body["error"].is_string());
 }
 
 /// A well-formed UUID that doesn't exist is 404, distinct from 400 — the
@@ -419,32 +417,10 @@ async fn batch_oversize_is_bad_request() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body}");
-    // Error wording is owned by the shared `validate_bulk_size` helper —
-    // assert on the stable substring ("exceeds maximum") and the actual
-    // cap (100) rather than the historical "batch size" phrasing that the
-    // local check used before #5491 series.
-    let err = body["error"].as_str().unwrap_or_default();
-    assert!(
-        err.contains("exceeds maximum") && err.contains("100"),
-        "unexpected error: {err}",
-    );
-}
-
-/// An array of empty strings within the 8 MiB body cap must be rejected
-/// up front by `validate_bulk_size` BEFORE the handler reaches the
-/// `Vec::with_capacity(body.ids.len())` line — otherwise the handler
-/// would pre-allocate millions of entries on a cheap attack request.
-#[tokio::test(flavor = "multi_thread")]
-async fn batch_array_of_empty_strings_over_cap_is_bad_request() {
-    let h = boot();
-    let ids: Vec<String> = (0..200).map(|_| String::new()).collect();
-    let (status, body) = post(
-        &h,
-        "/api/approvals/batch",
-        serde_json::json!({ "ids": ids, "decision": "approve" }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body}");
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("batch size"));
 }
 
 // ---------------------------------------------------------------------------

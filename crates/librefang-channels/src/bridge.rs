@@ -156,78 +156,27 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 
     /// Send an ephemeral "side question" (`/btw`) — answered with the agent's system
-    /// prompt but without loading or saving session history. `sender` is forwarded
-    /// for peer-scoped memory lookups (#4923).
+    /// prompt but without loading or saving session history.
     async fn send_message_ephemeral(
         &self,
         _agent_id: AgentId,
         _message: &str,
-        _sender: Option<&SenderContext>,
     ) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
-    /// Reset every session for an agent (default + per-channel + cron).
-    /// Used by surfaces that mean "wipe this agent" — dashboard / explicit
-    /// admin reset. Channel `/new` should call [`Self::reset_channel_session`]
-    /// instead so other surfaces are not collateral damage (#4868).
+    /// Reset an agent's session (clear messages, fresh session ID).
     async fn reset_session(&self, _agent_id: AgentId) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
-    /// Hard-reboot every session for an agent — full context clear without
-    /// saving summaries. Channel `/reboot` should call
-    /// [`Self::reboot_channel_session`] instead (#4868).
+    /// Hard-reboot an agent's session — full context clear without saving summary.
     async fn reboot_session(&self, _agent_id: AgentId) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
-    /// Trigger LLM-based session compaction for an agent's registry-pointer
-    /// session. Channel `/compact` should call
-    /// [`Self::compact_channel_session`] instead so it operates on the
-    /// per-channel session the user is actually chatting in (#4868).
+    /// Trigger LLM-based session compaction for an agent.
     async fn compact_session(&self, _agent_id: AgentId) -> Result<String, String> {
-        Err("Not implemented".to_string())
-    }
-
-    /// Reset only the session derived from `(channel, chat_id)` — the
-    /// per-channel session that channel `/new` actually means to clear
-    /// (#4868). Sibling sessions (other channels, dashboard) stay intact.
-    ///
-    /// `chat_id` follows the inbound-message convention: `None` for an
-    /// adapter that doesn't disambiguate by chat (the channel name itself
-    /// becomes the scope), `Some(<sender.platform_id>)` otherwise — the same
-    /// pair the channel resolver uses to derive
-    /// [`librefang_types::agent::SessionId::for_channel`] for inbound traffic.
-    async fn reset_channel_session(
-        &self,
-        _agent_id: AgentId,
-        _channel: &str,
-        _chat_id: Option<&str>,
-    ) -> Result<String, String> {
-        Err("Not implemented".to_string())
-    }
-
-    /// Hard-reboot only the per-channel session derived from
-    /// `(channel, chat_id)` — no summary saved (#4868).
-    async fn reboot_channel_session(
-        &self,
-        _agent_id: AgentId,
-        _channel: &str,
-        _chat_id: Option<&str>,
-    ) -> Result<String, String> {
-        Err("Not implemented".to_string())
-    }
-
-    /// Compact only the per-channel session derived from
-    /// `(channel, chat_id)` — operates on the session the channel user is
-    /// chatting in, not the agent's registry-pointer session (#4868).
-    async fn compact_channel_session(
-        &self,
-        _agent_id: AgentId,
-        _channel: &str,
-        _chat_id: Option<&str>,
-    ) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
@@ -567,33 +516,6 @@ pub trait ChannelBridgeHandle: Send + Sync {
     fn channels_download_max_bytes(&self) -> Option<u64> {
         None
     }
-
-    /// Transcribe an inbound channel audio attachment that has already been
-    /// downloaded to disk by the bridge.
-    ///
-    /// Implementations should:
-    ///   1. Honor the `[media] audio_transcription` kernel config (default OFF) —
-    ///      return `Ok(None)` when transcription is disabled.
-    ///   2. On enabled, hand the attachment to the kernel `MediaEngine`
-    ///      (`transcribe_audio`), returning `Ok(Some(text))` on success.
-    ///   3. On provider error / no credentials / oversize file, return
-    ///      `Err(reason)` so the bridge can surface an opaque
-    ///      `[Transcription unavailable]` note next to the saved path
-    ///      without dropping the message. The bridge sanitizes the
-    ///      reason out of the user-facing block (see #4999) — operator
-    ///      logs still carry the full error.
-    ///
-    /// The default impl (used by mocks) is "feature off" — returns `Ok(None)`.
-    /// See issue #4975: `MediaEngine::process_attachments` previously had no
-    /// callers, so inbound voice messages were never auto-transcribed even
-    /// when `[media].audio_transcription = true`.
-    async fn transcribe_inbound_audio(
-        &self,
-        _path: &std::path::Path,
-        _mime_type: &str,
-    ) -> Result<Option<String>, String> {
-        Ok(None)
-    }
 }
 
 struct PendingMessage {
@@ -872,29 +794,6 @@ impl MessageDebouncer {
     }
 }
 
-/// True when the `/approve` / `/reject` text-ack reply from
-/// `handle_command` is redundant because the user **clicked an
-/// inline-keyboard button** rather than typing the slash command.
-///
-/// Rationale: tapping `[Approve]` already conveys the action visibly
-/// in the chat. The kernel then either fires the agent-wake continuation
-/// (#5488, "I've written the file…") OR posts a separate channel-listener
-/// confirmation — both arrive within seconds. The extra `"Approved
-/// [abc12345] file_write — uuid"` line that the slash-command handler
-/// returned post-#5483 was a UX wart: noisy, machine-shaped, and
-/// arrived between the user's tap and the agent's natural-language
-/// follow-up.
-///
-/// Suppression is scoped tight: ONLY the approve/reject command pair,
-/// and ONLY when triggered by a `ButtonCallback`. Typed `/approve <id>`
-/// keeps its ack — text-only channels (IRC, SMS, any sidecar without
-/// the `interactive` capability) need that confirmation because they
-/// don't have an inline-keyboard tap to convey "your action landed".
-fn suppress_button_command_ack(content: &ChannelContent, command: &str) -> bool {
-    matches!(content, ChannelContent::ButtonCallback { .. })
-        && matches!(command, "approve" | "reject")
-}
-
 fn content_to_text(content: &ChannelContent) -> String {
     match content {
         ChannelContent::Text(t) => t.clone(),
@@ -1139,15 +1038,6 @@ pub struct BridgeManager {
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
-    /// `AbortHandle` mirror of every entry in `tasks`, kept behind a
-    /// `std::sync::Mutex` so the bridge can be hard-stopped through a shared
-    /// `&self` (`abort()`), not just the `&mut self` graceful `stop()`
-    /// (#5142). `JoinHandle::abort()` only needs `&self`, but the
-    /// `tasks.drain(..)` + `task.await` join loop in `stop()` needs `&mut`,
-    /// which is unreachable through `Arc<Option<BridgeManager>>` while a
-    /// concurrent `push_message` holds the Arc — the exact leak path the
-    /// audit flagged. Populated in lockstep with `tasks` via `track()`.
-    abort_handles: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
     adapters: Vec<Arc<dyn ChannelAdapter>>,
     /// Webhook routes collected from adapters, to be mounted on the shared server.
     webhook_routes: Vec<(String, axum::Router)>,
@@ -1170,7 +1060,6 @@ impl BridgeManager {
             shutdown_tx,
             shutdown_rx,
             tasks: Vec::new(),
-            abort_handles: std::sync::Mutex::new(Vec::new()),
             adapters: Vec::new(),
             webhook_routes: Vec::new(),
             journal: None,
@@ -1193,7 +1082,6 @@ impl BridgeManager {
             shutdown_tx,
             shutdown_rx,
             tasks: Vec::new(),
-            abort_handles: std::sync::Mutex::new(Vec::new()),
             adapters: Vec::new(),
             webhook_routes: Vec::new(),
             journal: None,
@@ -1262,18 +1150,6 @@ impl BridgeManager {
                 tokio::spawn(async move { cleanup_old_uploads(&dir).await });
             });
         }
-
-        // 24h retention only fires when something accesses a bucket;
-        // groups that go quiet without ever being addressed need an
-        // active ticker to free memory. The evictor is owned by the
-        // process-wide buffer (see `crate::group_history::install_global`),
-        // not by any one BridgeManager — binding its lifetime to a single
-        // bridge would orphan the buffer's TTL on hot-reload (the second
-        // BridgeManager would skip the spawn, leaving the singleton
-        // accumulating entries with no ticker).
-        crate::group_history::install_global(|| {
-            Arc::new(crate::group_history::GroupHistoryBuffer::with_default_retention())
-        });
 
         // Prefer shared webhook routes over adapter-managed HTTP servers.
         // If the adapter provides webhook routes, collect them for mounting
@@ -1369,7 +1245,7 @@ impl BridgeManager {
                     }
                 }
             });
-            self.track(task);
+            self.tasks.push(task);
         } else {
             // Debounce path
             let (debouncer, mut flush_rx) =
@@ -1394,8 +1270,7 @@ impl BridgeManager {
                                     let image_blocks = if let ChannelContent::Image {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
-                                        let extra_headers = adapter_clone.fetch_headers_for(url);
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir, &extra_headers).await {
+                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir).await {
                                             blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
                                             _ => None,
                                         }
@@ -1453,7 +1328,7 @@ impl BridgeManager {
                     }
                 }
             });
-            self.track(task);
+            self.tasks.push(task);
         }
 
         self.adapters.push(adapter);
@@ -1461,17 +1336,13 @@ impl BridgeManager {
     }
 
     /// Start listening for `ApprovalRequested` kernel events and forward them
-    /// to every running channel adapter as a text notification (#4875).
+    /// to all running channel adapters as interactive approval messages.
     ///
-    /// Per-adapter recipients come from
-    /// [`ChannelAdapter::notification_recipients`]. Adapters that return an
-    /// empty list (the default) silently skip the broadcast — that is the
-    /// correct behaviour for group-only / public-broadcast adapters that
-    /// have no stable operator inbox. The current payload is plain text
-    /// with the truncated approval ID and `/approve <id>` / `/reject <id>`
-    /// instructions; inline-keyboard support per adapter is a follow-on
-    /// (re-opens the delivery side of #2029).
-    pub async fn start_approval_listener(&mut self) {
+    /// Each adapter receives a text notification about the pending approval.
+    /// Adapters that support inline keyboards (e.g. Telegram) can later be
+    /// extended to send interactive buttons; for now we send a text prompt
+    /// with the approval ID so users can `/approve <id>` or `/reject <id>`.
+    pub async fn start_approval_listener(&mut self, adapters: Vec<Arc<dyn ChannelAdapter>>) {
         let maybe_rx = self.handle.subscribe_events().await;
         let Some(mut rx) = maybe_rx else {
             debug!("Event subscription not available — approval listener not started");
@@ -1480,378 +1351,47 @@ impl BridgeManager {
 
         let mut shutdown = self.shutdown_rx.clone();
         let handle = self.handle.clone();
-        let adapters = self.adapters.clone();
-        let router = self.router.clone();
 
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    // Bias toward shutdown so a stop() call wins deterministically
-                    // over an in-flight ApprovalRequested poll. Without this the
-                    // unbiased select can pick the broadcast arm on the same poll
-                    // that shutdown_tx fires, then call adapter.send() on an
-                    // adapter that stop() has already drained — benign (warn! +
-                    // continue) but spurious in shutdown logs.
-                    biased;
-                    _ = shutdown.changed() => {
-                        if *shutdown.borrow() {
-                            info!("Shutting down approval event listener");
-                            break;
-                        }
-                    }
                     result = rx.recv() => {
                         match result {
                             Ok(event) => {
                                 if let librefang_types::event::EventPayload::ApprovalRequested(approval) = &event.payload {
-                                    // Parse the requesting agent's UUID once.
-                                    // The event ships `agent_id` as a String for
-                                    // wire stability; the router stores `AgentId`
-                                    // (UUID-wrapped). A malformed value here
-                                    // means we cannot scope safely — drop the
-                                    // event rather than fall back to the pre-fix
-                                    // broadcast behaviour (#4985).
-                                    let requesting_agent = match uuid::Uuid::parse_str(&approval.agent_id) {
-                                        Ok(u) => AgentId(u),
-                                        Err(e) => {
-                                            // ERROR (not WARN): a malformed
-                                            // agent_id here means some
-                                            // `require_approval` caller is
-                                            // emitting a non-UUID string,
-                                            // which silently swallows every
-                                            // approval from that source —
-                                            // exactly the failure mode #4875
-                                            // was about. Operators need to
-                                            // notice this in logs.
-                                            // Metrics counter intentionally
-                                            // not added: librefang-channels
-                                            // does not currently depend on
-                                            // the `metrics` crate, and per
-                                            // PR #4994 review guidance we
-                                            // do not introduce a new dep
-                                            // for a single counter.
-                                            error!(
-                                                request_id = %approval.request_id,
-                                                agent_id = %approval.agent_id,
-                                                error = %e,
-                                                "ApprovalRequested.agent_id is not a valid UUID — dropping notification (cannot scope to bound adapter)"
-                                            );
-                                            continue;
-                                        }
-                                    };
-
-                                    // Two-button inline keyboard. The button
-                                    // `action` is the slash command itself —
-                                    // when a user taps, the Telegram /
-                                    // Slack / Feishu sidecar emits a
-                                    // `callback_query` (or platform analogue)
-                                    // that lands in this crate's bridge as a
-                                    // `ChannelContent::ButtonCallback` whose
-                                    // `action` starts with `/`. The existing
-                                    // inbound dispatcher at `content_to_text`
-                                    // routes that straight through the
-                                    // `/approve` / `/reject` command handler.
-                                    // No new protocol bits required — the
-                                    // round-trip already existed; pre-fix the
-                                    // listener just sent plain text and never
-                                    // gave users buttons to click. The
-                                    // capability check + text fallback is in
-                                    // `ChannelAdapter::send_interactive` so
-                                    // adapters that don't declare
-                                    // `interactive` (IRC, SMS, …) still get
-                                    // the actionable text body unchanged.
-                                    let approval_keyboard = build_approval_interactive(
-                                        &approval.agent_id,
-                                        &approval.request_id,
-                                        &approval.tool_name,
-                                        &approval.risk_level,
-                                        &approval.description,
+                                    let msg = format!(
+                                        "Approval required for agent {}\n\
+                                         Tool: {}\n\
+                                         Risk: {}\n\
+                                         {}\n\n\
+                                         Reply /approve {} or /reject {}",
+                                        approval.agent_id,
+                                        approval.tool_name,
+                                        approval.risk_level,
+                                        approval.description,
+                                        &approval.request_id[..8.min(approval.request_id.len())],
+                                        &approval.request_id[..8.min(approval.request_id.len())],
                                     );
 
+                                    // Send to all adapters (best-effort). Each adapter
+                                    // gets the notification so the user sees it on
+                                    // whichever channel they are active on.
                                     for adapter in &adapters {
-                                        // #4985 / PR #4994 follow-up: scope
-                                        // delivery to adapters bound to the
-                                        // requesting agent. We build the same
-                                        // channel key the bridge boot stores
-                                        // in `channel_defaults` — bare
-                                        // `<channel_type>` for single-bot
-                                        // adapters (`account_id().is_none()`),
-                                        // account-qualified
-                                        // `<channel_type>:<account_id>` for
-                                        // multi-bot adapters
-                                        // (`account_id().is_some()`).
-                                        //
-                                        // Crucially, when the adapter exposes
-                                        // an `account_id`, ONLY the qualified
-                                        // key counts. A bare-key fallback in
-                                        // mixed configs (one single-bot
-                                        // adapter + one multi-bot adapter
-                                        // both on the same channel type)
-                                        // would point the multi-bot
-                                        // adapter's qualified miss at the
-                                        // single-bot adapter's default,
-                                        // leaking the approval into the
-                                        // multi-bot adapter's chat. The
-                                        // resolver's "qualified > bare"
-                                        // precedence is for inbound routing
-                                        // where the same physical message
-                                        // can fall through; the approval
-                                        // listener has no such fallback
-                                        // semantics — each adapter must
-                                        // match on its own configured key.
-                                        let channel_type = adapter.channel_type();
-                                        let ct_str = channel_type_str(&channel_type);
-                                        let bound_agent = match adapter.account_id() {
-                                            Some(aid) => {
-                                                router.channel_default(&format!("{ct_str}:{aid}"))
-                                            }
-                                            None => router.channel_default(ct_str),
-                                        };
-
-                                        // Recipients to notify on this adapter.
-                                        // Two sources, in order of precedence:
-                                        //   1. If `channel_default` resolves
-                                        //      to the requesting agent, the
-                                        //      adapter's static
-                                        //      `notification_recipients()`
-                                        //      list (the operator inbox /
-                                        //      admin list shape pre-#5002).
-                                        //   2. If `channel_default` is None
-                                        //      or points elsewhere, fall
-                                        //      back to `AgentBinding`-derived
-                                        //      `peer_id`s on this adapter
-                                        //      that route to the requesting
-                                        //      agent — this is the #5002
-                                        //      fix for adapters with
-                                        //      `default_agent = None` that
-                                        //      route purely via bindings.
-                                        //
-                                        // The two are NOT merged when (1)
-                                        // applies: pre-#5002 behaviour for
-                                        // operator-inbox channels is
-                                        // unchanged, and bindings on those
-                                        // channels are already covered by
-                                        // the inbound routing path. Mixing
-                                        // would re-enable the leak shape
-                                        // #4985 was about (admin inbox +
-                                        // unrelated bound chat both
-                                        // receiving the same approval).
-                                        // ── Fast path: route back to the
-                                        // originating chat when the kernel
-                                        // populated `sender_id` + `channel`
-                                        // on the request. This is the common
-                                        // case for tool calls triggered by a
-                                        // user chatting with the agent in
-                                        // Telegram / Slack / Feishu: the
-                                        // approval prompt goes straight back
-                                        // to that chat, no
-                                        // `notification_recipients` or
-                                        // `AgentBinding` config needed.
-                                        //
-                                        // Pre-fix this branch didn't exist;
-                                        // the kernel didn't even put
-                                        // `sender_id` / `channel` on the
-                                        // event payload, so approvals on
-                                        // freshly-set-up Telegram adapters
-                                        // silently dropped at the
-                                        // empty-recipients DEBUG line below.
-                                        if let (Some(src_sender), Some(src_channel)) =
-                                            (approval.sender_id.as_deref(), approval.channel.as_deref())
-                                        {
-                                            if src_channel == ct_str
-                                                && !src_sender.is_empty()
-                                            {
-                                                // Group-chat fix:
-                                                // prefer `chat_id` (group id)
-                                                // when present, fall back to
-                                                // `sender_id` for DMs and for
-                                                // pre-PR producers that
-                                                // didn't stamp chat_id. The
-                                                // `platform_id` on
-                                                // `ChannelUser` is the
-                                                // address the channel adapter
-                                                // sends to — Telegram
-                                                // sidecar's send-path treats
-                                                // it as `chat_id` against the
-                                                // Bot API, so passing the
-                                                // group's chat_id here puts
-                                                // the keyboard back in the
-                                                // group conversation instead
-                                                // of the human's DM with the
-                                                // bot.
-                                                let target_id = approval
-                                                    .chat_id
-                                                    .as_deref()
-                                                    .filter(|c| !c.is_empty())
-                                                    .unwrap_or(src_sender)
-                                                    .to_string();
-                                                let direct_recipient = ChannelUser {
-                                                    platform_id: target_id,
-                                                    display_name: String::new(),
-                                                    librefang_user: None,
-                                                };
-                                                if let Err(e) = adapter
-                                                    .send_interactive(&direct_recipient, &approval_keyboard)
-                                                    .await
-                                                {
-                                                    warn!(
-                                                        adapter = adapter.name(),
-                                                        request_id = %approval.request_id,
-                                                        recipient = %direct_recipient.platform_id,
-                                                        error = %e,
-                                                        "Failed to deliver approval notification (direct-route)"
-                                                    );
-                                                } else {
-                                                    info!(
-                                                        adapter = adapter.name(),
-                                                        request_id = %approval.request_id,
-                                                        recipient = %direct_recipient.platform_id,
-                                                        "Delivered approval notification (direct-route to originating chat)"
-                                                    );
-                                                }
-                                                // Direct route handled this
-                                                // adapter; skip the legacy
-                                                // recipients fan-out below.
-                                                continue;
-                                            }
-                                        }
-
-                                        let recipients: Vec<ChannelUser> = match bound_agent {
-                                            Some(bound) if bound == requesting_agent => {
-                                                adapter.notification_recipients()
-                                            }
-                                            Some(_) => {
-                                                // channel_default points at a
-                                                // DIFFERENT agent. Even so,
-                                                // an explicit binding on the
-                                                // same adapter that targets
-                                                // the requesting agent is a
-                                                // valid delivery target —
-                                                // operators set the binding
-                                                // deliberately. This is the
-                                                // "Telegram bot bound to
-                                                // agent A by default but
-                                                // also bound to agent B in
-                                                // chat Z via AgentBinding"
-                                                // case. Fan out to those
-                                                // bound chats only; do NOT
-                                                // touch the static
-                                                // notification_recipients
-                                                // (that's agent A's
-                                                // operator inbox).
-                                                let peers = router.bound_recipients_for_agent(
-                                                    requesting_agent,
-                                                    ct_str,
-                                                    adapter.account_id(),
-                                                );
-                                                if peers.is_empty() {
-                                                    debug!(
-                                                        adapter = adapter.name(),
-                                                        account_id = adapter.account_id().unwrap_or(""),
-                                                        request_id = %approval.request_id,
-                                                        requesting_agent = %requesting_agent,
-                                                        "Adapter bound to a different agent and no peer-binding override — skipping approval broadcast"
-                                                    );
-                                                    continue;
-                                                }
-                                                peers
-                                                    .into_iter()
-                                                    .map(|peer| ChannelUser {
-                                                        platform_id: peer,
-                                                        display_name: String::new(),
-                                                        librefang_user: None,
-                                                    })
-                                                    .collect()
-                                            }
-                                            None => {
-                                                // No `channel_default` for
-                                                // this adapter's key. Pre-
-                                                // #5002 silently dropped
-                                                // here — that's the bug.
-                                                // Walk bindings and fan out
-                                                // to every `peer_id` whose
-                                                // binding resolves to the
-                                                // requesting agent on this
-                                                // (channel, account_id).
-                                                let peers = router.bound_recipients_for_agent(
-                                                    requesting_agent,
-                                                    ct_str,
-                                                    adapter.account_id(),
-                                                );
-                                                if peers.is_empty() {
-                                                    // No default AND no
-                                                    // binding-derived peers.
-                                                    // Surface this loudly:
-                                                    // the operator probably
-                                                    // forgot to configure
-                                                    // either (and would
-                                                    // otherwise have no
-                                                    // signal that approvals
-                                                    // are being dropped on
-                                                    // the floor).
-                                                    warn!(
-                                                        adapter = adapter.name(),
-                                                        account_id = adapter.account_id().unwrap_or(""),
-                                                        channel = ct_str,
-                                                        request_id = %approval.request_id,
-                                                        requesting_agent = %requesting_agent,
-                                                        "Approval dropped: no channel_default and no AgentBinding peer_id covers the requesting agent on this adapter"
-                                                    );
-                                                    continue;
-                                                }
-                                                peers
-                                                    .into_iter()
-                                                    .map(|peer| ChannelUser {
-                                                        platform_id: peer,
-                                                        display_name: String::new(),
-                                                        librefang_user: None,
-                                                    })
-                                                    .collect()
-                                            }
-                                        };
-
-                                        if recipients.is_empty() {
-                                            debug!(
-                                                adapter = adapter.name(),
-                                                request_id = %approval.request_id,
-                                                "Adapter has no notification recipients — skipping approval broadcast"
-                                            );
-                                            continue;
-                                        }
-                                        for user in &recipients {
-                                            // `send_interactive` has a built-in
-                                            // text fallback for adapters that
-                                            // don't override it (or whose
-                                            // sidecar didn't declare
-                                            // `interactive` capability) —
-                                            // see `ChannelAdapter::send_interactive`
-                                            // in `types.rs`. So this single
-                                            // call covers both surfaces:
-                                            // Telegram / Slack get a real
-                                            // inline keyboard, IRC / SMS get
-                                            // the plain text body (which
-                                            // already carries the slash-command
-                                            // instructions for them to act on).
-                                            if let Err(e) = adapter
-                                                .send_interactive(user, &approval_keyboard)
-                                                .await
-                                            {
-                                                warn!(
-                                                    adapter = adapter.name(),
-                                                    request_id = %approval.request_id,
-                                                    recipient = %user.platform_id,
-                                                    error = %e,
-                                                    "Failed to deliver approval notification"
-                                                );
-                                            } else {
-                                                info!(
-                                                    adapter = adapter.name(),
-                                                    request_id = %approval.request_id,
-                                                    recipient = %user.platform_id,
-                                                    "Delivered approval notification (inline buttons; adapters without `interactive` capability render the text body verbatim)"
-                                                );
-                                            }
-                                        }
+                                        // We don't have a specific user to send to, so
+                                        // this is a broadcast-style notification. Adapters
+                                        // that don't support broadcast will simply skip.
+                                        // For now, log the notification — concrete delivery
+                                        // requires per-adapter user tracking which is a
+                                        // follow-up feature.
+                                        info!(
+                                            adapter = adapter.name(),
+                                            request_id = %approval.request_id,
+                                            "Approval notification ready for channel adapter"
+                                        );
                                     }
+
+                                    let _ = &msg; // Suppress unused variable warning
+                                    let _ = &handle;
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -1869,11 +1409,17 @@ impl BridgeManager {
                             }
                         }
                     }
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            info!("Shutting down approval event listener");
+                            break;
+                        }
+                    }
                 }
             }
         });
 
-        self.track(task);
+        self.tasks.push(task);
     }
 
     /// Push a proactive outbound message to a channel recipient.
@@ -1925,73 +1471,6 @@ impl BridgeManager {
         router
     }
 
-    /// Register a background task with the bridge so its lifetime is
-    /// tied to the bridge's. `stop()` awaits every tracked handle.
-    /// External spawners (e.g. the journal retry ticker in
-    /// `librefang-api`) MUST register here or they leak across
-    /// hot-reloads — old and new instances would race on the same
-    /// journal entries and double-dispatch.
-    pub fn track_task(&mut self, handle: tokio::task::JoinHandle<()>) {
-        self.track(handle);
-    }
-
-    /// Internal task recorder. Records the `JoinHandle` for the graceful
-    /// `&mut self` `stop()` join loop AND its `AbortHandle` mirror for the
-    /// `&self` hard `abort()` path (#5142). Every spawn that the bridge
-    /// owns MUST go through here so the two collections never drift —
-    /// otherwise `abort()` would silently leak the un-mirrored task.
-    fn track(&mut self, handle: tokio::task::JoinHandle<()>) {
-        if let Ok(mut guard) = self.abort_handles.lock() {
-            guard.push(handle.abort_handle());
-        }
-        self.tasks.push(handle);
-    }
-
-    /// Subscriber to the bridge's shutdown signal. Background tasks
-    /// can `select!` on this to exit cleanly when `stop()` fires.
-    pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
-        self.shutdown_rx.clone()
-    }
-
-    /// Hard-stop the bridge through a **shared** `&self` (#5142).
-    ///
-    /// `reload_channels_from_disk` swaps the old `BridgeManager` out of an
-    /// `ArcSwap<Option<BridgeManager>>` and then tries `Arc::try_unwrap` to
-    /// get `&mut` for the graceful `stop()`. Under load that `try_unwrap`
-    /// fails — `routes/agents.rs::push_message` does
-    /// `state.bridge_manager.load_full()` and holds the Arc across
-    /// `bm.push_message(...).await`, so a strong ref outlives the swap. The
-    /// old `if let Ok(Some(_)) = try_unwrap` arm is then skipped and the old
-    /// bridge's tokio tasks leak until the strong count happens to hit 1
-    /// (potentially never on a busy channel).
-    ///
-    /// This method is callable on the still-shared Arc: it fires the watch
-    /// shutdown signal (every dispatch loop and every adapter `select!`s on
-    /// `shutdown.changed()`, so they break promptly) and then `abort()`s
-    /// every tracked task handle as a hard backstop for any task parked
-    /// somewhere a cooperative break can't reach. It does not move out of
-    /// `self`, so it is sound to call regardless of `try_unwrap`'s outcome.
-    /// `stop()` remains the preferred path when `&mut self` is reachable
-    /// (it additionally awaits a clean join and runs each adapter's own
-    /// async cleanup).
-    pub fn abort(&self) {
-        if let Err(e) = self.shutdown_tx.send(true) {
-            debug!(error = %e, "Channel bridge shutdown signal had no live receivers");
-        }
-        if let Ok(mut guard) = self.abort_handles.lock() {
-            let n = guard.len();
-            for h in guard.drain(..) {
-                h.abort();
-            }
-            if n > 0 {
-                debug!(
-                    tasks = n,
-                    "Channel bridge tasks aborted via shared-ref abort()"
-                );
-            }
-        }
-    }
-
     pub async fn stop(&mut self) {
         // Signal the dispatch loops to stop. A send error here only means
         // every receiver was already dropped, which is fine on a duplicate
@@ -2012,70 +1491,10 @@ impl BridgeManager {
         for task in self.tasks.drain(..) {
             let _ = task.await;
         }
-        // The graceful join above completed every task, so the mirrored
-        // abort handles are now stale no-ops; clear them so a later
-        // `abort()` on a re-shared Arc doesn't iterate dead handles.
-        if let Ok(mut guard) = self.abort_handles.lock() {
-            guard.clear();
-        }
     }
 }
 
 /// Resolve channel type to its config string key.
-/// Build the inline-keyboard payload the approval listener fans out
-/// to every bound adapter. The `text` is platform-agnostic prose;
-/// `buttons` carries the two slash-command actions that the existing
-/// inbound `ButtonCallback` dispatcher (`bridge.rs::content_to_text`)
-/// already routes straight to the `/approve` / `/reject` handlers.
-///
-/// Adapters that declare the `interactive` capability render this as
-/// a real inline keyboard (Telegram, Slack Block Kit, Feishu cards);
-/// adapters that don't fall back via the default
-/// `ChannelAdapter::send_interactive` impl in `types.rs:647-661`,
-/// which prepends the button labels to the text body. The
-/// slash-command instructions live in the text body so the
-/// text-fallback path stays actionable.
-///
-/// Factored out for unit-testing — the listener loop itself spins up
-/// real tokio tasks against live adapters, which is too heavy a
-/// scaffold for asserting payload shape.
-pub(crate) fn build_approval_interactive(
-    agent_id: &str,
-    request_id: &str,
-    tool_name: &str,
-    risk_level: &str,
-    description: &str,
-) -> crate::types::InteractiveMessage {
-    let short_id = &request_id[..8.min(request_id.len())];
-    let text = format!(
-        "Approval required for agent {agent_id}\n\
-         Tool: {tool_name}\n\
-         Risk: {risk_level}\n\
-         {description}\n\n\
-         Tap a button below, or reply \
-         /approve {short_id} or /reject {short_id} \
-         (add a TOTP code if required: \
-         /approve {short_id} <6-digit>)"
-    );
-    crate::types::InteractiveMessage {
-        text,
-        buttons: vec![vec![
-            crate::types::InteractiveButton {
-                label: "Approve".to_string(),
-                action: format!("/approve {short_id}"),
-                style: Some("primary".to_string()),
-                url: None,
-            },
-            crate::types::InteractiveButton {
-                label: "Deny".to_string(),
-                action: format!("/reject {short_id}"),
-                style: Some("danger".to_string()),
-                url: None,
-            },
-        ]],
-    }
-}
-
 fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
     match channel {
         crate::types::ChannelType::Telegram => "telegram",
@@ -2093,13 +1512,6 @@ fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
         crate::types::ChannelType::Custom(s) => s.as_str(),
     }
 }
-
-/// Re-export of [`crate::types::sanitize_channel_name`] so the
-/// bridge call sites keep working unchanged; the canonical
-/// implementation lives in `types.rs` so non-bridge external
-/// `SenderContext` construction sites (HTTP request body,
-/// approval-replay path) can call it without a `bridge` dep.
-use crate::types::sanitize_channel_name;
 
 /// Metadata key for the actual sender user ID (distinct from platform_id in DMs).
 pub const SENDER_USER_ID_KEY: &str = "sender_user_id";
@@ -2515,10 +1927,7 @@ fn build_sender_context(
         Some(message.sender.platform_id.clone())
     };
     SenderContext {
-        // sanitize_channel_name guards against ChannelType::Custom
-        // collisions with reserved kernel-internal channels — see
-        // its doc-comment + audit: cron-channel-name-not-reserved.
-        channel: sanitize_channel_name(channel_type_str(&message.channel)),
+        channel: channel_type_str(&message.channel).to_string(),
         user_id: sender_user_id(message).to_string(),
         chat_id,
         display_name: message.sender.display_name.clone(),
@@ -2561,11 +1970,6 @@ fn build_sender_context(
         // Channel-originated traffic is never internal cron — [SILENT] markers
         // coming from real users must be treated as literal message content.
         is_internal_cron: false,
-        // Channel bridges are external ingress, not a trusted kernel system
-        // path — a reserved channel name here (e.g. a `Custom("cron")` adapter)
-        // is already rewritten to `ext-cron` by `sanitize_channel_name` above,
-        // and the kernel resolver must keep treating it as external.
-        is_internal_system: false,
     }
 }
 
@@ -2758,38 +2162,12 @@ fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
     formatter::default_output_format_for_channel(channel_type)
 }
 
-/// Extract the tool name from a `\n\n🔧 toolname\n\n` progress marker
-/// emitted by `librefang_api::channel_bridge` in response to a kernel
-/// `StreamEvent::ToolUseStart` event. Returns `None` for plain text
-/// deltas, the trailing-`⚠️`-error marker, the context-warning marker,
-/// or anything that doesn't exactly match the prefix+suffix wrapping —
-/// the api channel bridge sends each marker as its own dedicated
-/// `tx.send(line)` so an exact-match strip is the right shape (we
-/// would NOT want to grab a `🔧` that appeared inside model prose).
-fn extract_tool_marker_name(delta: &str) -> Option<String> {
-    let prefix = "\n\n🔧 ";
-    let suffix = "\n\n";
-    let inner = delta.strip_prefix(prefix)?.strip_suffix(suffix)?;
-    let trimmed = inner.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
 /// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
 ///
-/// Errors are logged at WARN — reactions are best-effort UX polish, but a
-/// silent failure mode masks real problems. The original `debug!` here hid
-/// per-room rate-limit drops on Matrix (`M_LIMIT_EXCEEDED`) where the
-/// trailing `✅ Done` reaction was being silently swallowed at default
-/// verbosity, and made the lifecycle-reaction feature look broken even
-/// when it was working. WARN is the right level: a single failure tells
-/// an operator "your homeserver is rate-limiting the bot", which is
-/// exactly the actionable diagnosis we want surfaced.
-/// For Telegram, the underlying HTTP call is already fire-and-forget
-/// (spawned internally), so this await returns almost immediately.
+/// Errors are logged at debug level — reactions are non-critical UX polish, but
+/// repeated failures can hint at adapter / permission issues worth investigating.
+/// For Telegram, the underlying HTTP call is already fire-and-forget (spawned internally),
+/// so this await returns almost immediately.
 async fn send_lifecycle_reaction(
     adapter: &dyn ChannelAdapter,
     user: &ChannelUser,
@@ -2802,12 +2180,12 @@ async fn send_lifecycle_reaction(
         remove_previous: true,
     };
     if let Err(e) = adapter.send_reaction(user, message_id, &reaction).await {
-        warn!(
+        debug!(
             adapter = adapter.name(),
             message_id = message_id,
             phase = ?phase,
             error = %e,
-            "Lifecycle reaction send failed (best-effort, not retried)",
+            "Lifecycle reaction send failed (best-effort, ignored)",
         );
     }
 }
@@ -3013,20 +2391,8 @@ async fn resolve_or_fallback(
             .and_then(|agents| agents.first().map(|(id, _)| *id)),
     };
     if let Some(id) = fallback {
-        // Auto-set this as the user's default so future messages route
-        // directly. Scope the cache entry to (channel, account_id) when we
-        // know the bot identity, otherwise we would re-introduce the #5672
-        // cross-bot leak via the fallback path (same platform user reaching
-        // a different bot would inherit this auto-bind).
-        let channel_str = crate::router::channel_type_to_str(&message.channel);
-        match message.metadata.get("account_id").and_then(|v| v.as_str()) {
-            Some(aid) => router.set_user_default_for_channel(
-                format!("{channel_str}:{aid}"),
-                message.sender.platform_id.clone(),
-                id,
-            ),
-            None => router.set_user_default(message.sender.platform_id.clone(), id),
-        }
+        // Auto-set this as the user's default so future messages route directly
+        router.set_user_default(message.sender.platform_id.clone(), id);
     }
     fallback
 }
@@ -3187,44 +2553,9 @@ async fn dispatch_message(
     // --- DM/Group policy check ---
     if let Some(ref ov) = overrides {
         if message.is_group {
-            // capture the group_jid before the gating call so
-            // both branches (record-on-skip, drain-on-pass) can use the
-            // same key without re-deriving it. The bridge keys group
-            // messages by `sender.platform_id` (= chat JID for groups).
-            let group_id = message.sender.platform_id.clone();
-
             if !should_process_group_message(ct_str, ov, message) {
-                // Record the skipped message into the per-group buffer so
-                // the next addressed turn on this group can recover its
-                // text. Only plain-text content reaches `dispatch_message`
-                // (media goes through `dispatch_with_blocks` which doesn't
-                // gate); recording empty text would just bloat the
-                // buffer, so we skip when nothing useful is extractable.
-                if let Some(buffer) = crate::group_history::global() {
-                    if let Some(text) = text_content(message) {
-                        if !text.is_empty() {
-                            let entry = crate::group_history::HistoryEntry {
-                                sender_display_name: message.sender.display_name.clone(),
-                                text: text.to_string(),
-                                captured_at: std::time::Instant::now(),
-                            };
-                            buffer
-                                .record(&crate::group_history::group_key(ct_str, &group_id), entry)
-                                .await;
-                        }
-                    }
-                }
                 return;
             }
-            // Gating pass: the drain is deferred to the dispatch site
-            // (just before the journal record) so per-channel rate-limit,
-            // per-user rate-limit, reply-intent precheck, command-policy,
-            // thread-ownership, RBAC, and auto-reply early-returns can
-            // each take their turn first. Draining here would empty the
-            // buffer even when one of those gates suppresses the message,
-            // erasing the very context the next addressed turn was meant
-            // to recover. See `dispatch_message` near the journal-record
-            // call for the actual drain.
             // Reply-intent precheck: lightweight LLM classification for group
             // messages when group_policy is "all" and precheck is enabled.
             // Skipped for mentions and commands (already filtered above).
@@ -3376,13 +2707,10 @@ async fn dispatch_message(
                 router,
                 &message.sender,
                 &message.channel,
-                message.metadata.get("account_id").and_then(|v| v.as_str()),
                 overrides.as_ref(),
             )
             .await;
-            if !suppress_button_command_ack(&message.content, name) {
-                send_response(adapter, &message.sender, result, thread_id, output_format).await;
-            }
+            send_response(adapter, &message.sender, result, thread_id, output_format).await;
             return;
         }
         debug!(
@@ -3400,15 +2728,9 @@ async fn dispatch_message(
     } = message.content
     {
         let upload_dir = handle.effective_channels_download_dir();
-        let extra_headers = adapter.fetch_headers_for(url);
-        let blocks = download_image_to_blocks(
-            url,
-            caption.as_deref(),
-            mime_type.as_deref(),
-            &upload_dir,
-            &extra_headers,
-        )
-        .await;
+        let blocks =
+            download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir)
+                .await;
         if blocks.iter().any(|b| {
             matches!(
                 b,
@@ -3445,10 +2767,7 @@ async fn dispatch_message(
         let max_bytes = handle
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
-        let extra_headers = adapter.fetch_headers_for(url);
-        let downloaded =
-            download_file_to_blocks(url, filename, max_bytes, &download_dir, &extra_headers).await;
-        let blocks = downloaded.blocks;
+        let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
         if has_file_saved_block(&blocks) {
             dispatch_with_blocks(
                 blocks,
@@ -3482,17 +2801,8 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
-        let extra_headers = adapter.fetch_headers_for(url);
-        let downloaded =
-            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
-        let mut blocks = downloaded.blocks;
+        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
         if has_file_saved_block(&blocks) {
-            // Auto-transcription when `[media] audio_transcription = true` (#4975).
-            // The kernel checks the flag and falls back to `Ok(None)` when disabled,
-            // so the existing default-OFF behaviour is preserved verbatim.
-            let transcription_block =
-                maybe_transcribe_inbound_audio(handle, downloaded.saved.as_ref()).await;
-
             // Prepend a context block carrying duration + caption so the
             // model knows this is voice (not an arbitrary file) and any
             // user-supplied caption survives the save-path replacement.
@@ -3509,9 +2819,6 @@ async fn dispatch_message(
                     provider_metadata: None,
                 },
             );
-            if let Some(t) = transcription_block {
-                blocks.insert(1, t);
-            }
             dispatch_with_blocks(
                 blocks,
                 message,
@@ -3547,15 +2854,8 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "audio.mp3".to_string());
-        let extra_headers = adapter.fetch_headers_for(url);
-        let downloaded =
-            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
-        let mut blocks = downloaded.blocks;
+        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
         if has_file_saved_block(&blocks) {
-            // Auto-transcription when `[media] audio_transcription = true` (#4975).
-            let transcription_block =
-                maybe_transcribe_inbound_audio(handle, downloaded.saved.as_ref()).await;
-
             let mut header = format!("[Audio ({duration_seconds}s)");
             match (title.as_deref(), performer.as_deref()) {
                 (Some(t), Some(p)) if !t.is_empty() && !p.is_empty() => {
@@ -3577,9 +2877,6 @@ async fn dispatch_message(
                     provider_metadata: None,
                 },
             );
-            if let Some(t) = transcription_block {
-                blocks.insert(1, t);
-            }
             dispatch_with_blocks(
                 blocks,
                 message,
@@ -3618,16 +2915,8 @@ async fn dispatch_message(
             .clone()
             .or_else(|| filename_from_url(url))
             .unwrap_or_else(|| "video.mp4".to_string());
-        let extra_headers = adapter.fetch_headers_for(url);
-        let downloaded = download_file_to_blocks(
-            url,
-            &resolved_filename,
-            max_bytes,
-            &download_dir,
-            &extra_headers,
-        )
-        .await;
-        let mut blocks = downloaded.blocks;
+        let mut blocks =
+            download_file_to_blocks(url, &resolved_filename, max_bytes, &download_dir).await;
         if has_file_saved_block(&blocks) {
             let context = match caption {
                 Some(c) if !c.is_empty() => {
@@ -3746,31 +3035,10 @@ async fn dispatch_message(
                 }
             } else if action.starts_with("model:") {
                 let model_id = action.strip_prefix("model:").unwrap_or("");
-                // #5672 Layer A: use the context-aware resolver so the
-                // interactive `/model` button-callback path routes to the
-                // bot's own agent, not the first-registered channel default.
-                let ctx = crate::router::BindingContext {
-                    channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(
-                        &message.channel,
-                    )),
-                    account_id: message
-                        .metadata
-                        .get("account_id")
-                        .and_then(|v| v.as_str())
-                        .map(std::borrow::Cow::Borrowed),
-                    peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
-                    guild_id: message
-                        .metadata
-                        .get("guild_id")
-                        .and_then(|v| v.as_str())
-                        .map(std::borrow::Cow::Borrowed),
-                    roles: smallvec::SmallVec::new(),
-                };
-                let agent_id = router.resolve_with_context(
+                let agent_id = router.resolve(
                     &message.channel,
                     &message.sender.platform_id,
                     message.sender.librefang_user.as_deref(),
-                    &ctx,
                 );
                 let label = {
                     // Best-effort: look up display name from all providers
@@ -4018,13 +3286,10 @@ async fn dispatch_message(
                     router,
                     &message.sender,
                     &message.channel,
-                    message.metadata.get("account_id").and_then(|v| v.as_str()),
                     overrides.as_ref(),
                 )
                 .await;
-                if !suppress_button_command_ack(&message.content, cmd) {
-                    send_response(adapter, &message.sender, result, thread_id, output_format).await;
-                }
+                send_response(adapter, &message.sender, result, thread_id, output_format).await;
                 return;
             }
             debug!(
@@ -4201,30 +3466,6 @@ async fn dispatch_message(
         return;
     }
 
-    // --- Group-history drain (gating pass survived all early-return gates) ---
-    //
-    // Done here, after rate-limit / reply-intent / command-policy /
-    // thread-ownership / RBAC / auto-reply have all let the message
-    // through — earlier in the gating block we'd erase the buffer even
-    // when one of these suppressed the dispatch, costing the very
-    // context the next addressed turn was meant to recover. The drained
-    // count is log-only in v1; the kernel-side prompt enrichment that
-    // consumes `drained` is the follow-up PR.
-    if message.is_group {
-        if let Some(buffer) = crate::group_history::global() {
-            let key = crate::group_history::group_key(ct_str, &message.sender.platform_id);
-            if let Some(drained) = buffer.drain(&key).await {
-                info!(
-                    event = "group_history_drained",
-                    channel = ct_str,
-                    group = %message.sender.platform_id,
-                    entries = drained.len(),
-                    "drained prior group entries on gating pass",
-                );
-            }
-        }
-    }
-
     // --- Message journal: record before dispatch for crash recovery ---
     if let Some(j) = journal {
         let entry = crate::message_journal::JournalEntry {
@@ -4242,7 +3483,6 @@ async fn dispatch_message(
             is_group: message.is_group,
             thread_id: thread_id.map(|s| s.to_string()),
             metadata: std::collections::HashMap::new(),
-            next_retry_after: None,
         };
         j.record(entry).await;
     }
@@ -4296,54 +3536,42 @@ async fn dispatch_message(
 
                 // Tee: forward deltas to the adapter while buffering a copy.
                 // If send_streaming fails, the buffer lets us fall back to send().
-                //
-                // Drain runs as a sibling future via `tokio::join!` (not a
-                // detached `tokio::spawn`) so it shares the dispatch task's
-                // borrow of `adapter`. That lets us call
-                // `send_lifecycle_reaction(adapter, ...)` from inside the
-                // drain when we observe the api/channel_bridge's
-                // `\n\n🔧 toolname\n\n` text marker — a turn that runs a
-                // tool now flips the trigger-message reaction to ⚙️ for the
-                // duration of the call, instead of staying stuck on ✍️.
                 let (adapter_tx, adapter_rx) = mpsc::channel::<String>(64);
-                let prefix_chunk_owned = prefix_chunk.clone();
-                let drain_fut = async {
+                let mut buffered_text = String::new();
+                let buffer_handle = tokio::spawn({
+                    let prefix_chunk = prefix_chunk.clone();
                     let mut buffered = String::new();
-                    // Inject the prefix as the first delta so it becomes
-                    // part of the streamed message. Mirror it into the
-                    // buffer so the stream-fail fallback path's
-                    // idempotency check (`apply_agent_prefix`) sees an
-                    // already-prefixed buffer and skips re-prefixing.
-                    if let Some(ref p) = prefix_chunk_owned {
-                        buffered.push_str(p);
-                        if adapter_tx.send(p.clone()).await.is_err() {
-                            return buffered;
+                    async move {
+                        // Inject the prefix as the first delta so it becomes
+                        // part of the streamed message. Mirror it into the
+                        // buffer so the stream-fail fallback path's
+                        // idempotency check (`apply_agent_prefix`) sees an
+                        // already-prefixed buffer and skips re-prefixing.
+                        if let Some(ref p) = prefix_chunk {
+                            buffered.push_str(p);
+                            if adapter_tx.send(p.clone()).await.is_err() {
+                                return buffered;
+                            }
                         }
+                        while let Some(delta) = delta_rx.recv().await {
+                            buffered.push_str(&delta);
+                            // Best-effort forward — if adapter dropped rx, stop.
+                            if adapter_tx.send(delta).await.is_err() {
+                                break;
+                            }
+                        }
+                        buffered
                     }
-                    while let Some(delta) = delta_rx.recv().await {
-                        buffered.push_str(&delta);
-                        if let Some(name) = extract_tool_marker_name(&delta) {
-                            send_lifecycle_reaction(
-                                adapter,
-                                &message.sender,
-                                msg_id,
-                                &AgentPhase::tool_use(&name),
-                            )
-                            .await;
-                        }
-                        // Best-effort forward — if adapter dropped rx, stop.
-                        if adapter_tx.send(delta).await.is_err() {
-                            break;
-                        }
-                    }
-                    drop(adapter_tx);
-                    buffered
-                };
+                });
 
-                let (stream_result, buffered_text) = tokio::join!(
-                    adapter.send_streaming(&message.sender, adapter_rx, thread_id),
-                    drain_fut
-                );
+                let stream_result = adapter
+                    .send_streaming(&message.sender, adapter_rx, thread_id)
+                    .await;
+
+                // Collect the buffered text (always succeeds unless the task panicked).
+                if let Ok(text) = buffer_handle.await {
+                    buffered_text = text;
+                }
 
                 // Status is sent after the text channel fully drains, so
                 // awaiting here will not block longer than the stream itself.
@@ -4372,9 +3600,14 @@ async fn dispatch_message(
                             )
                             .await;
                         if let Some(j) = journal {
-                            j.record_outcome(
+                            let jstatus = if kernel_ok {
+                                crate::message_journal::JournalStatus::Completed
+                            } else {
+                                crate::message_journal::JournalStatus::Failed
+                            };
+                            j.update_status(
                                 &message.platform_message_id,
-                                kernel_ok,
+                                jstatus,
                                 kernel_err_str.clone(),
                             )
                             .await;
@@ -4442,7 +3675,12 @@ async fn dispatch_message(
                                 )
                                 .await;
                             if let Some(j) = journal {
-                                j.record_outcome(&message.platform_message_id, kernel_ok, err_str)
+                                let jstatus = if kernel_ok {
+                                    crate::message_journal::JournalStatus::Completed
+                                } else {
+                                    crate::message_journal::JournalStatus::Failed
+                                };
+                                j.update_status(&message.platform_message_id, jstatus, err_str)
                                     .await;
                             }
                             return;
@@ -4468,8 +3706,12 @@ async fn dispatch_message(
                             )
                             .await;
                         if let Some(j) = journal {
-                            j.record_outcome(&message.platform_message_id, false, Some(err_str))
-                                .await;
+                            j.update_status(
+                                &message.platform_message_id,
+                                crate::message_journal::JournalStatus::Failed,
+                                Some(err_str),
+                            )
+                            .await;
                         }
                         return;
                     }
@@ -4546,7 +3788,12 @@ async fn dispatch_message(
             )
             .await;
         if let Some(j) = journal {
-            j.record_outcome(&message.platform_message_id, success, err_str)
+            let jstatus = if success {
+                crate::message_journal::JournalStatus::Completed
+            } else {
+                crate::message_journal::JournalStatus::Failed
+            };
+            j.update_status(&message.platform_message_id, jstatus, err_str)
                 .await;
         }
         return;
@@ -4575,8 +3822,12 @@ async fn dispatch_message(
                 )
                 .await;
             if let Some(j) = journal {
-                j.record_outcome(&message.platform_message_id, true, None)
-                    .await;
+                j.update_status(
+                    &message.platform_message_id,
+                    crate::message_journal::JournalStatus::Completed,
+                    None,
+                )
+                .await;
             }
         }
         Err(e) => {
@@ -4605,8 +3856,12 @@ async fn dispatch_message(
             )
             .await;
             if let Some(j) = journal {
-                j.record_outcome(&message.platform_message_id, false, Some(e.to_string()))
-                    .await;
+                j.update_status(
+                    &message.platform_message_id,
+                    crate::message_journal::JournalStatus::Failed,
+                    Some(e.to_string()),
+                )
+                .await;
             }
         }
     }
@@ -4634,94 +3889,6 @@ fn detect_image_magic(bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Detect audio format from the first few magic bytes.
-///
-/// Returns `Some("audio/...")` for OGG, MP3, WAV, FLAC, M4A, and WebM/Matroska.
-/// Used to recover a correct MIME type when the HTTP Content-Type header is
-/// the uninformative `application/octet-stream` (common with Telegram CDN).
-pub(crate) fn detect_audio_magic(bytes: &[u8]) -> Option<&'static str> {
-    // OGG container — covers Opus (.oga/.opus), Vorbis, etc.
-    if bytes.len() >= 4 && bytes[..4] == [0x4F, 0x67, 0x67, 0x53] {
-        return Some("audio/ogg");
-    }
-    // MP3: ID3 tag header
-    if bytes.len() >= 3 && bytes[..3] == [0x49, 0x44, 0x33] {
-        return Some("audio/mpeg");
-    }
-    // MP3: sync word (0xFF 0xEx or 0xFF 0xFx) with valid MPEG version/layer bits.
-    // Byte 1 encodes: sync(3 bits) | version(2) | layer(2) | crc(1).
-    // Reject version=00 (reserved) and layer=00 (reserved) to reduce false positives.
-    // Valid second bytes: 0xF2/0xF3 (MPEG-2), 0xFA/0xFB/0xF2/0xF3/0xE2/0xE3 (various).
-    // Simplified: require byte[0]==0xFF, upper nibble of byte[1] is 0xF or 0xE,
-    // version bits != 01 (reserved), layer bits != 00 (reserved).
-    if bytes.len() >= 2 && bytes[0] == 0xFF {
-        let b1 = bytes[1];
-        // Upper nibble must be 0xE or 0xF (sync continuation)
-        if b1 & 0xE0 == 0xE0 {
-            let version = (b1 >> 3) & 0x03; // bits 4-3
-            let layer = (b1 >> 1) & 0x03; // bits 2-1
-            if version != 0x01 && layer != 0x00 {
-                return Some("audio/mpeg");
-            }
-        }
-    }
-    // WAV: RIFF....WAVE
-    if bytes.len() >= 12
-        && bytes[..4] == [0x52, 0x49, 0x46, 0x46]
-        && bytes[8..12] == [0x57, 0x41, 0x56, 0x45]
-    {
-        return Some("audio/wav");
-    }
-    // FLAC
-    if bytes.len() >= 4 && bytes[..4] == [0x66, 0x4C, 0x61, 0x43] {
-        return Some("audio/flac");
-    }
-    // M4A / MP4 audio: ftyp box at offset 4 with a known audio-only brand.
-    // Brands: "M4A " (iTunes), "M4B " (audiobook), "mp42", "mp41", "isom", "dash".
-    if bytes.len() >= 12 && bytes[4..8] == [0x66, 0x74, 0x79, 0x70] {
-        let brand = &bytes[8..12];
-        if brand == b"M4A "
-            || brand == b"M4B "
-            || brand == b"mp42"
-            || brand == b"mp41"
-            || brand == b"isom"
-            || brand == b"dash"
-        {
-            return Some("audio/mp4");
-        }
-    }
-    // WebM / Matroska: EBML magic — but this also matches video/webm.
-    // Return None here and let filename-based detection resolve .weba → audio/webm.
-    // (Returning audio/webm unconditionally would misclassify video files.)
-    if bytes.len() >= 4 && bytes[..4] == [0x1A, 0x45, 0xDF, 0xA3] {
-        return None;
-    }
-    None
-}
-
-/// Infer an audio MIME type from a filename extension.
-///
-/// Returns `Some("audio/...")` for known audio extensions, `None` otherwise.
-/// Used as a fallback when magic-byte detection is inconclusive.
-fn audio_mime_from_filename(filename: &str) -> Option<&'static str> {
-    let lower = filename.to_ascii_lowercase();
-    if lower.ends_with(".ogg") || lower.ends_with(".oga") || lower.ends_with(".opus") {
-        Some("audio/ogg")
-    } else if lower.ends_with(".mp3") {
-        Some("audio/mpeg")
-    } else if lower.ends_with(".wav") {
-        Some("audio/wav")
-    } else if lower.ends_with(".flac") {
-        Some("audio/flac")
-    } else if lower.ends_with(".m4a") {
-        Some("audio/mp4")
-    } else if lower.ends_with(".webm") {
-        Some("audio/webm")
-    } else {
-        None
-    }
-}
-
 /// Guess image media type from the URL file extension.
 fn media_type_from_url(url: &str) -> String {
     if url.contains(".png") {
@@ -4745,27 +3912,6 @@ const CHANNEL_FILE_DOWNLOAD_MAX_BYTES: u64 = 50 * 1024 * 1024;
 /// `dispatch_message` to detect success vs failure.
 const FILE_SAVED_BLOCK_PREFIX: &str = "[File: ";
 
-/// Result of downloading a channel attachment to disk.
-///
-/// `blocks` is the content blocks the agent should receive (path block plus
-/// any inline-enriched text). `saved` is `Some((path, media_type))` when the
-/// download produced bytes on disk — callers that need to invoke media
-/// understanding (e.g. inbound audio transcription, #4975) use this to drive
-/// `MediaEngine` without re-parsing the path-block text.
-struct DownloadedFile {
-    blocks: Vec<ContentBlock>,
-    saved: Option<(std::path::PathBuf, String)>,
-}
-
-impl DownloadedFile {
-    fn failed(blocks: Vec<ContentBlock>) -> Self {
-        Self {
-            blocks,
-            saved: None,
-        }
-    }
-}
-
 /// Returns `true` when [`download_file_to_blocks`] produced a block that
 /// represents a successfully saved download — either an inline `ImageFile`
 /// (when the response was image-typed) or a `Text` block whose content
@@ -4786,122 +3932,6 @@ fn has_file_saved_block(blocks: &[ContentBlock]) -> bool {
         _ => false,
     })
 }
-
-/// Auto-transcribe an inbound channel audio attachment when the kernel's
-/// `[media] audio_transcription` flag is enabled (#4975).
-///
-/// Returns a `ContentBlock::Text` to insert next to the saved-path block:
-///   - `Some([Transcription: …])` when transcription succeeded.
-///   - `Some([Transcription unavailable])` when the kernel reported an
-///     error (no provider configured, oversize file, provider 5xx, …) or
-///     the STT call exceeded [`INBOUND_TRANSCRIPTION_TIMEOUT`]. The raw
-///     path block is still delivered so the agent can fall back to
-///     `media_transcribe` or just acknowledge the voice note. The
-///     opaque text deliberately omits the provider reason — provider
-///     error envelopes can echo API keys / URLs (e.g. Gemini's
-///     `?key=…`); leaking the verbose reason into the message stream
-///     would also leak it into every downstream LLM's prompt cache.
-///     Operators see the full reason in logs.
-///   - `None` when transcription is disabled (the default) or there is no
-///     saved file (download failed earlier).
-///
-/// Non-audio MIME types (e.g. a `video/mp4` that hit the Voice arm because
-/// of an upstream classification bug) are skipped silently so we never
-/// bill an STT provider for the wrong shape.
-async fn maybe_transcribe_inbound_audio(
-    handle: &Arc<dyn ChannelBridgeHandle>,
-    saved: Option<&(std::path::PathBuf, String)>,
-) -> Option<ContentBlock> {
-    maybe_transcribe_inbound_audio_with_timeout(handle, saved, INBOUND_TRANSCRIPTION_TIMEOUT).await
-}
-
-/// Inner variant of [`maybe_transcribe_inbound_audio`] that takes the
-/// timeout explicitly. Production callers go through the wrapper above,
-/// which pins the timeout to [`INBOUND_TRANSCRIPTION_TIMEOUT`]; tests use
-/// this entry point with a small duration to exercise the timeout branch
-/// without sitting on the wall clock.
-async fn maybe_transcribe_inbound_audio_with_timeout(
-    handle: &Arc<dyn ChannelBridgeHandle>,
-    saved: Option<&(std::path::PathBuf, String)>,
-    timeout_dur: std::time::Duration,
-) -> Option<ContentBlock> {
-    let (path, media_type) = saved?;
-    // Cheap ASCII prefix check without allocating a lowercase copy on
-    // every voice message.
-    if !media_type
-        .as_bytes()
-        .get(..6)
-        .is_some_and(|p| p.eq_ignore_ascii_case(b"audio/"))
-    {
-        return None;
-    }
-    let fut = handle.transcribe_inbound_audio(path, media_type);
-    let result = match tokio::time::timeout(timeout_dur, fut).await {
-        Ok(inner) => inner,
-        Err(_elapsed) => {
-            // STT hung past the budget — dispatch must move on so the
-            // per-(agent,channel) session doesn't pile up behind one
-            // 60s voice note. Treat identically to the provider-error
-            // path: opaque unavailable block + raw saved-path block.
-            warn!(
-                path = %path.display(),
-                mime = %media_type,
-                timeout_secs = timeout_dur.as_secs(),
-                "Inbound audio transcription timed out; passing raw file to agent"
-            );
-            return Some(ContentBlock::Text {
-                text: TRANSCRIPTION_UNAVAILABLE_BLOCK.to_string(),
-                provider_metadata: None,
-            });
-        }
-    };
-    match result {
-        Ok(Some(text)) => {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            Some(ContentBlock::Text {
-                text: format!("[Transcription: {trimmed}]"),
-                provider_metadata: None,
-            })
-        }
-        Ok(None) => None,
-        Err(reason) => {
-            // Never drop the message — surface the failure as a sibling
-            // block so the agent knows transcription was attempted and
-            // failed. Operator log keeps the full reason; the LLM-facing
-            // block is intentionally opaque (see SECURITY note in the
-            // doc-comment above).
-            warn!(
-                path = %path.display(),
-                mime = %media_type,
-                error = %reason,
-                "Inbound audio transcription failed; passing raw file to agent"
-            );
-            Some(ContentBlock::Text {
-                text: TRANSCRIPTION_UNAVAILABLE_BLOCK.to_string(),
-                provider_metadata: None,
-            })
-        }
-    }
-}
-
-/// Hard deadline for the kernel STT round-trip during channel dispatch.
-///
-/// Whisper / Groq normally return in 2-5s for a 1-minute voice; 30s is
-/// generous but short enough that a hung provider can't pin the
-/// per-(agent,channel) session indefinitely. On expiry the helper
-/// returns the opaque "unavailable" block and the raw saved-path block
-/// continues to the agent.
-const INBOUND_TRANSCRIPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// User-facing text for an inbound transcription that didn't produce a
-/// usable result — provider error, missing credentials, oversize file,
-/// or [`INBOUND_TRANSCRIPTION_TIMEOUT`] expiry. Deliberately opaque to
-/// avoid leaking provider error envelopes (which can echo API keys /
-/// request URLs) into the LLM prompt and downstream cache.
-const TRANSCRIPTION_UNAVAILABLE_BLOCK: &str = "[Transcription unavailable]";
 
 /// Extract a basename-style filename from the path component of a URL.
 ///
@@ -4964,52 +3994,32 @@ async fn download_file_to_blocks(
     filename: &str,
     max_bytes: u64,
     download_dir: &std::path::Path,
-    extra_headers: &[(String, String)],
-) -> DownloadedFile {
+) -> Vec<ContentBlock> {
     // Validate URL scheme
     if let Err(reason) = validate_url_scheme(url) {
         warn!("{reason}");
-        return DownloadedFile::failed(vec![ContentBlock::Text {
+        return vec![ContentBlock::Text {
             text: format!("[File download rejected: {reason}]"),
             provider_metadata: None,
-        }]);
+        }];
     }
 
     let client = crate::http_client::new_client();
-    let mut req = client.get(url).timeout(std::time::Duration::from_secs(60));
-    for (name, value) in extra_headers {
-        req = req.header(name.as_str(), value.as_str());
-    }
-    let resp = match req.send().await {
+    let resp = match client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to download file from channel: {e}");
-            return DownloadedFile::failed(vec![ContentBlock::Text {
+            return vec![ContentBlock::Text {
                 text: format!("[File download failed: {e}]"),
                 provider_metadata: None,
-            }]);
+            }];
         }
     };
-
-    // Fail closed on non-2xx. Without this the body of a 4xx/5xx (e.g.
-    // Synapse's `M_NOT_FOUND` JSON, ~45 bytes) streams straight into
-    // `<uuid>.<ext>` and the agent then sees a "PDF" that's actually an
-    // error envelope.
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let preview: String = body.chars().take(200).collect();
-        warn!(
-            status = %status,
-            body_preview = %preview,
-            url = %url,
-            "File download returned non-success status"
-        );
-        return DownloadedFile::failed(vec![ContentBlock::Text {
-            text: format!("[File download failed: HTTP {status} ({filename})]"),
-            provider_metadata: None,
-        }]);
-    }
 
     // Fast-reject via Content-Length header when available.
     if let Some(cl) = resp.content_length() {
@@ -5018,12 +4028,12 @@ async fn download_file_to_blocks(
                 content_length = cl,
                 max_bytes, "File exceeds size cap (Content-Length), skipping download"
             );
-            return DownloadedFile::failed(vec![ContentBlock::Text {
+            return vec![ContentBlock::Text {
                 text: format!(
                     "[File too large: {cl} bytes exceeds {max_bytes} byte limit ({filename})]"
                 ),
                 provider_metadata: None,
-            }]);
+            }];
         }
     }
 
@@ -5051,10 +4061,10 @@ async fn download_file_to_blocks(
             "Failed to create download dir {}: {e}",
             download_dir.display()
         );
-        return DownloadedFile::failed(vec![ContentBlock::Text {
+        return vec![ContentBlock::Text {
             text: format!("[File download failed: cannot create directory: {e}]"),
             provider_metadata: None,
-        }]);
+        }];
     }
 
     // Stream body to disk chunk by chunk, enforcing size cap.
@@ -5063,18 +4073,14 @@ async fn download_file_to_blocks(
         Ok(f) => f,
         Err(e) => {
             warn!("Failed to create file {}: {e}", file_path.display());
-            return DownloadedFile::failed(vec![ContentBlock::Text {
+            return vec![ContentBlock::Text {
                 text: format!("[File download failed: {e}]"),
                 provider_metadata: None,
-            }]);
+            }];
         }
     };
 
     let mut total: u64 = 0;
-    // Retain the first 12 bytes of the response body so we can sniff the audio
-    // MIME type without a second read syscall (avoids sync IO in async context).
-    let mut magic_buf = [0u8; 12];
-    let mut magic_filled: usize = 0;
     use tokio::io::AsyncWriteExt;
     while let Some(chunk_result) = stream.next().await {
         match chunk_result {
@@ -5087,38 +4093,31 @@ async fn download_file_to_blocks(
                     );
                     drop(file);
                     let _ = tokio::fs::remove_file(&file_path).await;
-                    return DownloadedFile::failed(vec![ContentBlock::Text {
+                    return vec![ContentBlock::Text {
                         text: format!(
                             "[File too large: exceeded {max_bytes} byte limit ({filename})]"
                         ),
                         provider_metadata: None,
-                    }]);
-                }
-                // Fill magic buffer from the very first bytes of the stream.
-                if magic_filled < magic_buf.len() {
-                    let need = magic_buf.len() - magic_filled;
-                    let take = need.min(chunk.len());
-                    magic_buf[magic_filled..magic_filled + take].copy_from_slice(&chunk[..take]);
-                    magic_filled += take;
+                    }];
                 }
                 if let Err(e) = file.write_all(&chunk).await {
                     warn!("Failed to write chunk to {}: {e}", file_path.display());
                     drop(file);
                     let _ = tokio::fs::remove_file(&file_path).await;
-                    return DownloadedFile::failed(vec![ContentBlock::Text {
+                    return vec![ContentBlock::Text {
                         text: format!("[File download failed: write error: {e}]"),
                         provider_metadata: None,
-                    }]);
+                    }];
                 }
             }
             Err(e) => {
                 warn!("Stream error downloading file: {e}");
                 drop(file);
                 let _ = tokio::fs::remove_file(&file_path).await;
-                return DownloadedFile::failed(vec![ContentBlock::Text {
+                return vec![ContentBlock::Text {
                     text: format!("[File download failed: {e}]"),
                     provider_metadata: None,
-                }]);
+                }];
             }
         }
     }
@@ -5126,37 +4125,6 @@ async fn download_file_to_blocks(
     if let Err(e) = file.flush().await {
         warn!("Failed to flush file {}: {e}", file_path.display());
     }
-
-    // When the Content-Type header was uninformative (application/octet-stream
-    // or absent — common with Telegram and S3 CDNs), attempt to recover the
-    // real MIME type so the kernel STT pipeline fires correctly:
-    //   1. Magic-byte sniff from the bytes already buffered during streaming
-    //      (no extra read syscall — avoids blocking sync IO in async context).
-    //   2. Fall back to filename extension.
-    //   3. Keep application/octet-stream only when both are inconclusive.
-    let media_type = if media_type == "application/octet-stream" {
-        let sniffed_magic = detect_audio_magic(&magic_buf[..magic_filled]).map(str::to_string);
-        let sniffed_name = audio_mime_from_filename(filename).map(str::to_string);
-
-        // Log when magic and filename hint disagree so operators can debug
-        // files that land with the wrong MIME.
-        if let (Some(ref magic_mime), Some(ref name_mime)) = (&sniffed_magic, &sniffed_name) {
-            if magic_mime != name_mime {
-                debug!(
-                    sniffed_mime = %magic_mime,
-                    filename_mime = %name_mime,
-                    filename = %filename,
-                    "audio MIME source disagreement: magic-bytes and filename extension differ; \
-                     using magic-bytes result"
-                );
-            }
-        }
-
-        // Magic bytes take precedence; filename is the fallback.
-        sniffed_magic.or(sniffed_name).unwrap_or(media_type)
-    } else {
-        media_type
-    };
 
     // Probabilistic cleanup — avoids unbounded disk growth between restarts.
     // Triggers on ~1/256 downloads without a rand dependency.
@@ -5179,9 +4147,9 @@ async fn download_file_to_blocks(
     );
 
     let path_str = file_path.to_string_lossy().into_owned();
-    let blocks = if media_type.starts_with("image/") {
+    if media_type.starts_with("image/") {
         vec![ContentBlock::ImageFile {
-            media_type: media_type.clone(),
+            media_type,
             path: path_str,
         }]
     } else {
@@ -5197,10 +4165,6 @@ async fn download_file_to_blocks(
             provider_metadata: None,
         });
         blocks
-    };
-    DownloadedFile {
-        blocks,
-        saved: Some((file_path, media_type)),
     }
 }
 
@@ -5246,75 +4210,100 @@ async fn download_image_to_blocks(
     caption: Option<&str>,
     mime_type_hint: Option<&str>,
     upload_dir: &std::path::Path,
-    extra_headers: &[(String, String)],
 ) -> Vec<ContentBlock> {
     use base64::Engine;
 
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-    // SSRF guard (#3442) + size cap (5 MiB, in-memory) + Content-Type
-    // capture, all behind one helper. The helper rejects non-http(s)
-    // schemes and any host literally in a private/loopback/metadata
-    // range BEFORE opening a socket — so a forged
-    // `http://169.254.169.254/...` never produces an "image" block in
-    // the agent's LLM context. The size cap enforces both a
-    // Content-Length pre-check and a streaming-accumulator mid-fetch
-    // bound, so a chunked-transfer "lying" length cannot bypass it.
-    //
-    // `extra_headers` is threaded through to attach auth (MSC3916
-    // Bearer for Matrix's authenticated media path); the adapter has
-    // already gated the URL host before producing the headers — see
-    // `ChannelAdapter::fetch_headers_for` for the credential-leak
-    // contract.
-    let (buf, response_content_type) =
-        match crate::http_client::fetch_url_bytes(url, MAX_IMAGE_BYTES, extra_headers).await {
-            Ok(t) => t,
-            Err(crate::http_client::FetchError::Rejected(reason)) => {
-                warn!("Rejecting image download: {reason}");
-                return vec![ContentBlock::Text {
-                    text: format!("[Image download rejected: {reason}]"),
-                    provider_metadata: None,
-                }];
-            }
-            Err(crate::http_client::FetchError::TooLarge { actual, limit }) => {
-                let reported_kb = actual
-                    .map(|a| a / 1024)
-                    .unwrap_or_else(|| (limit as u64) / 1024);
-                match actual {
-                    Some(len) => warn!(
-                    "Image Content-Length ({len} bytes) exceeds limit, rejecting before download"
-                ),
-                    None => warn!("Image stream exceeded {limit} byte limit, aborting download"),
-                }
-                let desc = match caption {
-                    Some(c) => {
-                        format!("[Image too large for vision ({reported_kb} KB)]\nCaption: {c}")
-                    }
-                    None => format!("[Image too large for vision ({reported_kb} KB)]"),
-                };
-                return vec![ContentBlock::Text {
-                    text: desc,
-                    provider_metadata: None,
-                }];
-            }
-            Err(crate::http_client::FetchError::Failed(reason)) => {
-                warn!("Image download failed: {reason}");
-                return vec![ContentBlock::Text {
-                    text: format!("[Image download failed: {reason}]"),
-                    provider_metadata: None,
-                }];
-            }
-        };
+    // SSRF guard (#3442): reject not just non-http/https schemes but also
+    // any URL that points at a loopback, private, link-local, or cloud
+    // metadata target.  A forged inbound message could otherwise smuggle
+    // `http://169.254.169.254/...` into the LLM context as an "image".
+    if let Err(reason) = crate::http_client::validate_url_for_fetch(url) {
+        warn!("Rejecting image download: {reason}");
+        return vec![ContentBlock::Text {
+            text: format!("[Image download rejected: {reason}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    let client = crate::http_client::new_client();
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to download image from channel: {e}");
+            return vec![ContentBlock::Text {
+                text: format!("[Image download failed: {e}]"),
+                provider_metadata: None,
+            }];
+        }
+    };
 
     // Detect media type from Content-Type header — but only trust it if it's
     // actually an image/* type. Many APIs (Telegram, S3 pre-signed URLs) return
     // `application/octet-stream` for all files, which breaks vision.
-    let header_type = response_content_type
-        .as_deref()
+    let header_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
         .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
         .filter(|ct| ct.starts_with("image/"));
 
+    // Early rejection if Content-Length header exceeds limit
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_IMAGE_BYTES {
+            warn!("Image Content-Length ({len} bytes) exceeds limit, rejecting before download");
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    len / 1024
+                ),
+                None => format!("[Image too large for vision ({} KB)]", len / 1024),
+            };
+            return vec![ContentBlock::Text {
+                text: desc,
+                provider_metadata: None,
+            }];
+        }
+    }
+
+    // Stream body with size accumulator to enforce limit even without Content-Length
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read image bytes: {e}");
+                return vec![ContentBlock::Text {
+                    text: format!("[Image read failed: {e}]"),
+                    provider_metadata: None,
+                }];
+            }
+        };
+        buf.extend_from_slice(&chunk);
+        if buf.len() > MAX_IMAGE_BYTES {
+            warn!(
+                "Image stream exceeded {} byte limit, aborting download",
+                MAX_IMAGE_BYTES
+            );
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    MAX_IMAGE_BYTES / 1024
+                ),
+                None => format!(
+                    "[Image too large for vision ({} KB)]",
+                    MAX_IMAGE_BYTES / 1024
+                ),
+            };
+            return vec![ContentBlock::Text {
+                text: desc,
+                provider_metadata: None,
+            }];
+        }
+    }
     let bytes = bytes::Bytes::from(buf);
 
     // Four-tier media type detection:
@@ -5545,7 +4534,6 @@ async fn dispatch_with_blocks(
             is_group: message.is_group,
             thread_id: thread_id.map(|s| s.to_string()),
             metadata: std::collections::HashMap::new(),
-            next_retry_after: None,
         };
         j.record(entry).await;
     }
@@ -5575,8 +4563,12 @@ async fn dispatch_with_blocks(
                 send_response(adapter, &message.sender, response, thread_id, output_format).await;
             }
             if let Some(j) = journal {
-                j.record_outcome(&message.platform_message_id, true, None)
-                    .await;
+                j.update_status(
+                    &message.platform_message_id,
+                    crate::message_journal::JournalStatus::Completed,
+                    None,
+                )
+                .await;
             }
             handle
                 .record_delivery(
@@ -5614,8 +4606,12 @@ async fn dispatch_with_blocks(
             )
             .await;
             if let Some(j) = journal {
-                j.record_outcome(&message.platform_message_id, false, Some(e.to_string()))
-                    .await;
+                j.update_status(
+                    &message.platform_message_id,
+                    crate::message_journal::JournalStatus::Failed,
+                    Some(e.to_string()),
+                )
+                .await;
             }
         }
     }
@@ -5627,14 +4623,6 @@ async fn dispatch_with_blocks(
 /// context. It currently affects `/help` rendering (so disabled/blocked
 /// commands don't appear in the help text); other branches treat it as
 /// advisory.
-///
-/// `account_id` is the bot/account identifier inside `channel_type`
-/// (`message.metadata["account_id"]`). It is plumbed through into every
-/// agent-resolving command arm so multi-bot deployments do not collapse
-/// to the first-registered agent (#5672 Layer A). When the adapter does
-/// not expose an `account_id` (single-bot deployments, channels with no
-/// account concept), pass `None`.
-#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     name: &str,
     args: &[String],
@@ -5642,43 +4630,8 @@ async fn handle_command(
     router: &Arc<AgentRouter>,
     sender: &ChannelUser,
     channel_type: &crate::types::ChannelType,
-    account_id: Option<&str>,
     overrides: Option<&ChannelOverrides>,
 ) -> String {
-    // Helper closure: build a `BindingContext` for the command and resolve
-    // the target agent via the context-aware resolver. This is what the
-    // regular message dispatch path uses (`resolve_or_fallback` →
-    // `resolve_with_context`) — the #5672 regression was that command arms
-    // called the context-less `resolve()` and lost the `account_id` along
-    // the way, so every bot's command would collapse to the first-registered
-    // channel default.
-    let resolve_for_command = || {
-        let ctx = crate::router::BindingContext {
-            channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(channel_type)),
-            account_id: account_id.map(std::borrow::Cow::Borrowed),
-            peer_id: std::borrow::Cow::Borrowed(sender.platform_id.as_str()),
-            guild_id: None,
-            roles: smallvec::SmallVec::new(),
-        };
-        router.resolve_with_context(
-            channel_type,
-            &sender.platform_id,
-            sender.librefang_user.as_deref(),
-            &ctx,
-        )
-    };
-
-    // Channel-account key used to scope user-default writes (e.g. `/agent`)
-    // so that selecting an agent on `bot-a` does not silently override
-    // `bot-b`'s channel default for the same platform user (#5672 Layer B).
-    let channel_account_key = account_id.map(|aid| {
-        format!(
-            "{}:{}",
-            crate::router::channel_type_to_str(channel_type),
-            aid
-        )
-    });
-
     match name {
         "start" => {
             let agents = handle.list_agents().await.unwrap_or_default();
@@ -5714,30 +4667,16 @@ async fn handle_command(
                 return "Usage: /agent <name>".to_string();
             }
             let agent_name = &args[0];
-            // Helper: record the user's selection. If we have a channel
-            // account key (multi-bot adapter), scope the override to
-            // `(channel:account, platform_id)` so it doesn't leak across
-            // other bots the same user can reach (#5672). If we don't have
-            // one (single-bot channel, CLI), fall back to the legacy global
-            // override so existing behaviour is preserved.
-            let store_user_default = |agent_id| match channel_account_key.as_deref() {
-                Some(scope) => router.set_user_default_for_channel(
-                    scope.to_string(),
-                    sender.platform_id.clone(),
-                    agent_id,
-                ),
-                None => router.set_user_default(sender.platform_id.clone(), agent_id),
-            };
             match handle.find_agent_by_name(agent_name).await {
                 Ok(Some(agent_id)) => {
-                    store_user_default(agent_id);
+                    router.set_user_default(sender.platform_id.clone(), agent_id);
                     format!("Now talking to agent: {agent_name}")
                 }
                 Ok(None) => {
                     // Try to spawn it
                     match handle.spawn_agent_by_name(agent_name).await {
                         Ok(agent_id) => {
-                            store_user_default(agent_id);
+                            router.set_user_default(sender.platform_id.clone(), agent_id);
                             format!("Spawned and connected to agent: {agent_name}")
                         }
                         Err(e) => {
@@ -5753,86 +4692,68 @@ async fn handle_command(
                 return "Usage: /btw <question> — ask a side question without affecting session history".to_string();
             }
             let question = args.join(" ");
-            let agent_id = resolve_for_command();
-            // Build a minimal SenderContext so the kernel can apply the
-            // same peer-scoped memory lookup that the regular message path
-            // uses (#4923) — otherwise the agent re-asks the user's name
-            // for every `/btw` even after it was learned on a channel turn.
-            let sctx = crate::types::SenderContext {
-                channel: channel_type_str(channel_type).to_string(),
-                user_id: sender.platform_id.clone(),
-                display_name: sender.display_name.clone(),
-                ..Default::default()
-            };
+            let agent_id = router.resolve(
+                channel_type,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
             match agent_id {
                 Some(aid) => handle
-                    .send_message_ephemeral(aid, &question, Some(&sctx))
+                    .send_message_ephemeral(aid, &question)
                     .await
                     .unwrap_or_else(|e| format!("Error: {e}")),
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
         "new" => {
-            // Resolve the user's current agent and the channel-derived sid
-            // so /new only resets THIS chat (#4868). The (channel, chat_id)
-            // pair must match `build_sender_context` exactly so the sid we
-            // delete here equals the sid the next inbound message will
-            // resolve via `SessionId::for_channel`.
-            let agent_id = resolve_for_command();
+            // Need to resolve the user's current agent
+            let agent_id = router.resolve(
+                channel_type,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
             match agent_id {
-                Some(aid) => {
-                    let ch = channel_type_str(channel_type);
-                    let chat = if sender.platform_id.is_empty() {
-                        None
-                    } else {
-                        Some(sender.platform_id.as_str())
-                    };
-                    handle
-                        .reset_channel_session(aid, ch, chat)
-                        .await
-                        .unwrap_or_else(|e| format!("Error: {e}"))
-                }
+                Some(aid) => handle
+                    .reset_session(aid)
+                    .await
+                    .unwrap_or_else(|e| format!("Error: {e}")),
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
         "reboot" => {
-            let agent_id = resolve_for_command();
+            let agent_id = router.resolve(
+                channel_type,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
             match agent_id {
-                Some(aid) => {
-                    let ch = channel_type_str(channel_type);
-                    let chat = if sender.platform_id.is_empty() {
-                        None
-                    } else {
-                        Some(sender.platform_id.as_str())
-                    };
-                    handle
-                        .reboot_channel_session(aid, ch, chat)
-                        .await
-                        .unwrap_or_else(|e| format!("Error: {e}"))
-                }
+                Some(aid) => handle
+                    .reboot_session(aid)
+                    .await
+                    .unwrap_or_else(|e| format!("Error: {e}")),
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
         "compact" => {
-            let agent_id = resolve_for_command();
+            let agent_id = router.resolve(
+                channel_type,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
             match agent_id {
-                Some(aid) => {
-                    let ch = channel_type_str(channel_type);
-                    let chat = if sender.platform_id.is_empty() {
-                        None
-                    } else {
-                        Some(sender.platform_id.as_str())
-                    };
-                    handle
-                        .compact_channel_session(aid, ch, chat)
-                        .await
-                        .unwrap_or_else(|e| format!("Error: {e}"))
-                }
+                Some(aid) => handle
+                    .compact_session(aid)
+                    .await
+                    .unwrap_or_else(|e| format!("Error: {e}")),
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
         "model" => {
-            let agent_id = resolve_for_command();
+            let agent_id = router.resolve(
+                channel_type,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
             match agent_id {
                 Some(aid) => {
                     if args.is_empty() {
@@ -5852,7 +4773,11 @@ async fn handle_command(
             }
         }
         "stop" => {
-            let agent_id = resolve_for_command();
+            let agent_id = router.resolve(
+                channel_type,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
             match agent_id {
                 Some(aid) => handle
                     .stop_run(aid)
@@ -5862,7 +4787,11 @@ async fn handle_command(
             }
         }
         "usage" => {
-            let agent_id = resolve_for_command();
+            let agent_id = router.resolve(
+                channel_type,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
             match agent_id {
                 Some(aid) => handle
                     .session_usage(aid)
@@ -5872,7 +4801,11 @@ async fn handle_command(
             }
         }
         "think" => {
-            let agent_id = resolve_for_command();
+            let agent_id = router.resolve(
+                channel_type,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
             match agent_id {
                 Some(aid) => {
                     let on = args.first().map(|a| a == "on").unwrap_or(true);
@@ -5988,198 +4921,6 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
         f();
-    }
-
-    // ── Approval-notification inline keyboard (PR: telegram-approval-buttons) ──
-    //
-    // The bridge's approval listener wraps every fan-out in an
-    // `InteractiveMessage` built by `build_approval_interactive`.
-    // Adapters that declare `interactive` capability render that as
-    // inline buttons (Telegram, Slack, Feishu); ones that don't fall
-    // back via the default `ChannelAdapter::send_interactive` impl,
-    // which exposes the slash commands as text. These tests pin both
-    // the wire shape and the slash-command actions inside the buttons.
-
-    // ── suppress_button_command_ack ──────────────────────────────
-    //
-    // Pin the noise-suppression rule for `/approve` and `/reject`
-    // when triggered by an inline-keyboard click. Goal of these tests
-    // is to keep two failure modes from sneaking back in:
-    //   1. Suppression accidentally widening to other commands (a
-    //      future `/cancel` button must still get its ack — only
-    //      approve/reject are the duplicate-ack case).
-    //   2. Suppression accidentally widening to typed slash commands
-    //      (text-only channels with no button affordance need the
-    //      ack — silencing typed `/approve abc` would break IRC/SMS
-    //      UX where the tap doesn't exist).
-
-    fn button_callback(action: &str) -> ChannelContent {
-        ChannelContent::ButtonCallback {
-            action: action.to_string(),
-            message_text: None,
-        }
-    }
-
-    #[test]
-    fn suppress_button_command_ack_silences_button_approve_and_reject() {
-        let approve = button_callback("/approve abc12345");
-        let reject = button_callback("/reject abc12345");
-        assert!(suppress_button_command_ack(&approve, "approve"));
-        assert!(suppress_button_command_ack(&reject, "reject"));
-    }
-
-    #[test]
-    fn suppress_button_command_ack_keeps_ack_for_typed_slash_commands() {
-        // Typed `/approve abc12345` arrives as plain text on inbound.
-        // The slash-command handler still sees `command == "approve"`,
-        // but the originating content is NOT a ButtonCallback, so the
-        // ack must NOT be suppressed — text-only channels (IRC, SMS,
-        // any sidecar lacking the `interactive` capability) rely on
-        // it to confirm the resolution landed.
-        let typed = ChannelContent::Text("/approve abc12345".to_string());
-        assert!(!suppress_button_command_ack(&typed, "approve"));
-        assert!(!suppress_button_command_ack(&typed, "reject"));
-    }
-
-    #[test]
-    fn suppress_button_command_ack_does_not_widen_to_other_commands() {
-        // Future-proofing: if another command (e.g. `/cancel`,
-        // `/agents`) ever gets an inline-keyboard trigger, that
-        // command's ack must still send. The duplicate-ack issue
-        // is specific to approval resolution; other commands rely
-        // on their text response to communicate result.
-        let btn = button_callback("/cancel xyz");
-        assert!(!suppress_button_command_ack(&btn, "cancel"));
-        assert!(!suppress_button_command_ack(&btn, "agents"));
-        assert!(!suppress_button_command_ack(&btn, "ping"));
-        assert!(!suppress_button_command_ack(&btn, ""));
-    }
-
-    #[test]
-    fn build_approval_interactive_shapes_two_buttons_in_one_row() {
-        let msg = build_approval_interactive(
-            "agent-uuid-here",
-            "req-abcdef1234567890",
-            "file_write",
-            "high",
-            "Write to /etc/hosts",
-        );
-        assert_eq!(msg.buttons.len(), 1, "single row expected");
-        assert_eq!(
-            msg.buttons[0].len(),
-            2,
-            "row should carry exactly Approve + Deny"
-        );
-        assert_eq!(msg.buttons[0][0].label, "Approve");
-        assert_eq!(msg.buttons[0][1].label, "Deny");
-        // Style hints — adapters that honor them (Slack Block Kit) get
-        // a green primary / red danger rendering; ones that don't
-        // (Telegram, currently) ignore the field harmlessly.
-        assert_eq!(msg.buttons[0][0].style.as_deref(), Some("primary"));
-        assert_eq!(msg.buttons[0][1].style.as_deref(), Some("danger"));
-    }
-
-    #[test]
-    fn build_approval_interactive_actions_are_slash_commands_with_short_id() {
-        // `content_to_text` (this file) treats a `ButtonCallback` whose
-        // `action` starts with `/` as a slash command — that's the
-        // entire round-trip. The action MUST be `/approve <8-char>` /
-        // `/reject <8-char>` so the existing `/approve` handler at
-        // `bridge.rs::5673+` picks it up unchanged.
-        let msg = build_approval_interactive(
-            "agent",
-            "0123456789abcdef-truncated",
-            "tool",
-            "low",
-            "desc",
-        );
-        let approve = &msg.buttons[0][0].action;
-        let deny = &msg.buttons[0][1].action;
-        assert_eq!(approve, "/approve 01234567");
-        assert_eq!(deny, "/reject 01234567");
-        // Telegram's `callback_data` is capped at 64 bytes; both
-        // commands stay well under it (16-17 bytes each).
-        assert!(approve.len() <= 64);
-        assert!(deny.len() <= 64);
-    }
-
-    #[test]
-    fn build_approval_interactive_text_carries_fallback_slash_instructions() {
-        // Adapters without `interactive` capability render the
-        // `text` field verbatim via the trait default impl. The text
-        // MUST still tell the operator how to act (because their
-        // platform won't draw a tappable button).
-        let msg = build_approval_interactive("agent", "abcdefgh123456", "tool", "low", "desc");
-        assert!(msg.text.contains("/approve abcdefgh"));
-        assert!(msg.text.contains("/reject abcdefgh"));
-        // TOTP hint surfaced for the require-TOTP variant — a single
-        // button click can't carry a 6-digit code, so users need the
-        // slash form for those.
-        assert!(msg.text.contains("TOTP"));
-    }
-
-    #[test]
-    fn approval_requested_event_carries_routing_fields() {
-        // Pin the new wire shape on `ApprovalRequestedEvent`. Pre-fix the
-        // event had only request_id / agent_id / tool_name / description /
-        // risk_level, which is what stranded Telegram approvals: the
-        // channel listener subscribed to the EventBus version (NOT the
-        // approval_manager's broadcast) and got no `sender_id` / `channel`
-        // to route by.
-        use librefang_types::event::ApprovalRequestedEvent;
-        let evt = ApprovalRequestedEvent {
-            request_id: "req-12345678".to_string(),
-            agent_id: "agent".to_string(),
-            tool_name: "file_write".to_string(),
-            description: "desc".to_string(),
-            risk_level: "high".to_string(),
-            sender_id: Some("telegram-user-12345".to_string()),
-            channel: Some("telegram".to_string()),
-            chat_id: Some("telegram-group-67890".to_string()),
-        };
-        assert_eq!(evt.sender_id.as_deref(), Some("telegram-user-12345"));
-        assert_eq!(evt.channel.as_deref(), Some("telegram"));
-        // chat_id distinct from sender_id — pins the group-chat shape
-        // where the human's platform_id differs from the conversation id.
-        assert_eq!(evt.chat_id.as_deref(), Some("telegram-group-67890"));
-
-        // And the JSON shape: new fields are `#[serde(default,
-        // skip_serializing_if = Option::is_none)]` so an event without
-        // them (the dashboard-direct / cron / autonomous path) emits the
-        // pre-fix payload byte-identically. This pins the wire-compat.
-        let bare = ApprovalRequestedEvent {
-            request_id: "req".to_string(),
-            agent_id: "agent".to_string(),
-            tool_name: "tool".to_string(),
-            description: "desc".to_string(),
-            risk_level: "low".to_string(),
-            sender_id: None,
-            channel: None,
-            chat_id: None,
-        };
-        let json = serde_json::to_string(&bare).unwrap();
-        assert!(
-            !json.contains("sender_id"),
-            "absent sender_id must be omitted, got: {json}"
-        );
-        assert!(
-            !json.contains(r#""channel""#),
-            "absent channel must be omitted, got: {json}"
-        );
-        assert!(
-            !json.contains("chat_id"),
-            "absent chat_id must be omitted, got: {json}"
-        );
-    }
-
-    #[test]
-    fn build_approval_interactive_tolerates_short_request_ids() {
-        // The existing listener slices `request_id[..8.min(len)]`.
-        // Make sure the helper inherits the same defensive truncation
-        // so a short / malformed request id doesn't panic.
-        let msg = build_approval_interactive("agent", "abc", "tool", "low", "desc");
-        assert_eq!(msg.buttons[0][0].action, "/approve abc");
-        assert_eq!(msg.buttons[0][1].action, "/reject abc");
     }
 
     #[test]
@@ -6524,7 +5265,6 @@ mod tests {
             &sender,
             &ChannelType::CLI,
             None,
-            None,
         )
         .await;
         assert!(result.contains("coder"));
@@ -6536,7 +5276,6 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
-            None,
             None,
         )
         .await;
@@ -6565,7 +5304,6 @@ mod tests {
             &sender,
             &ChannelType::CLI,
             None,
-            None,
         )
         .await;
         assert!(result.contains("Now talking to agent: coder"));
@@ -6573,171 +5311,6 @@ mod tests {
         // Verify router was updated
         let resolved = router.resolve(&ChannelType::Telegram, "user1", None);
         assert_eq!(resolved, Some(agent_id));
-    }
-
-    /// MockHandle that records which `agent_id` `/model` was dispatched to,
-    /// so we can assert command-routing isolation between multi-bot
-    /// deployments (#5672).
-    struct RecordingHandle {
-        agents: Mutex<Vec<(AgentId, String)>>,
-        set_model_calls: Mutex<Vec<AgentId>>,
-    }
-
-    #[async_trait]
-    impl ChannelBridgeHandle for RecordingHandle {
-        async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
-            Ok(format!("Echo: {message}"))
-        }
-        async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
-            let agents = self.agents.lock().unwrap();
-            Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
-        }
-        async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
-            Ok(self.agents.lock().unwrap().clone())
-        }
-        async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
-            Err("spawn not implemented in mock".to_string())
-        }
-        async fn set_model(&self, agent_id: AgentId, _model: &str) -> Result<String, String> {
-            self.set_model_calls.lock().unwrap().push(agent_id);
-            Ok("ok".to_string())
-        }
-        fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
-    }
-
-    /// Regression test for #5672 Layer A: a channel-side `/command`
-    /// resolved on `bot-a` must route to `bot-a`'s configured default agent,
-    /// not to the first-registered channel default for the channel type.
-    #[tokio::test]
-    async fn command_resolution_respects_account_id() {
-        let agent_a = AgentId::new();
-        let agent_b = AgentId::new();
-        let agent_c = AgentId::new();
-
-        let recording = Arc::new(RecordingHandle {
-            agents: Mutex::new(vec![
-                (agent_a, "agent-A".to_string()),
-                (agent_b, "agent-B".to_string()),
-                (agent_c, "agent-C".to_string()),
-            ]),
-            set_model_calls: Mutex::new(Vec::new()),
-        });
-        let handle: Arc<dyn ChannelBridgeHandle> = recording.clone();
-        let router = Arc::new(AgentRouter::new());
-
-        // Three Telegram bots, each with their own account-qualified default.
-        // The order of registration is intentional: agent-A is registered
-        // first, which is the agent the pre-fix code would collapse to for
-        // EVERY bot's `/model`.
-        router.set_channel_default("telegram:bot-a".to_string(), agent_a);
-        router.set_channel_default("telegram:bot-b".to_string(), agent_b);
-        router.set_channel_default("telegram:bot-c".to_string(), agent_c);
-
-        let sender = ChannelUser {
-            platform_id: "shared-user".to_string(),
-            display_name: "Test".to_string(),
-            librefang_user: None,
-        };
-
-        // `/model` issued in bot-b must dispatch to agent-B.
-        let _ = handle_command(
-            "model",
-            &[],
-            &handle,
-            &router,
-            &sender,
-            &ChannelType::Telegram,
-            Some("bot-b"),
-            None,
-        )
-        .await;
-        // `/model` issued in bot-c must dispatch to agent-C.
-        let _ = handle_command(
-            "model",
-            &[],
-            &handle,
-            &router,
-            &sender,
-            &ChannelType::Telegram,
-            Some("bot-c"),
-            None,
-        )
-        .await;
-
-        let calls = recording.set_model_calls.lock().unwrap().clone();
-        assert_eq!(
-            calls,
-            vec![agent_b, agent_c],
-            "/model must route per-account; got {:?}",
-            calls,
-        );
-    }
-
-    /// Regression test for #5672 Layer B: `/agent` in bot-a must NOT
-    /// override which agent handles bot-b's traffic for the same user.
-    #[tokio::test]
-    async fn agent_command_does_not_leak_across_bots() {
-        let agent_a = AgentId::new();
-        let agent_b = AgentId::new();
-        let agent_c = AgentId::new();
-
-        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
-            agents: Mutex::new(vec![
-                (agent_a, "agent-A".to_string()),
-                (agent_b, "agent-B".to_string()),
-                (agent_c, "agent-C".to_string()),
-            ]),
-        });
-        let router = Arc::new(AgentRouter::new());
-        router.set_channel_default("telegram:bot-a".to_string(), agent_a);
-        router.set_channel_default("telegram:bot-b".to_string(), agent_b);
-
-        let sender = ChannelUser {
-            platform_id: "shared-user".to_string(),
-            display_name: "Test".to_string(),
-            librefang_user: None,
-        };
-
-        // User runs `/agent agent-C` in bot-a — scope: bot-a only.
-        let result = handle_command(
-            "agent",
-            &["agent-C".to_string()],
-            &handle,
-            &router,
-            &sender,
-            &ChannelType::Telegram,
-            Some("bot-a"),
-            None,
-        )
-        .await;
-        assert!(result.contains("Now talking to agent: agent-C"));
-
-        // Re-resolving for bot-a returns agent-C (the override).
-        let ctx_a = crate::router::BindingContext {
-            channel: std::borrow::Cow::Borrowed("telegram"),
-            account_id: Some(std::borrow::Cow::Borrowed("bot-a")),
-            peer_id: std::borrow::Cow::Borrowed("shared-user"),
-            ..Default::default()
-        };
-        assert_eq!(
-            router.resolve_with_context(&ChannelType::Telegram, "shared-user", None, &ctx_a),
-            Some(agent_c),
-            "bot-a should honour /agent override"
-        );
-
-        // Re-resolving for bot-b for the SAME user returns bot-b's default
-        // (agent-B) — the /agent override must not leak across bots.
-        let ctx_b = crate::router::BindingContext {
-            channel: std::borrow::Cow::Borrowed("telegram"),
-            account_id: Some(std::borrow::Cow::Borrowed("bot-b")),
-            peer_id: std::borrow::Cow::Borrowed("shared-user"),
-            ..Default::default()
-        };
-        assert_eq!(
-            router.resolve_with_context(&ChannelType::Telegram, "shared-user", None, &ctx_b),
-            Some(agent_b),
-            "bot-b must NOT inherit bot-a's /agent override (#5672)"
-        );
     }
 
     #[test]
@@ -7249,157 +5822,6 @@ mod tests {
         assert_eq!(detect_image_magic(&[]), None);
     }
 
-    #[test]
-    fn test_detect_audio_magic_ogg() {
-        // OggS magic
-        let bytes = [0x4F, 0x67, 0x67, 0x53, 0x00, 0x02];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/ogg"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_mp3_id3() {
-        // ID3 tag
-        let bytes = [0x49, 0x44, 0x33, 0x03, 0x00, 0x00];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/mpeg"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_mp3_sync_fb() {
-        let bytes = [0xFF, 0xFB, 0x90, 0x00];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/mpeg"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_mp3_sync_f3() {
-        let bytes = [0xFF, 0xF3, 0x90, 0x00];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/mpeg"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_mp3_sync_f2() {
-        let bytes = [0xFF, 0xF2, 0x90, 0x00];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/mpeg"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_wav() {
-        // RIFF....WAVE
-        let bytes = [
-            0x52, 0x49, 0x46, 0x46, // RIFF
-            0x24, 0x00, 0x00, 0x00, // size
-            0x57, 0x41, 0x56, 0x45, // WAVE
-        ];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/wav"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_flac() {
-        // fLaC
-        let bytes = [0x66, 0x4C, 0x61, 0x43, 0x00, 0x00];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/flac"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_m4a() {
-        // ....ftypM4A
-        let bytes = [
-            0x00, 0x00, 0x00, 0x20, // box size
-            0x66, 0x74, 0x79, 0x70, // ftyp
-            0x4D, 0x34, 0x41, 0x20, // M4A
-        ];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/mp4"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_m4b() {
-        // ....ftypM4B  (audiobook brand)
-        let bytes = [
-            0x00, 0x00, 0x00, 0x20, // box size
-            0x66, 0x74, 0x79, 0x70, // ftyp
-            0x4D, 0x34, 0x42, 0x20, // M4B
-        ];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/mp4"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_isom() {
-        // ....ftypisom
-        let bytes = [
-            0x00, 0x00, 0x00, 0x1C, // box size
-            0x66, 0x74, 0x79, 0x70, // ftyp
-            0x69, 0x73, 0x6F, 0x6D, // isom
-        ];
-        assert_eq!(detect_audio_magic(&bytes), Some("audio/mp4"));
-    }
-
-    #[test]
-    fn test_detect_audio_magic_webm_ebml_returns_none() {
-        // EBML magic also matches video/webm, so magic alone returns None;
-        // filename-based detection (.weba) is the fallback for audio/webm.
-        let bytes = [0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x00];
-        assert_eq!(detect_audio_magic(&bytes), None);
-    }
-
-    #[test]
-    fn test_detect_audio_magic_unknown() {
-        // Random bytes — must stay None
-        let bytes = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05];
-        assert_eq!(detect_audio_magic(&bytes), None);
-    }
-
-    #[test]
-    fn test_detect_audio_magic_empty() {
-        assert_eq!(detect_audio_magic(&[]), None);
-    }
-
-    #[test]
-    fn test_audio_mime_from_filename_oga() {
-        assert_eq!(audio_mime_from_filename("file_136.oga"), Some("audio/ogg"));
-    }
-
-    #[test]
-    fn test_audio_mime_from_filename_ogg() {
-        assert_eq!(audio_mime_from_filename("track.OGG"), Some("audio/ogg"));
-    }
-
-    #[test]
-    fn test_audio_mime_from_filename_opus() {
-        assert_eq!(audio_mime_from_filename("voice.opus"), Some("audio/ogg"));
-    }
-
-    #[test]
-    fn test_audio_mime_from_filename_mp3() {
-        assert_eq!(audio_mime_from_filename("song.mp3"), Some("audio/mpeg"));
-    }
-
-    #[test]
-    fn test_audio_mime_from_filename_wav() {
-        assert_eq!(audio_mime_from_filename("clip.wav"), Some("audio/wav"));
-    }
-
-    #[test]
-    fn test_audio_mime_from_filename_flac() {
-        assert_eq!(audio_mime_from_filename("album.flac"), Some("audio/flac"));
-    }
-
-    #[test]
-    fn test_audio_mime_from_filename_m4a() {
-        assert_eq!(audio_mime_from_filename("audio.m4a"), Some("audio/mp4"));
-    }
-
-    #[test]
-    fn test_audio_mime_from_filename_webm() {
-        assert_eq!(audio_mime_from_filename("clip.webm"), Some("audio/webm"));
-    }
-
-    #[test]
-    fn test_audio_mime_from_filename_unknown() {
-        // No audio extension — must return None
-        assert_eq!(audio_mime_from_filename("photo.jpg"), None);
-        assert_eq!(audio_mime_from_filename("document.pdf"), None);
-        assert_eq!(audio_mime_from_filename("noextension"), None);
-    }
-
     #[tokio::test]
     async fn test_handle_command_btw_no_args() {
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
@@ -7419,7 +5841,6 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
-            None,
             None,
         )
         .await;
@@ -7448,7 +5869,6 @@ mod tests {
             &sender,
             &ChannelType::CLI,
             None,
-            None,
         )
         .await;
         assert!(result.contains("No agent selected"));
@@ -7473,7 +5893,6 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
-            None,
             None,
         )
         .await;
@@ -8597,16 +7016,9 @@ mod tests {
         #[tokio::test]
         async fn test_file_download_rejects_bad_scheme() {
             let dir = std::env::temp_dir().join("librefang_test_download");
-            let result = download_file_to_blocks(
-                "ftp://evil.com/malware.exe",
-                "malware.exe",
-                1024,
-                &dir,
-                &[],
-            )
-            .await;
-            let blocks = result.blocks;
-            assert!(result.saved.is_none());
+            let blocks =
+                download_file_to_blocks("ftp://evil.com/malware.exe", "malware.exe", 1024, &dir)
+                    .await;
             assert_eq!(blocks.len(), 1);
             match &blocks[0] {
                 ContentBlock::Text { text, .. } => {
@@ -8618,558 +7030,5 @@ mod tests {
                 other => panic!("Expected Text block, got: {other:?}"),
             }
         }
-    }
-
-    mod tool_marker_extraction {
-        use super::super::extract_tool_marker_name;
-
-        #[test]
-        fn extracts_simple_tool_name() {
-            assert_eq!(
-                extract_tool_marker_name("\n\n🔧 system_time\n\n"),
-                Some("system_time".to_string())
-            );
-        }
-
-        #[test]
-        fn extracts_pretty_tool_name_with_spaces() {
-            // `prettify_tool_name` upstream may render `web_fetch` as
-            // `Web Fetch` — the marker passes through whatever upstream
-            // emits. Trim whitespace but preserve the inner text.
-            assert_eq!(
-                extract_tool_marker_name("\n\n🔧 Web Fetch\n\n"),
-                Some("Web Fetch".to_string())
-            );
-        }
-
-        #[test]
-        fn rejects_plain_text_delta() {
-            assert_eq!(extract_tool_marker_name("Hello world"), None);
-            assert_eq!(extract_tool_marker_name(""), None);
-        }
-
-        #[test]
-        fn rejects_error_marker() {
-            // `\n\n⚠️ tool failed\n\n` is a different signal — it MUST
-            // not be misread as a ToolUse start (would fire ⚙️ on a
-            // tool that just errored).
-            assert_eq!(
-                extract_tool_marker_name("\n\n⚠️ system_time failed\n\n"),
-                None
-            );
-        }
-
-        #[test]
-        fn rejects_marker_inside_prose() {
-            // We rely on the api channel bridge sending each marker as
-            // its own `tx.send(line)` — a `🔧` literal that appears
-            // inside model-authored prose must NOT be treated as a
-            // marker, since we'd extract the wrong "tool name" and
-            // fire a phantom reaction.
-            assert_eq!(
-                extract_tool_marker_name("Sure, I'll use 🔧 to fix it."),
-                None
-            );
-        }
-
-        #[test]
-        fn rejects_marker_missing_suffix() {
-            // The api bridge always emits `\n\n…\n\n`. If the suffix
-            // is missing the delta is malformed; fail closed rather
-            // than guess.
-            assert_eq!(extract_tool_marker_name("\n\n🔧 system_time"), None);
-        }
-
-        #[test]
-        fn rejects_empty_tool_name() {
-            assert_eq!(extract_tool_marker_name("\n\n🔧 \n\n"), None);
-            assert_eq!(extract_tool_marker_name("\n\n🔧    \n\n"), None);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // MIME sniff integration — verifies the detection pipeline end-to-end:
-    // bytes served as application/octet-stream over HTTP → detect_audio_magic
-    // returns the correct type.  Uses fetch_url_bytes_unchecked (which skips
-    // the SSRF guard) so wiremock's 127.0.0.1 binding is reachable from tests.
-    // -----------------------------------------------------------------------
-
-    mod audio_mime_sniff {
-        use super::super::{audio_mime_from_filename, detect_audio_magic};
-        use crate::http_client::fetch_url_bytes_unchecked;
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        /// OGG bytes served with Content-Type: application/octet-stream.
-        /// Asserts detect_audio_magic correctly identifies audio/ogg from the
-        /// magic bytes, and that audio_mime_from_filename agrees via extension.
-        /// This locks BLOCKER-1: the sniff logic that runs before enrich must
-        /// produce "audio/ogg", not "application/octet-stream".
-        #[tokio::test]
-        async fn ogg_served_as_octet_stream_is_detected_as_audio_ogg() {
-            // Minimal OGG bytes: OggS magic + padding to fill 12-byte buffer.
-            let mut ogg_bytes = vec![
-                0x4F, 0x67, 0x67, 0x53, // OggS
-                0x00, 0x02, 0x00, 0x00, // version + header type
-                0x00, 0x00, 0x00, 0x00, // granule position (low)
-            ];
-            ogg_bytes.extend_from_slice(&[0u8; 64]);
-
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/file/bot123/voice/file_136.oga"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("content-type", "application/octet-stream")
-                        .set_body_bytes(ogg_bytes),
-                )
-                .mount(&server)
-                .await;
-
-            let url = format!("{}/file/bot123/voice/file_136.oga", server.uri());
-            let client = crate::http_client::new_client();
-            let (body, content_type) = fetch_url_bytes_unchecked(&client, &url, 1024 * 1024, &[])
-                .await
-                .expect("fetch succeeded");
-
-            // Server sends application/octet-stream — same as Telegram CDN.
-            assert_eq!(
-                content_type.as_deref(),
-                Some("application/octet-stream"),
-                "expected server to return application/octet-stream"
-            );
-
-            // Magic-byte sniff must recover audio/ogg from the first 12 bytes.
-            let magic = detect_audio_magic(&body[..body.len().min(12)]);
-            assert_eq!(
-                magic,
-                Some("audio/ogg"),
-                "detect_audio_magic should identify OGG bytes as audio/ogg"
-            );
-
-            // Filename fallback also agrees (extension .oga).
-            let fname_mime = audio_mime_from_filename("file_136.oga");
-            assert_eq!(fname_mime, Some("audio/ogg"));
-        }
-    }
-
-    /// Regression coverage for #4975 — inbound audio attachments must hand
-    /// the saved file off to the kernel's `MediaEngine` (via the
-    /// `transcribe_inbound_audio` trait method) whenever `[media]
-    /// audio_transcription = true`. Before the fix the path-block was
-    /// dispatched as-is and `MediaEngine::process_attachments` was
-    /// orphaned, so a Telegram voice note never reached Whisper / Groq.
-    mod inbound_audio_transcription {
-        use super::*;
-        use std::path::PathBuf;
-        use std::sync::Arc;
-
-        /// Mock that captures every `transcribe_inbound_audio` call.
-        ///
-        /// The fixed/error response lets us simulate the kernel returning:
-        ///   - `Ok(Some(text))` — transcription succeeded
-        ///   - `Ok(None)`       — config disabled (`audio_transcription = false`)
-        ///   - `Err(reason)`    — provider error / oversize / missing creds
-        struct RecordingHandle {
-            calls: Mutex<Vec<(PathBuf, String)>>,
-            response: Result<Option<String>, String>,
-        }
-
-        #[async_trait]
-        impl ChannelBridgeHandle for RecordingHandle {
-            async fn send_message(
-                &self,
-                _agent_id: AgentId,
-                _message: &str,
-            ) -> Result<String, String> {
-                Ok(String::new())
-            }
-            async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
-                Ok(None)
-            }
-            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
-                Ok(Vec::new())
-            }
-            async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
-                Err("unused in this test".into())
-            }
-            fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
-
-            async fn transcribe_inbound_audio(
-                &self,
-                path: &std::path::Path,
-                mime_type: &str,
-            ) -> Result<Option<String>, String> {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push((path.to_path_buf(), mime_type.to_string()));
-                self.response.clone()
-            }
-        }
-
-        fn handle_with(
-            response: Result<Option<String>, String>,
-        ) -> (Arc<dyn ChannelBridgeHandle>, Arc<RecordingHandle>) {
-            let inner = Arc::new(RecordingHandle {
-                calls: Mutex::new(Vec::new()),
-                response,
-            });
-            let h: Arc<dyn ChannelBridgeHandle> = inner.clone();
-            (h, inner)
-        }
-
-        fn saved(path: &str, mime: &str) -> Option<(PathBuf, String)> {
-            Some((PathBuf::from(path), mime.to_string()))
-        }
-
-        #[tokio::test]
-        async fn enabled_success_returns_transcription_block() {
-            // Kernel reports `Ok(Some("hello world"))` → bridge appends a
-            // `[Transcription: hello world]` block. This is the path that
-            // was completely broken before #4975 — no caller ever invoked
-            // `MediaEngine::process_attachments` so `Some(...)` was never
-            // produced for inbound audio.
-            let (h, rec) = handle_with(Ok(Some("hello world".into())));
-            let s = saved("/tmp/x.ogg", "audio/ogg");
-            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
-            match block {
-                Some(ContentBlock::Text { text, .. }) => {
-                    assert_eq!(text, "[Transcription: hello world]");
-                }
-                other => panic!("expected transcription text block, got {other:?}"),
-            }
-            let calls = rec.calls.lock().unwrap();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].0, PathBuf::from("/tmp/x.ogg"));
-            assert_eq!(calls[0].1, "audio/ogg");
-        }
-
-        #[tokio::test]
-        async fn disabled_returns_none_and_preserves_raw_path() {
-            // `audio_transcription = false` → kernel returns Ok(None) → the
-            // bridge does NOT insert a transcription block. The raw saved-
-            // path block continues straight to the agent (verified by
-            // absence of any sibling Text insertion at the call site —
-            // see Voice/Audio branches in dispatch_message).
-            let (h, rec) = handle_with(Ok(None));
-            let s = saved("/tmp/x.ogg", "audio/ogg");
-            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
-            assert!(block.is_none(), "disabled-config must produce no block");
-            // The trait call still happens — the kernel is the one that
-            // honors the flag. This guarantees mocks/integration tests
-            // can't accidentally hide the dispatch.
-            assert_eq!(rec.calls.lock().unwrap().len(), 1);
-        }
-
-        #[tokio::test]
-        async fn provider_failure_surfaces_opaque_block_not_drop() {
-            // Provider 5xx, missing creds, or oversize → `Err(reason)`.
-            // Message MUST still reach the agent: we return an opaque
-            // `[Transcription unavailable]` text block (the raw reason
-            // never reaches the LLM prompt because provider error
-            // envelopes can echo API keys — see #4999); the raw
-            // saved-path block is preserved by the caller, so the agent
-            // can fall back to `media_transcribe` or just acknowledge
-            // the voice note. Never drop the message.
-            let leak = "Gemini API error (401): https://generativelanguage.googleapis.com/v1beta/models/foo:generateContent?key=SECRET_KEY_DO_NOT_LEAK";
-            let (h, _rec) = handle_with(Err(leak.into()));
-            let s = saved("/tmp/x.ogg", "audio/ogg");
-            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
-            match block {
-                Some(ContentBlock::Text { text, .. }) => {
-                    assert_eq!(
-                        text, "[Transcription unavailable]",
-                        "failure block must be the opaque sentinel"
-                    );
-                    assert!(
-                        !text.contains("SECRET_KEY_DO_NOT_LEAK"),
-                        "provider reason (which may contain credentials) must not leak into the block"
-                    );
-                    assert!(
-                        !text.contains("?key="),
-                        "URL query params from the provider error must not leak into the block"
-                    );
-                }
-                other => panic!("expected failure text block, got {other:?}"),
-            }
-        }
-
-        #[tokio::test]
-        async fn no_saved_file_skips_dispatch() {
-            // Download failed earlier in the pipeline → no path/mime to
-            // send. Helper must return None without touching the trait —
-            // saves a no-op kernel round-trip.
-            let (h, rec) = handle_with(Ok(Some("should never be returned".into())));
-            let block = maybe_transcribe_inbound_audio(&h, None).await;
-            assert!(block.is_none());
-            assert!(rec.calls.lock().unwrap().is_empty());
-        }
-
-        #[tokio::test]
-        async fn non_audio_mime_is_silently_skipped() {
-            // Defense in depth: if upstream classification routes a video
-            // through the Voice/Audio arm (it shouldn't, but #4927 wasn't
-            // shipped yet at the time the bug was reported), don't waste
-            // an STT call on a non-audio file. The agent still gets the
-            // raw path block.
-            let (h, rec) = handle_with(Ok(Some("would have transcribed".into())));
-            let s = saved("/tmp/clip.mp4", "video/mp4");
-            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
-            assert!(block.is_none());
-            assert!(
-                rec.calls.lock().unwrap().is_empty(),
-                "non-audio MIME must never hit the kernel STT path"
-            );
-        }
-
-        #[tokio::test]
-        async fn empty_transcription_is_discarded() {
-            // Whisper occasionally returns empty/whitespace when the
-            // audio is silence. Don't pollute the agent's prompt with
-            // `[Transcription: ]`.
-            let (h, _rec) = handle_with(Ok(Some("   ".into())));
-            let s = saved("/tmp/x.ogg", "audio/ogg");
-            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
-            assert!(block.is_none(), "empty transcription must be dropped");
-        }
-
-        /// Mirror the Voice/Audio dispatch sites in `dispatch_message`:
-        /// after `download_file_to_blocks` we have `[Text("[File: …]")]`
-        /// → caller `insert(0, header)` → caller `insert(1, transcription)`.
-        /// The resulting order must be:
-        ///   blocks[0] = "[Voice message …]" header
-        ///   blocks[1] = "[Transcription: …]"
-        ///   blocks[2] = "[File: …]" saved-path block
-        ///
-        /// This pins the position so a future refactor can't silently
-        /// move the transcription after the path block — which would
-        /// change how the model reads the message (transcription serves
-        /// as the *spoken content*; it must precede the file metadata).
-        #[tokio::test]
-        async fn transcription_block_lands_between_header_and_file_path() {
-            let (h, _rec) = handle_with(Ok(Some("hello world".into())));
-            let s = saved("/tmp/voice.ogg", "audio/ogg");
-
-            // Simulate what `download_file_to_blocks` produced on success.
-            let mut blocks = vec![ContentBlock::Text {
-                text: "[File: /tmp/voice.ogg]".into(),
-                provider_metadata: None,
-            }];
-
-            // Same sequence as the Voice/Audio arms of dispatch_message.
-            let transcription = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
-            blocks.insert(
-                0,
-                ContentBlock::Text {
-                    text: "[Voice message (4s)]".into(),
-                    provider_metadata: None,
-                },
-            );
-            if let Some(t) = transcription {
-                blocks.insert(1, t);
-            }
-
-            assert_eq!(blocks.len(), 3, "want header + transcription + file block");
-            match &blocks[0] {
-                ContentBlock::Text { text, .. } => {
-                    assert!(text.starts_with("[Voice message"), "blocks[0] header");
-                }
-                other => panic!("blocks[0] should be the voice header, got {other:?}"),
-            }
-            match &blocks[1] {
-                ContentBlock::Text { text, .. } => {
-                    assert_eq!(
-                        text, "[Transcription: hello world]",
-                        "blocks[1] must be the transcription, not the file path"
-                    );
-                }
-                other => panic!("blocks[1] should be the transcription, got {other:?}"),
-            }
-            match &blocks[2] {
-                ContentBlock::Text { text, .. } => {
-                    assert!(
-                        text.starts_with("[File:"),
-                        "blocks[2] must be the saved-path block"
-                    );
-                }
-                other => panic!("blocks[2] should be the file path block, got {other:?}"),
-            }
-        }
-
-        /// A hung STT provider must not pin the dispatch task. The
-        /// production helper wraps the kernel call in a 30s
-        /// `tokio::time::timeout`; on expiry it delivers the opaque
-        /// "unavailable" block (same shape as the provider-error path)
-        /// and lets dispatch move on. We exercise the timeout branch
-        /// via `maybe_transcribe_inbound_audio_with_timeout` so the
-        /// test finishes in milliseconds, not 30s. Using `test-util`'s
-        /// paused-time runtime would be cleaner but requires an extra
-        /// dev-dep — the parameterized helper is the cheapest path.
-        #[tokio::test]
-        async fn provider_hang_times_out_and_returns_unavailable_block() {
-            // Custom hand-rolled handle whose `transcribe_inbound_audio`
-            // future never resolves. `RecordingHandle` can't model this
-            // because it returns a cloned response immediately.
-            struct HangHandle;
-            #[async_trait]
-            impl ChannelBridgeHandle for HangHandle {
-                async fn send_message(
-                    &self,
-                    _agent_id: AgentId,
-                    _message: &str,
-                ) -> Result<String, String> {
-                    Ok(String::new())
-                }
-                async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
-                    Ok(None)
-                }
-                async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
-                    Ok(Vec::new())
-                }
-                async fn spawn_agent_by_name(
-                    &self,
-                    _manifest_name: &str,
-                ) -> Result<AgentId, String> {
-                    Err("unused".into())
-                }
-                fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
-
-                async fn transcribe_inbound_audio(
-                    &self,
-                    _path: &std::path::Path,
-                    _mime_type: &str,
-                ) -> Result<Option<String>, String> {
-                    // Block forever; the helper's timeout must fire.
-                    std::future::pending::<()>().await;
-                    unreachable!("pending future cannot resolve")
-                }
-            }
-
-            let h: Arc<dyn ChannelBridgeHandle> = Arc::new(HangHandle);
-            let s = saved("/tmp/x.ogg", "audio/ogg");
-            let started = std::time::Instant::now();
-            let block = maybe_transcribe_inbound_audio_with_timeout(
-                &h,
-                s.as_ref(),
-                std::time::Duration::from_millis(50),
-            )
-            .await;
-
-            // The timeout must actually have fired — sanity-check the
-            // wall-clock elapsed is on the order of the budget, not 30s.
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(5),
-                "helper waited too long; timeout did not fire"
-            );
-
-            match block {
-                Some(ContentBlock::Text { text, .. }) => {
-                    assert_eq!(text, "[Transcription unavailable]");
-                }
-                other => panic!("timeout must produce the unavailable block, got {other:?}"),
-            }
-        }
-    }
-
-    /// #5142 regression: `BridgeManager::abort()` must hard-stop the bridge's
-    /// tracked tasks through a **shared** `&self`. The hot-reload path
-    /// (`reload_channels_from_disk`) cannot get `&mut self` when a concurrent
-    /// `push_message` holds a strong `Arc` ref — pre-#5142 the graceful
-    /// `stop()` was simply skipped and the old bridge's tasks leaked. This
-    /// test reproduces that exact shape: a tracked long-lived task, a second
-    /// outstanding `Arc` clone making `Arc::try_unwrap` fail, then `abort()`
-    /// on the still-shared Arc must terminate the task.
-    #[tokio::test]
-    async fn bridge_abort_stops_tracked_task_through_shared_arc_5142() {
-        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
-            agents: Mutex::new(vec![]),
-        });
-        let router = Arc::new(AgentRouter::new());
-        let mut mgr = BridgeManager::new(handle, router);
-
-        // Stand-in for an adapter dispatch loop. It exits cleanly on the
-        // shutdown signal too, but we assert the hard abort backstop fires.
-        let task = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-        });
-        let abort_probe = task.abort_handle();
-        mgr.track_task(task);
-        assert!(
-            !abort_probe.is_finished(),
-            "sanity: tracked task is alive before abort()"
-        );
-
-        // Model the live AppState: the bridge lives behind an Arc and a
-        // concurrent reader (push_message) holds a second strong ref, so
-        // `Arc::try_unwrap` would fail and the &mut `stop()` is unreachable.
-        let shared = Arc::new(Some(mgr));
-        let concurrent_reader = Arc::clone(&shared);
-        assert!(
-            Arc::try_unwrap(Arc::clone(&shared)).is_err(),
-            "sanity: a second strong ref must make try_unwrap fail (the leak path)"
-        );
-
-        // The reload path's new behaviour: always abort() on the shared ref.
-        shared.as_ref().as_ref().unwrap().abort();
-
-        for _ in 0..50 {
-            if abort_probe.is_finished() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(
-            abort_probe.is_finished(),
-            "abort() on the shared Arc must terminate the tracked task (#5142) — \
-             otherwise the old bridge's tasks leak across hot-reload"
-        );
-
-        drop(concurrent_reader);
-        drop(shared);
-    }
-
-    /// Audit: cron-channel-name-not-reserved. Operator-supplied
-    /// `ChannelType::Custom("cron")` MUST NOT derive the same
-    /// SessionId as the kernel-internal cron-fire path. The
-    /// `sanitize_channel_name` helper renames any reserved-name
-    /// collision to `ext-<name>` before SenderContext stores the
-    /// string — `SessionId::for_channel` then hashes the disjoint
-    /// version.
-    #[test]
-    fn sanitize_channel_name_renames_reserved_collisions() {
-        assert_eq!(sanitize_channel_name("cron"), "ext-cron");
-        assert_eq!(sanitize_channel_name("CRON"), "ext-cron");
-        assert_eq!(sanitize_channel_name("Autonomous"), "ext-autonomous");
-        assert_eq!(sanitize_channel_name("WebUI"), "ext-webui");
-        assert_eq!(sanitize_channel_name("  cron  "), "ext-cron");
-    }
-
-    #[test]
-    fn sanitize_channel_name_passes_through_normal_names() {
-        assert_eq!(sanitize_channel_name("telegram"), "telegram");
-        assert_eq!(sanitize_channel_name("slack"), "slack");
-        assert_eq!(sanitize_channel_name("ext-cron"), "ext-cron");
-        assert_eq!(sanitize_channel_name("custom-bot"), "custom-bot");
-    }
-
-    /// End-to-end coverage of the SessionId disjoint property:
-    /// `for_channel(agent, "cron")` (the kernel internal path) and
-    /// `for_channel(agent, sanitize_channel_name("cron"))` (an
-    /// attacker-controlled custom channel that lands at
-    /// `build_sender_context`) must produce DIFFERENT SessionIds.
-    /// Without the sanitize step they were identical, which was
-    /// the audit-flagged data-leak.
-    #[test]
-    fn reserved_collision_disjoins_from_kernel_session_id() {
-        use librefang_types::agent::{AgentId, SessionId};
-        let agent = AgentId::new();
-        let kernel_internal = SessionId::for_channel(agent, "cron");
-        let sanitized_external = SessionId::for_channel(agent, &sanitize_channel_name("cron"));
-        assert_ne!(
-            kernel_internal, sanitized_external,
-            "operator-typed `Custom(\"cron\")` must NOT collide with the \
-             kernel's cron-fire SessionId after sanitize"
-        );
     }
 }

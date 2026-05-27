@@ -195,9 +195,7 @@ auto_memorize = true
 auto_retrieve = true
 max_retrieve = 10
 extraction_threshold = 0.7
-# extraction_model = "gpt-4o-mini"             # uses default provider
-# extraction_model = "anthropic/claude-haiku-4" # targets a specific provider
-# extraction_model = "anthropic:claude-haiku-4" # colon form also works
+# extraction_model = "gpt-4o-mini"  # optional, enables LLM-powered extraction
 extract_categories = ["user_preference", "important_fact", "task_context", "relationship"]
 session_ttl_hours = 24
 duplicate_threshold = 0.5
@@ -212,7 +210,7 @@ max_memories_per_agent = 1000
 | `auto_retrieve` | bool | `true` | Automatically retrieve relevant memories before each agent execution. |
 | `max_retrieve` | usize | `10` | Maximum number of memories to retrieve per query. |
 | `extraction_threshold` | f32 | `0.7` | Confidence threshold for near-duplicate detection (0.0–1.0). |
-| `extraction_model` | string or null | `null` | LLM model for extraction. Supports `provider/model` (e.g. `"anthropic/claude-haiku-4"`), `provider:model`, or bare model name (uses default provider). If `null`, uses rule-based extraction. There is no separate `extraction_provider` field. |
+| `extraction_model` | string or null | `null` | LLM model to use for extraction. If `null`, uses rule-based extraction. |
 | `extract_categories` | list of strings | `["user_preference", "important_fact", "task_context", "relationship"]` | Categories to extract from conversations. |
 | `session_ttl_hours` | u32 | `24` | Session memory TTL in hours. Memories older than this are cleaned up before each agent execution. |
 | `duplicate_threshold` | f32 | `0.5` | Similarity threshold for duplicate detection (0.0–1.0). Uses vector cosine similarity when embeddings are available, otherwise falls back to Jaccard word overlap. |
@@ -363,35 +361,44 @@ Complete table of all environment variables referenced by the configuration. Non
 | `EMAIL_PASSWORD` | Email | Email account password or app password. |
 | `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework app password. |
 | `TEAMS_SECURITY_TOKEN` | Teams | Outgoing webhook security token (base64) — HMAC-SHA256 key used to verify the `Authorization: HMAC <…>` header on every inbound activity. Production deployments should always set this. |
-| `MATTERMOST_TOKEN` | Mattermost (sidecar) | Mattermost bot token (sidecar adapter — set in `~/.librefang/secrets.env`). |
+| `MATTERMOST_TOKEN` | Mattermost | Mattermost bot token. |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth token. |
-| `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat personal access token (sidecar adapter — set in `~/.librefang/secrets.env`). |
+| `ROCKETCHAT_TOKEN` | Rocket.Chat | Rocket.Chat auth token. |
 | `ZULIP_API_KEY` | Zulip | Zulip bot API key. |
 | `XMPP_PASSWORD` | XMPP | XMPP account password. |
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | Service account JSON key. |
-| `LINE_CHANNEL_SECRET` | LINE (sidecar) | LINE channel secret (`librefang.sidecar.adapters.line` — set in `~/.librefang/secrets.env`). |
-| `LINE_CHANNEL_ACCESS_TOKEN` | LINE (sidecar) | LINE channel access token (sidecar adapter). |
+| `LINE_CHANNEL_SECRET` | LINE | LINE channel secret. |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE | LINE channel access token. |
+| `VIBER_AUTH_TOKEN` | Viber | Viber Bot auth token. |
+| `MESSENGER_PAGE_TOKEN` | Messenger | Facebook page access token. |
+| `MESSENGER_VERIFY_TOKEN` | Messenger | Webhook verification token. |
+| `MESSENGER_APP_SECRET` | Messenger | Facebook App Secret — HMAC-SHA1 key used to verify the `X-Hub-Signature` header on every inbound webhook. Production deployments should always set this. |
 | `REDDIT_CLIENT_SECRET` | Reddit | Reddit app client secret. |
 | `REDDIT_PASSWORD` | Reddit | Reddit bot account password. |
 | `MASTODON_ACCESS_TOKEN` | Mastodon | Mastodon access token. |
 | `BLUESKY_APP_PASSWORD` | Bluesky | Bluesky app password. |
 | `FEISHU_APP_SECRET` | Feishu | Feishu/Lark app secret. |
 | `REVOLT_BOT_TOKEN` | Revolt | Revolt bot token. |
-| `NEXTCLOUD_TOKEN` | Nextcloud (sidecar) | Nextcloud Talk app password / OAuth bearer (`librefang.sidecar.adapters.nextcloud`). |
+| `NEXTCLOUD_TOKEN` | Nextcloud | Nextcloud Talk auth token. |
 | `GUILDED_BOT_TOKEN` | Guilded | Guilded bot token. |
 | `KEYBASE_PAPERKEY` | Keybase | Keybase paper key. |
 | `THREEMA_SECRET` | Threema | Threema Gateway API secret. |
-| `WEBEX_BOT_TOKEN` | Webex (sidecar) | Webex bot Bearer token (`librefang.sidecar.adapters.webex`). |
+| `NOSTR_PRIVATE_KEY` | Nostr | Nostr private key (nsec or hex). |
+| `WEBEX_BOT_TOKEN` | Webex | Webex bot token. |
 | `PUMBLE_BOT_TOKEN` | Pumble | Pumble bot token. |
 | `FLOCK_BOT_TOKEN` | Flock | Flock bot token. |
 | `TWIST_TOKEN` | Twist | Twist API token. |
 | `MUMBLE_PASSWORD` | Mumble | Mumble server password. |
-| `DINGTALK_APP_KEY` | DingTalk | DingTalk App Key / Client ID (sidecar — `librefang.sidecar.adapters.dingtalk`, stream mode only). |
-| `DINGTALK_APP_SECRET` | DingTalk | DingTalk App Secret / Client Secret (sidecar — `librefang.sidecar.adapters.dingtalk`, stream mode only). |
+| `DINGTALK_APP_KEY` | DingTalk | DingTalk App Key / Client ID (stream mode). |
+| `DINGTALK_APP_SECRET` | DingTalk | DingTalk App Secret / Client Secret (stream mode). |
+| `DINGTALK_ACCESS_TOKEN` | DingTalk | DingTalk webhook access token (webhook mode). |
+| `DINGTALK_SECRET` | DingTalk | DingTalk signing secret (webhook mode). |
+| `DISCOURSE_API_KEY` | Discourse | Discourse API key. |
 | `GITTER_TOKEN` | Gitter | Gitter auth token. |
 | `NTFY_TOKEN` | ntfy | ntfy auth token (optional for public topics). |
 | `GOTIFY_APP_TOKEN` | Gotify | Gotify app token (sending). |
 | `GOTIFY_CLIENT_TOKEN` | Gotify | Gotify client token (receiving). |
 | `WEBHOOK_SECRET` | Webhook | HMAC signing secret for webhook verification. |
+| `LINKEDIN_ACCESS_TOKEN` | LinkedIn | LinkedIn OAuth2 access token. |
 
 ---

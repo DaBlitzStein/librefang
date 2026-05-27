@@ -5,23 +5,11 @@
 # tagged release months later produce a bit-for-bit identical builder image.
 # Track Node 20 LTS — CI's setup-node also uses node-version: 20
 # (.github/workflows/ci.yml, .github/workflows/dashboard-build.yml).
-FROM node:20.20.2-alpine AS dashboard-builder
+FROM node:20.18.1-alpine AS dashboard-builder
 WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
-# `corepack enable` alone hits `fetchLatestStableVersion2` against the npm
-# registry, which has flaked on us during builds. Activate the pinned pnpm
-# version (matches the `packageManager` field in package.json) directly so
-# the build never has to ask the registry "what's the latest stable?".
-# We also refresh corepack itself first: the keyring bundled with the node
-# base image goes stale as pnpm rotates signing keys, manifesting as
-# "Internal Error: Cannot find matching keyid" during `corepack prepare`.
-# Node ≥20.19 is also required by vite 8 / rolldown's optional native
-# bindings (engines: ^20.19.0), without which `pnpm install` silently skips
-# the linux-x64-musl binding and `vite build` fails at require-time.
-RUN npm install --global corepack@latest \
-    && corepack enable \
-    && corepack prepare pnpm@10.33.0 --activate \
+RUN corepack enable \
     && pnpm install --frozen-lockfile --ignore-scripts \
     && pnpm run build
 
@@ -48,12 +36,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
 COPY packages ./packages
-# librefang-channels embeds the Python SDK tree at compile time via
-# include_dir!("$CARGO_MANIFEST_DIR/../../sdk/python/librefang") in
-# embedded_sdk.rs (added in #5472). Without this COPY the proc macro
-# panics with "sdk/python/librefang is not a directory". Only this one
-# subtree is needed — .dockerignore keeps the rest of sdk/ out.
-COPY sdk/python/librefang ./sdk/python/librefang
 # librefang-api uses include_str!("../../../deploy/...") to embed the
 # observability stack (prometheus / tempo / otel-collector / grafana
 # configs) at compile time — added in #3062. Without this COPY the
@@ -65,12 +47,12 @@ COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    # `--features telemetry`: the published Docker image is the full
-    # daemon, so it ships with telemetry on. Channel adapters all run as
-    # out-of-process sidecars now (see #5408 / #5461), so the old
-    # `all-channels` / `core-channels` aliases are gone — `telemetry` is
-    # the whole opt-in surface left, matching the CLI's own `default`.
-    cargo build --release --bin librefang --features telemetry && \
+    # `--features all-channels`: the published Docker image is the full
+    # daemon, so opt back in to every channel adapter. The CLI's `default`
+    # was slimmed to a "core-channels" subset (see #3655 / #3688) to keep
+    # developer cold-build time low; release/packaging pipelines re-enable
+    # the full set explicitly.
+    cargo build --release --bin librefang --features all-channels && \
     cp target/release/librefang /usr/local/bin/librefang
 
 # Pinned to a specific Node 22 LTS minor (not floating `node:lts-bookworm-slim`)

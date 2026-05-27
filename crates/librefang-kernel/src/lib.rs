@@ -1,13 +1,8 @@
-// `KernelApi`'s `async_trait`-expanded methods nest pinned futures deeply
-// enough that the default 128-step layout pass tips over (#3566).
-#![recursion_limit = "256"]
-
 //! Core kernel for the LibreFang Agent Operating System.
 //!
 //! The kernel manages agent lifecycles, memory, permissions, scheduling,
 //! and inter-agent communication.
 
-pub mod agent_identity_registry;
 pub mod approval;
 pub mod auth;
 pub mod auto_dream;
@@ -24,10 +19,8 @@ pub mod heartbeat;
 pub mod hooks;
 pub mod inbox;
 pub mod kernel;
-pub mod kernel_api;
 pub mod log_reload;
 pub mod mcp_oauth_provider;
-pub mod oauth_cache_invalidator;
 pub use librefang_kernel_metering as metering;
 pub mod orchestration;
 pub mod pairing;
@@ -37,33 +30,16 @@ pub mod scheduler;
 pub mod session_lifecycle;
 pub mod session_policy;
 pub mod session_stream_hub;
-pub mod skill_workshop;
 pub mod supervised_spawn;
 pub mod supervisor;
 pub mod trajectory;
 pub mod triggers;
-// whatsapp_gateway module removed alongside the whatsapp sidecar
-// migration — the Baileys gateway is no longer embedded /
-// auto-spawned by the kernel. Operators run it separately as a
-// `[[sidecar_channels]]` entry or an external service.
+pub mod whatsapp_gateway;
 pub mod wizard;
 pub mod workflow;
 
 pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;
-pub use kernel::{SYSTEM_CHANNEL_AUTONOMOUS, SYSTEM_CHANNEL_CRON, SYSTEM_CHANNEL_WEBUI};
-pub use kernel_api::KernelApi;
-
-// Focused per-subsystem traits (refs #3565). Re-exported so external
-// crates can bind `&dyn FooSubsystemApi` instead of dragging in the
-// entire `KernelApi` surface, and so the upcoming method-body
-// migration can move callers off `LibreFangKernel` inherent forwards.
-pub use kernel::subsystems::{
-    AgentSubsystemApi, CredentialPoolSummary, EventSubsystemApi, GovernanceSubsystemApi,
-    LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi,
-    MeteringSubsystemApi, ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi,
-    WorkflowSubsystemApi,
-};
 
 // ---------------------------------------------------------------------------
 // Runtime re-exports (refs #3596 — API → Kernel → Runtime layering)
@@ -84,30 +60,13 @@ pub use kernel::subsystems::{
 // `librefang-api/Cargo.toml`'s direct `librefang-runtime` dependency once the
 // last in-tree `use librefang_runtime::*` is gone, letting the compiler
 // enforce the boundary.
-pub use librefang_runtime::a2a;
 pub use librefang_runtime::agent_loop;
 pub use librefang_runtime::audit;
-pub use librefang_runtime::browser;
-pub use librefang_runtime::catalog_sync;
-pub use librefang_runtime::channel_registry;
-pub use librefang_runtime::compactor;
-pub use librefang_runtime::copilot_oauth;
-pub use librefang_runtime::drivers;
-pub use librefang_runtime::http_client;
 pub use librefang_runtime::kernel_handle;
 pub use librefang_runtime::llm_driver;
 pub use librefang_runtime::llm_errors;
-pub use librefang_runtime::mcp;
 pub use librefang_runtime::mcp_oauth;
-pub use librefang_runtime::mcp_server;
 pub use librefang_runtime::media;
-pub use librefang_runtime::model_catalog;
-pub use librefang_runtime::pdf_text;
-pub use librefang_runtime::plugin_manager;
-pub use librefang_runtime::plugin_runtime;
-pub use librefang_runtime::provider_health;
-pub use librefang_runtime::registry_sync;
-pub use librefang_runtime::silent_response;
 pub use librefang_runtime::str_utils;
 pub use librefang_runtime::tool_runner;
 

@@ -14,10 +14,6 @@
 # ── Core (kernel, runtime, types, memory) ────────────────────────────
 crates/librefang-kernel/ @librefang/core
 crates/librefang-runtime/ @librefang/core
-crates/librefang-runtime-audit/ @librefang/core
-crates/librefang-runtime-mcp/ @librefang/core
-crates/librefang-runtime-media/ @librefang/core
-crates/librefang-runtime-sandbox-docker/ @librefang/core
 crates/librefang-types/ @librefang/core
 crates/librefang-memory/ @librefang/core
 crates/librefang-api/ @librefang/core
@@ -31,10 +27,10 @@ SECURITY.md @librefang/core
 crates/librefang-desktop/ @librefang/core
 crates/librefang-cli/ @librefang/core
 
-# ── Integrations (channels, skills, import, SDKs) ────────────────────
+# ── Integrations (channels, skills, migrate, SDKs) ───────────────────
 crates/librefang-channels/ @librefang/integrations
 crates/librefang-skills/ @librefang/integrations
-crates/librefang-import/ @librefang/integrations
+crates/librefang-migrate/ @librefang/integrations
 crates/librefang-hands/ @librefang/integrations
 sdk/javascript/ @librefang/integrations
 sdk/python/ @librefang/integrations

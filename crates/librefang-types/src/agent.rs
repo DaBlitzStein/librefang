@@ -154,36 +154,6 @@ pub enum HookEvent {
     AgentLoopEnd,
 }
 
-/// Reserved prefix for synthetic operator-node "agent" names emitted by
-/// the workflow engine (#4980). The dry-run preview and step results
-/// label operator nodes (Wait / Gate / Approval / Transform / Branch)
-/// with names like `_operator:wait` so the dashboard can distinguish
-/// them from real agents. A user-supplied agent name that collides
-/// with this prefix would make the run history ambiguous (is
-/// `_operator:wait` the builtin step or a hand-rolled agent that
-/// happens to share the name?), so the prefix is reserved at the
-/// registry boundary.
-pub const RESERVED_OPERATOR_AGENT_NAME_PREFIX: &str = "_operator:";
-
-/// Reject agent names that collide with the reserved `_operator:`
-/// namespace used by workflow operator-node step results (#4980).
-///
-/// Returns `Err(LibreFangError::InvalidInput)` ready to be propagated
-/// through `spawn_agent` / `update_name` / any other manifest entry
-/// point. Empty / whitespace-only names are NOT rejected here — that
-/// is a separate concern handled by the registry's `find_by_name`
-/// callers and the boot-time manifest loader.
-pub fn validate_agent_name(name: &str) -> Result<(), crate::error::LibreFangError> {
-    if name.starts_with(RESERVED_OPERATOR_AGENT_NAME_PREFIX) {
-        return Err(crate::error::LibreFangError::InvalidInput(format!(
-            "Agent name {name:?} uses reserved namespace \
-             '{RESERVED_OPERATOR_AGENT_NAME_PREFIX}' \
-             (operator-node synthetic names — see #4980)"
-        )));
-    }
-    Ok(())
-}
-
 /// Unique identifier for an agent instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentId(pub Uuid);
@@ -278,20 +248,6 @@ const CRON_RUN_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
     0x7e, 0x91, 0x2c, 0x4f, 0xb5, 0xa3, 0x48, 0xd1, 0xa0, 0x6c, 0xe2, 0x83, 0x1f, 0x57, 0xc4, 0x09,
 ]);
 
-/// Distinct UUID v5 namespace for per-fire trigger session IDs.
-/// audit: trigger-new-session-non-deterministic — random `SessionId::new()`
-/// minted at `triggers_and_workflow.rs` dispatch made "trigger X fired at T"
-/// log lines impossible to correlate to a specific SessionId. Mirror the
-/// cron `for_cron_run` design: derive deterministic v5 UUID from
-/// `(agent, trigger_id, fire_time)`. Disjoint from both
-/// `CHANNEL_SESSION_NAMESPACE` and `CRON_RUN_SESSION_NAMESPACE` so a
-/// `for_trigger_fire` id can never collide with any other session-key
-/// flavour even if input strings happen to coincide.
-/// Generated via `uuidgen`: e1e39b22-c416-4e06-93a5-60657b06e003.
-const TRIGGER_FIRE_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
-    0xe1, 0xe3, 0x9b, 0x22, 0xc4, 0x16, 0x4e, 0x06, 0x93, 0xa5, 0x60, 0x65, 0x7b, 0x06, 0xe0, 0x03,
-]);
-
 impl SessionId {
     /// Create a new random SessionId.
     pub fn new() -> Self {
@@ -310,31 +266,6 @@ impl SessionId {
         ))
     }
 
-    /// Derive the per-channel `SessionId` for a `(channel, chat_id)` pair
-    /// using the canonical scope construction shared by the kernel's inbound
-    /// resolver and the channel-bridge `/new` / `/reboot` / `/compact`
-    /// commands. Empty `chat_id` collapses to channel-only — matching what
-    /// `build_sender_context` does when `sender.platform_id` is empty.
-    ///
-    /// This is the single source of truth for the scope formula. The
-    /// inbound message resolver (`kernel/messaging.rs::send_message_full`,
-    /// the dispatch resolver in `kernel/mod.rs::resolve_dispatch_session_id`,
-    /// and the agent-execution path in `kernel/agent_execution.rs`) plus
-    /// the channel-bridge reset helper in `librefang-api::channel_bridge`
-    /// all call this so they cannot drift. Without this helper, the
-    /// scope-derivation literal lived inline in 4 places — any one of
-    /// them silently disagreeing would re-introduce #4868 (channel `/new`
-    /// deleting the wrong sid).
-    pub fn for_sender_scope(agent_id: AgentId, channel: &str, chat_id: Option<&str>) -> Self {
-        // `compose_sender_scope` returns `None` only when `channel` is
-        // empty, which is callers' responsibility to avoid (the kernel's
-        // channel branch already guards `!ctx.channel.is_empty()` before
-        // reaching here). Falling back to the bare channel preserves the
-        // pre-helper behaviour without panicking on a degenerate input.
-        let scope = compose_sender_scope(channel, chat_id).unwrap_or_else(|| channel.to_string());
-        Self::for_channel(agent_id, &scope)
-    }
-
     /// Derive a per-fire cron session id keyed by `(agent, run_key)`.
     ///
     /// Used when a cron job is configured with `session_mode = "new"` and
@@ -351,39 +282,6 @@ impl SessionId {
         let name = format!("{}:{}", agent_id.0, run_key.to_lowercase());
         Self(uuid::Uuid::new_v5(
             &CRON_RUN_SESSION_NAMESPACE,
-            name.as_bytes(),
-        ))
-    }
-
-    /// Derive a per-fire trigger session id keyed by
-    /// `(agent, trigger_id, fire_time)`.
-    ///
-    /// audit: trigger-new-session-non-deterministic — used when an event
-    /// trigger fires with `SessionMode::New` (manifest default or
-    /// per-trigger override). The dispatcher previously minted a random
-    /// `SessionId::new()`, which made it impossible to correlate a
-    /// "trigger X fired at T" log line to the actual SessionId for
-    /// diagnostics. Mirrors `for_cron_run` so log-driven debugging on
-    /// triggers behaves the same as cron.
-    ///
-    /// `trigger_id` is taken as a raw `Uuid` to avoid a layering inversion:
-    /// the concrete `TriggerId` newtype lives in `librefang-kernel`, which
-    /// depends on this crate. The dispatcher passes `trigger_match.trigger_id.0`.
-    /// `fire_time` is the moment the dispatcher resolved the match; the
-    /// kernel event bus already carries `Event::timestamp` for this.
-    pub fn for_trigger_fire(
-        agent_id: AgentId,
-        trigger_id: uuid::Uuid,
-        fire_time: DateTime<Utc>,
-    ) -> Self {
-        let name = format!(
-            "{}:{}:{}",
-            agent_id.0,
-            trigger_id,
-            fire_time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        );
-        Self(uuid::Uuid::new_v5(
-            &TRIGGER_FIRE_SESSION_NAMESPACE,
             name.as_bytes(),
         ))
     }
@@ -427,30 +325,6 @@ impl SessionId {
     }
 }
 
-/// Canonical scope-string formula shared by [`SessionId::for_sender_scope`]
-/// and the kernel's `sender_chat_scope` metadata stamp (#5227).
-///
-/// Returns `Some("<channel>:<chat_id>")` when both fields are non-empty,
-/// `Some("<channel>")` when chat_id is absent/empty, and `None` when
-/// channel itself is empty (no scope to compose).
-///
-/// Keeping the two consumers in lockstep is load-bearing: if the kernel's
-/// session-id derivation and the runtime's memory-scope filter ever
-/// disagree on this formula, a memory written under one chat will leak
-/// into the SessionId-isolated history of the OTHER chat — exactly the
-/// regression #5227 set out to close. Both call sites take a
-/// `(channel, chat_id)` pair via this helper rather than re-inlining
-/// `format!("{ch}:{cid}")`.
-pub fn compose_sender_scope(channel: &str, chat_id: Option<&str>) -> Option<String> {
-    if channel.is_empty() {
-        return None;
-    }
-    Some(match chat_id {
-        Some(cid) if !cid.is_empty() => format!("{channel}:{cid}"),
-        _ => channel.to_string(),
-    })
-}
-
 impl std::str::FromStr for SessionId {
     type Err = uuid::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -468,21 +342,6 @@ impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
-}
-
-/// Scope passed to `reset_session` / `reboot_session` so callers can choose
-/// between agent-wide nuke and single-session reset (#4868).
-///
-/// Channel `/new` / `/reboot` use `Session(for_channel(agent, channel:chat))`
-/// so resetting in one chat does not wipe transcripts on every other surface
-/// the same agent serves. Dashboard / explicit "reset agent" surfaces use
-/// `Agent` to preserve the historical full-wipe semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResetScope {
-    /// Reset every session belonging to this agent (default + per-channel).
-    Agent,
-    /// Reset exactly one session id; sibling sessions are untouched.
-    Session(SessionId),
 }
 
 /// Snapshot of a single in-flight (agent, session) loop, returned by
@@ -520,19 +379,6 @@ pub enum RunningSessionState {
 ///
 /// Controls whether background ticks, triggers, and `agent_send` calls
 /// reuse the agent's persistent session or create a fresh one each time.
-///
-/// **Strict-variant deserialization** (audit:
-/// session-mode-deserialize-fallback). serde's standard derive errors
-/// hard on unknown variants — there is no `#[serde(other)]` arm here
-/// and `#[default]` does NOT serve as a fallback for unknown variant
-/// strings (it only fires when `#[serde(default)]` is set on a
-/// container or field and the entire key is missing). The tests
-/// `session_mode_*` below pin this contract so a future refactor
-/// that adds a permissive `#[serde(other)]` arm gets caught — silently
-/// re-mapping `session_mode = "New"` (capitalised typo) to
-/// `Persistent` would run the operator straight into CLAUDE.md's
-/// warning that "concurrent writes to a single persistent session
-/// are undefined."
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
@@ -655,14 +501,6 @@ pub struct ResourceQuota {
     /// - `Some(n)` = limit to `n` tokens per hour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_llm_tokens_per_hour: Option<u64>,
-    /// Fraction of the hourly token budget allowed in any single minute.
-    ///
-    /// - `None` = not configured (uses compiled default `0.2`, i.e. 1/5 of hourly budget).
-    /// - `Some(r)` = allow `r × max_llm_tokens_per_hour` tokens per minute.
-    ///
-    /// Clamped to `0.01..=1.0` at enforcement time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub burst_ratio: Option<f32>,
     /// Maximum network bytes per hour.
     pub max_network_bytes_per_hour: u64,
     /// Maximum cost in USD per hour.
@@ -680,7 +518,6 @@ impl Default for ResourceQuota {
             max_cpu_time_ms: 30_000,             // 30 seconds
             max_tool_calls_per_minute: 60,
             max_llm_tokens_per_hour: None, // inherit global default
-            burst_ratio: None,             // inherit compiled default (0.2 = 1/5)
             max_network_bytes_per_hour: 100 * 1024 * 1024, // 100 MB
             max_cost_per_hour_usd: 0.0,    // unlimited by default
             max_cost_per_day_usd: 0.0,     // unlimited
@@ -699,20 +536,6 @@ impl ResourceQuota {
     /// returned value is `0`.
     pub fn effective_token_limit(&self) -> u64 {
         self.max_llm_tokens_per_hour.unwrap_or(0)
-    }
-
-    /// Resolved burst ratio: agent override > global default > 0.2.
-    /// Clamped to [0.01, 1.0]. NaN/Inf fall back to 0.2.
-    pub fn effective_burst_ratio(&self, global_default: f32) -> f32 {
-        let raw = self.burst_ratio.unwrap_or(if global_default > 0.0 {
-            global_default
-        } else {
-            0.2
-        });
-        if !raw.is_finite() {
-            return 0.2;
-        }
-        raw.clamp(0.01, 1.0)
     }
 }
 
@@ -901,111 +724,6 @@ pub struct ToolConfig {
     pub params: HashMap<String, serde_json::Value>,
 }
 
-/// Reconciliation policy for triggers present in the runtime store but
-/// missing from the manifest's `[[triggers]]` list (#5014).
-///
-/// Triggers created at runtime via `POST /api/triggers` or
-/// `librefang trigger create` coexist with declarative TOML triggers.
-/// When `reconcile_orphans` is set on an agent, the kernel checks every
-/// runtime-only trigger owned by that agent on spawn / reload and applies
-/// this policy:
-///
-/// - `Keep` (default): runtime-only triggers are preserved untouched.
-///   This is the conservative default — a missing TOML entry never
-///   silently deletes a trigger an operator created via API/CLI.
-/// - `Warn`: emit a `WARN` log naming the orphan trigger id and pattern,
-///   but keep it. Useful when migrating an existing deployment to
-///   declarative triggers — operators can see what's outside the TOML
-///   without losing live state.
-/// - `Delete`: remove runtime-only triggers from the store. Use this
-///   when `agent.toml` is the canonical source of truth and ad-hoc
-///   API-created triggers should be reaped on the next reconcile.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OrphanPolicy {
-    /// Leave runtime-only triggers in place (default).
-    #[default]
-    Keep,
-    /// Emit a warning log for each runtime-only trigger and keep it.
-    Warn,
-    /// Remove runtime-only triggers from the store.
-    Delete,
-}
-
-/// Declarative event trigger in `agent.toml` (#5014).
-///
-/// Mirrors the wire shape of the runtime
-/// [`librefang_kernel::triggers::Trigger`] for the operator-facing fields,
-/// so a manifest entry round-trips through the same JSON serialization
-/// that `POST /api/triggers` accepts. The runtime-managed fields (`id`,
-/// `created_at`, `fire_count`, `last_fired_at`) are intentionally absent
-/// — they are state, not configuration.
-///
-/// The `pattern` field stays as a `serde_json::Value` so that adding new
-/// `TriggerPattern` variants in the kernel does not require coordinated
-/// edits to this crate; deserialization happens at reconcile time, after
-/// the same `preprocess_pattern_json` normalisation the API route uses.
-///
-/// Example:
-/// ```toml
-/// [[triggers]]
-/// pattern = { task_posted = {} }
-/// prompt_template = "New task: {{event}}"
-/// max_fires = 0
-/// cooldown_secs = 0
-/// session_mode = "persistent"
-/// enabled = true
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ManifestTrigger {
-    /// Event pattern this trigger matches. See
-    /// [`librefang_kernel::triggers::TriggerPattern`] for the variant set.
-    /// Carried as a `serde_json::Value` so the manifest crate does not
-    /// have to depend on the kernel.
-    pub pattern: serde_json::Value,
-    /// Prompt template sent to the LLM when the trigger fires.
-    /// `{{event}}` is replaced with the rendered event description.
-    pub prompt_template: String,
-    /// Maximum number of times this trigger may fire (`0` = unlimited).
-    pub max_fires: u64,
-    /// Cooldown in seconds before the trigger may fire again
-    /// (`0` = engine default, see `TriggersConfig.cooldown_secs`).
-    pub cooldown_secs: u64,
-    /// Per-trigger session mode override. `None` inherits the agent
-    /// manifest's `session_mode`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_mode: Option<SessionMode>,
-    /// Optional cross-session wake target — the triggered message is
-    /// routed to this agent (by **name**, resolved at reconcile time)
-    /// instead of the manifest's owning agent. Empty string is treated
-    /// as unset.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_agent: Option<String>,
-    /// Optional workflow id to fire instead of dispatching a message.
-    /// `prompt_template` is still rendered and used as the workflow's
-    /// initial input.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workflow_id: Option<String>,
-    /// Whether this trigger is enabled.
-    pub enabled: bool,
-}
-
-impl Default for ManifestTrigger {
-    fn default() -> Self {
-        Self {
-            pattern: serde_json::Value::Null,
-            prompt_template: String::new(),
-            max_fires: 0,
-            cooldown_secs: 0,
-            session_mode: None,
-            target_agent: None,
-            workflow_id: None,
-            enabled: true,
-        }
-    }
-}
-
 /// Complete agent manifest — defines everything about an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1060,14 +778,8 @@ pub struct AgentManifest {
     /// LLM model configuration.
     pub model: ModelConfig,
     /// Fallback model chain — tried in order if the primary model fails.
-    /// `None` means "inherit global fallback_providers"; `Some([])` means
-    /// "disable all fallbacks for this agent".
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_compat::option_vec_lenient"
-    )]
-    pub fallback_models: Option<Vec<FallbackModel>>,
+    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
+    pub fallback_models: Vec<FallbackModel>,
     /// Resource quotas.
     pub resources: ResourceQuota,
     /// Priority level.
@@ -1089,20 +801,6 @@ pub struct AgentManifest {
     /// MCP server allowlist (empty = all connected MCP servers available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
-    /// Explicitly disable all MCP server tools for this agent. Mirrors
-    /// `skills_disabled` — `mcp_servers = []` means "all", this means "none".
-    ///
-    /// **Scope**: this flag hides MCP tools and the MCP server summary from
-    /// *this agent's* LLM prompt only. MCP servers defined in `KernelConfig`
-    /// still start globally if any other agent uses them — no server process
-    /// is stopped or skipped.
-    ///
-    /// **Hot-reload**: takes effect on the next `available_tools()` call after
-    /// the per-agent tools cache is evicted. `reload_agent_from_disk` (the
-    /// file-watcher path) evicts it automatically, so toggling `mcp_disabled`
-    /// in `agent.toml` at runtime takes effect without an agent respawn.
-    #[serde(default)]
-    pub mcp_disabled: bool,
     /// Custom metadata.
     #[serde(default, deserialize_with = "crate::serde_compat::map_lenient")]
     pub metadata: HashMap<String, serde_json::Value>,
@@ -1230,10 +928,9 @@ pub struct AgentManifest {
     pub channel_overrides: Option<crate::config::ChannelOverrides>,
     /// Per-agent override for the message-history trim cap. When set,
     /// takes precedence over `KernelConfig.max_history_messages` and the
-    /// compiled-in default (`agent_loop::history::DEFAULT_MAX_HISTORY_MESSAGES`).
-    /// `None` means inherit from kernel config / default. Runtime clamps values
-    /// below 4 up to the safe-trim floor and values above 500 down to the hard
-    /// ceiling, emitting a `warn!` log with `agent`, `requested`, and `applied`.
+    /// compiled-in default (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`).
+    /// `None` means inherit from kernel config / default. Values below 4
+    /// are silently clamped at runtime with a warning log.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
     /// Trigger-dispatch-only: cap on concurrent invocations from the
@@ -1270,174 +967,6 @@ pub struct AgentManifest {
     /// on the next message.
     #[serde(default)]
     pub cache_context: bool,
-    /// Per-agent tool-execution backend override (#3332).
-    ///
-    /// Resolution order: this field > `KernelConfig.tool_exec.kind` >
-    /// compiled-in default (`local`). The backend selected here is used
-    /// for shell / docker_exec / tool process spawns originating from
-    /// this agent. Setting this to `ssh` or `daytona` requires the
-    /// matching subtable in `config.toml: [tool_exec.ssh]` /
-    /// `[tool_exec.daytona]` so the runtime knows where to dispatch.
-    /// `None` means inherit from kernel config.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_exec_backend: Option<crate::tool_exec::BackendKind>,
-    /// Skill workshop (#3328): passive after-turn capture of reusable
-    /// workflows from successful interactions. Default disabled — opt-in
-    /// per agent via `[skill_workshop]` in `agent.toml`.
-    #[serde(default)]
-    pub skill_workshop: SkillWorkshopConfig,
-    /// Per-agent override for the kernel-global `[proactive_memory]`
-    /// policy (#4870). Each field of
-    /// [`crate::memory::ProactiveMemoryOverrides`] is an `Option<bool>`
-    /// that, when set, supersedes the matching field in
-    /// `KernelConfig.proactive_memory` for this agent only. Default is
-    /// all-`None` (inherit global). Boot caveat: the global
-    /// `proactive_memory.enabled = false` still short-circuits store
-    /// construction, so this knob is primarily a per-agent opt-out
-    /// vector — see the struct doc for details.
-    #[serde(default)]
-    pub proactive_memory: crate::memory::ProactiveMemoryOverrides,
-    /// Per-agent override for the kernel-global `[compaction]` policy
-    /// (#4976). Each field of [`CompactionOverrides`] is an `Option`
-    /// that, when set, supersedes the matching field in
-    /// `KernelConfig.compaction` for this agent only. Default `None`
-    /// means inherit global for every field.
-    ///
-    /// Use case: a chat agent with short exchanges wants aggressive
-    /// pruning (low `keep_recent`), while a workflow orchestrator with
-    /// long multi-tool sessions wants high `keep_recent` and a larger
-    /// summary budget. The global config can no longer be one-size-
-    /// fits-all once both agents share a daemon.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<CompactionOverrides>,
-    /// Declarative event triggers (#5014) — symmetric to runtime
-    /// triggers created via `POST /api/triggers`. On agent spawn or
-    /// reload the kernel reconciles this list against the existing
-    /// `trigger_jobs.json` store: missing entries are created,
-    /// matching entries are left alone, and entries whose
-    /// configuration drifted (prompt template, max_fires,
-    /// cooldown_secs, session_mode, target_agent, workflow_id,
-    /// enabled) are updated in place — TOML wins. Triggers created via
-    /// API / CLI are NOT touched unless `reconcile_orphans = "delete"`
-    /// is set explicitly.
-    ///
-    /// Empty list (the default) means "no declarative triggers";
-    /// runtime triggers continue to work unchanged.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub triggers: Vec<ManifestTrigger>,
-    /// Policy for runtime triggers that are owned by this agent but
-    /// have no matching entry in `triggers` (#5014). See
-    /// [`OrphanPolicy`] for the three options. Default is `Keep` —
-    /// the conservative path that never deletes a runtime-only trigger
-    /// silently. Set to `Delete` to make `agent.toml` the canonical
-    /// source of truth.
-    #[serde(default)]
-    pub reconcile_orphans: OrphanPolicy,
-    /// Async task tracker (#4983) per-agent settings. Controls how
-    /// long the agent is willing to wait on a `workflow_start`
-    /// (and, later, `agent_send_async` / external-webhook) operation
-    /// before the kernel cancels it on the agent's behalf, and
-    /// whether a timeout cancellation surfaces as a synthetic
-    /// `TaskCompletionEvent` in the agent's session (so the agent
-    /// can apologise to the user / retry / escalate) or is silently
-    /// dropped.
-    ///
-    /// Defaults are conservative: no global timeout, notification
-    /// on timeout = `true`. Step-1 / step-2 design decision: timeout
-    /// ownership stays with the agent that spawned the task — the
-    /// kernel does not impose a hard ceiling.
-    #[serde(default)]
-    pub async_tasks: AsyncTasksConfig,
-}
-
-/// Per-agent override for the kernel-global `[compaction]` configuration
-/// (#4976). Mirrors the user-facing fields of
-/// [`crate::config::CompactionTomlConfig`] as `Option<_>` so a manifest
-/// can override individual knobs while inheriting the rest from
-/// `KernelConfig.compaction`.
-///
-/// Internal algorithmic knobs (`base_chunk_ratio`, `safety_margin`,
-/// `summarization_overhead_tokens`, …) live only on the runtime
-/// `CompactionConfig` and are intentionally not exposed here — they are
-/// implementation details of the summarisation algorithm, not policy.
-///
-/// Resolution order at compaction time:
-/// 1. agent.toml `[compaction]` field (this struct) — when `Some(_)`
-/// 2. config.toml `[compaction]` — global default
-/// 3. compiled-in defaults inside `CompactionTomlConfig::default()`
-///
-/// Example in `agent.toml` (all fields optional):
-/// ```toml
-/// [compaction]
-/// max_summary_tokens = 8192
-/// keep_recent = 20
-/// threshold_messages = 50
-/// ```
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct CompactionOverrides {
-    /// Override `threshold_messages` — message count that triggers compaction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threshold_messages: Option<usize>,
-    /// Override `keep_recent` — recent messages preserved verbatim.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_recent: Option<usize>,
-    /// Override `max_summary_tokens` — token budget for the summary output.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_summary_tokens: Option<usize>,
-    /// Override `token_threshold_ratio` — fraction of the model's
-    /// context window that triggers token-based compaction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_threshold_ratio: Option<f64>,
-    /// Override `max_chunk_chars` — maximum chars per summarisation chunk.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_chunk_chars: Option<usize>,
-    /// Override `max_retries` — max retry attempts for LLM summarisation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_retries: Option<u32>,
-}
-
-impl CompactionOverrides {
-    /// Merge this per-agent override on top of the kernel-global
-    /// `CompactionTomlConfig`. For each field, `Some(_)` on the override
-    /// wins; `None` falls through to the global value.
-    ///
-    /// Returns a fresh `CompactionTomlConfig` — the global is not mutated,
-    /// so different agents can produce different merged configs from the
-    /// same global snapshot.
-    pub fn resolve(
-        &self,
-        global: &crate::config::CompactionTomlConfig,
-    ) -> crate::config::CompactionTomlConfig {
-        // Clamp ratio overrides into a sane window. Values outside [0.0, 1.0]
-        // either disable compaction (>1.0 → never triggers) or fire on every
-        // message (≤0.0). Either way the operator typed a typo, not a real
-        // policy — fall back to a clamped value rather than misbehaving.
-        let token_threshold_ratio = self
-            .token_threshold_ratio
-            .map(|r| r.clamp(0.0, 1.0))
-            .unwrap_or(global.token_threshold_ratio);
-        crate::config::CompactionTomlConfig {
-            threshold_messages: self.threshold_messages.unwrap_or(global.threshold_messages),
-            keep_recent: self.keep_recent.unwrap_or(global.keep_recent),
-            max_summary_tokens: self.max_summary_tokens.unwrap_or(global.max_summary_tokens),
-            token_threshold_ratio,
-            max_chunk_chars: self.max_chunk_chars.unwrap_or(global.max_chunk_chars),
-            max_retries: self.max_retries.unwrap_or(global.max_retries),
-        }
-    }
-
-    /// True when no field is set — equivalent to `Default::default()`.
-    /// Call sites can use this to skip the resolve dance entirely for
-    /// the common "no override" case.
-    pub fn is_empty(&self) -> bool {
-        self.threshold_messages.is_none()
-            && self.keep_recent.is_none()
-            && self.max_summary_tokens.is_none()
-            && self.token_threshold_ratio.is_none()
-            && self.max_chunk_chars.is_none()
-            && self.max_retries.is_none()
-    }
 }
 
 /// Access mode for a named workspace.
@@ -1504,7 +1033,7 @@ impl Default for AgentManifest {
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),
             model: ModelConfig::default(),
-            fallback_models: None,
+            fallback_models: Vec::new(),
             resources: ResourceQuota::default(),
             priority: Priority::default(),
             capabilities: ManifestCapabilities::default(),
@@ -1513,7 +1042,6 @@ impl Default for AgentManifest {
             skills: Vec::new(),
             skills_disabled: false,
             mcp_servers: Vec::new(),
-            mcp_disabled: false,
             metadata: HashMap::new(),
             tags: Vec::new(),
             routing: None,
@@ -1543,54 +1071,6 @@ impl Default for AgentManifest {
             channel_overrides: None,
             max_history_messages: None,
             cache_context: false,
-            tool_exec_backend: None,
-            skill_workshop: SkillWorkshopConfig::default(),
-            proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
-            compaction: None,
-            triggers: Vec::new(),
-            reconcile_orphans: OrphanPolicy::default(),
-            async_tasks: AsyncTasksConfig::default(),
-        }
-    }
-}
-
-/// Per-agent async-task tracker settings (#4983).
-///
-/// Lives on `AgentManifest.async_tasks`, deserialised from the
-/// `[async_tasks]` table in `agent.toml`. Both fields default to the
-/// safest values: no timeout (the agent's spawn caller passes the
-/// deadline if one is needed) and notify-on-timeout enabled (so a
-/// timeout cancellation surfaces in the session rather than being
-/// silently dropped).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AsyncTasksConfig {
-    /// Default wall-clock timeout in seconds applied to async tasks
-    /// the agent spawns when its own call site does not pass an
-    /// explicit deadline. `None` means no kernel-imposed default —
-    /// the task runs until the underlying executor (workflow engine,
-    /// peer agent) returns. This default matches the step-1
-    /// "timeout ownership is agent-side" decision.
-    ///
-    /// Operators that want a safety net on a chatty agent can set
-    /// e.g. `default_timeout_secs = 600` to make sure no async task
-    /// silently hangs forever.
-    pub default_timeout_secs: Option<u64>,
-    /// Whether to inject a synthetic `TaskCompletionEvent`
-    /// (with `TaskStatus::Failed("timeout after Ns")`) into the
-    /// originating session when a task hits the timeout above.
-    /// Default `true`: timeouts are user-visible so the agent can
-    /// react (apologise, retry, escalate). Setting to `false`
-    /// drops the event silently — operationally meaningful only
-    /// for batch agents whose sessions are never read by a human.
-    pub notify_on_timeout: bool,
-}
-
-impl Default for AsyncTasksConfig {
-    fn default() -> Self {
-        Self {
-            default_timeout_secs: None,
-            notify_on_timeout: true,
         }
     }
 }
@@ -1624,136 +1104,6 @@ pub struct ManifestCapabilities {
     /// Allowed OFP peer patterns.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub ofp_connect: Vec<String>,
-}
-
-/// Skill workshop configuration (#3328).
-///
-/// Controls passive, after-turn capture of reusable workflows from
-/// successful interactions. When the user spends multiple turns teaching
-/// the agent a multi-step workflow, the workshop detects the teaching
-/// signal (`from now on, always X` / `no, do it like Y` / repeated tool
-/// patterns) and stores a draft skill in
-/// `~/.librefang/skills/pending/<agent_id>/<uuid>.toml` for review.
-///
-/// **Default on with the conservative knob set** (`enabled=true`,
-/// `auto_capture=true`, `review_mode="heuristic"` so no LLM call,
-/// `approval_policy="pending"` so no auto-promote, `max_pending=20`).
-/// Candidates land in `pending/` and wait for human review via
-/// `librefang skill pending approve <id>` (CLI) or the Skills page
-/// (dashboard). With `approval_policy = "auto"`, the workshop still
-/// writes the candidate to `pending/` first — for the audit trail and
-/// to give the prompt-injection scan a place to fail loudly — and then
-/// promotes it through `evolution::create_skill` and removes the
-/// pending file. Either way the active skill goes through the same
-/// `SkillVerifier::scan_prompt_content` gate that guards marketplace
-/// skills.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SkillWorkshopConfig {
-    /// Master switch. When `false`, the after-turn hook is a no-op for
-    /// this agent (no scanning, no LLM call, no disk write).
-    pub enabled: bool,
-    /// When `true`, the after-turn hook runs the heuristic / LLM
-    /// capture pass. When `false`, the hook short-circuits before
-    /// scanning, so no new candidates are produced — the
-    /// approval-side CLI / dashboard / API still work over whatever
-    /// is already in `pending/`. Independent of `enabled` so an
-    /// operator can pause capture on a single agent during a busy
-    /// session without flipping the master switch.
-    pub auto_capture: bool,
-    /// What the workshop does with a positively-classified candidate.
-    pub approval_policy: ApprovalPolicy,
-    /// How candidates are classified.
-    pub review_mode: ReviewMode,
-    /// Maximum number of pending candidates retained per agent. When the
-    /// limit is reached, the oldest candidate (by `captured_at`) is
-    /// deleted before the new one is written. Set to `0` to skip the
-    /// disk write entirely (the scanner still runs; if you want to
-    /// skip the scan as well, use `auto_capture = false`).
-    pub max_pending: u32,
-    /// Optional time-to-live for pending candidates, in days. When set
-    /// to `Some(n)` with `n > 0`, `save_candidate` prunes any pending
-    /// candidate whose `captured_at` is older than `n` days before
-    /// writing the new one — bounds the worst case where a user opts
-    /// in but never reviews the pending tree. `None` (default) and
-    /// `Some(0)` both keep the historical behaviour: candidates only
-    /// age out when the per-agent `max_pending` cap evicts them by
-    /// LRU. `Some(0)` is treated as "disabled" rather than "expire
-    /// everything" because the latter would be a footgun for an
-    /// operator who configured zero expecting the disabled meaning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_pending_age_days: Option<u32>,
-}
-
-impl Default for SkillWorkshopConfig {
-    fn default() -> Self {
-        // Default-OFF — opt-in per the original #3328 acceptance
-        // criteria. Operators who want the workshop set
-        // `[skill_workshop] enabled = true` in `agent.toml`. The
-        // remaining knobs document the conservative shape the
-        // workshop takes once it IS turned on: heuristic-only review
-        // (no LLM cost), pending policy (every candidate waits for
-        // human approve / reject), 20-candidate cap.
-        Self {
-            enabled: false,
-            auto_capture: true,
-            approval_policy: ApprovalPolicy::Pending,
-            review_mode: ReviewMode::Heuristic,
-            max_pending: 20,
-            // No TTL by default — the cap is the only aging mechanism
-            // unless the operator opts in.
-            max_pending_age_days: None,
-        }
-    }
-}
-
-/// What happens to a positively-classified skill workshop candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ApprovalPolicy {
-    /// Default. Write the candidate to
-    /// `~/.librefang/skills/pending/<agent_id>/<uuid>.toml`. The skill
-    /// is not loaded into the active registry until a user approves it.
-    #[default]
-    Pending,
-    /// Bypass review — write directly to `~/.librefang/skills/active/`
-    /// and reload the skill registry. The same prompt-injection scan
-    /// that gates marketplace skills still applies. Intended for trust-
-    /// established power-user setups; do not enable on shared accounts.
-    Auto,
-}
-
-/// How a skill workshop candidate is classified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewMode {
-    /// Cheap pattern match only — no LLM call, no token spend.
-    #[default]
-    Heuristic,
-    /// Heuristic gate first; only candidates that pass the heuristic
-    /// are forwarded to a cheap auxiliary LLM
-    /// (`AuxTask::SkillWorkshopReview`) for confirmation and
-    /// refinement. The LLM may reject a candidate that the heuristic
-    /// accepted, but it cannot resurrect one the heuristic dropped —
-    /// keeps the LLM call rate bounded by the heuristic's hit rate.
-    /// `both` from openclaw's vocabulary is accepted as an alias and
-    /// is functionally identical: a parallel "run both gates
-    /// independently and union accepts" mode would require feeding
-    /// the LLM raw turn text without a heuristic seed and is
-    /// out-of-scope for the current pipeline.
-    #[serde(
-        alias = "threshold-llm",
-        alias = "threshold_llm",
-        alias = "both",
-        alias = "Both"
-    )]
-    ThresholdLlm,
-    /// Run the heuristic scanners but drop every hit before writing
-    /// to disk. No new candidates are produced. Use `auto_capture =
-    /// false` instead if you want to also skip the regex scan; this
-    /// variant exists for the test path that wants the scanner code
-    /// exercised without polluting the pending tree.
-    None,
 }
 
 /// Human-readable session label (e.g., "support inbox", "research").
@@ -2192,54 +1542,6 @@ mod tests {
     // ----- ToolProfile tests -----
 
     #[test]
-    fn effective_burst_ratio_defaults_to_one_fifth() {
-        let q = ResourceQuota::default();
-        assert!((q.effective_burst_ratio(0.0) - 0.2).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn effective_burst_ratio_uses_global_default() {
-        let q = ResourceQuota::default();
-        assert!((q.effective_burst_ratio(0.5) - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn effective_burst_ratio_agent_overrides_global() {
-        let q = ResourceQuota {
-            burst_ratio: Some(0.3),
-            ..Default::default()
-        };
-        assert!((q.effective_burst_ratio(0.8) - 0.3).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn effective_burst_ratio_clamps_below_minimum() {
-        let q = ResourceQuota {
-            burst_ratio: Some(0.0),
-            ..Default::default()
-        };
-        assert!((q.effective_burst_ratio(0.0) - 0.01).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn effective_burst_ratio_clamps_above_one() {
-        let q = ResourceQuota {
-            burst_ratio: Some(2.5),
-            ..Default::default()
-        };
-        assert!((q.effective_burst_ratio(0.0) - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn effective_burst_ratio_nan_falls_back_to_default() {
-        let q = ResourceQuota {
-            burst_ratio: Some(f32::NAN),
-            ..Default::default()
-        };
-        assert!((q.effective_burst_ratio(0.0) - 0.2).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn test_tool_profile_minimal() {
         let tools = ToolProfile::Minimal.tools();
         assert_eq!(tools, vec!["file_read", "file_list"]);
@@ -2434,74 +1736,19 @@ mod tests {
     fn test_manifest_with_new_fields() {
         let manifest = AgentManifest {
             profile: Some(ToolProfile::Coding),
-            fallback_models: Some(vec![FallbackModel {
+            fallback_models: vec![FallbackModel {
                 provider: "groq".to_string(),
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
                 extra_params: std::collections::HashMap::new(),
-            }]),
+            }],
             ..Default::default()
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let back: AgentManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.profile, Some(ToolProfile::Coding));
-        assert_eq!(back.fallback_models.as_deref().map(|v| v.len()), Some(1));
-    }
-
-    // ----- fallback_models three-state TOML parse tests (#5112) -----
-
-    #[test]
-    fn test_fallback_models_absent_key_yields_none() {
-        // A manifest TOML with NO `fallback_models` key at all must deserialize
-        // to `None` (= inherit global fallback_providers chain).
-        let toml_str = r#"
-            name = "test-agent"
-            [model]
-            provider = "anthropic"
-            model = "claude-3-haiku-20240307"
-        "#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        assert!(
-            manifest.fallback_models.is_none(),
-            "absent fallback_models key must produce None, got: {:?}",
-            manifest.fallback_models
-        );
-    }
-
-    #[test]
-    fn test_fallback_models_explicit_empty_yields_some_empty_and_roundtrips() {
-        // `fallback_models = []` (inline TOML array syntax) must deserialize to
-        // `Some(vec![])` — opting the agent out of the global fallback chain.
-        // The roundtrip back to JSON must preserve `Some(vec![])` (i.e.
-        // `skip_serializing_if = "Option::is_none"` must NOT drop it).
-        let toml_str = r#"
-            name = "test-agent"
-            fallback_models = []
-            [model]
-            provider = "anthropic"
-            model = "claude-3-haiku-20240307"
-        "#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        assert!(
-            manifest.fallback_models.as_ref().map(|v| v.is_empty()) == Some(true),
-            "explicit fallback_models = [] must produce Some(vec![]), got: {:?}",
-            manifest.fallback_models
-        );
-
-        // Round-trip: serialize to JSON then deserialize again.
-        let json = serde_json::to_string(&manifest).unwrap();
-        // Some(vec![]) serializes as `"fallback_models":[]` — the key must be present.
-        assert!(
-            json.contains("fallback_models"),
-            "serialized JSON must contain the fallback_models key when Some(vec![]); json={json}"
-        );
-        let back: AgentManifest = serde_json::from_str(&json).unwrap();
-        assert!(
-            back.fallback_models.as_ref().map(|v| v.is_empty()) == Some(true),
-            "roundtrip must preserve Some(vec![]), got: {:?}",
-            back.fallback_models
-        );
+        assert_eq!(back.fallback_models.len(), 1);
     }
 
     #[test]
@@ -3007,78 +2254,6 @@ model = "llama-3.3-70b-versatile"
         assert_eq!(sid.0.get_version_num(), 5, "SessionId must be UUID v5");
     }
 
-    /// #5227 follow-up — `compose_sender_scope` is the canonical
-    /// formula shared by `SessionId::for_sender_scope` and the kernel's
-    /// `sender_chat_scope` metadata stamp. If the two ever drift,
-    /// memories written under one chat would leak into the SessionId-
-    /// isolated history of the OTHER chat — re-opening the original
-    /// bug but for non-WhatsApp adapters. This test pins all four
-    /// behavioural cases so any future change to the formula has to
-    /// own both sides.
-    #[test]
-    fn compose_sender_scope_formula_5227() {
-        // Bare channel — chat_id absent or empty collapses to the
-        // channel string verbatim (matches `for_channel` semantics).
-        assert_eq!(
-            compose_sender_scope("telegram", None),
-            Some("telegram".to_string()),
-        );
-        assert_eq!(
-            compose_sender_scope("telegram", Some("")),
-            Some("telegram".to_string()),
-        );
-
-        // Chat-qualified — `<channel>:<chat_id>`.
-        assert_eq!(
-            compose_sender_scope("telegram", Some("group--999")),
-            Some("telegram:group--999".to_string()),
-        );
-
-        // Already-qualified channel (WhatsApp gateway path) +
-        // chat_id None — passes through.
-        assert_eq!(
-            compose_sender_scope("whatsapp:+15551234567@s.whatsapp.net", None),
-            Some("whatsapp:+15551234567@s.whatsapp.net".to_string()),
-        );
-
-        // Empty channel is `None` — kernel inject sites guard against
-        // this before reaching the helper, but the helper itself stays
-        // defensive so callers can safely propagate the result via
-        // `if let Some(scope) = compose_sender_scope(...) { ... }`.
-        assert_eq!(compose_sender_scope("", None), None);
-        assert_eq!(compose_sender_scope("", Some("anything")), None);
-    }
-
-    /// #5227 follow-up — verify the two consumers of the formula
-    /// actually agree byte-for-byte. The session-id path goes
-    /// `for_sender_scope -> compose_sender_scope -> for_channel`;
-    /// the memory-stamp path stamps the raw `compose_sender_scope`
-    /// output. Both consumers running through the helper guarantees
-    /// they cannot drift, but it's cheap to assert the equality
-    /// explicitly so a refactor that re-inlines one side is caught.
-    #[test]
-    fn compose_sender_scope_matches_for_sender_scope_5227() {
-        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
-        for (channel, chat_id) in [
-            ("telegram", Some("dm-7777")),
-            ("telegram", Some("group--999")),
-            ("slack", Some("C012345")),
-            ("slack", Some("D012345")),
-            ("whatsapp:+15551234567@s.whatsapp.net", None),
-            ("whatsapp", None),
-            ("discord", Some("ch-1")),
-        ] {
-            let scope = compose_sender_scope(channel, chat_id)
-                .expect("non-empty channel composes successfully");
-            assert_eq!(
-                SessionId::for_sender_scope(agent, channel, chat_id),
-                SessionId::for_channel(agent, &scope),
-                "for_sender_scope and for_channel(compose_sender_scope) must agree \
-                 for (channel={channel}, chat_id={chat_id:?})"
-            );
-        }
-    }
-
     #[test]
     fn session_id_from_str_parses_uuid() {
         use std::str::FromStr;
@@ -3121,107 +2296,6 @@ model = "llama-3.3-70b-versatile"
         let persistent = SessionId::for_channel(agent, "cron");
         let isolated = SessionId::for_cron_run(agent, "cron");
         assert_ne!(persistent, isolated);
-    }
-
-    // audit: trigger-new-session-non-deterministic
-    // The tests below pin the contract for `SessionId::for_trigger_fire`.
-    // Mirrors `for_cron_run_*` and `fire_session_override_new_matches_for_cron_run_contract_3657`
-    // (in `librefang-kernel/src/cron.rs`). Any change to derivation shape
-    // (timestamp precision, separator, ordering, namespace) must update all of
-    // these in lockstep — random `SessionId::new()` regressed log-correlation
-    // once, and a quiet shape change would silently repeat that.
-
-    #[test]
-    fn for_trigger_fire_deterministic() {
-        use chrono::TimeZone;
-        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
-        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
-        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
-        let a = SessionId::for_trigger_fire(agent, trigger_id, t);
-        let b = SessionId::for_trigger_fire(agent, trigger_id, t);
-        assert_eq!(
-            a, b,
-            "same (agent, trigger_id, fire_time) must yield identical SessionId"
-        );
-    }
-
-    #[test]
-    fn for_trigger_fire_distinguishes_fire_time() {
-        use chrono::TimeZone;
-        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
-        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
-        let t1 = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
-        let t2 = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 1).unwrap();
-        assert_ne!(
-            SessionId::for_trigger_fire(agent, trigger_id, t1),
-            SessionId::for_trigger_fire(agent, trigger_id, t2),
-            "different fire_times must yield different SessionIds"
-        );
-    }
-
-    #[test]
-    fn for_trigger_fire_distinguishes_trigger_id() {
-        use chrono::TimeZone;
-        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
-        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
-        let tid_a = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
-        let tid_b = uuid::Uuid::parse_str("c3c4c5c6-d3d4-e3e4-f3f4-a3a4a5a6a7a8").unwrap();
-        assert_ne!(
-            SessionId::for_trigger_fire(agent, tid_a, t),
-            SessionId::for_trigger_fire(agent, tid_b, t),
-            "different trigger_ids at the same instant must yield different SessionIds"
-        );
-    }
-
-    #[test]
-    fn for_trigger_fire_distinguishes_agent() {
-        use chrono::TimeZone;
-        let agent_a =
-            AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
-        let agent_b =
-            AgentId(uuid::Uuid::parse_str("d4d5d6d7-e4e5-f4f5-a4a5-b4b5b6b7b8b9").unwrap());
-        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
-        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
-        assert_ne!(
-            SessionId::for_trigger_fire(agent_a, trigger_id, t),
-            SessionId::for_trigger_fire(agent_b, trigger_id, t),
-            "different agents must yield different SessionIds for the same trigger fire"
-        );
-    }
-
-    #[test]
-    fn for_trigger_fire_distinct_namespace_from_cron_and_channel() {
-        use chrono::TimeZone;
-        // Distinct namespaces guarantee: even if a future caller hands
-        // identical input strings to all three derivation flavours, the
-        // resulting SessionIds cannot collide. This pins
-        // TRIGGER_FIRE_SESSION_NAMESPACE as semantically disjoint from
-        // CHANNEL_SESSION_NAMESPACE and CRON_RUN_SESSION_NAMESPACE.
-        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
-        // Use the trigger_id's UUID *string* as the colliding input for the
-        // other two namespaces — purely to force the same byte sequence.
-        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
-        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
-        let trigger_sid = SessionId::for_trigger_fire(agent, trigger_id, t);
-        let cron_sid = SessionId::for_cron_run(
-            agent,
-            &format!(
-                "{}:{}",
-                trigger_id,
-                t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
-            ),
-        );
-        let channel_sid = SessionId::for_channel(
-            agent,
-            &format!(
-                "{}:{}",
-                trigger_id,
-                t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
-            ),
-        );
-        assert_ne!(trigger_sid, cron_sid);
-        assert_ne!(trigger_sid, channel_sid);
-        assert_ne!(cron_sid, channel_sid);
     }
 
     #[test]
@@ -3324,437 +2398,5 @@ mount = "/abs"
         let s = "mode = \"r\"\n";
         let d: WorkspaceDecl = toml::from_str(s).unwrap();
         assert!(d.path.is_none() && d.mount.is_none());
-    }
-
-    // ── mcp_disabled field (#4808) ─────────────────────────────────────────
-
-    #[test]
-    fn mcp_disabled_default_is_false() {
-        let manifest = AgentManifest::default();
-        assert!(!manifest.mcp_disabled, "mcp_disabled must default to false");
-    }
-
-    #[test]
-    fn mcp_disabled_toml_roundtrip() {
-        let toml_str = r#"
-name = "no-mcp-agent"
-mcp_disabled = true
-
-[model]
-provider = "anthropic"
-model = "claude-3-haiku-20240307"
-"#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        assert!(
-            manifest.mcp_disabled,
-            "mcp_disabled must survive TOML deserialization"
-        );
-
-        let re_serialized = toml::to_string(&manifest).unwrap();
-        let re_parsed: AgentManifest = toml::from_str(&re_serialized).unwrap();
-        assert!(
-            re_parsed.mcp_disabled,
-            "mcp_disabled must survive TOML roundtrip"
-        );
-    }
-
-    #[test]
-    fn mcp_disabled_json_roundtrip() {
-        let manifest = AgentManifest {
-            mcp_disabled: true,
-            mcp_servers: vec!["foo".to_string()],
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&manifest).unwrap();
-        let back: AgentManifest = serde_json::from_str(&json).unwrap();
-        assert!(
-            back.mcp_disabled,
-            "mcp_disabled must survive JSON roundtrip"
-        );
-        assert_eq!(back.mcp_servers, vec!["foo".to_string()]);
-    }
-
-    #[test]
-    fn mcp_disabled_absent_from_toml_is_false() {
-        // When the field is omitted from TOML, serde(default) should give false.
-        let toml_str = r#"
-name = "normal-agent"
-
-[model]
-provider = "anthropic"
-model = "claude-3-haiku-20240307"
-"#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        assert!(
-            !manifest.mcp_disabled,
-            "mcp_disabled must be false when absent from TOML"
-        );
-    }
-
-    // ----- #4976: per-agent compaction overrides -----
-
-    #[test]
-    fn compaction_overrides_all_none_returns_global_unchanged() {
-        let global = crate::config::CompactionTomlConfig::default();
-        let overrides = CompactionOverrides::default();
-        let merged = overrides.resolve(&global);
-        assert_eq!(merged.threshold_messages, global.threshold_messages);
-        assert_eq!(merged.keep_recent, global.keep_recent);
-        assert_eq!(merged.max_summary_tokens, global.max_summary_tokens);
-        assert_eq!(merged.token_threshold_ratio, global.token_threshold_ratio);
-        assert_eq!(merged.max_chunk_chars, global.max_chunk_chars);
-        assert_eq!(merged.max_retries, global.max_retries);
-        assert!(overrides.is_empty());
-    }
-
-    #[test]
-    fn compaction_overrides_partial_only_overrides_set_fields() {
-        let global = crate::config::CompactionTomlConfig {
-            threshold_messages: 30,
-            keep_recent: 10,
-            max_summary_tokens: 1024,
-            token_threshold_ratio: 0.7,
-            max_chunk_chars: 80_000,
-            max_retries: 3,
-        };
-        let overrides = CompactionOverrides {
-            keep_recent: Some(20),
-            max_summary_tokens: Some(8192),
-            ..Default::default()
-        };
-        let merged = overrides.resolve(&global);
-        // Override wins:
-        assert_eq!(merged.keep_recent, 20);
-        assert_eq!(merged.max_summary_tokens, 8192);
-        // Falls through to global:
-        assert_eq!(merged.threshold_messages, 30);
-        assert_eq!(merged.token_threshold_ratio, 0.7);
-        assert_eq!(merged.max_chunk_chars, 80_000);
-        assert_eq!(merged.max_retries, 3);
-        assert!(!overrides.is_empty());
-    }
-
-    #[test]
-    fn compaction_overrides_all_some_overrides_every_field() {
-        let global = crate::config::CompactionTomlConfig::default();
-        let overrides = CompactionOverrides {
-            threshold_messages: Some(50),
-            keep_recent: Some(20),
-            max_summary_tokens: Some(8192),
-            token_threshold_ratio: Some(0.5),
-            max_chunk_chars: Some(120_000),
-            max_retries: Some(5),
-        };
-        let merged = overrides.resolve(&global);
-        assert_eq!(merged.threshold_messages, 50);
-        assert_eq!(merged.keep_recent, 20);
-        assert_eq!(merged.max_summary_tokens, 8192);
-        assert!((merged.token_threshold_ratio - 0.5).abs() < f64::EPSILON);
-        assert_eq!(merged.max_chunk_chars, 120_000);
-        assert_eq!(merged.max_retries, 5);
-    }
-
-    #[test]
-    fn compaction_overrides_toml_roundtrip_partial() {
-        // Issue #4976 example: partial overrides parse cleanly.
-        let toml_str = r#"
-name = "orchestrator"
-
-[model]
-provider = "anthropic"
-model = "claude-3-sonnet-20240229"
-
-[compaction]
-max_summary_tokens = 8192
-keep_recent = 20
-threshold_messages = 50
-"#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        let overrides = manifest
-            .compaction
-            .expect("compaction section must be parsed");
-        assert_eq!(overrides.max_summary_tokens, Some(8192));
-        assert_eq!(overrides.keep_recent, Some(20));
-        assert_eq!(overrides.threshold_messages, Some(50));
-        // Unset fields stay None — they fall through to global at resolve time.
-        assert_eq!(overrides.token_threshold_ratio, None);
-        assert_eq!(overrides.max_chunk_chars, None);
-        assert_eq!(overrides.max_retries, None);
-    }
-
-    #[test]
-    fn compaction_overrides_absent_from_toml_is_none() {
-        // No `[compaction]` section → field is None → resolve() inherits global.
-        let toml_str = r#"
-name = "chat-agent"
-
-[model]
-provider = "anthropic"
-model = "claude-3-haiku-20240307"
-"#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        assert!(
-            manifest.compaction.is_none(),
-            "missing [compaction] must deserialize to None, not Default::default()"
-        );
-    }
-
-    // -- ManifestTrigger / OrphanPolicy (#5014) --------------------------------
-
-    #[test]
-    fn manifest_triggers_default_empty_orphan_keep() {
-        // No [[triggers]] block → empty Vec, orphan policy = Keep (conservative).
-        let toml_str = r#"
-name = "chat-agent"
-
-[model]
-provider = "anthropic"
-model = "claude-3-haiku-20240307"
-"#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        assert!(manifest.triggers.is_empty());
-        assert_eq!(manifest.reconcile_orphans, OrphanPolicy::Keep);
-    }
-
-    #[test]
-    fn manifest_triggers_parse_full_shape() {
-        // Full [[triggers]] block: every operator-facing field set.
-        let toml_str = r#"
-name = "task-watcher"
-reconcile_orphans = "delete"
-
-[model]
-provider = "anthropic"
-model = "claude-3-haiku-20240307"
-
-[[triggers]]
-pattern = { task_posted = {} }
-prompt_template = "New task: {{event}}"
-max_fires = 0
-cooldown_secs = 30
-session_mode = "new"
-target_agent = "writer"
-enabled = true
-
-[[triggers]]
-pattern = { content_match = { substring = "deploy" } }
-prompt_template = "Deploy mentioned: {{event}}"
-max_fires = 5
-cooldown_secs = 0
-enabled = false
-"#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        assert_eq!(manifest.triggers.len(), 2);
-        assert_eq!(manifest.reconcile_orphans, OrphanPolicy::Delete);
-
-        let t1 = &manifest.triggers[0];
-        assert_eq!(t1.prompt_template, "New task: {{event}}");
-        assert_eq!(t1.max_fires, 0);
-        assert_eq!(t1.cooldown_secs, 30);
-        assert_eq!(t1.session_mode, Some(SessionMode::New));
-        assert_eq!(t1.target_agent.as_deref(), Some("writer"));
-        assert!(t1.enabled);
-
-        let t2 = &manifest.triggers[1];
-        assert_eq!(t2.prompt_template, "Deploy mentioned: {{event}}");
-        assert_eq!(t2.max_fires, 5);
-        assert_eq!(t2.cooldown_secs, 0);
-        assert!(t2.session_mode.is_none());
-        assert!(t2.target_agent.is_none());
-        assert!(!t2.enabled);
-    }
-
-    #[test]
-    fn manifest_trigger_defaults_per_field() {
-        // Only `pattern` and `prompt_template` are required in practice — the
-        // others should fall through to `#[serde(default)]` values.
-        let toml_str = r#"
-name = "minimal"
-
-[model]
-provider = "anthropic"
-model = "claude-3-haiku-20240307"
-
-[[triggers]]
-pattern = { task_posted = {} }
-prompt_template = "x"
-"#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        assert_eq!(manifest.triggers.len(), 1);
-        let t = &manifest.triggers[0];
-        assert_eq!(t.max_fires, 0);
-        assert_eq!(t.cooldown_secs, 0);
-        assert!(t.session_mode.is_none());
-        assert!(t.target_agent.is_none());
-        assert!(t.workflow_id.is_none());
-        // Default for `enabled` is true — operators rarely declare a
-        // trigger they want disabled at boot.
-        assert!(t.enabled);
-    }
-
-    #[test]
-    fn orphan_policy_serde_round_trip() {
-        for policy in [OrphanPolicy::Keep, OrphanPolicy::Warn, OrphanPolicy::Delete] {
-            let json = serde_json::to_string(&policy).unwrap();
-            let back: OrphanPolicy = serde_json::from_str(&json).unwrap();
-            assert_eq!(policy, back);
-        }
-    }
-
-    #[test]
-    fn orphan_policy_toml_string_form() {
-        // Mirrors how SessionMode parses ("persistent"/"new") — snake_case.
-        let toml_str = r#"
-name = "x"
-reconcile_orphans = "warn"
-
-[model]
-provider = "anthropic"
-model = "claude-3-haiku-20240307"
-"#;
-        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
-        assert_eq!(manifest.reconcile_orphans, OrphanPolicy::Warn);
-    }
-
-    #[test]
-    fn manifest_trigger_round_trip_toml() {
-        // Build a manifest in Rust, serialise to TOML, parse back — every
-        // declarative-trigger field must survive the round-trip.
-        let manifest = AgentManifest {
-            name: "rt".to_string(),
-            reconcile_orphans: OrphanPolicy::Warn,
-            triggers: vec![ManifestTrigger {
-                // `task_posted` is a struct variant that accepts the empty
-                // table form — the same shape `normalize_manifest_pattern_json`
-                // canonicalises strings into.
-                pattern: serde_json::json!({ "task_posted": {} }),
-                prompt_template: "Saw event: {{event}}".to_string(),
-                max_fires: 3,
-                cooldown_secs: 60,
-                session_mode: Some(SessionMode::New),
-                target_agent: Some("downstream".to_string()),
-                workflow_id: None,
-                enabled: true,
-            }],
-            ..AgentManifest::default()
-        };
-
-        let toml_str = toml::to_string(&manifest).unwrap();
-        let back: AgentManifest = toml::from_str(&toml_str).unwrap();
-        assert_eq!(back.reconcile_orphans, OrphanPolicy::Warn);
-        assert_eq!(back.triggers.len(), 1);
-        let t = &back.triggers[0];
-        assert_eq!(t.prompt_template, "Saw event: {{event}}");
-        assert_eq!(t.max_fires, 3);
-        assert_eq!(t.cooldown_secs, 60);
-        assert_eq!(t.session_mode, Some(SessionMode::New));
-        assert_eq!(t.target_agent.as_deref(), Some("downstream"));
-        assert!(t.workflow_id.is_none());
-        assert!(t.enabled);
-    }
-
-    #[test]
-    fn validate_agent_name_accepts_ordinary_names() {
-        // Sanity: typical agent names pass — only the reserved prefix is
-        // gated, the validator must not regress into a stricter charset
-        // check that surprises existing manifests.
-        assert!(validate_agent_name("chat-agent").is_ok());
-        assert!(validate_agent_name("assistant").is_ok());
-        assert!(validate_agent_name("hand:role").is_ok());
-        assert!(validate_agent_name("_internal").is_ok());
-        assert!(validate_agent_name("").is_ok());
-        // Substring, not prefix — must not match.
-        assert!(validate_agent_name("foo_operator:bar").is_ok());
-    }
-
-    #[test]
-    fn validate_agent_name_rejects_operator_prefix() {
-        // #4980 nit: a user-supplied agent named `_operator:foo` would
-        // collide with the synthetic step-result labels the workflow
-        // engine emits for Wait/Gate/Approval/Transform/Branch nodes,
-        // making run history ambiguous. Reject at the registry boundary.
-        for name in [
-            "_operator:foo",
-            "_operator:wait",
-            "_operator:gate",
-            "_operator:approval",
-            "_operator:transform",
-            "_operator:branch",
-            "_operator:",
-        ] {
-            let err = validate_agent_name(name).expect_err(name);
-            let msg = err.to_string();
-            assert!(
-                msg.contains("reserved namespace") && msg.contains("_operator:"),
-                "rejection for {name:?} should mention the reserved namespace; got: {msg}"
-            );
-        }
-    }
-
-    /// Audit: session-mode-deserialize-fallback. Pin serde's
-    /// strict-variant behaviour for `SessionMode`. A future refactor
-    /// that adds `#[serde(other)]` to silence "unknown variant" errors
-    /// would silently re-map operator typos (`"New"`, `"Default"`,
-    /// `""`) to whatever the catch-all arm chose — most likely
-    /// `Persistent` — and the operator who intended `New` semantics
-    /// would land on CLAUDE.md's "concurrent writes to a single
-    /// persistent session are undefined" warning.
-    #[test]
-    fn session_mode_deserializes_lowercase_persistent_and_new() {
-        let p: SessionMode = serde_json::from_str("\"persistent\"").unwrap();
-        assert_eq!(p, SessionMode::Persistent);
-        let n: SessionMode = serde_json::from_str("\"new\"").unwrap();
-        assert_eq!(n, SessionMode::New);
-    }
-
-    #[test]
-    fn session_mode_rejects_capitalised_variant_strings() {
-        // snake_case rename means uppercase / TitleCase variant names
-        // are NOT valid. The dispute resolution in the audit doc rests
-        // on this contract.
-        let err = serde_json::from_str::<SessionMode>("\"New\"").unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unknown variant"),
-            "TitleCase `\"New\"` must error with `unknown variant`, got: {msg}"
-        );
-        let err = serde_json::from_str::<SessionMode>("\"PERSISTENT\"").unwrap_err();
-        assert!(err.to_string().contains("unknown variant"));
-    }
-
-    #[test]
-    fn session_mode_rejects_empty_string_and_typos() {
-        // Common operator mistakes: blank, near-misses.
-        for bad in ["\"\"", "\"presistent\"", "\"none\"", "\"default\""] {
-            let err = serde_json::from_str::<SessionMode>(bad).unwrap_err();
-            assert!(
-                err.to_string().contains("unknown variant"),
-                "{bad} must be rejected as unknown variant, got: {err}"
-            );
-        }
-    }
-
-    /// `Option<SessionMode>` with `#[serde(default)]` is the
-    /// per-trigger / per-cron-job override shape. `#[serde(default)]`
-    /// fires only when the entire key is missing — an explicit
-    /// `session_mode = "New"` typo still errors hard. This test
-    /// pins the boundary.
-    #[test]
-    fn optional_session_mode_default_fires_on_missing_key_not_unknown_string() {
-        #[derive(serde::Deserialize, Debug)]
-        struct Wrap {
-            #[serde(default)]
-            session_mode: Option<SessionMode>,
-        }
-        // Key absent → None via #[serde(default)].
-        let w: Wrap = toml::from_str("").unwrap();
-        assert!(w.session_mode.is_none());
-        // Key present but capitalised → hard error, not silent None.
-        let err =
-            toml::from_str::<Wrap>("session_mode = \"New\"").expect_err("must reject capitalised");
-        assert!(
-            err.to_string().contains("unknown variant"),
-            "explicit `session_mode = \"New\"` must error, not fall back to None / Persistent: {err}"
-        );
     }
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Copy, Download, Loader2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -35,20 +35,11 @@ export function TomlViewer({
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [tab, setTab] = useState<"toml" | "markdown">("toml");
-  const revokeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const body = tab === "toml" ? toml : markdown;
   const loading = body === undefined && !error;
 
-  useEffect(() => {
-    return () => {
-      if (revokeTimeoutRef.current !== null) {
-        clearTimeout(revokeTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  const onCopy = useCallback(async () => {
+  const onCopy = async () => {
     if (!body) return;
     try {
       await navigator.clipboard.writeText(body);
@@ -56,13 +47,13 @@ export function TomlViewer({
     } catch {
       addToast(t("toml_viewer.copy_failed"), "error");
     }
-  }, [body, t, addToast]);
+  };
 
-  const onDownload = useCallback(() => {
+  const onDownload = () => {
     if (!body) return;
     const filename =
       tab === "markdown" ? downloadName.replace(/\.toml$/i, ".md") : downloadName;
-    const mime = tab === "markdown" ? "text/markdown" : "text/x-toml";
+    const mime = tab === "markdown" ? "text/markdown" : "application/toml";
     const blob = new Blob([body], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -71,21 +62,17 @@ export function TomlViewer({
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    revokeTimeoutRef.current = setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [body, tab, downloadName]);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={title} size="3xl">
       <div className="p-5 space-y-3">
         <div className="flex items-center justify-between gap-2">
           {markdown !== undefined ? (
-            <div className="flex gap-1" role="tablist">
+            <div className="flex gap-1">
               <button
                 type="button"
-                role="tab"
-                id="toml-viewer-tab-toml"
-                aria-selected={tab === "toml"}
-                aria-controls="toml-viewer-panel"
                 onClick={() => setTab("toml")}
                 className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
                   tab === "toml" ? "bg-brand text-white" : "text-text-dim hover:text-text"
@@ -95,10 +82,6 @@ export function TomlViewer({
               </button>
               <button
                 type="button"
-                role="tab"
-                id="toml-viewer-tab-markdown"
-                aria-selected={tab === "markdown"}
-                aria-controls="toml-viewer-panel"
                 onClick={() => setTab("markdown")}
                 className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
                   tab === "markdown" ? "bg-brand text-white" : "text-text-dim hover:text-text"
@@ -148,9 +131,6 @@ export function TomlViewer({
           <AnimatePresence mode="wait">
             <motion.div
               key={tab}
-              role="tabpanel"
-              id="toml-viewer-panel"
-              aria-labelledby={tab === "toml" ? "toml-viewer-tab-toml" : "toml-viewer-tab-markdown"}
               variants={tabContent}
               initial="initial"
               animate="animate"

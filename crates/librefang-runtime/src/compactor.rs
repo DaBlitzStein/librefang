@@ -79,23 +79,6 @@ impl CompactionConfig {
             ..Self::default()
         }
     }
-
-    /// Build a `CompactionConfig` by merging an optional per-agent
-    /// override on top of the kernel-global `CompactionTomlConfig`
-    /// (#4976). When `overrides` is `None` (or empty) this is identical
-    /// to [`Self::from_toml`].
-    ///
-    /// Resolution order: per-agent override > global TOML > compiled
-    /// defaults from `CompactionTomlConfig::default()`.
-    pub fn from_toml_with_overrides(
-        global: &librefang_types::config::CompactionTomlConfig,
-        overrides: Option<&librefang_types::agent::CompactionOverrides>,
-    ) -> Self {
-        match overrides {
-            Some(o) if !o.is_empty() => Self::from_toml(&o.resolve(global)),
-            _ => Self::from_toml(global),
-        }
-    }
 }
 
 /// Result of a compaction operation.
@@ -381,7 +364,7 @@ pub fn format_context_report(report: &ContextReport) -> String {
         "**Context Usage:** {bar} {:.1}% ({} / {} tokens)\n\n\
          **Breakdown:**\n\
          - System prompt: ~{} tokens\n\
-         - Messages ({}, estimated, retained messages only): ~{} tokens\n\
+         - Messages ({}): ~{} tokens\n\
          - Tool definitions: ~{} tokens\n\n\
          **Pressure:** {:?}\n\
          **Recommendation:** {}",
@@ -490,17 +473,7 @@ fn tail_has_matching_result(messages: &[Message], from_idx: usize, tool_use_id: 
 ///
 /// Returns the adjusted split index (or the original `split_at` if no
 /// adjustment is needed).
-///
-/// **Internal helper** — exposed publicly only so the kernel's
-/// `try_summarize_trim` (#3693) can call across the runtime ↔ kernel crate
-/// boundary. Treat the signature as workspace-internal: it may change
-/// without a semver bump and is not intended for external dependents.
-#[doc(hidden)]
-pub fn adjust_split_for_tool_pair(
-    messages: &[Message],
-    split_at: usize,
-    keep_recent: usize,
-) -> usize {
+fn adjust_split_for_tool_pair(messages: &[Message], split_at: usize, keep_recent: usize) -> usize {
     if split_at == 0 {
         return split_at;
     }
@@ -662,7 +635,6 @@ async fn summarize_messages(
     model: &str,
     messages: &[Message],
     config: &CompactionConfig,
-    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Result<String, String> {
     let mut conversation_text = build_conversation_text(messages, config);
 
@@ -711,14 +683,10 @@ async fn summarize_messages(
         thinking: None,
         prompt_caching: false,
         cache_ttl: None,
-        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
-        session_id: None,
-        step_id: None,
-        reasoning_echo_policy,
     };
 
     // Retry logic for transient failures
@@ -756,7 +724,6 @@ async fn summarize_in_chunks(
     model: &str,
     messages: &[Message],
     config: &CompactionConfig,
-    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Result<String, String> {
     let chunk_ratio = compute_adaptive_chunk_ratio(messages, config);
     let chunk_size = (messages.len() as f64 * chunk_ratio).ceil() as usize;
@@ -771,8 +738,7 @@ async fn summarize_in_chunks(
     let mut success_count = 0usize;
     let mut last_chunk_error = String::new();
     for (i, chunk) in messages.chunks(chunk_size).enumerate() {
-        match summarize_messages(driver.clone(), model, chunk, config, reasoning_echo_policy).await
-        {
+        match summarize_messages(driver.clone(), model, chunk, config).await {
             Ok(summary) => {
                 info!(chunk = i, summary_len = summary.len(), "Chunk summarized");
                 summaries.push(summary);
@@ -843,14 +809,10 @@ async fn summarize_in_chunks(
         thinking: None,
         prompt_caching: false,
         cache_ttl: None,
-        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
-        session_id: None,
-        step_id: None,
-        reasoning_echo_policy,
     };
 
     match driver.complete(merge_request).await {
@@ -887,46 +849,12 @@ pub async fn compact_session(
     model: &str,
     session: &Session,
     config: &CompactionConfig,
-    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Result<CompactionResult, String> {
-    compact_messages(
-        driver,
-        model,
-        &session.messages,
-        config,
-        reasoning_echo_policy,
-    )
-    .await
-}
-
-/// Same as [`compact_session`] but takes a raw message slice instead of a
-/// `Session`. Useful for callers that already hold a `&[Message]` (e.g. the
-/// kernel's cron `SummarizeTrim` path, #3693) and would otherwise have to
-/// fabricate a throwaway `Session` purely to satisfy the signature.
-///
-/// The behavioural contract is identical: 3-stage summarization (full →
-/// chunked → minimal fallback), `used_fallback` flagged when the LLM is
-/// unavailable, and `adjust_split_for_tool_pair` applied at the head/tail
-/// boundary.
-///
-/// **Internal helper** — exposed publicly only so the kernel's
-/// `try_summarize_trim` (#3693) can call across the runtime ↔ kernel crate
-/// boundary. Treat the signature as workspace-internal: it may change without
-/// a semver bump and is not intended for external dependents (mirrors the
-/// `#[doc(hidden)]` carve-out on [`adjust_split_for_tool_pair`]).
-#[doc(hidden)]
-pub async fn compact_messages(
-    driver: Arc<dyn LlmDriver>,
-    model: &str,
-    messages: &[Message],
-    config: &CompactionConfig,
-    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
-) -> Result<CompactionResult, String> {
-    let msg_count = messages.len();
+    let msg_count = session.messages.len();
     if msg_count <= config.keep_recent {
         return Ok(CompactionResult {
             summary: String::new(),
-            kept_messages: messages.to_vec(),
+            kept_messages: session.messages.clone(),
             compacted_count: 0,
             chunks_used: 0,
             used_fallback: false,
@@ -939,10 +867,10 @@ pub async fn compact_messages(
     // If the head ends with an unresolved ToolUse and the tail starts with the
     // matching ToolResult delivery, extend the head to include that result so the
     // pair is not separated by summarization.
-    let split_at = adjust_split_for_tool_pair(messages, split_at, config.keep_recent);
+    let split_at = adjust_split_for_tool_pair(&session.messages, split_at, config.keep_recent);
 
-    let to_compact = &messages[..split_at];
-    let kept = &messages[split_at..];
+    let to_compact = &session.messages[..split_at];
+    let kept = &session.messages[split_at..];
 
     info!(
         total = msg_count,
@@ -955,15 +883,7 @@ pub async fn compact_messages(
     let compacted_count = to_compact.len();
 
     // Stage 1: Try full single-pass summarization
-    match summarize_messages(
-        driver.clone(),
-        model,
-        to_compact,
-        config,
-        reasoning_echo_policy,
-    )
-    .await
-    {
+    match summarize_messages(driver.clone(), model, to_compact, config).await {
         Ok(summary) => {
             info!(
                 summary_len = summary.len(),
@@ -984,15 +904,7 @@ pub async fn compact_messages(
     }
 
     // Stage 2: Chunked summarization with adaptive ratio
-    match summarize_in_chunks(
-        driver.clone(),
-        model,
-        to_compact,
-        config,
-        reasoning_echo_policy,
-    )
-    .await
-    {
+    match summarize_in_chunks(driver.clone(), model, to_compact, config).await {
         Ok(summary) => {
             let chunk_ratio = compute_adaptive_chunk_ratio(to_compact, config);
             let chunk_size = (to_compact.len() as f64 * chunk_ratio).ceil() as usize;
@@ -1053,8 +965,6 @@ mod tests {
             messages: vec![Message::user("hello")],
             context_window_tokens: 0,
             label: None,
-            model_override: None,
-
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1073,8 +983,6 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
-            model_override: None,
-
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1117,7 +1025,6 @@ mod tests {
                         output_tokens: 50,
                         ..Default::default()
                     },
-                    actual_provider: None,
                 })
             }
         }
@@ -1128,8 +1035,6 @@ mod tests {
             messages: vec![Message::user("hello"), Message::assistant("hi")],
             context_window_tokens: 0,
             label: None,
-            model_override: None,
-
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1141,15 +1046,9 @@ mod tests {
         };
 
         // With only 2 messages and keep_recent=10, nothing should be compacted
-        let result = compact_session(
-            Arc::new(FakeDriver),
-            "test-model",
-            &session,
-            &config,
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await
-        .unwrap();
+        let result = compact_session(Arc::new(FakeDriver), "test-model", &session, &config)
+            .await
+            .unwrap();
         assert_eq!(result.compacted_count, 0);
         assert_eq!(result.kept_messages.len(), 2);
         assert_eq!(result.chunks_used, 0);
@@ -1191,7 +1090,6 @@ mod tests {
                         output_tokens: 50,
                         ..Default::default()
                     },
-                    actual_provider: None,
                 })
             }
         }
@@ -1233,8 +1131,6 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
-            model_override: None,
-
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1245,15 +1141,9 @@ mod tests {
             ..CompactionConfig::default()
         };
 
-        let result = compact_session(
-            Arc::new(FakeDriver),
-            "test-model",
-            &session,
-            &config,
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await
-        .unwrap();
+        let result = compact_session(Arc::new(FakeDriver), "test-model", &session, &config)
+            .await
+            .unwrap();
         assert!(result.compacted_count > 0);
         assert!(result.summary.contains("tools"));
         assert_eq!(result.chunks_used, 1);
@@ -1302,7 +1192,6 @@ mod tests {
                         output_tokens: 100,
                         ..Default::default()
                     },
-                    actual_provider: None,
                 })
             }
         }
@@ -1316,8 +1205,6 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
-            model_override: None,
-
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1328,15 +1215,9 @@ mod tests {
             ..CompactionConfig::default()
         };
 
-        let result = compact_session(
-            Arc::new(FakeDriver),
-            "test-model",
-            &session,
-            &config,
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await
-        .unwrap();
+        let result = compact_session(Arc::new(FakeDriver), "test-model", &session, &config)
+            .await
+            .unwrap();
         assert_eq!(result.compacted_count, 90);
         assert_eq!(result.kept_messages.len(), 10);
         assert!(result.summary.contains("Summary"));
@@ -1453,8 +1334,6 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
-            model_override: None,
-
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1466,15 +1345,9 @@ mod tests {
             ..CompactionConfig::default()
         };
 
-        let result = compact_session(
-            Arc::new(FailingDriver),
-            "test-model",
-            &session,
-            &config,
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await
-        .unwrap();
+        let result = compact_session(Arc::new(FailingDriver), "test-model", &session, &config)
+            .await
+            .unwrap();
 
         assert!(result.used_fallback, "Should have used fallback");
         assert_eq!(result.chunks_used, 0, "Fallback uses 0 chunks");
@@ -1520,7 +1393,6 @@ mod tests {
                         output_tokens: 20,
                         ..Default::default()
                     },
-                    actual_provider: None,
                 })
             }
         }
@@ -1533,15 +1405,10 @@ mod tests {
             .collect();
         let config = CompactionConfig::default();
 
-        let result = summarize_in_chunks(
-            Arc::new(CountingDriver),
-            "test-model",
-            &messages,
-            &config,
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await
-        .unwrap();
+        let result =
+            summarize_in_chunks(Arc::new(CountingDriver), "test-model", &messages, &config)
+                .await
+                .unwrap();
 
         let calls = CALL_COUNT.load(Ordering::SeqCst);
         // With base_chunk_ratio=0.4, chunk_size = ceil(20*0.4) = 8, so 3 chunks + 1 merge = 4 calls
@@ -1840,57 +1707,5 @@ mod tests {
         }];
         let text = build_conversation_text(&messages, &config);
         assert!(text.contains(short_result));
-    }
-
-    // ----- #4976: per-agent compaction override resolution -----
-
-    #[test]
-    fn from_toml_with_overrides_none_matches_from_toml() {
-        let global = librefang_types::config::CompactionTomlConfig {
-            threshold_messages: 42,
-            keep_recent: 7,
-            max_summary_tokens: 2048,
-            token_threshold_ratio: 0.6,
-            max_chunk_chars: 90_000,
-            max_retries: 4,
-        };
-        let merged = CompactionConfig::from_toml_with_overrides(&global, None);
-        let baseline = CompactionConfig::from_toml(&global);
-        assert_eq!(merged.threshold, baseline.threshold);
-        assert_eq!(merged.keep_recent, baseline.keep_recent);
-        assert_eq!(merged.max_summary_tokens, baseline.max_summary_tokens);
-        assert_eq!(merged.max_chunk_chars, baseline.max_chunk_chars);
-        assert_eq!(merged.max_retries, baseline.max_retries);
-        assert!(
-            (merged.token_threshold_ratio - baseline.token_threshold_ratio).abs() < f64::EPSILON
-        );
-    }
-
-    #[test]
-    fn from_toml_with_overrides_applies_partial_override() {
-        let global = librefang_types::config::CompactionTomlConfig::default();
-        let overrides = librefang_types::agent::CompactionOverrides {
-            keep_recent: Some(25),
-            max_summary_tokens: Some(8192),
-            ..Default::default()
-        };
-        let merged = CompactionConfig::from_toml_with_overrides(&global, Some(&overrides));
-        assert_eq!(merged.keep_recent, 25);
-        assert_eq!(merged.max_summary_tokens, 8192);
-        // Falls through to global:
-        assert_eq!(merged.threshold, global.threshold_messages);
-        assert_eq!(merged.max_retries, global.max_retries);
-    }
-
-    #[test]
-    fn from_toml_with_overrides_empty_struct_is_passthrough() {
-        // Some(&overrides) where every field is None must behave like None.
-        let global = librefang_types::config::CompactionTomlConfig::default();
-        let overrides = librefang_types::agent::CompactionOverrides::default();
-        let merged = CompactionConfig::from_toml_with_overrides(&global, Some(&overrides));
-        let baseline = CompactionConfig::from_toml(&global);
-        assert_eq!(merged.threshold, baseline.threshold);
-        assert_eq!(merged.keep_recent, baseline.keep_recent);
-        assert_eq!(merged.max_summary_tokens, baseline.max_summary_tokens);
     }
 }

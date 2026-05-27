@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { Link, useBlocker } from "@tanstack/react-router";
+import { useRouter } from "@tanstack/react-router";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
@@ -25,50 +25,20 @@ import {
   useReloadConfig,
 } from "../lib/mutations/config";
 import { TomlViewer } from "../components/TomlViewer";
-import { StringMapEditor } from "../components/config/StringMapEditor";
-import { StructListEditor } from "../components/config/StructListEditor";
 
 /* ------------------------------------------------------------------ */
 /*  Category → sections mapping                                        */
 /* ------------------------------------------------------------------ */
 
 const CATEGORY_SECTIONS: Record<string, string[]> = {
-  general: [
-    "general", "default_model", "thinking", "budget", "reload", "llm",
-    "fallback_providers", "provider_urls", "provider_regions",
-    "provider_proxy_urls", "provider_request_timeout_secs",
-    "vertex_ai", "azure_openai", "proxy",
-  ],
+  general: ["general", "default_model", "thinking", "budget", "reload"],
   memory: ["memory", "proactive_memory", "auto_dream"],
-  tools: [
-    "web", "browser", "links", "media", "tts", "canvas",
-    "tool_invoke", "parallel_tools", "tool_results", "tool_policy",
-    "tool_timeouts", "skills", "plugins",
-  ],
-  channels: [
-    "channels", "broadcast", "auto_reply",
-    "sidecar_channels", "inbox", "webhook_triggers", "triggers",
-  ],
-  security: [
-    "approval", "exec_policy", "vault", "oauth", "external_auth", "terminal",
-    "sanitize", "privacy", "taint_rules", "audit",
-  ],
+  tools: ["web", "browser", "links", "media", "tts", "canvas"],
+  channels: ["channels", "broadcast", "auto_reply"],
+  security: ["approval", "exec_policy", "vault", "oauth", "external_auth", "terminal"],
   network: ["network", "a2a", "pairing"],
-  infra: [
-    "docker", "extensions", "session", "queue",
-    "compaction", "registry", "context_engine", "prompt_intelligence",
-    "task_board", "rate_limit", "health_check", "heartbeat",
-    "telemetry", "notification", "background",
-  ],
+  infra: ["docker", "extensions", "session", "queue", "webhook_triggers", "vertex_ai"],
 };
-
-// Top-level category navigation order. Drives the tab strip at the top of
-// ConfigPage so the user can move between categories without leaving the
-// page. Closes #4678 — sidebar previously had a single Config link landing
-// on /config/general with no way to reach Tools / Security / Memory / etc.
-const CATEGORIES_ORDER: ReadonlyArray<string> = [
-  "general", "memory", "tools", "channels", "security", "network", "infra",
-];
 
 // Explicit field ordering for sections where the server-side JSON schema
 // ordering is wrong for the user. `KernelConfig`'s `default_model` sub-struct
@@ -84,17 +54,14 @@ function sectionLabelFallback(key: string): string {
   return key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
-const ACRONYM_MAP: Record<string, string> = {
-  Api: "API", Url: "URL", Sql: "SQL", Ssl: "SSL", Tls: "TLS",
-  Ttl: "TTL", Env: "Env Var", Id: "ID", Usd: "USD", Llm: "LLM",
-  Mdns: "mDNS", Totp: "TOTP",
-};
-
 function fieldLabelFallback(key: string): string {
-  return key
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase())
-    .replace(/\b\w+\b/g, (w) => ACRONYM_MAP[w] ?? w);
+  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\bApi\b/g, "API").replace(/\bUrl\b/g, "URL")
+    .replace(/\bSql\b/g, "SQL").replace(/\bSsl\b/g, "SSL")
+    .replace(/\bTls\b/g, "TLS").replace(/\bTtl\b/g, "TTL")
+    .replace(/\bEnv\b/g, "Env Var").replace(/\bId\b/g, "ID")
+    .replace(/\bUsd\b/g, "USD").replace(/\bLlm\b/g, "LLM")
+    .replace(/\bMdns\b/g, "mDNS").replace(/\bTotp\b/g, "TOTP");
 }
 
 /* ------------------------------------------------------------------ */
@@ -109,10 +76,6 @@ type FieldRender = {
   min?: number;
   max?: number;
   step?: number;
-  // For "struct_list" fields — the JSON Schema of one item, used to seed
-  // sensible defaults when the user clicks "Add". Only set when type is
-  // "struct_list" (Vec<Struct>) and the items shape is resolvable.
-  itemSchema?: JsonSchema;
 };
 
 function pickType(node: JsonSchema): string {
@@ -243,29 +206,6 @@ function resolveSectionFields(
     }
   }
   if (target?.$ref) target = resolveRef(root, target.$ref);
-
-  // Collection-typed sections (BTreeMap / HashMap / Vec<Struct>) — emit a
-  // single synthetic "field" whose key matches the section key so the
-  // section renders as one editor instead of a property grid. Path
-  // computation in the renderer treats this as root-level so the value is
-  // posted to /api/config/set under the section key directly.
-  if (target?.type === "object" && target.additionalProperties &&
-      typeof target.additionalProperties === "object") {
-    const apType = target.additionalProperties.type;
-    const valueType: "number_map" | "string_map" =
-      apType === "integer" || apType === "number" ? "number_map" : "string_map";
-    return [[desc.key, { type: valueType }]];
-  }
-  if (target?.type === "array" && target.items) {
-    const items = target.items;
-    if (items.$ref || items.type === "object") {
-      return [[desc.key, { type: "struct_list", itemSchema: items }]];
-    }
-    // Vec<String> as a whole-section field (no shipping cases today; falls
-    // through to the existing string[] treatment if the section happens to
-    // wrap a Vec<String>).
-  }
-
   if (!target?.properties) return [];
 
   const declared = Object.entries(target.properties);
@@ -324,9 +264,6 @@ const TYPE_COLORS: Record<string, string> = {
   array:   "text-teal-500 bg-teal-500/10",
   "string[]": "text-teal-500 bg-teal-500/10",
   object:  "text-orange-500 bg-orange-500/10",
-  string_map: "text-pink-500 bg-pink-500/10",
-  number_map: "text-pink-500 bg-pink-500/10",
-  struct_list: "text-indigo-500 bg-indigo-500/10",
   string:  "text-text-dim bg-border-subtle/50",
 };
 
@@ -422,15 +359,8 @@ const SENSITIVE_PATTERNS = /api_key|secret|password|token_env|client_secret|cred
 type SelectOption = string | { id: string; name: string; provider: string } | { value: string; label: string };
 
 function ConfigFieldInput({
-  inputId, fieldKey, fieldType, options, min, max, step, value, onChange,
-  itemSchema, schemaRoot,
+  fieldKey, fieldType, options, min, max, step, value, onChange,
 }: {
-  // DOM id applied to the primitive control (input / select / boolean
-  // toggle) so the row's <label htmlFor> resolves for screen readers
-  // and label-click focus (#5140). Composite editors (string_map /
-  // struct_list / object) render multiple controls and are not a single
-  // labelable target — the row label still describes them as a group.
-  inputId: string;
   fieldKey: string;
   fieldType: string;
   options?: SelectOption[];
@@ -439,10 +369,6 @@ function ConfigFieldInput({
   step?: number;
   value: unknown;
   onChange: (v: unknown) => void;
-  // Only used by `struct_list` to seed sensible defaults when the user
-  // clicks "Add" on a Vec<Struct> section. Optional otherwise.
-  itemSchema?: JsonSchema;
-  schemaRoot?: ConfigSchemaRoot;
 }) {
   const { t } = useTranslation();
   const inputClass =
@@ -452,10 +378,6 @@ function ConfigFieldInput({
     return (
       <div className="flex items-center h-[30px]">
         <button
-          id={inputId}
-          type="button"
-          role="switch"
-          aria-checked={Boolean(value)}
           onClick={() => onChange(!value)}
           className={`relative w-10 h-5 rounded-full transition-colors ${value ? "bg-brand" : "bg-border-subtle"}`}
         >
@@ -483,7 +405,7 @@ function ConfigFieldInput({
       }
     };
     return (
-      <select id={inputId} value={matched} onChange={(e) => handleChange(e.target.value)} className={inputClass}>
+      <select value={matched} onChange={(e) => handleChange(e.target.value)} className={inputClass}>
         {matched && !normalizedOptions.some((o) => o.value === matched) && <option value={matched}>{matched}</option>}
         {normalizedOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
@@ -492,7 +414,7 @@ function ConfigFieldInput({
 
   if (fieldType === "number") {
     return (
-      <input id={inputId} type="number" value={value != null ? String(value) : ""}
+      <input type="number" value={value != null ? String(value) : ""}
         onChange={(e) => {
           const v = e.target.value;
           if (v === "") { onChange(null); return; }
@@ -507,7 +429,7 @@ function ConfigFieldInput({
   if (fieldType === "string[]" || fieldType === "array") {
     const arr = Array.isArray(value) ? value : [];
     return (
-      <input id={inputId} type="text" value={arr.join(", ")}
+      <input type="text" value={arr.join(", ")}
         onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
         placeholder="comma-separated values" className={inputClass} />
     );
@@ -517,44 +439,10 @@ function ConfigFieldInput({
     return <JsonEditor value={value} onChange={onChange} />;
   }
 
-  if (fieldType === "string_map") {
-    return (
-      <StringMapEditor
-        value={value as Record<string, string> | null | undefined}
-        onChange={onChange}
-        valueType="string"
-      />
-    );
-  }
-
-  if (fieldType === "number_map") {
-    return (
-      <StringMapEditor
-        value={value as Record<string, number> | null | undefined}
-        onChange={onChange}
-        valueType="number"
-        min={min}
-        max={max}
-        step={step}
-      />
-    );
-  }
-
-  if (fieldType === "struct_list") {
-    return (
-      <StructListEditor
-        value={Array.isArray(value) ? value : []}
-        onChange={onChange}
-        itemSchema={itemSchema}
-        schemaRoot={schemaRoot}
-      />
-    );
-  }
-
   const isSensitive = fieldType === "string" && SENSITIVE_PATTERNS.test(fieldKey);
 
   return (
-    <input id={inputId} type={isSensitive ? "password" : "text"} value={String(value ?? "")}
+    <input type={isSensitive ? "password" : "text"} value={String(value ?? "")}
       onChange={(e) => onChange(e.target.value || null)} className={inputClass}
       autoComplete={isSensitive ? "off" : undefined} />
   );
@@ -566,6 +454,7 @@ function ConfigFieldInput({
 
 export function ConfigPage({ category }: { category: string }) {
   const { t } = useTranslation();
+  const router = useRouter();
 
   const schemaQuery = useConfigSchema();
   const configQuery = useFullConfig();
@@ -577,7 +466,6 @@ export function ConfigPage({ category }: { category: string }) {
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [showRawToml, setShowRawToml] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
-  const saveStatusTimeoutRefs = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const rawTomlQuery = useRawConfigToml(showRawToml);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
@@ -626,22 +514,18 @@ export function ConfigPage({ category }: { category: string }) {
     return () => window.removeEventListener("beforeunload", handler);
   }, [hasPendingChanges]);
 
-  const blocker = useBlocker({
-    shouldBlockFn: () => hasPendingChanges,
-    withResolver: true,
-  });
-  const blockerRef = useRef(blocker);
-  blockerRef.current = blocker;
-
   useEffect(() => {
-    if (blockerRef.current.status !== "blocked") return;
-    if (window.confirm(t("config.unsaved_warning", "You have unsaved changes. Discard them?"))) {
-      setPendingChanges({});
-      blockerRef.current.proceed();
-    } else {
-      blockerRef.current.reset();
-    }
-  }, [blocker.status, t]);
+    if (!hasPendingChanges) return;
+    const unsub = router.subscribe("onBeforeNavigate", () => {
+      if (Object.keys(pendingChanges).length > 0) {
+        if (!window.confirm(t("config.unsaved_warning", "You have unsaved changes. Discard them?"))) {
+          throw new Error("Navigation cancelled");
+        }
+        setPendingChanges({});
+      }
+    });
+    return unsub;
+  }, [hasPendingChanges, pendingChanges, router, t]);
 
   const handleFieldChange = useCallback(
     (sectionKey: string, fieldKey: string, value: unknown, rootLevel?: boolean) => {
@@ -651,22 +535,14 @@ export function ConfigPage({ category }: { category: string }) {
         // Cascading: when provider changes in default_model, clear model if
         // the current selection doesn't belong to the new provider. Pulls
         // the model catalog straight from the x-ui-options overlay.
-        //
-        // If the catalog hasn't loaded yet (schema query still pending) we
-        // can't tell whether the existing model is still valid, so we
-        // conservatively clear it — better to ask the user to re-pick than
-        // to leave a stale (provider, model) pair that fails at the LLM
-        // call site (round-4 review of #4678).
         if (sectionKey === "default_model" && fieldKey === "provider" && value) {
           const modelPath = "default_model.model";
           const currentModel = modelPath in p ? p[modelPath] : getNestedValue(configQuery.data ?? {}, "default_model", "model");
-          if (currentModel) {
-            const modelOptions = schemaRoot?.["x-ui-options"]?.["/default_model/model"]?.select_objects;
-            const modelBelongsToProvider = modelOptions
-              ? modelOptions.some(
-                  (m) => m.id === String(currentModel) && m.provider === String(value),
-                )
-              : false;
+          const modelOptions = schemaRoot?.["x-ui-options"]?.["/default_model/model"]?.select_objects;
+          if (modelOptions && currentModel) {
+            const modelBelongsToProvider = modelOptions.some(
+              (m) => m.id === String(currentModel) && m.provider === String(value),
+            );
             if (!modelBelongsToProvider) {
               next[modelPath] = null;
             }
@@ -694,21 +570,11 @@ export function ConfigPage({ category }: { category: string }) {
         }
         return p;
       });
-      const existing = saveStatusTimeoutRefs.current[variables.path];
-      if (existing) clearTimeout(existing);
-      saveStatusTimeoutRefs.current[variables.path] = setTimeout(() => {
-        setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; });
-        delete saveStatusTimeoutRefs.current[variables.path];
-      }, 3000);
+      setTimeout(() => setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; }), 3000);
     },
     onError: (err: Error, variables) => {
       setSaveStatus((s) => ({ ...s, [variables.path]: { ok: false, msg: err.message } }));
-      const existing = saveStatusTimeoutRefs.current[variables.path];
-      if (existing) clearTimeout(existing);
-      saveStatusTimeoutRefs.current[variables.path] = setTimeout(() => {
-        setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; });
-        delete saveStatusTimeoutRefs.current[variables.path];
-      }, 3000);
+      setTimeout(() => setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; }), 3000);
     },
   });
 
@@ -732,9 +598,6 @@ export function ConfigPage({ category }: { category: string }) {
 
   useEffect(() => () => {
     for (const timeoutId of Object.values(batchStatusTimeoutRefs.current)) {
-      clearTimeout(timeoutId);
-    }
-    for (const timeoutId of Object.values(saveStatusTimeoutRefs.current)) {
       clearTimeout(timeoutId);
     }
   }, []);
@@ -787,16 +650,11 @@ export function ConfigPage({ category }: { category: string }) {
         ...s,
         __batch__: { ok: false, msg: err.message || t("config.save_failed") },
       }));
-      const existing = batchStatusTimeoutRefs.current["__batch__"];
-      if (existing) clearTimeout(existing);
-      batchStatusTimeoutRefs.current["__batch__"] = setTimeout(() => {
-        setSaveStatus((s) => {
-          const next = { ...s };
-          delete next.__batch__;
-          return next;
-        });
-        delete batchStatusTimeoutRefs.current["__batch__"];
-      }, 5000);
+      setTimeout(() => setSaveStatus((s) => {
+        const next = { ...s };
+        delete next.__batch__;
+        return next;
+      }), 5000);
     },
   });
   const handleBatchSave = useCallback(async () => {
@@ -860,27 +718,16 @@ export function ConfigPage({ category }: { category: string }) {
     : (activeSection && sectionKeys.includes(activeSection) ? activeSection : sectionKeys[0] ?? null);
 
   // Which sections have pending changes (for tab dot indicators)
-  const sectionsWithPending = useMemo(() => {
-    const set = new Set<string>();
-    const rootFieldMap = new Map<string, string>();
-    for (const [sKey, desc] of Object.entries(sectionsByKey)) {
+  const sectionHasPending = useCallback((sKey: string): boolean => {
+    const desc = sectionsByKey[sKey];
+    if (!desc) return false;
+    return Object.keys(pendingChanges).some((path) => {
       if (desc.root_level) {
-        for (const [fKey] of resolvedFields[sKey] ?? []) {
-          rootFieldMap.set(fKey, sKey);
-        }
+        return (resolvedFields[sKey] ?? []).some(([fKey]) => fKey === path);
       }
-    }
-    for (const path of Object.keys(pendingChanges)) {
-      const dotIdx = path.indexOf(".");
-      if (dotIdx !== -1) {
-        set.add(path.slice(0, dotIdx));
-      } else {
-        const sKey = rootFieldMap.get(path);
-        if (sKey) set.add(sKey);
-      }
-    }
-    return set;
-  }, [pendingChanges, sectionsByKey, resolvedFields]);
+      return path.startsWith(sKey + ".");
+    });
+  }, [sectionsByKey, resolvedFields, pendingChanges]);
 
   const filteredSections = useMemo(() => {
     const keysToShow = effectiveTab ? [effectiveTab] : sectionKeys;
@@ -958,45 +805,12 @@ export function ConfigPage({ category }: { category: string }) {
         </div>
       </div>
 
-      {/* Row 1.5: category tabs — all 7 categories reachable from any /config
-          page. Closes #4678: previously the sidebar only had a single Config
-          link landing on /config/general with no in-page way to reach Tools /
-          Security / Memory / etc. */}
-      <div className="flex items-center gap-0.5 -mx-6 px-6 overflow-x-auto border-b border-border-subtle">
-        {CATEGORIES_ORDER.map((cat) => {
-          const isActive = cat === category;
-          return (
-            <Link
-              key={cat}
-              // TanStack Router's typed `to` would require listing 7 literal
-              // routes; cast keeps the call-site driven by CATEGORIES_ORDER
-              // so adding a category is a one-line change.
-              to={`/config/${cat}` as never}
-              className={`px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors whitespace-nowrap ${
-                isActive
-                  ? "border-brand text-brand"
-                  : "border-transparent text-text-dim hover:text-text hover:border-border-subtle"
-              }`}
-            >
-              {t(`config.cat_${cat}`, sectionLabelFallback(cat))}
-            </Link>
-          );
-        })}
-      </div>
-
-      {/* Row 2: section tabs (within current category) — always visible
-          when >1 section; grayed/disabled during search. The tab list
-          wraps to multiple rows on narrow viewports (general has 14
-          sections, infra has 15) so the trailing tabs never get clipped
-          off-screen at default zoom — closes #5293. The shared bottom
-          border lives on each tab via `border-b-2`, not on this
-          container, so wrapping doesn't draw stray separator lines
-          between rows. */}
+      {/* Row 2: tabs — always visible when >1 section; grayed/disabled during search */}
       {sectionKeys.length > 1 && (
-        <div className="flex flex-wrap items-center gap-y-1 border-b border-border-subtle -mx-6 px-6">
+        <div className="flex items-center border-b border-border-subtle -mx-6 px-6">
           {sectionKeys.map((sKey) => {
             const isActive = !isSearching && effectiveTab === sKey;
-            const hasDot = sectionsWithPending.has(sKey);
+            const hasDot = sectionHasPending(sKey);
             return (
               <button
                 key={sKey}
@@ -1103,33 +917,11 @@ export function ConfigPage({ category }: { category: string }) {
               )}
               <div className="divide-y divide-border-subtle/30">
                 {fieldsToShow.map(([fieldKey, render]) => {
-                  const { type: fieldType, options: rawOptions, min, max, step, itemSchema } = render;
-                  // Collection-typed sections (string_map / number_map /
-                  // struct_list) emit a single synthetic field whose key
-                  // matches the section key. Treat them as root-level for
-                  // path / value lookup so the editor reads from and posts
-                  // to /<sectionKey>, not /<sectionKey>/<sectionKey>.
-                  const isCollection =
-                    fieldType === "string_map" ||
-                    fieldType === "number_map" ||
-                    fieldType === "struct_list";
-                  // Composite editors (object / string_map / number_map /
-                  // struct_list) render multiple controls, so the row
-                  // label cannot resolve to a single labelable target via
-                  // <label htmlFor>. For those we expose the label via
-                  // aria-labelledby on a role="group" wrapper instead
-                  // (#5182).
-                  const isComposite = isCollection || fieldType === "object";
-                  const useRootSemantics = desc.root_level || isCollection;
-                  const path = useRootSemantics ? fieldKey : `${sKey}.${fieldKey}`;
-                  // DOM-safe, stable per-field id for label↔control
-                  // association (#5140). `path` is unique within a
-                  // section render; non-word chars → '-'.
-                  const fieldInputId = `cfg-${path.replace(/[^\w-]/g, "-")}`;
-                  const fieldLabelId = `${fieldInputId}-label`;
+                  const { type: fieldType, options: rawOptions, min, max, step } = render;
+                  const path = desc.root_level ? fieldKey : `${sKey}.${fieldKey}`;
                   const currentValue = path in pendingChanges
                     ? pendingChanges[path]
-                    : getNestedValue(config, sKey, fieldKey, useRootSemantics);
+                    : getNestedValue(config, sKey, fieldKey, desc.root_level);
                   const hasPending = path in pendingChanges;
                   const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
                   const statusForField = saveStatus[path] ?? null;
@@ -1157,15 +949,9 @@ export function ConfigPage({ category }: { category: string }) {
                   return (
                     <div key={fieldKey} className="flex items-start gap-4 px-5 py-3 group">
                       <div className="w-44 shrink-0 pt-1">
-                        {isComposite ? (
-                          <span id={fieldLabelId} className="block text-xs font-semibold leading-tight">
-                            <Highlight text={fieldLabel} query={q} />
-                          </span>
-                        ) : (
-                          <label htmlFor={fieldInputId} className="block text-xs font-semibold leading-tight">
-                            <Highlight text={fieldLabel} query={q} />
-                          </label>
-                        )}
+                        <p className="text-xs font-semibold leading-tight">
+                          <Highlight text={fieldLabel} query={q} />
+                        </p>
                         <div className="flex items-center gap-1 mt-0.5">
                           <p className="text-[10px] text-text-dim font-mono leading-tight">
                             <Highlight text={fieldKey} query={q} />
@@ -1177,37 +963,16 @@ export function ConfigPage({ category }: { category: string }) {
                         </div>
                       </div>
                       <div className="flex-1 min-w-0 flex flex-col gap-1 pt-1">
-                        {isComposite ? (
-                          <div role="group" aria-labelledby={fieldLabelId}>
-                            <ConfigFieldInput
-                              inputId={fieldInputId}
-                              fieldKey={fieldKey}
-                              fieldType={fieldType}
-                              options={options}
-                              min={min}
-                              max={max}
-                              step={step}
-                              value={currentValue}
-                              onChange={(v) => handleFieldChange(sKey, fieldKey, v, useRootSemantics)}
-                              itemSchema={itemSchema}
-                              schemaRoot={schemaRoot}
-                            />
-                          </div>
-                        ) : (
-                          <ConfigFieldInput
-                            inputId={fieldInputId}
-                            fieldKey={fieldKey}
-                            fieldType={fieldType}
-                            options={options}
-                            min={min}
-                            max={max}
-                            step={step}
-                            value={currentValue}
-                            onChange={(v) => handleFieldChange(sKey, fieldKey, v, useRootSemantics)}
-                            itemSchema={itemSchema}
-                            schemaRoot={schemaRoot}
-                          />
-                        )}
+                        <ConfigFieldInput
+                          fieldKey={fieldKey}
+                          fieldType={fieldType}
+                          options={options}
+                          min={min}
+                          max={max}
+                          step={step}
+                          value={currentValue}
+                          onChange={(v) => handleFieldChange(sKey, fieldKey, v, desc.root_level)}
+                        />
                         {fieldDesc && (
                           <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>
                         )}

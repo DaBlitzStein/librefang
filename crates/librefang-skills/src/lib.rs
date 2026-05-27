@@ -17,7 +17,6 @@ pub mod openclaw_compat;
 pub mod publish;
 pub mod registry;
 pub mod skillhub;
-pub mod supply_chain;
 pub mod verify;
 
 use serde::{Deserialize, Serialize};

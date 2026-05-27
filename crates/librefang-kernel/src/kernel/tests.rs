@@ -1,9 +1,4 @@
 use super::*;
-use crate::registry::AgentRegistry;
-use crate::GovernanceSubsystemApi;
-use crate::McpSubsystemApi;
-use crate::MemorySubsystemApi;
-use crate::MeteringSubsystemApi;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
 use librefang_types::approval::{
@@ -203,10 +198,7 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel
-        .mesh
-        .channel_adapters
-        .insert("test".to_string(), adapter);
+    kernel.channel_adapters.insert("test".to_string(), adapter);
 
     let req = ApprovalRequest {
         id: uuid::Uuid::new_v4(),
@@ -219,11 +211,9 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
         timeout_secs: 60,
         sender_id: None,
         channel: None,
-        chat_id: None,
         route_to: vec![explicit_target],
         escalation_count: 1,
         session_id: None,
-        tool_use_id: None,
     };
 
     kernel.notify_escalated_approval(&req, req.id).await;
@@ -439,7 +429,6 @@ fn test_spawn_agent_applies_local_default_model_override() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     *kernel
-        .llm
         .default_model_override
         .write()
         .expect("default model override lock") = Some(DefaultModelConfig {
@@ -477,11 +466,7 @@ fn test_spawn_agent_applies_local_default_model_override() {
         )
         .expect("agent should spawn with local model override");
 
-    let entry = kernel
-        .agents
-        .registry
-        .get(agent_id)
-        .expect("agent registry entry");
+    let entry = kernel.registry.get(agent_id).expect("agent registry entry");
     // Spawn now stores "default"/"default" so provider changes propagate at
     // execute time without re-spawning. Concrete resolution happens in
     // execute_llm_agent, not at spawn.
@@ -565,7 +550,6 @@ fn test_spawn_child_exceeding_parent_is_rejected() {
     // Nothing called "escalated-child" should be registered —
     // the check ran before `register()`.
     assert!(kernel
-        .agents
         .registry
         .list()
         .iter()
@@ -630,11 +614,7 @@ fn test_spawn_child_with_subset_capabilities_is_allowed() {
         )
         .expect("subset child should be allowed");
 
-    let entry = kernel
-        .agents
-        .registry
-        .get(child_id)
-        .expect("child registered");
+    let entry = kernel.registry.get(child_id).expect("child registered");
     assert_eq!(entry.parent, Some(parent));
 
     kernel.shutdown();
@@ -731,11 +711,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .expect("agent should spawn");
 
     // Sanity: stale overrides are present.
-    let pre = kernel
-        .agents
-        .registry
-        .get(agent_id)
-        .expect("agent registry entry");
+    let pre = kernel.registry.get(agent_id).expect("agent registry entry");
     assert_eq!(pre.manifest.model.provider, "cloudverse");
     assert_eq!(
         pre.manifest.model.api_key_env.as_deref(),
@@ -753,7 +729,6 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .expect("provider switch should succeed");
 
     let post = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("agent registry entry after switch");
@@ -783,7 +758,6 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
     // Seed an override on the now-openrouter agent so we can confirm the
     // same-provider branch leaves it alone.
     kernel
-        .agents
         .registry
         .update_model_provider_config(
             agent_id,
@@ -803,7 +777,6 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .expect("same-provider swap should succeed");
 
     let same_provider = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("agent after same-provider swap");
@@ -845,7 +818,6 @@ fn test_hand_activation_does_not_seed_runtime_tool_filters() {
     };
     let agent_id = instance.agent_id().expect("apitester hand agent id");
     let entry = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry");
@@ -887,7 +859,6 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     };
     let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
     let first_entry = kernel
-        .agents
         .registry
         .get(first_agent_id)
         .expect("first apitester hand agent entry");
@@ -924,7 +895,6 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
         .agent_id()
         .expect("second apitester agent id");
     let second_entry = kernel
-        .agents
         .registry
         .get(second_agent_id)
         .expect("second apitester hand agent entry");
@@ -1000,7 +970,6 @@ fn reactivate_builds_from_hand_toml_not_override() {
     };
     let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
     let first_entry = kernel
-        .agents
         .registry
         .get(first_agent_id)
         .expect("first apitester hand agent entry");
@@ -1021,7 +990,6 @@ fn reactivate_builds_from_hand_toml_not_override() {
         .expect("hand runtime override should update");
 
     let overridden_entry = kernel
-        .agents
         .registry
         .get(first_agent_id)
         .expect("overridden apitester hand agent entry");
@@ -1062,7 +1030,6 @@ fn reactivate_builds_from_hand_toml_not_override() {
         .agent_id()
         .expect("second apitester agent id");
     let second_entry = kernel
-        .agents
         .registry
         .get(second_agent_id)
         .expect("second apitester hand agent entry");
@@ -1178,7 +1145,6 @@ system_prompt = "You are a test worker."
 "#;
 
     kernel
-        .skills
         .hand_registry
         .install_from_content(hand_toml, "")
         .expect("install hand from content");
@@ -1191,7 +1157,6 @@ system_prompt = "You are a test worker."
         .agent_id()
         .expect("derived agent id from activated hand");
     let entry = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("hand-derived agent must be in the registry");
@@ -1245,7 +1210,6 @@ system_prompt = "You are a test worker."
 "#;
 
     kernel
-        .skills
         .hand_registry
         .install_from_content(hand_toml, "")
         .expect("install hand from content");
@@ -1258,7 +1222,6 @@ system_prompt = "You are a test worker."
         .agent_id()
         .expect("derived agent id from activated hand");
     let entry = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("hand-derived agent must be in the registry");
@@ -1405,7 +1368,6 @@ fn test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy
 
     // Verify exec_policy was promoted to Full
     let entry = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("agent must be registered");
@@ -1472,7 +1434,7 @@ fn test_boot_spawns_assistant_as_default_agent() {
     };
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let agents = kernel.agents.registry.list();
+    let agents = kernel.registry.list();
 
     assert!(
         agents.iter().any(|entry| entry.name == "assistant"),
@@ -1498,9 +1460,7 @@ async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
 
     // Use a random AgentId that doesn't exist
     let bogus_id = AgentId::new();
-    let result = kernel
-        .send_message_ephemeral(bogus_id, "hello?", None)
-        .await;
+    let result = kernel.send_message_ephemeral(bogus_id, "hello?").await;
     assert!(
         result.is_err(),
         "ephemeral message to unknown agent should error"
@@ -1524,7 +1484,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
     // Find the auto-spawned assistant agent
-    let agents = kernel.agents.registry.list();
+    let agents = kernel.registry.list();
     let assistant = agents
         .iter()
         .find(|a| a.name == "assistant")
@@ -1533,17 +1493,17 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     let session_id = assistant.session_id;
 
     // Get session messages before ephemeral call
-    let session_before = kernel.memory.substrate.get_session(session_id).unwrap();
+    let session_before = kernel.memory.get_session(session_id).unwrap();
     let msg_count_before = session_before.map(|s| s.messages.len()).unwrap_or(0);
 
     // Send ephemeral message (will fail because no LLM provider, but that's OK —
     // the point is the session should remain untouched)
     let _ = kernel
-        .send_message_ephemeral(agent_id, "what is 2+2?", None)
+        .send_message_ephemeral(agent_id, "what is 2+2?")
         .await;
 
     // Check session is unchanged
-    let session_after = kernel.memory.substrate.get_session(session_id).unwrap();
+    let session_after = kernel.memory.get_session(session_id).unwrap();
     let msg_count_after = session_after.map(|s| s.messages.len()).unwrap_or(0);
     assert_eq!(
         msg_count_before, msg_count_after,
@@ -1568,24 +1528,15 @@ async fn test_spawn_approval_sweep_task_is_idempotent() {
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
 
     Arc::clone(&kernel).spawn_approval_sweep_task();
-    assert!(kernel
-        .governance
-        .approval_sweep_started
-        .load(Ordering::Acquire));
+    assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
 
     Arc::clone(&kernel).spawn_approval_sweep_task();
-    assert!(kernel
-        .governance
-        .approval_sweep_started
-        .load(Ordering::Acquire));
+    assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
 
     kernel.shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-    assert!(!kernel
-        .governance
-        .approval_sweep_started
-        .load(Ordering::Acquire));
+    assert!(!kernel.approval_sweep_started.load(Ordering::Acquire));
 }
 
 /// The task-board sweeper must be spawn-idempotent so repeated callers
@@ -1606,26 +1557,17 @@ async fn test_spawn_task_board_sweep_task_is_idempotent() {
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
 
     Arc::clone(&kernel).spawn_task_board_sweep_task();
-    assert!(kernel
-        .governance
-        .task_board_sweep_started
-        .load(Ordering::Acquire));
+    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
 
     // Re-spawning while already running is a no-op — the atomic guard
     // short-circuits instead of starting a second loop.
     Arc::clone(&kernel).spawn_task_board_sweep_task();
-    assert!(kernel
-        .governance
-        .task_board_sweep_started
-        .load(Ordering::Acquire));
+    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
 
     kernel.shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-    assert!(!kernel
-        .governance
-        .task_board_sweep_started
-        .load(Ordering::Acquire));
+    assert!(!kernel.task_board_sweep_started.load(Ordering::Acquire));
 }
 
 /// End-to-end sanity check at the kernel layer: after a worker claims a task
@@ -1646,7 +1588,7 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
     };
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
 
-    let mem = kernel.substrate_ref();
+    let mem = kernel.memory_substrate();
 
     // Post and claim a task so status = in_progress.
     let task_id = mem
@@ -1738,53 +1680,19 @@ fn test_evaluate_condition_unknown_format() {
 
 #[test]
 fn test_peer_scoped_key() {
-    use librefang_runtime::kernel_handle::KernelOpError;
-
-    // With a colon-free, non-empty peer_id: key is namespaced.
+    // With peer_id: key is namespaced
     assert_eq!(
-        peer_scoped_key("car", Some("user-123")).expect("colon-free peer_id ok"),
+        peer_scoped_key("car", Some("user-123")),
         "peer:user-123:car"
     );
-
-    // Without peer_id: key is unchanged (global scope).
     assert_eq!(
-        peer_scoped_key("car", None).expect("None peer_id ok"),
-        "car"
-    );
-    assert_eq!(
-        peer_scoped_key("global_setting", None).expect("None peer_id ok"),
-        "global_setting"
-    );
-
-    // SECURITY (#5119): peer_id containing ':' is rejected — the historical
-    // `peer:{pid}:{key}` framing is only injective when pid is colon-free.
-    assert!(matches!(
         peer_scoped_key("prefs.color", Some("u:456")),
-        Err(KernelOpError::InvalidInput(_))
-    ));
-    assert!(matches!(
-        peer_scoped_key("car", Some("T1:U2")),
-        Err(KernelOpError::InvalidInput(_))
-    ));
+        "peer:u:456:prefs.color"
+    );
 
-    // SECURITY (#5119 / review #3): an empty peer_id is rejected — `peer::{key}`
-    // is ambiguous with a `None`-scope key literally named `:{key}` and would
-    // split / shadow a namespace.
-    assert!(matches!(
-        peer_scoped_key("car", Some("")),
-        Err(KernelOpError::InvalidInput(_))
-    ));
-
-    // SECURITY (#5120): key starting with reserved `peer:` prefix is rejected
-    // so an LLM-supplied key cannot collide with the internal namespace.
-    assert!(matches!(
-        peer_scoped_key("peer:victim:user_name", None),
-        Err(KernelOpError::InvalidInput(_))
-    ));
-    assert!(matches!(
-        peer_scoped_key("peer:anything", Some("alice")),
-        Err(KernelOpError::InvalidInput(_))
-    ));
+    // Without peer_id: key is unchanged
+    assert_eq!(peer_scoped_key("car", None), "car");
+    assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
 }
 
 #[test]
@@ -2151,7 +2059,7 @@ fn test_skills_config_disabled_list_filters_at_boot() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let registry = kernel.skills.skill_registry.read().unwrap();
+    let registry = kernel.skill_registry.read().unwrap();
     assert!(
         registry.get("kept-skill").is_some(),
         "non-disabled skill must load"
@@ -2192,7 +2100,7 @@ fn test_skills_config_extra_dirs_loaded_as_overlay() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let registry = kernel.skills.skill_registry.read().unwrap();
+    let registry = kernel.skill_registry.read().unwrap();
     assert!(
         registry.get("external-only").is_some(),
         "external skill must load"
@@ -2238,7 +2146,7 @@ fn test_reload_skills_preserves_disabled_and_extra_dirs() {
 
     // Baseline
     {
-        let reg = kernel.skills.skill_registry.read().unwrap();
+        let reg = kernel.skill_registry.read().unwrap();
         assert!(reg.get("keep-me").is_some());
         assert!(reg.get("silence-me").is_none());
         assert!(reg.get("overlay-skill").is_some());
@@ -2248,7 +2156,7 @@ fn test_reload_skills_preserves_disabled_and_extra_dirs() {
     // "silence-me" and drop "overlay-skill".
     kernel.reload_skills();
 
-    let reg = kernel.skills.skill_registry.read().unwrap();
+    let reg = kernel.skill_registry.read().unwrap();
     assert!(
         reg.get("keep-me").is_some(),
         "normal skill must stay loaded across reload"
@@ -2288,7 +2196,7 @@ fn test_stable_mode_freezes_registry_and_skips_review_gate() {
     };
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let registry = kernel.skills.skill_registry.read().unwrap();
+    let registry = kernel.skill_registry.read().unwrap();
     assert!(
         registry.is_frozen(),
         "Stable mode must freeze the skill registry"
@@ -2377,7 +2285,7 @@ async fn test_cron_create_preserves_peer_id() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
-    let agents = kernel.agents.registry.list();
+    let agents = kernel.registry.list();
     let assistant = agents
         .iter()
         .find(|a| a.name == "assistant")
@@ -2484,7 +2392,6 @@ async fn cascade_primitives_via_session_interrupts_dashmap() {
     let parent_session_id = SessionId::new();
     let parent_interrupt = SessionInterrupt::new();
     kernel
-        .agents
         .session_interrupts
         .insert((parent_id, parent_session_id), parent_interrupt.clone());
 
@@ -2555,10 +2462,9 @@ async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
     .expect_err("non-existent child must fail");
 
     assert!(
-        err.to_string()
-            .to_lowercase()
+        err.to_lowercase()
             .contains(&child_id.to_string().to_lowercase())
-            || err.to_string().to_lowercase().contains("not found"),
+            || err.to_lowercase().contains("not found"),
         "error must reference the missing child, not the missing parent: {err}"
     );
 
@@ -2583,7 +2489,7 @@ async fn send_to_agent_as_rejects_unparseable_parent_id() {
     .expect_err("garbage parent id must surface an error");
     // Either the resolver's "Agent not found" wording or the fallback
     // parse error is acceptable — the important thing is we don't panic.
-    assert!(!err.to_string().is_empty());
+    assert!(!err.is_empty());
 
     kernel.shutdown();
 }
@@ -2781,11 +2687,7 @@ system_prompt = "BASE PROMPT"
 
     // Sanity: the synthetic hand landed in the in-memory registry.
     assert!(
-        kernel
-            .skills
-            .hand_registry
-            .get_definition(hand_id)
-            .is_some(),
+        kernel.hand_registry.get_definition(hand_id).is_some(),
         "synthetic HAND.toml must be loaded from registry/hands/{hand_id}"
     );
 
@@ -2818,7 +2720,6 @@ system_prompt = "BASE PROMPT"
         .get("operator")
         .expect("operator role must be present in restored instance");
     let restored = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("restored operator agent must be registered in memory");
@@ -2936,11 +2837,7 @@ system_prompt = "WORKER PROMPT"
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
     assert!(
-        kernel
-            .skills
-            .hand_registry
-            .get_definition(hand_id)
-            .is_some(),
+        kernel.hand_registry.get_definition(hand_id).is_some(),
         "synthetic HAND.toml must be loaded from registry/hands/{hand_id}"
     );
 
@@ -2969,7 +2866,6 @@ system_prompt = "WORKER PROMPT"
         .get("lead")
         .expect("lead role must be present in restored instance");
     let restored = kernel
-        .agents
         .registry
         .get(lead_agent_id)
         .expect("restored lead agent must be registered in memory");
@@ -3090,7 +2986,6 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
 
         // Sanity: in-memory manifest already carries the overrides.
         let entry = kernel
-            .agents
             .registry
             .get(agent_id)
             .expect("apitester hand agent entry");
@@ -3171,7 +3066,6 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
     let _ = persisted_agent_id;
 
     let restored_entry = kernel
-        .agents
         .registry
         .get(restored_agent_id)
         .expect("restored apitester agent entry");
@@ -3275,7 +3169,6 @@ fn hand_runtime_override_survives_restart_via_start_background_agents() {
     });
 
     let instance = kernel
-        .skills
         .hand_registry
         .list_instances()
         .into_iter()
@@ -3283,7 +3176,6 @@ fn hand_runtime_override_survives_restart_via_start_background_agents() {
         .expect("apitester instance must be restored by start_background_agents");
     let agent_id = instance.agent_id().expect("restored apitester agent id");
     let entry = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("restored apitester agent entry");
@@ -3349,7 +3241,6 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
         assert!(
             kernel
                 .memory
-                .substrate
                 .load_agent(*id)
                 .expect("load_agent before deactivate")
                 .is_some(),
@@ -3364,7 +3255,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
     // Err out without touching the SQLite row — the scenario the new
     // explicit `memory.remove_agent` pass in `deactivate_hand` covers.
     for id in &agent_ids {
-        let _ = kernel.agents.registry.remove(*id);
+        let _ = kernel.registry.remove(*id);
     }
 
     kernel
@@ -3375,7 +3266,6 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
         assert!(
             kernel
                 .memory
-                .substrate
                 .load_agent(*id)
                 .expect("load_agent after deactivate")
                 .is_none(),
@@ -3440,15 +3330,10 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
             is_hand: true,
             ..Default::default()
         };
-        kernel
-            .memory
-            .substrate
-            .save_agent(&entry)
-            .expect("seed orphan row");
+        kernel.memory.save_agent(&entry).expect("seed orphan row");
         assert!(
             kernel
                 .memory
-                .substrate
                 .load_agent(orphan_id)
                 .expect("load_agent after seed")
                 .is_some(),
@@ -3477,7 +3362,6 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
     assert!(
         kernel
             .memory
-            .substrate
             .load_agent(orphan_id)
             .expect("load_agent after GC")
             .is_none(),
@@ -3533,11 +3417,7 @@ fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
             is_hand: true,
             ..Default::default()
         };
-        kernel
-            .memory
-            .substrate
-            .save_agent(&entry)
-            .expect("seed orphan row");
+        kernel.memory.save_agent(&entry).expect("seed orphan row");
         kernel.shutdown();
     }
 
@@ -3561,7 +3441,6 @@ fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
     assert!(
         kernel
             .memory
-            .substrate
             .load_agent(orphan_id)
             .expect("load_agent after skipped GC")
             .is_some(),
@@ -3607,7 +3486,6 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
     };
     let agent_id = instance.agent_id().expect("apitester hand agent id");
     let default_entry = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry");
@@ -3630,7 +3508,6 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
         )
         .expect("apply override");
     let overridden = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry post-override");
@@ -3642,7 +3519,6 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
         .clear_hand_agent_runtime_override(agent_id)
         .expect("clear override");
     let cleared = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry post-clear");
@@ -3677,7 +3553,6 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
 
     // hand_state must no longer carry the per-role entry.
     let restored_instance = kernel
-        .skills
         .hand_registry
         .get_instance(instance.instance_id)
         .expect("instance still active");
@@ -3750,7 +3625,6 @@ fn update_hand_agent_runtime_override_merges_partial_updates_in_state() {
         .expect("apply provider override");
 
     let restored_instance = kernel
-        .skills
         .hand_registry
         .get_instance(instance.instance_id)
         .expect("instance still active");
@@ -3801,7 +3675,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
 
-    kernel.agents.running_tasks.insert(
+    kernel.running_tasks.insert(
         (agent_id, session_a),
         RunningTask {
             abort: h_a.abort_handle(),
@@ -3809,7 +3683,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
             task_id: uuid::Uuid::new_v4(),
         },
     );
-    kernel.agents.running_tasks.insert(
+    kernel.running_tasks.insert(
         (agent_id, session_b),
         RunningTask {
             abort: h_b.abort_handle(),
@@ -3852,281 +3726,6 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
     kernel.shutdown();
 }
 
-/// #5142 regression: `kill_agent` must abort the agent's in-flight LLM
-/// loop, not merely tear down the registry entry and leave the streaming
-/// task burning provider tokens. Pre-#5142, `kill_agent_with_purge` removed
-/// the registry/scheduler entries but never called `stop_agent_run`, and the
-/// orphaned `running_tasks` entry was only reaped by the GC sweep — which
-/// *dropped* the `AbortHandle` instead of firing it. `suspend_agent` did the
-/// right thing; `kill_agent` did not.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kill_agent_aborts_in_flight_run_5142() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-kernel-kill-abort-5142");
-    std::fs::create_dir_all(&home_dir).unwrap();
-    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    })
-    .expect("kernel should boot");
-
-    let manifest = AgentManifest {
-        name: "victim".to_string(),
-        description: "agent whose run must be aborted on kill".to_string(),
-        author: "test".to_string(),
-        module: "builtin:chat".to_string(),
-        ..Default::default()
-    };
-    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-    let session = SessionId::new();
-
-    // A genuine long-lived task standing in for an in-flight LLM stream.
-    let task = tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-    });
-    let abort = task.abort_handle();
-    kernel.agents.running_tasks.insert(
-        (agent_id, session),
-        RunningTask {
-            abort: abort.clone(),
-            started_at: chrono::Utc::now(),
-            task_id: uuid::Uuid::new_v4(),
-        },
-    );
-    assert!(
-        !abort.is_finished(),
-        "sanity: the simulated in-flight run must be alive before kill"
-    );
-    assert!(kernel.agent_has_active_session(agent_id));
-
-    kernel
-        .kill_agent(agent_id)
-        .expect("kill_agent should succeed");
-
-    // The running_tasks entry must be gone AND the underlying task aborted.
-    assert!(
-        !kernel.agent_has_active_session(agent_id),
-        "kill_agent must remove the in-flight run entry"
-    );
-    // `AbortHandle::abort()` cancels at the next .await; give the runtime a
-    // moment to actually drop the task, then assert it is finished.
-    for _ in 0..50 {
-        if abort.is_finished() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        abort.is_finished(),
-        "kill_agent must fire abort() on the in-flight LLM task (#5142) — \
-         the task is still running, so it would keep burning provider tokens"
-    );
-
-    kernel.shutdown();
-}
-
-/// #5142 follow-up regression: the streaming-dispatch path must not
-/// register an orphan `RunningTask` when a `kill_agent` lands in the
-/// window between `entry = registry.get(agent_id)` (line 1717) and the
-/// `running_tasks.insert((agent, session), …)` at the bottom of
-/// `send_message_streaming_*`. Pre-fix, the kill's `stop_agent_run` ran
-/// before the dispatcher had inserted its handle, so the kill found
-/// nothing to abort; then the dispatcher inserted a handle for an agent
-/// that was no longer in the registry. The handle survived until the
-/// next periodic GC sweep — long enough to keep burning provider tokens.
-///
-/// The fix is the post-insert registry recheck + `remove_if` self-eject
-/// in `send_message_streaming_with_routing_…`. This test exercises that
-/// exact protocol at the running_tasks layer: spawn N concurrent
-/// "dispatchers" that follow the protocol against an agent another
-/// thread is repeatedly killing, and assert no orphan entries survive.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn kill_agent_dispatch_insert_race_leaves_no_orphan_5142() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-kernel-dispatch-race-5142");
-    std::fs::create_dir_all(&home_dir).unwrap();
-    let kernel = Arc::new(
-        LibreFangKernel::boot_with_config(KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        })
-        .expect("kernel should boot"),
-    );
-
-    let manifest = AgentManifest {
-        name: "race-victim".to_string(),
-        description: "agent for kill/dispatch race".to_string(),
-        author: "test".to_string(),
-        module: "builtin:chat".to_string(),
-        ..Default::default()
-    };
-    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-
-    // Count how many dispatchers observed the kill via the post-insert
-    // recheck and self-ejected. Used only for diagnostic output.
-    let self_ejected = Arc::new(AtomicUsize::new(0));
-
-    // Thread A: kill the agent. The kill's `stop_agent_run` runs before
-    // some dispatchers' inserts (the racy window) and `registry.remove`
-    // runs before the rest.
-    let killer_kernel = Arc::clone(&kernel);
-    let killer = tokio::spawn(async move {
-        // Brief yield so the dispatchers have spun up their loops.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let _ = killer_kernel.kill_agent(agent_id);
-    });
-
-    // Thread B (x N): simulate the streaming dispatch insert protocol.
-    // We do NOT call `send_message_streaming_*` directly because that
-    // would require a real LLM driver fixture; instead we replicate the
-    // exact insert-side sequence (snapshot-entry → spawn → post-insert
-    // recheck) at the running_tasks layer the fix touches.
-    let mut dispatchers = Vec::new();
-    for i in 0..32 {
-        let kernel_b = Arc::clone(&kernel);
-        let self_ejected_b = Arc::clone(&self_ejected);
-        dispatchers.push(tokio::spawn(async move {
-            // (1) Snapshot the entry the way `send_message_full` does at
-            //     line 819 / `send_message_streaming_*` at line 1717.
-            let entry_snapshot = kernel_b.agents.registry.get(agent_id);
-            if entry_snapshot.is_none() {
-                // Kill already won — dispatcher would have errored at the
-                // registry.get above and returned without spawning. No
-                // orphan possible on this branch.
-                return;
-            }
-
-            // (2) Spawn a long-lived task standing in for the in-flight
-            //     LLM stream.
-            let task = tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            });
-            let abort = task.abort_handle();
-
-            // Variable delay across dispatchers so insert/kill interleave
-            // exercises every race position.
-            tokio::time::sleep(std::time::Duration::from_micros(i * 50)).await;
-
-            // (3) Insert into running_tasks (matches messaging.rs:2911).
-            let session = SessionId::new();
-            let turn_task_id = uuid::Uuid::new_v4();
-            kernel_b.agents.running_tasks.insert(
-                (agent_id, session),
-                RunningTask {
-                    abort: abort.clone(),
-                    started_at: chrono::Utc::now(),
-                    task_id: turn_task_id,
-                },
-            );
-
-            // (4) Post-insert recheck + self-eject (the fix itself —
-            //     mirrors messaging.rs:2927-2942).
-            if kernel_b.agents.registry.get(agent_id).is_none() {
-                if let Some((_, evicted)) = kernel_b
-                    .agents
-                    .running_tasks
-                    .remove_if(&(agent_id, session), |_, v| v.task_id == turn_task_id)
-                {
-                    evicted.abort.abort();
-                    self_ejected_b.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }));
-    }
-
-    killer.await.expect("killer must finish");
-    for d in dispatchers {
-        d.await.expect("dispatcher must finish");
-    }
-
-    // The invariant: after kill + every dispatcher's insert protocol has
-    // run, the running_tasks map must hold no entries for this agent.
-    // Without the post-insert recheck, dispatchers that lost the race
-    // would have left an orphan that only the next gc_sweep tick could
-    // reap — and pre-#5142 the sweep dropped the AbortHandle on the
-    // floor anyway.
-    let leftovers: Vec<_> = kernel
-        .agents
-        .running_tasks
-        .iter()
-        .filter(|e| e.key().0 == agent_id)
-        .map(|e| *e.key())
-        .collect();
-    assert!(
-        leftovers.is_empty(),
-        "kill_agent + concurrent dispatch insert must not leave orphan running_tasks; \
-         {} leftover(s) after {} dispatchers self-ejected",
-        leftovers.len(),
-        self_ejected.load(Ordering::Relaxed),
-    );
-
-    kernel.shutdown();
-}
-
-/// #5142 regression: the periodic GC sweep must FIRE the `AbortHandle` for a
-/// dead agent's leftover `running_tasks` entry, not just drop it. Pre-#5142
-/// the sweep `running_tasks.remove(&key)` discarded the handle without
-/// `abort()`, so a task that outlived its agent (e.g. a kill that raced the
-/// dispatcher) kept running until the provider returned.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_sweep_aborts_orphaned_running_task_5142() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-kernel-gc-abort-5142");
-    std::fs::create_dir_all(&home_dir).unwrap();
-    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    })
-    .expect("kernel should boot");
-
-    // Agent ID that is NOT in the registry → the sweep classifies its
-    // running_tasks entry as belonging to a dead agent and must reap it.
-    let dead_agent = AgentId(uuid::Uuid::new_v4());
-    let session = SessionId::new();
-    let task = tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-    });
-    let abort = task.abort_handle();
-    kernel.agents.running_tasks.insert(
-        (dead_agent, session),
-        RunningTask {
-            abort: abort.clone(),
-            started_at: chrono::Utc::now(),
-            task_id: uuid::Uuid::new_v4(),
-        },
-    );
-    assert!(!abort.is_finished(), "sanity: orphan task alive pre-sweep");
-
-    kernel.gc_sweep();
-
-    assert!(
-        kernel
-            .agents
-            .running_tasks
-            .get(&(dead_agent, session))
-            .is_none(),
-        "GC sweep must remove the dead agent's running_tasks entry"
-    );
-    for _ in 0..50 {
-        if abort.is_finished() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        abort.is_finished(),
-        "GC sweep must fire abort() on the orphaned task (#5142), not just \
-         drop the AbortHandle"
-    );
-
-    kernel.shutdown();
-}
-
 /// `/api/sessions` joins the SQLite session list with this snapshot to set
 /// the per-row `active` flag (#4290). Verify it surfaces every running
 /// session across agents and shrinks back to empty after stops.
@@ -4160,7 +3759,7 @@ fn test_running_session_ids_reflects_live_tasks() {
     };
 
     for (a, s) in [(agent_a, s1), (agent_a, s2), (agent_b, s3)] {
-        kernel.agents.running_tasks.insert(
+        kernel.running_tasks.insert(
             (a, s),
             RunningTask {
                 abort: mk_handle(),
@@ -4218,7 +3817,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         .abort_handle()
     };
 
-    kernel.agents.running_tasks.insert(
+    kernel.running_tasks.insert(
         (agent_id, s1),
         RunningTask {
             abort: mk_handle(),
@@ -4226,7 +3825,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
             task_id: uuid::Uuid::new_v4(),
         },
     );
-    kernel.agents.running_tasks.insert(
+    kernel.running_tasks.insert(
         (agent_id, s2),
         RunningTask {
             abort: mk_handle(),
@@ -4235,7 +3834,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         },
     );
     // Different agent — must NOT be touched by stop_agent_run.
-    kernel.agents.running_tasks.insert(
+    kernel.running_tasks.insert(
         (other_agent, s3),
         RunningTask {
             abort: mk_handle(),
@@ -4317,7 +3916,7 @@ fn test_fork_does_not_overwrite_parent_registration() {
     // insert into both `running_tasks` and `session_interrupts` keyed by
     // `(agent, parent_session)`.
     let parent_started_at = chrono::Utc::now();
-    kernel.agents.running_tasks.insert(
+    kernel.running_tasks.insert(
         (agent_id, parent_session),
         RunningTask {
             abort: parent_abort,
@@ -4327,7 +3926,6 @@ fn test_fork_does_not_overwrite_parent_registration() {
     );
     let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
     kernel
-        .agents
         .session_interrupts
         .insert((agent_id, parent_session), parent_interrupt.clone());
 
@@ -4440,11 +4038,7 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
         is_hand: false,
         ..Default::default()
     };
-    kernel
-        .agents
-        .registry
-        .register(entry)
-        .expect("register agent");
+    kernel.registry.register(entry).expect("register agent");
 
     // Simulate the parent loop being mid-turn: insert its interrupt
     // under `(agent, parent_session)`, exactly as
@@ -4453,7 +4047,6 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
     // spawn site uses to discover which session to land on.
     let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
     kernel
-        .agents
         .session_interrupts
         .insert((agent_id, parent_session), parent_interrupt.clone());
 
@@ -4473,14 +4066,12 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
     let switched_session = SessionId::new();
     assert_ne!(switched_session, parent_session);
     kernel
-        .agents
         .registry
         .update_session_id(agent_id, switched_session)
         .expect("update_session_id");
 
     // Sanity: the registry pointer really did flip.
     let entry_after = kernel
-        .agents
         .registry
         .get(agent_id)
         .expect("agent still registered");
@@ -4727,239 +4318,6 @@ fn test_agent_concurrency_for_returns_cached_semaphore() {
     kernel.shutdown();
 }
 
-/// Workflow `send_message` closure must acquire the per-agent semaphore
-/// before invoking the LLM (audit fix for `triggers_and_workflow.rs:334-336`).
-///
-/// Reproduces the exact closure shape the workflow runner uses: N parallel
-/// fan-out steps each call `agent_concurrency_for(agent_id).acquire_owned()`
-/// then run the step body. With `max_concurrent_invocations = 1` + 3
-/// parallel arms holding the permit for 100 ms, total wall time must be
-/// ~300 ms (serialised), not ~100 ms (which is what the pre-fix path
-/// allowed by bypassing the semaphore).
-///
-/// The test runs the agent in `SessionMode::New` because `Persistent` is
-/// clamped to 1 by `agent_concurrency_for` regardless of manifest cap —
-/// using `New` keeps the cap as the variable under test.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn workflow_send_message_closure_honours_per_agent_semaphore() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-kernel-wf-sem-test");
-    std::fs::create_dir_all(&home_dir).unwrap();
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-    let aid = kernel
-        .spawn_agent_inner(
-            AgentManifest {
-                name: "wf-fanout-cap-agent".to_string(),
-                description: "cap=1 + 3 parallel fan-out steps must serialise".to_string(),
-                author: "test".to_string(),
-                module: "builtin:chat".to_string(),
-                // New (not Persistent) so the manifest cap is honoured
-                // instead of being clamped to 1 by the Persistent guard.
-                session_mode: librefang_types::agent::SessionMode::New,
-                max_concurrent_invocations: Some(1),
-                ..Default::default()
-            },
-            None,
-            None,
-            None,
-        )
-        .expect("agent should spawn");
-
-    // Confirm precondition: the cap really is 1 from the resolver.
-    assert_eq!(kernel.agent_concurrency_for(aid).available_permits(), 1);
-
-    // Mirror the workflow `send_message` closure body: acquire the
-    // per-agent semaphore, then run the step. We substitute a 100 ms
-    // sleep for `send_message_full` — the cap-enforcement contract is
-    // identical, and this keeps the test free of LLM driver wiring.
-    let step_body = |k: Arc<LibreFangKernel>, agent_id: librefang_types::agent::AgentId| async move {
-        let sem = k.agent_concurrency_for(agent_id);
-        let _permit = sem
-            .acquire_owned()
-            .await
-            .expect("semaphore must not be closed mid-test");
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    };
-
-    let kernel_arc = Arc::new(kernel);
-    let start = std::time::Instant::now();
-    let mut handles = Vec::with_capacity(3);
-    for _ in 0..3 {
-        let k = Arc::clone(&kernel_arc);
-        handles.push(tokio::spawn(step_body(k, aid)));
-    }
-    for h in handles {
-        h.await.expect("step task panicked");
-    }
-    let elapsed = start.elapsed();
-
-    // 3 parallel arms × 100 ms each, gated by cap=1 → wall ~300 ms.
-    // Floor at 250 ms (generous margin for runner scheduling jitter);
-    // pre-fix path with the semaphore bypassed would land near 100 ms.
-    assert!(
-        elapsed >= std::time::Duration::from_millis(250),
-        "3 parallel fan-out arms with max_concurrent_invocations=1 must \
-         serialise via the per-agent semaphore (expected ≥250ms, got {elapsed:?}). \
-         If this fails, the workflow `send_message` closure has stopped \
-         acquiring `agent_concurrency_for` before calling `send_message_full` — \
-         see triggers_and_workflow.rs and the audit note at :334-336.",
-    );
-
-    Arc::try_unwrap(kernel_arc).ok().unwrap().shutdown();
-}
-
-/// Source-shape sentinel for the fix above: the production workflow
-/// `send_message` closure (and its operator-resume twin) in
-/// `triggers_and_workflow.rs` must acquire the per-agent semaphore
-/// before calling `send_message_full`. The behavioral test above proves
-/// `agent_concurrency_for(aid)` enforces the cap *if used* — this test
-/// pins that the production closures actually use it, catching a future
-/// refactor that drops the acquire and silently reintroduces the bypass.
-#[test]
-fn workflow_send_message_closure_contains_per_agent_semaphore_acquire() {
-    let src = include_str!("triggers_and_workflow.rs");
-    // Strip line+block comments so the assertion can't be satisfied by
-    // a leftover doc reference after the wiring is removed.
-    let stripped: String = {
-        let mut out = String::with_capacity(src.len());
-        let mut in_block = false;
-        for line in src.lines() {
-            let mut s = line.to_string();
-            if in_block {
-                if let Some(end) = s.find("*/") {
-                    s = s.split_at(end + 2).1.to_string();
-                    in_block = false;
-                } else {
-                    continue;
-                }
-            }
-            while let Some(start) = s.find("/*") {
-                if let Some(end_rel) = s[start..].find("*/") {
-                    let end = start + end_rel + 2;
-                    s.replace_range(start..end, "");
-                } else {
-                    s.truncate(start);
-                    in_block = true;
-                    break;
-                }
-            }
-            if let Some(idx) = s.find("//") {
-                s.truncate(idx);
-            }
-            out.push_str(&s);
-            out.push('\n');
-        }
-        out
-    };
-    // Two production sites must wrap `send_message_full` with the per-agent
-    // semaphore: `run_workflow::send_message` and
-    // `KernelOperatorResumeDriver::drive_operator_timeout::send_message`.
-    let acquire_matches = stripped.matches("agent_concurrency_for(agent_id)").count();
-    assert!(
-        acquire_matches >= 2,
-        "expected ≥2 non-comment `agent_concurrency_for(agent_id)` acquires \
-         in triggers_and_workflow.rs (one in `run_workflow::send_message`, \
-         one in `KernelOperatorResumeDriver::drive_operator_timeout::send_message`); \
-         found {acquire_matches}. Did a refactor drop the acquire and \
-         silently re-bypass `max_concurrent_invocations` on the workflow path?",
-    );
-    let acquire_owned_matches = stripped.matches("acquire_owned()").count();
-    assert!(
-        acquire_owned_matches >= 3,
-        "expected ≥3 non-comment `acquire_owned()` calls in \
-         triggers_and_workflow.rs (Lane::Trigger lane permit + 2 per-agent \
-         semaphore acquires on the workflow paths); found {acquire_owned_matches}.",
-    );
-}
-
-/// Regression for the audit item
-/// `docs/issues/workflow-path-drops-lane-permit.md`: the workflow-dispatch
-/// path in `triggers_and_workflow.rs` MUST move the `Lane::Trigger` permit
-/// (`_lane_permit`, acquired once per dispatch iteration) into the
-/// `tokio::spawn` future for `kernel.run_workflow(...)`. Otherwise the permit
-/// drops as soon as the iteration yields and the run inside the spawn escapes
-/// the `queue.concurrency.trigger_lane` cap — N bursty workflow triggers
-/// produce N concurrent workflow runs, breaking the kernel-wide invariant.
-///
-/// This is a source-shape lint (matches the style of
-/// `workflow_send_message_closure_contains_per_agent_semaphore_acquire`
-/// above): we strip comments so a leftover doc reference can't satisfy the
-/// assertion, then require a non-comment binding that re-anchors the permit
-/// inside the spawn block. Behavioral coverage of the lane cap itself lives
-/// in `trigger_lane_global_semaphore_limits_total_concurrency`; this test
-/// pins the wiring that connects the cap to the workflow path.
-#[test]
-fn workflow_spawn_holds_lane_permit_across_run() {
-    let src = include_str!("triggers_and_workflow.rs");
-    // Strip line + block comments (same approach as the per-agent-semaphore
-    // lint test above) so the assertion is grounded in executable code.
-    let stripped: String = {
-        let mut out = String::with_capacity(src.len());
-        let mut in_block = false;
-        for line in src.lines() {
-            let mut s = line.to_string();
-            if in_block {
-                if let Some(end) = s.find("*/") {
-                    s = s.split_at(end + 2).1.to_string();
-                    in_block = false;
-                } else {
-                    continue;
-                }
-            }
-            while let Some(start) = s.find("/*") {
-                if let Some(end_rel) = s[start..].find("*/") {
-                    let end = start + end_rel + 2;
-                    s.replace_range(start..end, "");
-                } else {
-                    s.truncate(start);
-                    in_block = true;
-                    break;
-                }
-            }
-            if let Some(idx) = s.find("//") {
-                s.truncate(idx);
-            }
-            out.push_str(&s);
-            out.push('\n');
-        }
-        out
-    };
-
-    // (1) The capture must exist: the workflow branch rebinds `_lane_permit`
-    // so it can be moved INTO the spawn. Without this binding the permit
-    // would drop at the end of the for-loop iteration (i.e. as soon as
-    // `tokio::spawn` returned), exactly the pre-fix behaviour.
-    assert!(
-        stripped.contains("let lane_permit_for_spawn = _lane_permit"),
-        "expected `let lane_permit_for_spawn = _lane_permit` in the workflow \
-         branch of triggers_and_workflow.rs — without it, the Lane::Trigger \
-         permit drops at iteration end and concurrent workflow runs escape \
-         `queue.concurrency.trigger_lane`. See \
-         docs/issues/workflow-path-drops-lane-permit.md."
-    );
-
-    // (2) The spawned future must actually reference the rebound permit so
-    // Rust's move-capture keeps it alive for the workflow run. The explicit
-    // `drop(lane_permit_for_spawn)` at the tail of the async block serves
-    // both as the capture and as documentation of intent (an unused
-    // `_`-prefixed binding would otherwise let the compiler drop it
-    // immediately).
-    assert!(
-        stripped.contains("drop(lane_permit_for_spawn)"),
-        "expected `drop(lane_permit_for_spawn)` inside the workflow spawn \
-         block so the Lane::Trigger permit is held until the workflow run \
-         ends. Removing the drop allows Rust to release the permit early — \
-         the bug that \
-         docs/issues/workflow-path-drops-lane-permit.md describes."
-    );
-}
-
 // ---------------------------------------------------------------------------
 // push_notification routing — locks the global-fallback match arm.
 //
@@ -4996,10 +4354,7 @@ async fn test_push_notification_health_check_failed_falls_back_to_alert_channels
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel
-        .mesh
-        .channel_adapters
-        .insert("test".to_string(), adapter);
+    kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -5053,10 +4408,7 @@ async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_c
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel
-        .mesh
-        .channel_adapters
-        .insert("test".to_string(), adapter);
+    kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -5095,10 +4447,7 @@ async fn test_push_notification_health_check_failed_no_targets_when_unconfigured
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel
-        .mesh
-        .channel_adapters
-        .insert("test".to_string(), adapter);
+    kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -5149,10 +4498,7 @@ async fn test_push_notification_unknown_event_type_yields_no_targets() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel
-        .mesh
-        .channel_adapters
-        .insert("test".to_string(), adapter);
+    kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -5200,10 +4546,7 @@ async fn test_push_notification_appends_session_suffix_when_provided() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel
-        .mesh
-        .channel_adapters
-        .insert("test".to_string(), adapter);
+    kernel.channel_adapters.insert("test".to_string(), adapter);
 
     let session_id = SessionId::new();
     kernel
@@ -5255,10 +4598,7 @@ async fn test_push_notification_omits_session_suffix_for_agent_level_alerts() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel
-        .mesh
-        .channel_adapters
-        .insert("test".to_string(), adapter);
+    kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -5400,7 +4740,7 @@ fn register_test_agent(kernel: &LibreFangKernel, name: &str) -> AgentId {
         is_hand: false,
         ..Default::default()
     };
-    kernel.agents.registry.register(entry).unwrap();
+    kernel.registry.register(entry).unwrap();
     id
 }
 
@@ -5437,17 +4777,6 @@ fn approval_display_non_uuid_string_falls_back_verbatim() {
     let rendered = kernel.approval_agent_display("not-a-uuid");
 
     assert_eq!(rendered, "\"not-a-uuid\"");
-
-    kernel.shutdown();
-}
-
-#[test]
-fn approval_display_empty_string_uses_unknown_sentinel() {
-    let kernel = boot_kernel_for_display_tests();
-
-    let rendered = kernel.approval_agent_display("");
-
-    assert_eq!(rendered, "\"unknown\"");
 
     kernel.shutdown();
 }
@@ -5523,7 +4852,7 @@ async fn before_prompt_build_hook_fires_for_ephemeral_with_call_site_and_user_me
     // is resolved. Both Ok and Err are acceptable here; we only care that
     // the recorder captured the hook payload.
     let _ = kernel
-        .send_message_ephemeral(agent_id, "hello from the test", None)
+        .send_message_ephemeral(agent_id, "hello from the test")
         .await;
 
     let data = recorder
@@ -5570,7 +4899,7 @@ async fn before_prompt_build_hook_unregistered_event_does_not_fire_provider() {
         recorder.clone(),
     );
 
-    let _ = kernel.send_message_ephemeral(agent_id, "hello", None).await;
+    let _ = kernel.send_message_ephemeral(agent_id, "hello").await;
 
     assert!(
         recorder.last_data.lock().unwrap().is_none(),
@@ -5706,7 +5035,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
 
     // Order A: connect filesystem before github before weather.
     {
-        let mut tools = kernel.tools_ref().lock().unwrap();
+        let mut tools = kernel.mcp_tools_ref().lock().unwrap();
         tools.clear();
         tools.push(librefang_types::tool::ToolDefinition {
             name: "mcp_filesystem_read_file".to_string(),
@@ -5725,7 +5054,6 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
         });
     }
     kernel
-        .mcp
         .mcp_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let names_a: Vec<String> = kernel
@@ -5737,7 +5065,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
 
     // Order B: same set, scrambled connect order.
     {
-        let mut tools = kernel.tools_ref().lock().unwrap();
+        let mut tools = kernel.mcp_tools_ref().lock().unwrap();
         tools.clear();
         tools.push(librefang_types::tool::ToolDefinition {
             name: "mcp_weather_forecast".to_string(),
@@ -5756,7 +5084,6 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
         });
     }
     kernel
-        .mcp
         .mcp_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let names_b: Vec<String> = kernel
@@ -5781,271 +5108,6 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
     );
 
     kernel.shutdown();
-}
-
-// ─── mcp_disabled (#4808) ─────────────────────────────────────────────────
-
-#[test]
-fn mcp_disabled_suppresses_all_mcp_tools() {
-    // Manifest with mcp_disabled = true + mcp_servers = ["foo"] must produce
-    // zero MCP tools even when MCP tools are registered in the kernel.
-    let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path().join("librefang-mcp-disabled-test");
-    std::fs::create_dir_all(home.join("data")).unwrap();
-    let cfg = KernelConfig {
-        home_dir: home.clone(),
-        data_dir: home.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
-
-    let manifest = AgentManifest {
-        name: "no-mcp".to_string(),
-        description: "agent with mcp_disabled".to_string(),
-        author: "test".to_string(),
-        module: "builtin:chat".to_string(),
-        mcp_disabled: true,
-        mcp_servers: vec!["foo".to_string()],
-        ..Default::default()
-    };
-    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-
-    // Register some MCP tools in the kernel.
-    {
-        let mut tools = kernel.tools_ref().lock().unwrap();
-        tools.push(librefang_types::tool::ToolDefinition {
-            name: "mcp_foo_do_thing".to_string(),
-            description: String::new(),
-            input_schema: serde_json::json!({}),
-        });
-    }
-    kernel
-        .mcp
-        .mcp_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    let mcp_tools: Vec<_> = kernel
-        .available_tools(agent_id)
-        .iter()
-        .filter(|t| t.name.starts_with("mcp_"))
-        .map(|t| t.name.clone())
-        .collect();
-
-    assert!(
-        mcp_tools.is_empty(),
-        "mcp_disabled=true must produce zero MCP tools; got: {mcp_tools:?}"
-    );
-
-    kernel.shutdown();
-}
-
-#[test]
-fn mcp_disabled_false_preserves_mcp_tools() {
-    // Regression lock: default manifest (mcp_disabled = false) still gets MCP tools.
-    let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path().join("librefang-mcp-enabled-test");
-    std::fs::create_dir_all(home.join("data")).unwrap();
-    let cfg = KernelConfig {
-        home_dir: home.clone(),
-        data_dir: home.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
-
-    let manifest = AgentManifest {
-        name: "with-mcp".to_string(),
-        description: "agent with mcp enabled".to_string(),
-        author: "test".to_string(),
-        module: "builtin:chat".to_string(),
-        mcp_disabled: false,
-        ..Default::default()
-    };
-    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-
-    {
-        let mut tools = kernel.tools_ref().lock().unwrap();
-        tools.push(librefang_types::tool::ToolDefinition {
-            name: "mcp_bar_action".to_string(),
-            description: String::new(),
-            input_schema: serde_json::json!({}),
-        });
-    }
-    kernel
-        .mcp
-        .mcp_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    let mcp_tools: Vec<_> = kernel
-        .available_tools(agent_id)
-        .iter()
-        .filter(|t| t.name.starts_with("mcp_"))
-        .map(|t| t.name.clone())
-        .collect();
-
-    assert!(
-        !mcp_tools.is_empty(),
-        "mcp_disabled=false must not suppress MCP tools"
-    );
-
-    kernel.shutdown();
-}
-
-#[test]
-fn mcp_disabled_hot_reload_takes_effect_without_respawn() {
-    // After toggling mcp_disabled from false → true in a live manifest,
-    // the next available_tools() call must return zero MCP tools — no
-    // agent respawn required. This locks in the "hot-reload, no respawn"
-    // contract documented on AgentManifest::mcp_disabled.
-    let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path().join("librefang-mcp-hotreload-test");
-    std::fs::create_dir_all(home.join("data")).unwrap();
-    let cfg = KernelConfig {
-        home_dir: home.clone(),
-        data_dir: home.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
-
-    // Start with MCP enabled.
-    let manifest = AgentManifest {
-        name: "hot-reload-mcp".to_string(),
-        description: "agent for mcp_disabled hot-reload test".to_string(),
-        author: "test".to_string(),
-        module: "builtin:chat".to_string(),
-        mcp_disabled: false,
-        ..Default::default()
-    };
-    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-
-    // Register an MCP tool.
-    {
-        let mut tools = kernel.tools_ref().lock().unwrap();
-        tools.push(librefang_types::tool::ToolDefinition {
-            name: "mcp_svc_do_thing".to_string(),
-            description: String::new(),
-            input_schema: serde_json::json!({}),
-        });
-    }
-    kernel
-        .mcp
-        .mcp_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    // Before toggle: MCP tools must be visible.
-    let before: Vec<_> = kernel
-        .available_tools(agent_id)
-        .iter()
-        .filter(|t| t.name.starts_with("mcp_"))
-        .map(|t| t.name.clone())
-        .collect();
-    assert!(
-        !before.is_empty(),
-        "mcp_disabled=false should expose MCP tools before hot-reload; got: {before:?}"
-    );
-
-    // Hot-reload: update the manifest in-place to set mcp_disabled = true,
-    // then evict the per-agent tools cache entry. This replicates what
-    // reload_agent_from_disk does (replace_manifest + tools.remove), which
-    // is the mechanism by which toggling mcp_disabled in agent.toml at
-    // runtime takes effect on the next available_tools() call.
-    {
-        let mut updated = kernel
-            .agents
-            .registry
-            .get(agent_id)
-            .expect("agent must exist")
-            .manifest
-            .clone();
-        updated.mcp_disabled = true;
-        kernel
-            .agents
-            .registry
-            .replace_manifest(agent_id, updated)
-            .expect("replace_manifest must succeed");
-        // Evict the cached tool list so available_tools() re-reads the
-        // manifest. reload_agent_from_disk does this at agent_state.rs:309.
-        kernel.prompt_metadata_cache.tools.remove(&agent_id);
-    }
-
-    // After toggle: next available_tools() call must return zero MCP tools.
-    let after: Vec<_> = kernel
-        .available_tools(agent_id)
-        .iter()
-        .filter(|t| t.name.starts_with("mcp_"))
-        .map(|t| t.name.clone())
-        .collect();
-    assert!(
-        after.is_empty(),
-        "mcp_disabled=true after hot-reload must suppress MCP tools; got: {after:?}"
-    );
-
-    kernel.shutdown();
-}
-
-#[test]
-fn mcp_disabled_produces_empty_mcp_summary() {
-    // When mcp_disabled = true, the call sites gate build_mcp_summary behind
-    // `mcp_tool_count > 0 && !manifest.mcp_disabled`, so the summary is always
-    // String::new() (""). This test exercises that gate logic directly: with
-    // mcp_disabled = true, mcp_summary must be "" regardless of which MCP
-    // tools are registered or what insertion order they arrived in. Extends
-    // mcp_summary_is_byte_identical_across_input_orders to the disabled path.
-    let configured = vec![
-        "filesystem".to_string(),
-        "github".to_string(),
-        "weather".to_string(),
-    ];
-    let order_a = vec![
-        "mcp_filesystem_read_file".to_string(),
-        "mcp_github_create_issue".to_string(),
-        "mcp_weather_forecast".to_string(),
-    ];
-    let order_b = vec![
-        "mcp_weather_forecast".to_string(),
-        "mcp_filesystem_read_file".to_string(),
-        "mcp_github_create_issue".to_string(),
-    ];
-    let allowlist: Vec<String> = Vec::new();
-
-    // Helper that mirrors the call-site gate exactly:
-    //   `if mcp_tool_count > 0 && !mcp_disabled { build_mcp_summary(...) } else { "" }`
-    let gate = |tools: &[String], mcp_disabled: bool| -> String {
-        let mcp_tool_count = tools.len();
-        if mcp_tool_count > 0 && !mcp_disabled {
-            super::render_mcp_summary(tools, &configured, &allowlist)
-        } else {
-            String::new()
-        }
-    };
-
-    // With mcp_disabled = true, both orderings must produce "".
-    let disabled_a = gate(&order_a, true);
-    let disabled_b = gate(&order_b, true);
-    assert_eq!(
-        disabled_a, "",
-        "mcp_disabled=true must produce empty summary (order_a)"
-    );
-    assert_eq!(
-        disabled_b, "",
-        "mcp_disabled=true must produce empty summary (order_b)"
-    );
-    assert_eq!(
-        disabled_a, disabled_b,
-        "mcp_disabled=true summary must be identical regardless of insertion order"
-    );
-
-    // Sanity: with mcp_disabled = false, both orderings produce non-empty
-    // summaries that are byte-identical (the existing determinism contract).
-    let enabled_a = gate(&order_a, false);
-    let enabled_b = gate(&order_b, false);
-    assert!(
-        !enabled_a.is_empty(),
-        "mcp_disabled=false must produce a non-empty summary"
-    );
-    assert_eq!(
-        enabled_a, enabled_b,
-        "mcp_disabled=false summary must be byte-identical across insertion orders"
-    );
 }
 
 // ─── resolve_dispatch_session_id ──────────────────────────────────────────
@@ -6539,371 +5601,6 @@ fn session_mode_persistent_plus_cap_two_is_clamped_preventing_parallel_fires() {
     kernel.shutdown();
 }
 
-// ─── end-to-end parallel-firing concurrency-cap tests ────────────────────────
-//
-// The #3755 tests above check the *resolver* math (`available_permits()`) and
-// prove that a third `try_acquire_owned()` fails once a lane/per-agent
-// semaphore is exhausted. None of them actually fire N tasks at once and
-// observe the real peak in-flight count under load — they hold permits with
-// `try_acquire` and never spawn contending work.
-//
-// These tests close that gap. Each spawns N tasks that replicate the exact
-// acquire-then-work shape of the production trigger dispatcher
-// (`triggers_and_workflow.rs`): take the global `Lane::Trigger` permit, then
-// (agent path) the per-agent permit, then run a body that increments a shared
-// in-flight counter, records the peak, sleeps to create real overlap, and
-// decrements on drop. We then assert `peak <= cap`.
-//
-// We exercise the kernel's *real* semaphores — `kernel.workflows.command_queue`
-// (the same field the dispatcher reads at triggers_and_workflow.rs:357) and
-// `kernel.agent_concurrency_for(aid)` — rather than a standalone semaphore, so
-// a regression in how the kernel sizes either one is caught.
-//
-// What these tests do NOT cover: the full `send_message_full` LLM round-trip.
-// The production dispatcher executes triggers from a *single* event
-// sequentially inside one spawned task (bug #3841 fix), so genuine parallelism
-// across the lane only arises from independent events / workflow re-spawns,
-// neither of which can be driven without real LLM wiring. These tests model
-// the enforcement primitive the dispatcher relies on, which is where the cap
-// is actually held.
-
-/// RAII in-flight tracker: increments a live counter on construction, updates a
-/// monotonic peak, and decrements on drop. Sampling the peak this way is robust
-/// to scheduler jitter — every concurrent body that is simultaneously alive is
-/// counted, so the recorded peak is the true maximum overlap the semaphore
-/// allowed, not an inference from wall-clock time.
-struct InFlightGuard {
-    live: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl InFlightGuard {
-    fn enter(
-        live: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        peak: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) -> Self {
-        use std::sync::atomic::Ordering;
-        // fetch_add returns the value *before* the add, so the new live count
-        // is +1.
-        let now = live.fetch_add(1, Ordering::SeqCst) + 1;
-        // Monotonic max-update; SeqCst keeps the peak coherent with `live`.
-        // The peak is sampled here on entry — the guard only needs to hold
-        // `live` so it can decrement on drop.
-        peak.fetch_max(now, Ordering::SeqCst);
-        Self {
-            live: std::sync::Arc::clone(live),
-        }
-    }
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-/// E2E: the global `Lane::Trigger` semaphore must cap total in-flight trigger
-/// dispatches kernel-wide. Boot a kernel with `trigger_lane = 2`, fire 10
-/// tasks that each acquire the lane permit then hold it for 40 ms, and assert
-/// the sampled peak overlap never exceeds 2.
-///
-/// This is the behavioural counterpart to
-/// `trigger_lane_global_semaphore_limits_total_concurrency` (#3755), which only
-/// proves a third `try_acquire` fails — it never spawns 10 contending tasks and
-/// measures the real peak.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn e2e_trigger_lane_global_cap_holds_under_parallel_fires() {
-    use librefang_runtime::command_lane::Lane;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("e2e-trigger-lane-cap");
-    std::fs::create_dir_all(&home_dir).unwrap();
-    let mut config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    config.queue.concurrency.trigger_lane = 2;
-    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
-
-    // Precondition: the kernel sized its lane semaphore from config.
-    let lane_sem = kernel
-        .workflows
-        .command_queue
-        .semaphore_for_lane(Lane::Trigger);
-    assert_eq!(
-        lane_sem.available_permits(),
-        2,
-        "kernel must size the trigger lane from queue.concurrency.trigger_lane"
-    );
-
-    const FIRES: usize = 10;
-    let live = Arc::new(AtomicUsize::new(0));
-    let peak = Arc::new(AtomicUsize::new(0));
-    let completed = Arc::new(AtomicUsize::new(0));
-
-    let mut handles = Vec::with_capacity(FIRES);
-    for _ in 0..FIRES {
-        let k = Arc::clone(&kernel);
-        let live = Arc::clone(&live);
-        let peak = Arc::clone(&peak);
-        let completed = Arc::clone(&completed);
-        handles.push(tokio::spawn(async move {
-            // Mirror the dispatcher: acquire the global Lane::Trigger permit
-            // before doing any work (triggers_and_workflow.rs step (1)).
-            let sem = k.workflows.command_queue.semaphore_for_lane(Lane::Trigger);
-            let _permit = sem
-                .acquire_owned()
-                .await
-                .expect("trigger lane must not be closed mid-test");
-            let _guard = InFlightGuard::enter(&live, &peak);
-            // Hold the permit long enough that all 10 tasks are scheduled and
-            // contending — so if the cap were broken, peak would exceed 2.
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            completed.fetch_add(1, Ordering::SeqCst);
-        }));
-    }
-    for h in handles {
-        h.await.expect("fire task panicked");
-    }
-
-    assert_eq!(
-        completed.load(Ordering::SeqCst),
-        FIRES,
-        "every fire must run to completion"
-    );
-    assert_eq!(
-        live.load(Ordering::SeqCst),
-        0,
-        "all in-flight permits must be released after the test"
-    );
-    let observed_peak = peak.load(Ordering::SeqCst);
-    assert!(
-        observed_peak >= 1,
-        "at least one fire must have run (sanity: peak={observed_peak})"
-    );
-    assert!(
-        observed_peak <= 2,
-        "global Lane::Trigger cap=2 must hold under {FIRES} parallel fires; \
-         observed peak in-flight = {observed_peak}. If this exceeds 2, the \
-         dispatcher's Lane::Trigger acquire (triggers_and_workflow.rs step 1) \
-         has stopped gating concurrency."
-    );
-
-    Arc::try_unwrap(kernel).ok().unwrap().shutdown();
-}
-
-/// E2E: the per-agent semaphore (`max_concurrent_invocations`) caps how many of
-/// ONE agent's fires run in parallel, independently of the global lane. Use a
-/// `session_mode = "new"` agent with cap = 2 and a roomy global lane (8), fire
-/// 10 tasks that each take the per-agent permit, and assert peak <= 2.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn e2e_per_agent_cap_holds_under_parallel_fires() {
-    use librefang_types::agent::SessionMode;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    // default trigger_lane = 8, well above the per-agent cap so the per-agent
-    // semaphore is the binding constraint under test.
-    let (kernel, _dir) = minimal_kernel("e2e-per-agent-cap");
-    let aid = kernel
-        .spawn_agent_inner(
-            concurrency_manifest("e2e-per-agent-agent", SessionMode::New, Some(2)),
-            None,
-            None,
-            None,
-        )
-        .expect("agent spawns");
-    assert_eq!(
-        kernel.agent_concurrency_for(aid).available_permits(),
-        2,
-        "precondition: New + cap=2 resolves to a 2-permit semaphore"
-    );
-
-    let kernel = Arc::new(kernel);
-    const FIRES: usize = 10;
-    let live = Arc::new(AtomicUsize::new(0));
-    let peak = Arc::new(AtomicUsize::new(0));
-
-    let mut handles = Vec::with_capacity(FIRES);
-    for _ in 0..FIRES {
-        let k = Arc::clone(&kernel);
-        let live = Arc::clone(&live);
-        let peak = Arc::clone(&peak);
-        handles.push(tokio::spawn(async move {
-            // Mirror the dispatcher's per-agent acquire (step 2). The cached
-            // Arc means every fire contends on the SAME semaphore.
-            let sem = k.agent_concurrency_for(aid);
-            let _permit = sem
-                .acquire_owned()
-                .await
-                .expect("per-agent semaphore must not be closed mid-test");
-            let _guard = InFlightGuard::enter(&live, &peak);
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        }));
-    }
-    for h in handles {
-        h.await.expect("fire task panicked");
-    }
-
-    assert_eq!(live.load(Ordering::SeqCst), 0, "all permits released");
-    let observed_peak = peak.load(Ordering::SeqCst);
-    assert!(
-        (1..=2).contains(&observed_peak),
-        "per-agent cap=2 must hold under {FIRES} parallel fires; observed peak \
-         in-flight = {observed_peak}"
-    );
-
-    Arc::try_unwrap(kernel).ok().unwrap().shutdown();
-}
-
-/// E2E: a `session_mode = "persistent"` agent with `max_concurrent_invocations
-/// = 4` is auto-clamped to 1 by the resolver (parallel writes to one session's
-/// history are undefined). Firing 10 tasks must therefore fully serialise:
-/// peak in-flight == 1.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn e2e_persistent_plus_cap_gt_one_serialises_under_parallel_fires() {
-    use librefang_types::agent::SessionMode;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let (kernel, _dir) = minimal_kernel("e2e-persistent-clamp");
-    let aid = kernel
-        .spawn_agent_inner(
-            concurrency_manifest("e2e-persistent-agent", SessionMode::Persistent, Some(4)),
-            None,
-            None,
-            None,
-        )
-        .expect("agent spawns");
-    assert_eq!(
-        kernel.agent_concurrency_for(aid).available_permits(),
-        1,
-        "precondition: Persistent + cap=4 must clamp to 1 permit"
-    );
-
-    let kernel = Arc::new(kernel);
-    const FIRES: usize = 10;
-    let live = Arc::new(AtomicUsize::new(0));
-    let peak = Arc::new(AtomicUsize::new(0));
-
-    let mut handles = Vec::with_capacity(FIRES);
-    for _ in 0..FIRES {
-        let k = Arc::clone(&kernel);
-        let live = Arc::clone(&live);
-        let peak = Arc::clone(&peak);
-        handles.push(tokio::spawn(async move {
-            let sem = k.agent_concurrency_for(aid);
-            let _permit = sem
-                .acquire_owned()
-                .await
-                .expect("clamped semaphore must not be closed mid-test");
-            let _guard = InFlightGuard::enter(&live, &peak);
-            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
-        }));
-    }
-    for h in handles {
-        h.await.expect("fire task panicked");
-    }
-
-    assert_eq!(live.load(Ordering::SeqCst), 0, "all permits released");
-    assert_eq!(
-        peak.load(Ordering::SeqCst),
-        1,
-        "Persistent + cap>1 is clamped to 1; {FIRES} parallel fires must \
-         serialise (peak in-flight must be exactly 1). A peak > 1 means the \
-         clamp in agent_concurrency_for stopped enforcing single-writer \
-         access to the persistent session's history."
-    );
-
-    Arc::try_unwrap(kernel).ok().unwrap().shutdown();
-}
-
-/// E2E: the global lane and per-agent caps compose. With `trigger_lane = 4` and
-/// a per-agent cap = 2, firing 10 tasks for the SAME agent must be bounded by
-/// the *tighter* of the two (the per-agent cap = 2), since each fire holds both
-/// permits for the duration of its work — exactly as the dispatcher does
-/// (lane permit, then per-agent permit, both held across the body).
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn e2e_layered_caps_compose_to_tighter_bound() {
-    use librefang_runtime::command_lane::Lane;
-    use librefang_types::agent::SessionMode;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("e2e-layered-caps");
-    std::fs::create_dir_all(&home_dir).unwrap();
-    let mut config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    config.queue.concurrency.trigger_lane = 4;
-    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
-
-    let aid = kernel
-        .spawn_agent_inner(
-            concurrency_manifest("e2e-layered-agent", SessionMode::New, Some(2)),
-            None,
-            None,
-            None,
-        )
-        .expect("agent spawns");
-    assert_eq!(
-        kernel
-            .workflows
-            .command_queue
-            .semaphore_for_lane(Lane::Trigger)
-            .available_permits(),
-        4,
-        "precondition: lane cap = 4"
-    );
-    assert_eq!(
-        kernel.agent_concurrency_for(aid).available_permits(),
-        2,
-        "precondition: per-agent cap = 2"
-    );
-
-    const FIRES: usize = 10;
-    let live = Arc::new(AtomicUsize::new(0));
-    let peak = Arc::new(AtomicUsize::new(0));
-
-    let mut handles = Vec::with_capacity(FIRES);
-    for _ in 0..FIRES {
-        let k = Arc::clone(&kernel);
-        let live = Arc::clone(&live);
-        let peak = Arc::clone(&peak);
-        handles.push(tokio::spawn(async move {
-            // Acquire in the dispatcher's order: lane permit first, then the
-            // per-agent permit, both held across the body.
-            let lane_sem = k.workflows.command_queue.semaphore_for_lane(Lane::Trigger);
-            let _lane_permit = lane_sem
-                .acquire_owned()
-                .await
-                .expect("lane not closed mid-test");
-            let agent_sem = k.agent_concurrency_for(aid);
-            let _agent_permit = agent_sem
-                .acquire_owned()
-                .await
-                .expect("per-agent sem not closed mid-test");
-            let _guard = InFlightGuard::enter(&live, &peak);
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        }));
-    }
-    for h in handles {
-        h.await.expect("fire task panicked");
-    }
-
-    assert_eq!(live.load(Ordering::SeqCst), 0, "all permits released");
-    let observed_peak = peak.load(Ordering::SeqCst);
-    assert!(
-        (1..=2).contains(&observed_peak),
-        "layered caps (lane=4, per-agent=2) must bound a single agent's fires \
-         to the tighter per-agent cap=2; observed peak in-flight = \
-         {observed_peak}"
-    );
-
-    Arc::try_unwrap(kernel).ok().unwrap().shutdown();
-}
-
 // ─── spawn_agent error path unit tests ──────────────────────────────────────────
 // These tests verify error handling without requiring an LLM API key.
 // See issue #3816: kernel/mod.rs has zero unit tests.
@@ -7080,14 +5777,12 @@ async fn injection_senders_two_sessions_one_agent_do_not_collide() {
     // Both senders must be live concurrently (second insert used to overwrite the first).
     assert!(
         kernel
-            .events
             .injection_senders
             .contains_key(&(agent_id, session_a)),
         "session A sender lost under (agent, session) keying"
     );
     assert!(
         kernel
-            .events
             .injection_senders
             .contains_key(&(agent_id, session_b)),
         "session B sender lost under (agent, session) keying"
@@ -7136,11 +5831,9 @@ async fn injection_teardown_only_removes_target_session() {
     // Tearing down session A must NOT clear session B's sender.
     kernel.teardown_injection_channel(agent_id, session_a);
     assert!(!kernel
-        .events
         .injection_senders
         .contains_key(&(agent_id, session_a)));
     assert!(kernel
-        .events
         .injection_senders
         .contains_key(&(agent_id, session_b)));
 
@@ -7382,104 +6075,6 @@ fn resolve_cron_max_tokens_nonzero_passthrough() {
     assert_eq!(resolve_cron_max_tokens(Some(1)), Some(1));
 }
 
-// -----------------------------------------------------------------------
-// #3693 — cron session warn-threshold resolver
-// -----------------------------------------------------------------------
-
-#[test]
-fn resolve_cron_warn_threshold_disabled_when_no_fraction() {
-    // No fraction → no warn even if budget is set.
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(100_000), Some(200_000), None),
-        None
-    );
-}
-
-#[test]
-fn resolve_cron_warn_threshold_disabled_when_no_budget() {
-    // No max_tokens, no fallback → no budget → skip warn.
-    assert_eq!(resolve_cron_warn_threshold(None, None, Some(0.8)), None);
-}
-
-#[test]
-fn resolve_cron_warn_threshold_uses_max_tokens_when_set() {
-    // Explicit cap wins over fallback.
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(10_000), Some(200_000), Some(0.8)),
-        Some(8_000)
-    );
-}
-
-#[test]
-fn resolve_cron_warn_threshold_falls_back_to_total_tokens() {
-    // No explicit cap → fall back to warn_total_tokens.
-    assert_eq!(
-        resolve_cron_warn_threshold(None, Some(200_000), Some(0.5)),
-        Some(100_000)
-    );
-}
-
-#[test]
-fn resolve_cron_warn_threshold_rejects_out_of_range_fraction() {
-    // Negative, zero, > 1.0, NaN, Inf must all disable warn (silent).
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(10_000), None, Some(-0.1)),
-        None
-    );
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(10_000), None, Some(0.0)),
-        None
-    );
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(10_000), None, Some(1.5)),
-        None
-    );
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(10_000), None, Some(f64::NAN)),
-        None
-    );
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(10_000), None, Some(f64::INFINITY)),
-        None
-    );
-}
-
-#[test]
-fn resolve_cron_warn_threshold_at_full_fraction() {
-    // 1.0 = warn at budget; threshold equals budget exactly.
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(50_000), None, Some(1.0)),
-        Some(50_000)
-    );
-}
-
-#[test]
-fn resolve_cron_warn_threshold_ceils_partial_token() {
-    // 12345 * 0.8 = 9876.0 — exact, no rounding involved.
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(12_345), None, Some(0.8)),
-        Some(9_876)
-    );
-    // 100 * 0.83 = 83.0 → ceils to 83.
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(100), None, Some(0.83)),
-        Some(83)
-    );
-    // 10 * 0.85 = 8.5 → ceils to 9 so the warn trips before the cap.
-    assert_eq!(
-        resolve_cron_warn_threshold(Some(10), None, Some(0.85)),
-        Some(9)
-    );
-}
-
-#[test]
-fn resolve_cron_warn_threshold_zero_budget_disabled() {
-    // budget=0 must not produce a warn (would warn on every fire).
-    assert_eq!(resolve_cron_warn_threshold(Some(0), None, Some(0.8)), None);
-    // Same with fallback explicitly zero (operator override).
-    assert_eq!(resolve_cron_warn_threshold(None, Some(0), Some(0.8)), None);
-}
-
 /// Regression for #3533: `spawn_agent` must reject manifests whose
 /// `module` string escapes the LibreFang home dir. The pure-function
 /// `validate_module_string` is unit-tested in librefang-runtime, but
@@ -7651,14 +6246,11 @@ async fn config_reload_lock_not_held_across_long_await_3564() {
 ///      coherent across writes that go through the same handle.
 ///
 /// Serialised because `LIBREFANG_VAULT_KEY` and `LIBREFANG_VAULT_NO_KEYRING`
-/// are process-global. Uses the named `serial(librefang_vault_key)` group
-/// shared with every other vault-key-touching test in this crate
-/// (`mcp_oauth_provider::tests::*` and
-/// `install_integration_writes_through_cached_vault_handle` below) so
-/// concurrent env-var mutation never races init's resolve → save →
-/// verify sequence.
+/// are process-global; `mcp_oauth_provider` tests in this same crate also
+/// poke `LIBREFANG_VAULT_KEY` without serialisation, so we use the
+/// unnamed `serial` group to gate against any concurrent env-var mutation.
 #[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial(librefang_vault_key)]
+#[serial_test::serial]
 async fn vault_cache_reuses_unlocked_handle_across_calls() {
     // 44-char standard base64 of 32 deterministic bytes — produced offline
     // so this test does not pull a new `base64` dev-dep just to construct
@@ -7726,127 +6318,6 @@ async fn vault_cache_reuses_unlocked_handle_across_calls() {
     kernel.shutdown();
 }
 
-/// Regression test for the kernel install façade introduced in #3295: the
-/// HTTP install path historically opened `vault.enc` and ran the Argon2id
-/// KDF on every request. After the refactor, `Kernel::install_integration`
-/// rides the cached `vault_handle()` so the unlock cost is paid once per
-/// kernel lifetime.
-///
-/// We assert two things at the seam between resolver and cached vault:
-///
-///   1. Credentials supplied to `install_integration` are written into the
-///      kernel's cached vault — `vault_get` reads them back immediately
-///      with no fresh `unlock()` call. This proves the resolver's
-///      `with_vault_handle` constructor really does share storage with the
-///      kernel cache (rather than holding a stale clone).
-///   2. The `vault_handle()` Arc returned before the install is the same
-///      allocation as the one returned after — the install path must not
-///      poison or rebuild the cache slot.
-///
-/// Same `serial_test::serial(librefang_vault_key)` group as every other
-/// vault-key-touching test in this crate because `LIBREFANG_VAULT_KEY`
-/// is process-global.
-#[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial(librefang_vault_key)]
-async fn install_integration_writes_through_cached_vault_handle() {
-    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
-    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
-    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
-
-    let dir = tempfile::tempdir().unwrap();
-    let home_dir = dir.path().to_path_buf();
-    std::fs::create_dir_all(home_dir.join("data")).unwrap();
-
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-    // Drop the catalog fixture AFTER boot. `LibreFangKernel::boot_with_config`
-    // runs `librefang_runtime::registry_sync::sync_registry`, which calls
-    // `sync_flat_files` against `home_dir/mcp/catalog/`. That helper deletes
-    // any local TOML whose basename does not exist in the upstream registry
-    // mirror — a fixture written *before* boot gets nuked the moment CI has
-    // network access (see registry_sync.rs:458-475 "remove orphans" loop).
-    //
-    // Writing the fixture post-boot is the canonical path the test wants to
-    // exercise anyway: a user manually drops a custom template into
-    // ~/.librefang/mcp/catalog/, then triggers an install. The reload-on-
-    // install behaviour added in #4788 is what makes that path work without
-    // a daemon restart, and that is precisely what this test pins.
-    let catalog_dir = home_dir.join("mcp").join("catalog");
-    std::fs::create_dir_all(&catalog_dir).unwrap();
-    std::fs::write(
-        catalog_dir.join("test-template.toml"),
-        r#"
-id = "test-template"
-name = "Test Template"
-description = "Fixture for install_integration vault-write seam test"
-category = "devtools"
-
-[transport]
-type = "stdio"
-command = "echo"
-args = ["hello"]
-
-[[required_env]]
-name = "TEST_TEMPLATE_TOKEN"
-label = "Test Token"
-help = "anything goes"
-is_secret = true
-"#,
-    )
-    .unwrap();
-
-    // Snapshot the cached handle BEFORE install so we can assert the install
-    // path doesn't replace the cache slot.
-    let pre_handle = kernel
-        .vault_handle()
-        .expect("vault_handle should succeed before install");
-
-    let mut provided = std::collections::HashMap::new();
-    provided.insert(
-        "TEST_TEMPLATE_TOKEN".to_string(),
-        "shibboleth-42".to_string(),
-    );
-
-    let result = kernel
-        .install_integration("test-template", &provided)
-        .expect("install should succeed when all required creds are provided");
-
-    // Status must be Ready — the resolver saw the credential we just stored.
-    assert_eq!(
-        result.status,
-        librefang_types::mcp::McpStatus::Ready,
-        "install should report Ready when required cred was supplied",
-    );
-
-    // The credential lives in the kernel's cached vault — `vault_get` reads
-    // it without re-unlocking. This is the seam the resolver's
-    // `with_vault_handle` constructor exists to guarantee.
-    assert_eq!(
-        kernel.vault_get("TEST_TEMPLATE_TOKEN").as_deref(),
-        Some("shibboleth-42"),
-        "install_integration must write credentials through the cached \
-         vault handle, so kernel.vault_get sees them immediately",
-    );
-
-    // Same Arc before and after — install path didn't poison the cache.
-    let post_handle = kernel
-        .vault_handle()
-        .expect("vault_handle should succeed after install");
-    assert!(
-        std::sync::Arc::ptr_eq(&pre_handle, &post_handle),
-        "install_integration must reuse the cached vault handle; \
-         rebuilding it would silently re-introduce the per-request \
-         Argon2id KDF cost the façade exists to avoid",
-    );
-
-    kernel.shutdown();
-}
-
 // ── /api/agents/{id}/sessions `active` semantics (#4293) ────────────────────
 //
 // `list_agent_sessions` historically marked `active = (sid == registry pointer)`.
@@ -7863,26 +6334,19 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
     // Seed three persisted sessions for this agent.
     let s1 = kernel
         .memory
-        .substrate
         .create_session_with_label(agent_id, Some("one"))
         .unwrap();
     let s2 = kernel
         .memory
-        .substrate
         .create_session_with_label(agent_id, Some("two"))
         .unwrap();
     let s3 = kernel
         .memory
-        .substrate
         .create_session_with_label(agent_id, Some("three"))
         .unwrap();
 
     // Point the registry pointer at s2 — the legacy "active" answer.
-    kernel
-        .agents
-        .registry
-        .update_session_id(agent_id, s2.id)
-        .unwrap();
+    kernel.registry.update_session_id(agent_id, s2.id).unwrap();
 
     // Mark s1 and s3 as in-flight via running_tasks (not s2).
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -7892,7 +6356,7 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
     let h3 = rt.spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
-    kernel.agents.running_tasks.insert(
+    kernel.running_tasks.insert(
         (agent_id, s1.id),
         RunningTask {
             abort: h1.abort_handle(),
@@ -7900,7 +6364,7 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
             task_id: uuid::Uuid::new_v4(),
         },
     );
-    kernel.agents.running_tasks.insert(
+    kernel.running_tasks.insert(
         (agent_id, s3.id),
         RunningTask {
             abort: h3.abort_handle(),
@@ -7963,7 +6427,6 @@ fn list_agent_sessions_idle_agent_marks_all_inactive() {
     for label in ["a", "b", "c", "d", "e"] {
         kernel
             .memory
-            .substrate
             .create_session_with_label(agent_id, Some(label))
             .unwrap();
     }
@@ -7987,20 +6450,15 @@ fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
 
     let s = kernel
         .memory
-        .substrate
         .create_session_with_label(agent_id, Some("only"))
         .unwrap();
-    kernel
-        .agents
-        .registry
-        .update_session_id(agent_id, s.id)
-        .unwrap();
+    kernel.registry.update_session_id(agent_id, s.id).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let h = rt.spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
-    kernel.agents.running_tasks.insert(
+    kernel.running_tasks.insert(
         (agent_id, s.id),
         RunningTask {
             abort: h.abort_handle(),
@@ -8029,7 +6487,7 @@ fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
 /// state), and the final stored value reflects the writer's mutation.
 ///
 /// This pins the contract for the LLM hot path, which calls
-/// `kernel.current_budget()` on every turn for budget enforcement and
+/// `kernel.budget_config()` on every turn for budget enforcement and
 /// must never park a tokio worker on a blocking lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
@@ -8053,7 +6511,7 @@ async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
         let k = kernel.clone();
         readers.push(tokio::spawn(async move {
             for _ in 0..50 {
-                let snap = k.current_budget();
+                let snap = k.budget_config();
                 // Only ever the pre-update or post-update sentinel, never
                 // a torn / partial value.
                 let v = snap.max_hourly_usd;
@@ -8071,7 +6529,7 @@ async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
     }
 
     // After the writer completes, every subsequent read must see 9.0.
-    assert_eq!(kernel.current_budget().max_hourly_usd, 9.0);
+    assert_eq!(kernel.budget_config().max_hourly_usd, 9.0);
 
     kernel.shutdown();
 }
@@ -8118,7 +6576,7 @@ async fn budget_config_concurrent_writers_no_lost_update() {
         h.await.expect("writer task panicked");
     }
 
-    let final_cfg = kernel.current_budget();
+    let final_cfg = kernel.budget_config();
     // Final values must each be from *some* writer (in their respective
     // hourly_target / daily_target ranges) — proves the rcu retry kept
     // each field converging to a writer-supplied value rather than
@@ -8136,1792 +6594,4 @@ async fn budget_config_concurrent_writers_no_lost_update() {
     );
 
     kernel.shutdown();
-}
-
-// ---------------------------------------------------------------------------
-// cron_compute_keep_count (#3693 Gap 4)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cron_compute_keep_count_message_cap_only() {
-    use librefang_types::message::Message;
-
-    // 10 messages, message cap = 4 → keep the newest 4.
-    let messages: Vec<Message> = (0..10).map(|i| Message::user(format!("msg {i}"))).collect();
-    let keep = cron_compute_keep_count(&messages, Some(4), None);
-    assert_eq!(keep, 4, "message cap should keep newest 4");
-
-    // Verify which messages survive: indices 6..10 (msg 6 through msg 9).
-    let kept: Vec<_> = messages[messages.len() - keep..].to_vec();
-    assert_eq!(kept[0].content.text_content(), "msg 6");
-    assert_eq!(kept[3].content.text_content(), "msg 9");
-}
-
-#[test]
-fn cron_compute_keep_count_token_cap_trims_front() {
-    use librefang_runtime::compactor::estimate_token_count;
-    use librefang_types::message::Message;
-
-    // 20 short messages; token estimate of the full set determines the budget.
-    let messages: Vec<Message> = (0..20)
-        .map(|i| Message::user(format!("message content number {:04}", i)))
-        .collect();
-
-    let total_est = estimate_token_count(&messages, None, None);
-    assert!(total_est > 0);
-
-    // Budget = ~half → should keep fewer than 20 messages.
-    let half_budget = (total_est / 2) as u64;
-    let keep = cron_compute_keep_count(&messages, None, Some(half_budget));
-    assert!(
-        keep < 20,
-        "token cap should drop some messages, keep={keep}"
-    );
-    assert!(keep > 0, "must keep at least 1 message");
-
-    // The kept tail must fit within budget.
-    let start = messages.len() - keep;
-    let tail_est = estimate_token_count(&messages[start..], None, None);
-    assert!(
-        tail_est <= half_budget as usize,
-        "kept tail ({tail_est}) must fit within budget ({half_budget})"
-    );
-}
-
-#[test]
-fn cron_compute_keep_count_message_cap_applied_before_token_cap() {
-    use librefang_runtime::compactor::estimate_token_count;
-    use librefang_types::message::Message;
-
-    // 10 messages; message cap = 5 narrows to 5 first, then token cap is
-    // applied to those 5. The result must be ≤ 5.
-    let messages: Vec<Message> = (0..10)
-        .map(|i| Message::user("x".repeat(200 + i * 10)))
-        .collect();
-
-    let after_msg = 5usize;
-    let tail_after_msg = &messages[messages.len() - after_msg..];
-    let est_5 = estimate_token_count(tail_after_msg, None, None);
-    // Set token budget to 70% of the 5-message estimate → must trim further.
-    let budget = (est_5 as f64 * 0.7) as u64;
-
-    let keep = cron_compute_keep_count(&messages, Some(after_msg), Some(budget));
-    assert!(
-        keep <= after_msg,
-        "keep ({keep}) should be ≤ message cap ({after_msg})"
-    );
-}
-
-#[test]
-fn cron_compute_keep_count_no_caps_returns_all() {
-    use librefang_types::message::Message;
-    let messages: Vec<Message> = (0..8).map(|i| Message::user(format!("m{i}"))).collect();
-    let keep = cron_compute_keep_count(&messages, None, None);
-    assert_eq!(keep, 8, "no caps → keep all");
-}
-
-#[test]
-fn cron_compute_keep_count_empty_messages() {
-    use librefang_types::message::Message;
-    let messages: Vec<Message> = vec![];
-    let keep = cron_compute_keep_count(&messages, Some(4), Some(1000));
-    assert_eq!(keep, 0, "empty slice → keep 0");
-}
-
-// L9 — boundary / degenerate edge cases for cron_compute_keep_count
-
-#[test]
-fn cron_compute_keep_count_max_messages_zero_treated_as_none() {
-    use librefang_types::message::Message;
-    // Some(0) is coerced to None by resolve_cron_max_messages → keep all.
-    // cron_compute_keep_count itself receives None in that case; test both.
-    let messages: Vec<Message> = (0..5).map(|i| Message::user(format!("m{i}"))).collect();
-    // Passing None directly (resolve_cron_max_messages(Some(0)) == None).
-    let keep = cron_compute_keep_count(&messages, None, None);
-    assert_eq!(keep, 5, "None caps → keep all");
-}
-
-#[test]
-fn cron_compute_keep_count_max_tokens_zero_treated_as_none() {
-    use librefang_types::message::Message;
-    // resolve_cron_max_tokens(Some(0)) == None; passing None directly.
-    let messages: Vec<Message> = (0..5).map(|i| Message::user(format!("m{i}"))).collect();
-    let keep = cron_compute_keep_count(&messages, None, None);
-    assert_eq!(keep, 5, "None token cap → keep all");
-}
-
-#[test]
-fn cron_compute_keep_count_max_tokens_u64_max_keeps_all() {
-    use librefang_types::message::Message;
-    // An absurdly large token cap should keep all messages.
-    let messages: Vec<Message> = (0..8).map(|i| Message::user(format!("m{i}"))).collect();
-    let keep = cron_compute_keep_count(&messages, None, Some(u64::MAX));
-    assert_eq!(keep, 8, "u64::MAX token cap → keep all");
-}
-
-#[test]
-fn cron_compute_keep_count_single_giant_message_returns_one_or_zero() {
-    use librefang_runtime::compactor::estimate_token_count;
-    use librefang_types::message::Message;
-    // A single very large message whose estimated token count exceeds the cap.
-    // The loop exits with keep=0 because even 1 message is over budget.
-    let big = Message::user("x".repeat(50_000));
-    let messages = vec![big];
-    let est = estimate_token_count(&messages, None, None) as u64;
-    assert!(est > 0, "sanity: large message has non-zero token estimate");
-
-    // Budget smaller than the single message → keep = 0.
-    let keep = cron_compute_keep_count(&messages, None, Some(est / 2));
-    assert_eq!(
-        keep, 0,
-        "single oversized message with tight budget → keep 0"
-    );
-
-    // Budget equal to or larger → keep = 1.
-    let keep2 = cron_compute_keep_count(&messages, None, Some(est));
-    assert_eq!(
-        keep2, 1,
-        "single message fitting the budget exactly → keep 1"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// cron_clamp_keep_recent (#3693 PR #4683 review feedback)
-//
-// Regression coverage for the cap-violation bug where SummarizeTrim used the
-// raw cron_session_compaction_keep_recent without considering the active size
-// cap. The clamp guarantees [summary] + tail ≤ keep_count.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cron_clamp_keep_recent_respects_cap() {
-    // keep_count = 5 ⇒ tail ≤ 4 (one slot reserved for the summary).
-    assert_eq!(cron_clamp_keep_recent(8, 5), 4);
-    assert_eq!(cron_clamp_keep_recent(4, 5), 4);
-    assert_eq!(cron_clamp_keep_recent(3, 5), 3);
-}
-
-#[test]
-fn cron_clamp_keep_recent_preserves_user_value_when_under_cap() {
-    // keep_count = 100, user wants 8 → 8 (no clamp needed).
-    assert_eq!(cron_clamp_keep_recent(8, 100), 8);
-}
-
-#[test]
-fn cron_clamp_keep_recent_floor_is_one() {
-    // keep_count = 1 → cap permits a single message; clamp floors at 1.
-    // try_summarize_trim will then short-circuit because tail_start ==
-    // messages.len() once keep_recent ≥ n; the kernel falls back to plain
-    // prune in that case — exercising the floor here is just defensive.
-    assert_eq!(cron_clamp_keep_recent(8, 1), 1);
-    assert_eq!(cron_clamp_keep_recent(0, 1), 1);
-}
-
-#[test]
-fn cron_clamp_keep_recent_keep_count_zero_floors_to_one() {
-    // keep_count = 0 (cap would empty the session) — saturating_sub stays
-    // at 0, the .max(1) floor pulls the result back to 1. The caller is
-    // responsible for noticing keep_count == 0 separately; this only
-    // guarantees we never return 0 to try_summarize_trim, which would
-    // make tail_start == messages.len() and skip summarization entirely.
-    assert_eq!(cron_clamp_keep_recent(8, 0), 1);
-}
-
-#[test]
-fn cron_clamp_keep_recent_zero_cfg_floors_to_one() {
-    // Defensive: even though resolve_cron_max_* coerce 0 to None upstream,
-    // the helper itself must never return 0 because try_summarize_trim
-    // treats tail_start == messages.len() as "nothing to summarize".
-    assert_eq!(cron_clamp_keep_recent(0, 5), 1);
-}
-
-#[test]
-fn cron_clamp_combined_with_compute_keep_count_invariant() {
-    // End-to-end invariant for the SummarizeTrim path: across realistic
-    // (n, max_messages, keep_recent_cfg) combos, the post-compaction size
-    // (1 summary + clamped tail) must always satisfy the cap that
-    // cron_compute_keep_count would have produced.
-    use librefang_types::message::Message;
-
-    // Only cases where the kernel actually enters SummarizeTrim
-    // (i.e. keep_count < n, so `mutated == true`) and the cap allows
-    // at least the [summary] + 1-msg-tail minimum (keep_count >= 2).
-    let cases = [
-        // (n, max_messages, keep_recent_cfg)
-        (20, Some(5), 8),  // user wants 8, cap allows 5 → tail = 4 → result = 5
-        (20, Some(10), 8), // user wants 8, cap allows 10 → tail = 8 → result = 9
-        (20, Some(2), 8),  // tight cap → tail = 1 → result = 2
-    ];
-
-    for (n, max_msgs, keep_recent_cfg) in cases {
-        let messages: Vec<Message> = (0..n).map(|i| Message::user(format!("m{i}"))).collect();
-        let keep_count = cron_compute_keep_count(&messages, max_msgs, None);
-        // Sanity: this case should be one that triggers compaction.
-        assert!(
-            keep_count < n && keep_count >= 2,
-            "test case precondition: keep_count={keep_count} must be in [2, n) for n={n}"
-        );
-
-        let tail = cron_clamp_keep_recent(keep_recent_cfg, keep_count);
-        let post_size = 1 + tail; // [summary] + tail
-
-        assert!(
-            post_size <= keep_count,
-            "case (n={n}, max_messages={max_msgs:?}, keep_recent_cfg={keep_recent_cfg}): \
-             post_size={post_size} must fit within keep_count={keep_count}"
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// cron_resolve_compaction_mode (#4683 review M1)
-//
-// Routing layer that protects SummarizeTrim from being run against caps so
-// tight that `[summary] + 1-msg-tail` would still violate them, which would
-// loop forever burning aux LLM calls without converging the session.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cron_resolve_compaction_mode_summarize_trim_with_keep_count_zero_routes_to_prune() {
-    use librefang_types::config::CronCompactionMode;
-    // keep_count = 0 happens when even the single newest message exceeds
-    // cron_session_max_tokens — Prune empties the session, which is the
-    // only meaningful action here.
-    assert_eq!(
-        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 0),
-        CronCompactionMode::Prune,
-    );
-}
-
-#[test]
-fn cron_resolve_compaction_mode_summarize_trim_with_keep_count_one_routes_to_prune() {
-    use librefang_types::config::CronCompactionMode;
-    // keep_count = 1 means cap permits exactly 1 message. SummarizeTrim
-    // would write [summary, tail_msg] = 2, violating the cap and
-    // triggering the same compaction on the next fire — the loop the
-    // bug describes.
-    assert_eq!(
-        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 1),
-        CronCompactionMode::Prune,
-    );
-}
-
-#[test]
-fn cron_resolve_compaction_mode_summarize_trim_at_threshold_keeps_summarize() {
-    use librefang_types::config::CronCompactionMode;
-    // keep_count = 2 is the smallest value that fits [summary] + 1-tail
-    // exactly. SummarizeTrim is allowed.
-    assert_eq!(
-        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 2),
-        CronCompactionMode::SummarizeTrim,
-    );
-}
-
-#[test]
-fn cron_resolve_compaction_mode_summarize_trim_with_normal_keep_count_unchanged() {
-    use librefang_types::config::CronCompactionMode;
-    // Typical case: cap allows plenty of room. No re-routing.
-    assert_eq!(
-        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 50),
-        CronCompactionMode::SummarizeTrim,
-    );
-}
-
-#[test]
-fn cron_resolve_compaction_mode_prune_is_never_re_routed() {
-    use librefang_types::config::CronCompactionMode;
-    // The router only re-routes SummarizeTrim → Prune. Configured Prune
-    // passes through unchanged at every keep_count (including 0).
-    for keep_count in [0usize, 1, 2, 8, 100] {
-        assert_eq!(
-            cron_resolve_compaction_mode(CronCompactionMode::Prune, keep_count),
-            CronCompactionMode::Prune,
-            "Prune must pass through unchanged at keep_count={keep_count}"
-        );
-    }
-}
-
-#[test]
-fn cron_resolve_compaction_mode_combined_with_compute_keep_count_tight_cap() {
-    // L2 / integration-shaped invariant: for caps so tight that the
-    // helper would compute keep_count < 2, SummarizeTrim must resolve
-    // to Prune so the kernel dispatches to apply_cron_prune (which
-    // shrinks deterministically) and not to try_summarize_trim (which
-    // would write 2 messages back and loop).
-    use librefang_types::config::CronCompactionMode;
-    use librefang_types::message::Message;
-
-    // 10 plain messages; max_messages = 1 → keep_count = 1.
-    let messages: Vec<Message> = (0..10).map(|i| Message::user(format!("m{i}"))).collect();
-    let keep_count = cron_compute_keep_count(&messages, Some(1), None);
-    assert_eq!(keep_count, 1, "max_messages=1 must produce keep_count=1");
-
-    let resolved = cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, keep_count);
-    assert_eq!(
-        resolved,
-        CronCompactionMode::Prune,
-        "tight cap (keep_count=1) must downgrade SummarizeTrim → Prune"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// try_summarize_trim direct unit tests (#3693 / PR #4683 review M1)
-//
-// `try_summarize_trim` is the file-private async helper that the cron tick
-// calls when SummarizeTrim mode is active. It is reachable from this child
-// test module because Rust gives child modules access to their parent's
-// private items, and we exploit that to test the helper's branches directly
-// rather than reconstruct them via `compact_messages` (the integration suite
-// in `tests/cron_compaction_test.rs` already covers that).
-//
-// What these tests pin down:
-//   - L2 fast-fail: empty model name returns None *without* calling the LLM
-//     driver (verified via a counting mock).
-//   - keep_recent ≥ messages.len() short-circuit returns None instead of
-//     handing an empty / consume-everything prefix to compact_messages.
-//   - Successful path produces `[summary_msg, …kept_tail]` with the kernel's
-//     wrapper format (`[Cron session summary — N messages compacted]\n\n…`).
-//   - LLM-failure path (used_fallback=true via a failing driver) is rejected
-//     by the `!used_fallback && !empty` guard inside try_summarize_trim and
-//     returns None — so the caller drops to plain prune.
-//   - adjust_split_for_tool_pair is reused so a ToolUse / ToolResult pair is
-//     never split across the summary / tail boundary.
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod try_summarize_trim_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use librefang_runtime::llm_driver::{
-        CompletionRequest, CompletionResponse, LlmDriver, LlmError,
-    };
-    use librefang_types::message::{
-        ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
-    };
-
-    /// Returns a canned non-empty summary string. `calls` counts how many
-    /// times `complete` is invoked so tests can assert the L2 fast-fail
-    /// short-circuits before reaching the driver.
-    struct CountingFakeDriver {
-        summary: String,
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl LlmDriver for CountingFakeDriver {
-        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CompletionResponse {
-                content: vec![ContentBlock::Text {
-                    text: self.summary.clone(),
-                    provider_metadata: None,
-                }],
-                stop_reason: StopReason::EndTurn,
-                tool_calls: vec![],
-                usage: TokenUsage {
-                    input_tokens: 50,
-                    output_tokens: 10,
-                    ..Default::default()
-                },
-                actual_provider: None,
-            })
-        }
-    }
-
-    /// Always errors. Forces `compact_messages` through stage-1 → stage-2 →
-    /// stage-3 placeholder so it returns Ok with `used_fallback=true`.
-    struct AlwaysFailingDriver;
-
-    #[async_trait]
-    impl LlmDriver for AlwaysFailingDriver {
-        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-            Err(LlmError::Http("connection refused".to_string()))
-        }
-    }
-
-    /// L2 fast-fail: empty model name must skip the LLM call entirely.
-    /// Holding the per-session mutex / cron_lane slot across a guaranteed-fail
-    /// LLM round-trip is exactly what the L2 patch was added to prevent, so
-    /// the regression check is "driver was never called".
-    #[tokio::test(flavor = "multi_thread")]
-    async fn try_summarize_trim_empty_model_short_circuits_without_calling_driver() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
-            summary: "should never appear".to_string(),
-            calls: calls.clone(),
-        });
-        let messages: Vec<Message> = (0..10)
-            .map(|i| Message::user(format!("turn {i}")))
-            .collect();
-
-        let out = super::try_summarize_trim(
-            &messages,
-            4,
-            driver,
-            "",
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await;
-
-        assert!(out.is_none(), "empty model name must short-circuit to None");
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
-            "L2 fast-fail must not invoke the LLM driver"
-        );
-    }
-
-    /// `keep_recent >= messages.len()` makes `tail_start == messages.len()`,
-    /// which means there is nothing to summarise. The function must return
-    /// None so the caller can decide whether to plain-prune or skip.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn try_summarize_trim_keep_recent_covers_everything_returns_none() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
-            summary: "should never appear".to_string(),
-            calls: calls.clone(),
-        });
-        let messages: Vec<Message> = (0..3).map(|i| Message::user(format!("turn {i}"))).collect();
-
-        // keep_recent = 5 > 3 messages → raw_tail_start = 0 (saturating_sub),
-        // adjust_split_for_tool_pair leaves it at 0, so we hit the
-        // "tail_start == 0" short-circuit branch.
-        let out = super::try_summarize_trim(
-            &messages,
-            5,
-            driver,
-            "test-model",
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await;
-
-        assert!(
-            out.is_none(),
-            "keep_recent >= len must short-circuit to None"
-        );
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
-            "no summary needed → driver must not be called"
-        );
-    }
-
-    /// Happy path: a working LLM produces a real summary and
-    /// try_summarize_trim returns `Some([summary_msg] + tail)` where the
-    /// summary message has the kernel's expected wrapper format.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn try_summarize_trim_successful_returns_summary_plus_tail() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
-            summary: "Older turns covered tasks A and B.".to_string(),
-            calls: calls.clone(),
-        });
-        let messages: Vec<Message> = (0..10)
-            .map(|i| Message::user(format!("turn {i}")))
-            .collect();
-        let keep_recent = 3usize;
-
-        let out = super::try_summarize_trim(
-            &messages,
-            keep_recent,
-            driver,
-            "test-model",
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await
-        .expect("a working driver with non-empty content must yield Some(_)");
-
-        assert!(
-            calls.load(Ordering::SeqCst) >= 1,
-            "driver must be called at least once"
-        );
-        assert_eq!(
-            out.len(),
-            1 + keep_recent,
-            "output must be [summary] + kept tail"
-        );
-
-        // First message is the synthetic summary with the kernel's wrapper.
-        let head_text = out[0].content.text_content();
-        assert!(
-            head_text.contains("[Cron session summary"),
-            "summary message must use the kernel's '[Cron session summary — N messages compacted]' wrapper, got: {head_text}",
-        );
-        assert!(
-            head_text.contains("Older turns covered tasks A and B."),
-            "summary message must embed the LLM-produced summary text, got: {head_text}",
-        );
-        // The wrapper must report the count of messages that were compacted
-        // (10 - 3 = 7 here), not the kept-tail count.
-        assert!(
-            head_text.contains("7 messages compacted"),
-            "summary wrapper must count compacted messages (10 - keep_recent=3 = 7), got: {head_text}",
-        );
-
-        // Tail must be the verbatim newest 3 messages, in order.
-        assert_eq!(out[1].content.text_content(), "turn 7");
-        assert_eq!(out[2].content.text_content(), "turn 8");
-        assert_eq!(out[3].content.text_content(), "turn 9");
-    }
-
-    /// LLM failure path: when every stage of `compact_messages` fails, it
-    /// returns `Ok(result)` with `used_fallback = true` and a non-empty
-    /// placeholder summary string. The kernel's M4 guard
-    /// (`!summary.is_empty() && !used_fallback`) must reject that result so
-    /// `try_summarize_trim` returns None and the caller drops to plain prune.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn try_summarize_trim_llm_failure_via_used_fallback_returns_none() {
-        let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingDriver);
-        let messages: Vec<Message> = (0..10)
-            .map(|i| Message::user(format!("turn {i}")))
-            .collect();
-
-        let out = super::try_summarize_trim(
-            &messages,
-            3,
-            driver,
-            "test-model",
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await;
-
-        assert!(
-            out.is_none(),
-            "used_fallback=true result must be rejected so the caller can plain-prune"
-        );
-    }
-
-    /// Tool-pair edge case: with an Assistant{ToolUse} / User{ToolResult}
-    /// pair sitting at the would-be summary/tail boundary, the helper must
-    /// shift the split (via adjust_split_for_tool_pair) so the pair stays on
-    /// the same side. Concretely: the kept tail in the returned vec must not
-    /// contain a dangling ToolResult whose ToolUse was summarised away.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn try_summarize_trim_does_not_split_tool_pair_across_summary_boundary() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
-            summary: "summarised older turns including the tool call.".to_string(),
-            calls: calls.clone(),
-        });
-
-        let tool_use_id = "tool-xyz-789".to_string();
-
-        // 6 plain messages, then ToolUse @6 / ToolResult @7, then 2 plain follow-ups.
-        let mut messages: Vec<Message> =
-            (0..6).map(|i| Message::user(format!("pre {i}"))).collect();
-        messages.push(Message {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                id: tool_use_id.clone(),
-                name: "shell_exec".to_string(),
-                input: serde_json::json!({"cmd": "echo hi"}),
-                provider_metadata: None,
-            }]),
-            pinned: false,
-            timestamp: None,
-        });
-        messages.push(Message {
-            role: Role::User,
-            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
-                tool_use_id: tool_use_id.clone(),
-                tool_name: String::new(),
-                content: "hi".to_string(),
-                is_error: false,
-                status: librefang_types::tool::ToolExecutionStatus::default(),
-                approval_request_id: None,
-            }]),
-            pinned: false,
-            timestamp: None,
-        });
-        messages.push(Message::user("post 0".to_string()));
-        messages.push(Message::user("post 1".to_string()));
-
-        // Total: 10 messages. keep_recent = 3 → raw split = 7 (between
-        // ToolUse @6 and ToolResult @7). adjust_split_for_tool_pair must
-        // shift the split forward so the pair stays together; the ToolResult
-        // therefore must NOT appear in the kept tail.
-        let out = super::try_summarize_trim(
-            &messages,
-            3,
-            driver,
-            "test-model",
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
-        )
-        .await
-        .expect("working driver must yield Some(_)");
-
-        // out[0] is the summary message; out[1..] is the kept tail.
-        let tail = &out[1..];
-        let tail_has_orphan_tool_result = tail.iter().any(|m| {
-            matches!(&m.content, MessageContent::Blocks(blocks)
-            if blocks.iter().any(|b|
-                matches!(b, ContentBlock::ToolResult { tool_use_id: id, .. } if id == &tool_use_id)
-            ))
-        });
-        assert!(
-            !tail_has_orphan_tool_result,
-            "tool-pair must not be split across summary/tail: ToolUse was summarised away but ToolResult landed in the tail",
-        );
-    }
-}
-
-/// Regression for #4664: when `~/.librefang/config.toml` becomes syntactically
-/// invalid (e.g. a duplicate `[web.searxng]` key as in the bug report), the
-/// hot-reload watcher used to silently reset the live in-memory config to
-/// `KernelConfig::default()` because `crate::config::load_config` is tolerant
-/// and falls back to defaults on parse errors. The reload would then diff the
-/// live config against the defaults and apply the diff, blowing away
-/// `default_model`, `provider_api_keys`, channels, etc. — which surfaced to
-/// the user as "the dashboard stops loading".
-///
-/// `reload_config` must now strict-parse the file *before* doing anything
-/// destructive and return `Err` on TOML syntax errors so the watcher logs the
-/// failure and the live config stays intact.
-#[tokio::test(flavor = "multi_thread")]
-async fn reload_config_with_invalid_toml_preserves_live_config() {
-    let dir = tempfile::tempdir().unwrap();
-    let home_dir = dir.path().to_path_buf();
-    std::fs::create_dir_all(home_dir.join("data")).unwrap();
-
-    // Write a valid baseline config.toml that round-trips through KernelConfig
-    // serialization — this is what the kernel will load at boot AND what
-    // `reload_config` will read on the next tick if we leave it untouched.
-    //
-    // Clamp first so the on-disk file matches what `boot_with_config` actually
-    // holds in memory (it clamps too at construction time). Without this, a
-    // future change that lands a `Default` value outside the clamp window
-    // would silently desync test fixture vs. live state and quietly hollow
-    // out this regression's coverage.
-    let mut baseline = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        default_model: DefaultModelConfig {
-            provider: "anthropic".to_string(),
-            model: "user-picked-model".to_string(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-    baseline.clamp_bounds();
-    let baseline_toml = toml::to_string_pretty(&baseline).expect("serialize baseline config");
-    let config_path = home_dir.join("config.toml");
-    std::fs::write(&config_path, &baseline_toml).expect("write baseline config.toml");
-
-    let kernel =
-        LibreFangKernel::boot_with_config(baseline.clone()).expect("kernel boot with baseline");
-
-    // Snapshot the post-boot default_model. We do NOT assert it equals the
-    // baseline here: `boot_with_config` legitimately rewrites
-    // `config.default_model` when the primary driver fails to construct
-    // (no key for the requested provider), falling back to whichever
-    // provider it can auto-detect from env vars / CLI auth dirs
-    // (see `kernel/boot.rs` ~line 449-510). That fallback is correct
-    // production behaviour; the regression we're guarding here is
-    // strictly that an *invalid TOML reload* does not clobber whatever
-    // boot settled on. Snapshotting decouples this test from local
-    // ambient credentials so it stays deterministic on dev machines that
-    // happen to have OPENAI_API_KEY / Claude Code / Copilot CLI logged in.
-    let post_boot_provider = kernel.config_ref().default_model.provider.clone();
-    let post_boot_model = kernel.config_ref().default_model.model.clone();
-
-    // Now corrupt config.toml the way the bug report did: append a duplicate
-    // `[web.searxng]` key that already appears earlier in the file (or in this
-    // case, two consecutive `[web.searxng]` sections — same TOML parse error).
-    let bad_toml = format!(
-        "{baseline_toml}\n\n[web.searxng]\nurl = \"http://first\"\n\n[web.searxng]\nurl = \"http://second\"\n"
-    );
-    std::fs::write(&config_path, &bad_toml).expect("write bad config.toml");
-
-    // Reload must fail loudly and refuse to touch the live config.
-    let err = kernel
-        .reload_config()
-        .await
-        .expect_err("reload must reject invalid TOML, not swallow it into defaults");
-    assert!(
-        err.contains("invalid TOML") && err.contains("live config unchanged"),
-        "error must clearly attribute the failure and reassure the operator that \
-         live config is intact; got: {err}"
-    );
-
-    // Live config must still match the post-boot snapshot — proves the
-    // watcher's reload tick won't silently revert whatever the operator
-    // (or boot's auto-detect) settled on.
-    assert_eq!(
-        kernel.config_ref().default_model.model,
-        post_boot_model,
-        "live default_model.model must be preserved when the on-disk file is unparseable"
-    );
-    assert_eq!(
-        kernel.config_ref().default_model.provider,
-        post_boot_provider,
-        "live default_model.provider must be preserved when the on-disk file is unparseable"
-    );
-
-    kernel.shutdown();
-}
-
-// ─── #5117: kill_agent_with_purge propagates DB delete failure ───────────────
-
-/// Happy-path regression for #5117: `kill_agent_with_purge` previously
-/// discarded the substrate `remove_agent` result with `let _ = …`, so a DB
-/// failure (lock contention, schema drift, FS error) would silently leave the
-/// row on disk and the agent would resurrect on next daemon boot. After the
-/// fix, the error is propagated as `KernelError::LibreFang(LibreFangError)`.
-/// This test pins the success path so the refactor cannot regress the
-/// common case: kill returns `Ok(())` AND the SQLite `agents` row is
-/// scrubbed.
-#[test]
-fn kill_agent_with_purge_removes_agent_row_from_sqlite() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-kernel-5117-happy");
-    std::fs::create_dir_all(home_dir.join("data")).unwrap();
-
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
-
-    let manifest = AgentManifest {
-        name: "agent-5117".to_string(),
-        description: "agent for #5117 regression".to_string(),
-        author: "test".to_string(),
-        module: "builtin:chat".to_string(),
-        ..Default::default()
-    };
-    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-
-    assert!(
-        kernel
-            .memory
-            .substrate
-            .load_agent(agent_id)
-            .expect("load_agent before kill")
-            .is_some(),
-        "agent row must exist in SQLite before kill"
-    );
-
-    kernel
-        .kill_agent_with_purge(agent_id, true)
-        .expect("kill_agent_with_purge should succeed on happy path");
-
-    assert!(
-        kernel
-            .memory
-            .substrate
-            .load_agent(agent_id)
-            .expect("load_agent after kill")
-            .is_none(),
-        "agent row must be gone from SQLite after successful kill_agent_with_purge (#5117)"
-    );
-
-    kernel.shutdown();
-}
-
-// ---------------------------------------------------------------------------
-// #5125 / #5126: same-task re-entrant `agent_msg_locks` acquisition.
-//
-// Both issues are the same root cause — the same async task re-acquires
-// `agent_msg_locks[agent_id]` (a non-reentrant `tokio::sync::Mutex`) that an
-// outer `send_message_full` frame already holds, silently parking the worker
-// thread. The fix tracks held locks in a task-local registry
-// (`librefang_runtime::held_agent_locks`) populated at the single agent-scoped
-// acquisition site in `send_message_full_inner`, so:
-//   - #5125: the transitive `A -> B -> A` `agent_send` cycle is rejected with
-//     an error *before* the second `lock.lock().await`, instead of hanging.
-//   - #5126: `append_to_session`'s `block_in_place(blocking_lock)` is skipped
-//     in favour of a lockless write when this task already holds the lock,
-//     instead of self-deadlocking; the mirror write still lands.
-// The fix must NOT relax cross-task mutual exclusion (third test).
-//
-// Each test runs the deadlock-prone work under `tokio::time::timeout`: without
-// the fix the future never resolves and the timeout fires (test fails); with
-// the fix it resolves promptly.
-// ---------------------------------------------------------------------------
-
-/// Build a kernel + one spawned agent for the re-entrancy tests.
-fn reentrant_test_kernel() -> (Arc<LibreFangKernel>, AgentId) {
-    let dir = tempfile::tempdir().unwrap();
-    let home_dir = dir.path().to_path_buf();
-    std::fs::create_dir_all(home_dir.join("data")).unwrap();
-    std::mem::forget(dir); // keep tempdir alive until process exit
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
-    // `send_message_full` builds its kernel-handle arg via `kernel_handle()`,
-    // which panics if the self-handle weak ref was never installed.
-    kernel.set_self_handle();
-    let agent_id = kernel
-        .spawn_agent(test_manifest("reentrant-a", "agent A", vec![]))
-        .expect("spawn A should succeed");
-    (kernel, agent_id)
-}
-
-/// #5125: a transitive `A -> B -> A` cycle must be rejected, not deadlock.
-///
-/// We simulate the outer turn for A exactly as `send_message_full_inner` does:
-/// inside `held_agent_locks::scope`, acquire the real `agent_msg_locks[A]`
-/// guard and register A in the task-local held set. Then call
-/// `send_message_full(A, ...)` on the *same task* — the inner re-entrant
-/// acquisition. With the fix it returns the cycle-rejection error before the
-/// (would-be deadlocking) `lock.lock().await`. Without the fix the inner call
-/// blocks forever on the held mutex and the timeout fires.
-#[tokio::test(flavor = "multi_thread")]
-async fn issue_5125_transitive_cycle_is_rejected_not_deadlocked() {
-    let (kernel, agent_a) = reentrant_test_kernel();
-    let lock_a = kernel
-        .agents
-        .agent_msg_locks
-        .entry(agent_a)
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-
-    let kernel_clone = Arc::clone(&kernel);
-    let fut = librefang_runtime::held_agent_locks::scope(async move {
-        // Outer turn for A: hold the lock + register, like the real site.
-        let _outer_guard = lock_a.lock().await;
-        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_a);
-        assert!(
-            librefang_runtime::held_agent_locks::is_held(agent_a),
-            "A's lock must be registered as held on this task"
-        );
-
-        // Inner re-entrant send to A (the B->A leg of A->B->A), same task.
-        kernel_clone
-            .send_message_full(
-                agent_a,
-                "callback into A",
-                kernel_clone.kernel_handle(),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-    });
-
-    let res = tokio::time::timeout(std::time::Duration::from_secs(10), fut).await;
-    let inner = res.expect(
-        "re-entrant send_message_full(A) must NOT hang — without the fix this \
-         times out because the task self-deadlocks on agent_msg_locks[A]",
-    );
-    let err = inner.expect_err("re-entrant send must be rejected, not succeed");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("re-entrant") && msg.contains("deadlock"),
-        "rejection must name the re-entrant deadlock; got: {msg}"
-    );
-    assert!(
-        msg.contains(&agent_a.to_string()),
-        "rejection must name the cycle agent {agent_a}; got: {msg}"
-    );
-
-    kernel.shutdown();
-}
-
-/// #5126: `channel_send`'s mirror (`append_to_session`) from inside the
-/// channel owner's own turn must complete (lockless write) and persist the
-/// message, not deadlock on the already-held `agent_msg_locks[owner]`.
-#[tokio::test(flavor = "multi_thread")]
-async fn issue_5126_owner_caller_mirror_write_is_lockless_not_deadlocked() {
-    use librefang_runtime::kernel_handle::SessionWriter;
-    use librefang_types::message::{Message, MessageContent, Role};
-
-    let (kernel, owner) = reentrant_test_kernel();
-    let lock_owner = kernel
-        .agents
-        .agent_msg_locks
-        .entry(owner)
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-
-    // Mirror session id, derived exactly like mirror_channel_send_to_session.
-    let channel_sid = SessionId::for_sender_scope(owner, "telegram", Some("chat-42"));
-    let mirror_msg = Message {
-        role: Role::User,
-        content: MessageContent::Text("{\"mirror_from\":\"owner\",\"body\":\"reply\"}".to_string()),
-        pinned: false,
-        timestamp: Some(chrono::Utc::now()),
-    };
-
-    let kernel_clone = Arc::clone(&kernel);
-    let owner_copy = owner;
-    let sid_copy = channel_sid;
-    let msg_copy = mirror_msg.clone();
-    let fut = librefang_runtime::held_agent_locks::scope(async move {
-        // Outer turn for `owner` holds agent_msg_locks[owner] + registered.
-        let _outer_guard = lock_owner.lock().await;
-        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(owner_copy);
-
-        // Mirror path resolves owner == caller -> append_to_session. Without
-        // the fix this block_in_place(blocking_lock)s the held mutex on this
-        // same task and never returns. `append_to_session` is sync; running
-        // it on a blocking thread keeps the runtime healthy while still
-        // exercising the same task-local (block_in_place stays on-task).
-        tokio::task::block_in_place(|| {
-            SessionWriter::append_to_session(&*kernel_clone, sid_copy, owner_copy, msg_copy);
-        });
-    });
-
-    tokio::time::timeout(std::time::Duration::from_secs(10), fut)
-        .await
-        .expect(
-            "owner-caller mirror append must NOT hang — without the fix this \
-             times out because block_in_place re-locks the held agent_msg_lock",
-        );
-
-    // The mirror write must actually be present (lockless-write, not skip).
-    let session = kernel
-        .memory
-        .substrate
-        .get_session(channel_sid)
-        .expect("get_session must not error")
-        .expect("mirror session row must exist after append_to_session");
-    assert_eq!(
-        session.messages.len(),
-        1,
-        "the mirrored channel_send message must be persisted, not silently dropped"
-    );
-
-    kernel.shutdown();
-}
-
-/// The fix must ONLY relax SAME-task re-entry. Two DIFFERENT tasks must still
-/// serialize on the same agent's `agent_msg_locks` entry. Task 1 holds the
-/// real lock (with no held-set scope — it is a plain cross-task holder); Task 2
-/// calls `append_to_session` for the same agent. Task 2 must block until Task 1
-/// releases (proving the `block_in_place(blocking_lock)` path is still taken
-/// across tasks), then complete.
-#[tokio::test(flavor = "multi_thread")]
-async fn cross_task_serialization_on_agent_msg_lock_is_preserved() {
-    use librefang_runtime::kernel_handle::SessionWriter;
-    use librefang_types::message::{Message, MessageContent, Role};
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let (kernel, agent) = reentrant_test_kernel();
-
-    // Sanity: `is_held` is false outside any scope and across tasks — the
-    // task-local never bleeds between tasks, so the cross-task path always
-    // takes the real lock.
-    assert!(
-        !librefang_runtime::held_agent_locks::is_held(agent),
-        "is_held must be false outside any held_agent_locks::scope"
-    );
-
-    let lock = kernel
-        .agents
-        .agent_msg_locks
-        .entry(agent)
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-
-    let holder_released = Arc::new(AtomicBool::new(false));
-    let writer_started = Arc::new(AtomicBool::new(false));
-
-    // Task 1: hold the real lock for 400ms (NOT in a held-set scope, so this
-    // is a genuine cross-task holder the writer must wait behind).
-    let lock_t1 = Arc::clone(&lock);
-    let released_t1 = Arc::clone(&holder_released);
-    let writer_started_t1 = Arc::clone(&writer_started);
-    let holder = tokio::spawn(async move {
-        let _g = lock_t1.lock().await;
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        // The writer must NOT have completed while we still hold the lock; it
-        // may have *started* (spawned) but its blocking_lock must be parked.
-        assert!(
-            writer_started_t1.load(Ordering::SeqCst),
-            "writer task should have started while holder held the lock"
-        );
-        released_t1.store(true, Ordering::SeqCst);
-    });
-
-    // Give the holder time to acquire the lock first.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    // Task 2: a different task calls append_to_session for the SAME agent. It
-    // must block on the real mutex until Task 1 releases.
-    let kernel_w = Arc::clone(&kernel);
-    let sid = SessionId::for_sender_scope(agent, "telegram", Some("c1"));
-    let released_w = Arc::clone(&holder_released);
-    let writer_started_w = Arc::clone(&writer_started);
-    let writer = tokio::spawn(async move {
-        writer_started_w.store(true, Ordering::SeqCst);
-        tokio::task::block_in_place(|| {
-            SessionWriter::append_to_session(
-                &*kernel_w,
-                sid,
-                agent,
-                Message {
-                    role: Role::User,
-                    content: MessageContent::Text("cross-task".to_string()),
-                    pinned: false,
-                    timestamp: Some(chrono::Utc::now()),
-                },
-            );
-        });
-        // By the time the writer acquires the lock, the holder must have
-        // already released it — proving mutual exclusion held.
-        assert!(
-            released_w.load(Ordering::SeqCst),
-            "cross-task writer acquired agent_msg_lock before holder released \
-             it — cross-task mutual exclusion was wrongly relaxed"
-        );
-    });
-
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        holder.await.expect("holder task");
-        writer.await.expect("writer task");
-    })
-    .await
-    .expect("cross-task path must complete once the holder releases");
-
-    let session = kernel
-        .memory
-        .substrate
-        .get_session(sid)
-        .expect("get_session")
-        .expect("session row must exist");
-    assert_eq!(
-        session.messages.len(),
-        1,
-        "cross-task write must still land after serialized acquisition"
-    );
-
-    kernel.shutdown();
-}
-
-/// #5125 (streaming path): the re-entrancy fix must cover the streaming send
-/// path too. The streaming entry (`send_message_streaming_with_sender_and_opts`)
-/// acquires `agent_msg_locks[A]` *inside its spawned task*, not on the caller's
-/// task. Without wrapping that spawn body in `held_agent_locks::scope` and
-/// registering a `HeldLockGuard`, an `agent_send` tool call back to A from
-/// inside the streaming agent loop would re-acquire the same per-agent mutex
-/// on the spawned task and silently deadlock — identical to the non-streaming
-/// failure mode of #5125, just routed through the streaming entry that
-/// dashboards / WS / SSE actually use.
-///
-/// This test simulates the streaming spawn body's exact lock state — fresh
-/// task, `scope` established, agent-scoped `agent_msg_locks[A]` held, A
-/// registered in the held set — and verifies that an inner `send_message_full`
-/// re-entrant call rejects the cycle instead of hanging. The pattern mirrors
-/// `issue_5125_transitive_cycle_is_rejected_not_deadlocked` (the non-streaming
-/// dimension), but the work runs on a `tokio::spawn`ed task to model that the
-/// streaming-entry's spawned task is the one doing the re-acquisition.
-#[tokio::test(flavor = "multi_thread")]
-async fn issue_5125_streaming_spawn_body_rejects_reentrant_cycle() {
-    let (kernel, agent_a) = reentrant_test_kernel();
-    let lock_a = kernel
-        .agents
-        .agent_msg_locks
-        .entry(agent_a)
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-
-    let kernel_clone = Arc::clone(&kernel);
-    // Mirror exactly what the patched streaming spawn body does: a fresh task,
-    // wrap in `held_agent_locks::scope`, take the per-agent lock, register the
-    // held guard, then drive the agent-loop body (here represented by an inner
-    // `send_message_full(A)` standing in for an `agent_send` tool call). The
-    // streaming entry is a sync fn returning a `JoinHandle`, so the spawned
-    // task — not the caller — is where re-entrancy detection has to work.
-    let inner = tokio::spawn(librefang_runtime::held_agent_locks::scope(async move {
-        let _session_guard = lock_a.lock().await;
-        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_a);
-        assert!(
-            librefang_runtime::held_agent_locks::is_held(agent_a),
-            "A's lock must be registered as held on this spawned task — without \
-             the streaming-path fix, the spawn body never calls `scope` so this \
-             would fail and the inner send below would silently deadlock"
-        );
-
-        // Inner re-entrant send to A from inside the streaming spawn body —
-        // the streaming-turn analogue of an `agent_send(A)` tool call.
-        kernel_clone
-            .send_message_full(
-                agent_a,
-                "callback into A from streaming turn",
-                kernel_clone.kernel_handle(),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-    }));
-
-    let res = tokio::time::timeout(std::time::Duration::from_secs(10), inner).await;
-    let join_result = res.expect(
-        "spawned streaming-turn simulation must NOT hang — without the \
-         streaming-path fix the inner re-entrant send blocks forever on the \
-         held agent_msg_lock and this timeout fires",
-    );
-    let inner_result = join_result.expect("spawned task panicked");
-    let err = inner_result.expect_err(
-        "re-entrant send from inside the streaming spawn body must be rejected, \
-         not succeed",
-    );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("re-entrant") && msg.contains("deadlock"),
-        "rejection must name the re-entrant deadlock; got: {msg}"
-    );
-    assert!(
-        msg.contains(&agent_a.to_string()),
-        "rejection must name the cycle agent {agent_a}; got: {msg}"
-    );
-
-    kernel.shutdown();
-}
-
-/// #5126 (streaming path): the `channel_send` mirror (`append_to_session`)
-/// fired from inside a streaming turn must complete via the lockless-write
-/// path, not deadlock on the already-held `agent_msg_locks[owner]`. Same
-/// signal as `issue_5126_owner_caller_mirror_write_is_lockless_not_deadlocked`,
-/// but the work runs on a `tokio::spawn`ed task to model the streaming entry's
-/// own spawn — confirming the held-set registration is set up *inside* that
-/// spawned task (which the streaming-path fix is exactly what installs).
-#[tokio::test(flavor = "multi_thread")]
-async fn issue_5126_streaming_spawn_body_mirror_write_is_lockless() {
-    use librefang_runtime::kernel_handle::SessionWriter;
-    use librefang_types::message::{Message, MessageContent, Role};
-
-    let (kernel, owner) = reentrant_test_kernel();
-    let lock_owner = kernel
-        .agents
-        .agent_msg_locks
-        .entry(owner)
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-
-    let channel_sid = SessionId::for_sender_scope(owner, "telegram", Some("chat-stream"));
-    let mirror_msg = Message {
-        role: Role::User,
-        content: MessageContent::Text(
-            "{\"mirror_from\":\"owner-stream\",\"body\":\"reply\"}".to_string(),
-        ),
-        pinned: false,
-        timestamp: Some(chrono::Utc::now()),
-    };
-
-    let kernel_clone = Arc::clone(&kernel);
-    let owner_copy = owner;
-    let sid_copy = channel_sid;
-    let msg_copy = mirror_msg.clone();
-    // Replicate the streaming spawn body's lock-and-scope setup on a fresh
-    // task. The `channel_send` mirror inside the agent loop resolves
-    // owner == caller and falls through to `append_to_session`; without the
-    // streaming-path fix that block_in_place(blocking_lock)s the held
-    // `agent_msg_locks[owner]` on this same task and never returns.
-    let inner = tokio::spawn(librefang_runtime::held_agent_locks::scope(async move {
-        let _session_guard = lock_owner.lock().await;
-        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(owner_copy);
-
-        tokio::task::block_in_place(|| {
-            SessionWriter::append_to_session(&*kernel_clone, sid_copy, owner_copy, msg_copy);
-        });
-    }));
-
-    tokio::time::timeout(std::time::Duration::from_secs(10), inner)
-        .await
-        .expect(
-            "streaming-turn mirror append must NOT hang — without the \
-             streaming-path fix this times out because block_in_place re-locks \
-             the held agent_msg_lock from the streaming spawn body",
-        )
-        .expect("spawned task panicked");
-
-    let session = kernel
-        .memory
-        .substrate
-        .get_session(channel_sid)
-        .expect("get_session must not error")
-        .expect("mirror session row must exist after append_to_session");
-    assert_eq!(
-        session.messages.len(),
-        1,
-        "the mirrored channel_send message from the streaming turn must be \
-         persisted, not silently dropped"
-    );
-
-    kernel.shutdown();
-}
-
-/// On boot the kernel advances the canonical session pointer when a more-
-/// recently-updated unlabeled session exists with more messages than the
-/// current canonical.  This covers the restart-context-loss path from
-/// issue #5198: after an unclean shutdown the canonical pointer may point at
-/// a stale / empty session while the conversation history lives in a session
-/// that was written last but never promoted.
-#[test]
-fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-canonical-recovery-5198");
-    std::fs::create_dir_all(&home_dir).unwrap();
-
-    // --- First kernel instance: register agent + seed sessions manually ---
-    let kernel1 = LibreFangKernel::boot_with_config(KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    })
-    .expect("first kernel should boot");
-
-    let agent_id = AgentId::new();
-    let stale_session_id = SessionId::new();
-
-    // Register the agent with a stale canonical pointer (0 messages).
-    let entry = librefang_types::agent::AgentEntry {
-        id: agent_id,
-        name: format!("recovery-agent-{}", agent_id),
-        manifest: librefang_types::agent::AgentManifest {
-            name: format!("recovery-agent-{}", agent_id),
-            description: "test".into(),
-            author: "test".into(),
-            module: "test".into(),
-            ..Default::default()
-        },
-        state: librefang_types::agent::AgentState::Running,
-        mode: librefang_types::agent::AgentMode::default(),
-        created_at: chrono::Utc::now(),
-        last_active: chrono::Utc::now(),
-        parent: None,
-        children: vec![],
-        session_id: stale_session_id,
-        tags: vec![],
-        identity: Default::default(),
-        onboarding_completed: false,
-        onboarding_completed_at: None,
-        source_toml_path: None,
-        is_hand: false,
-        ..Default::default()
-    };
-    kernel1
-        .agents
-        .registry
-        .register(entry.clone())
-        .expect("register agent");
-    kernel1
-        .memory
-        .substrate
-        .save_agent(&entry)
-        .expect("persist agent");
-
-    // Save the stale (empty) session row — gives it an updated_at in the past.
-    let stale_session = librefang_memory::session::Session {
-        id: stale_session_id,
-        agent_id,
-        messages: vec![],
-        context_window_tokens: 0,
-        label: None,
-        model_override: None,
-        messages_generation: 0,
-        last_repaired_generation: None,
-    };
-    kernel1
-        .memory
-        .substrate
-        .save_session(&stale_session)
-        .expect("save stale session");
-
-    // Give a tiny wall-clock gap so updated_at columns differ.
-    std::thread::sleep(std::time::Duration::from_millis(5));
-
-    // Create a second session (the active one after the conversation) with
-    // messages — this simulates what happened before the crash.
-    let active_session_id = SessionId::new();
-    let active_session = librefang_memory::session::Session {
-        id: active_session_id,
-        agent_id,
-        messages: vec![
-            librefang_types::message::Message::user("hello"),
-            librefang_types::message::Message::assistant("world"),
-        ],
-        context_window_tokens: 0,
-        label: None,
-        model_override: None,
-        messages_generation: 0,
-        last_repaired_generation: None,
-    };
-    kernel1
-        .memory
-        .substrate
-        .save_session(&active_session)
-        .expect("save active session");
-
-    // Shut down first kernel — canonical pointer still points at stale_session_id.
-    kernel1.shutdown();
-
-    // Boot a second kernel against the same data directory — this triggers
-    // the canonical recovery pass.
-    let kernel2 = LibreFangKernel::boot_with_config(KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    })
-    .expect("second kernel should boot");
-
-    // After boot, the canonical pointer must have been advanced to active_session_id.
-    let restored = kernel2
-        .agents
-        .registry
-        .get(agent_id)
-        .expect("agent must survive boot");
-    assert_eq!(
-        restored.session_id, active_session_id,
-        "boot must advance canonical pointer to the most-recently-active session \
-         (issue #5198): expected {active_session_id} but got {}",
-        restored.session_id
-    );
-
-    // The DB must also be updated so subsequent boots agree.
-    let loaded = kernel2
-        .memory
-        .substrate
-        .load_agent(agent_id)
-        .expect("load_agent must not error")
-        .expect("agent must still exist in DB");
-    assert_eq!(
-        loaded.session_id, active_session_id,
-        "persisted agent entry must carry the advanced session pointer after boot"
-    );
-
-    kernel2.shutdown();
-}
-
-// Regression test for #5201: when a session is over the token threshold but
-// under threshold_messages, the inner gate in compact_agent_session_with_id
-// must NOT return "No compaction needed" — it must proceed to the compactor.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below() {
-    use librefang_memory::session::Session as MemSession;
-    use librefang_runtime::compactor::{estimate_token_count, CompactionConfig};
-    use librefang_types::message::Message;
-
-    let dir = tempfile::tempdir().unwrap();
-    let home_dir = dir.path().to_path_buf();
-    std::fs::create_dir_all(home_dir.join("data")).unwrap();
-
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-    let manifest = AgentManifest {
-        name: "compact-token-gate-test".to_string(),
-        description: "test".to_string(),
-        author: "test".to_string(),
-        module: "builtin:chat".to_string(),
-        ..Default::default()
-    };
-    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-    let entry = kernel.agents.registry.get(agent_id).unwrap();
-    let session_id = entry.session_id;
-    drop(entry);
-
-    // Build a session with fewer messages than threshold_messages (default 30)
-    // but enough token volume to exceed token_threshold_ratio × context_window
-    // (default 0.7 × 200_000 = 140_000 tokens).
-    // Each ~60K-char ASCII message estimates to ~15K tokens (chars/4).
-    // 10 such messages → ~150K tokens, which exceeds 140K.
-    let big_chunk = "word ".repeat(12_000); // ~60K chars ≈ 15K tokens
-    let messages: Vec<Message> = (0..10).map(|_| Message::user(big_chunk.clone())).collect();
-
-    // Sanity: message count is below the default threshold (30).
-    assert!(
-        messages.len() < CompactionConfig::default().threshold,
-        "test invariant: message count must be below threshold_messages"
-    );
-
-    // Sanity: token estimate exceeds the default token threshold.
-    let estimated = estimate_token_count(&messages, None, None);
-    let token_threshold = (CompactionConfig::default().context_window_tokens as f64
-        * CompactionConfig::default().token_threshold_ratio) as usize;
-    assert!(
-        estimated > token_threshold,
-        "test invariant: estimated tokens ({estimated}) must exceed token threshold ({token_threshold})"
-    );
-
-    // Persist the fat session so compact_agent_session_with_id can load it.
-    let session = MemSession {
-        id: session_id,
-        agent_id,
-        messages,
-        context_window_tokens: 0,
-        label: None,
-        model_override: None,
-        messages_generation: 0,
-        last_repaired_generation: None,
-    };
-    kernel
-        .memory
-        .substrate
-        .save_session(&session)
-        .expect("save_session should succeed");
-
-    // Call the function under test.  Without the fix it returns
-    // Ok("No compaction needed (10 messages, threshold 30)"); with the fix
-    // it proceeds past the gate and either compacts or errors at the LLM
-    // step (no provider configured in test).  Either way the result must
-    // not be the early-return sentinel.
-    //
-    // `force = false` — this test pins the *token-trigger gate* (#5210),
-    // not the user-forced bypass path (#5213). The force=true case is
-    // covered separately.
-    let result = kernel
-        .compact_agent_session_with_id(agent_id, Some(session_id), false)
-        .await;
-
-    match &result {
-        Ok(msg) => {
-            assert!(
-                !msg.starts_with("No compaction needed"),
-                "gate must not short-circuit on token-only trigger; got: {msg}"
-            );
-        }
-        Err(_) => {
-            // An error from the LLM driver (no provider) is the expected
-            // outcome once the gate passes — this is correct behaviour.
-        }
-    }
-
-    kernel.shutdown();
-}
-
-/// Regression: `context_report` must resolve the context window from the
-/// model catalog rather than falling back to the 200K hardcoded placeholder
-/// (#5200). An agent on a 1M-window model must report a 1M denominator, not
-/// 200K.
-#[test]
-fn test_context_report_uses_catalog_context_window_not_200k() {
-    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier};
-
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-kernel-ctx-report-test");
-    std::fs::create_dir_all(&home_dir).unwrap();
-
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-
-    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
-
-    // Insert a catalog entry for a fictional 1M-window model so the
-    // resolver finds it via L2 (registry lookup) without needing real
-    // provider files on disk.
-    kernel.model_catalog_update(|cat| {
-        cat.add_custom_model(ModelCatalogEntry {
-            id: "fake-1m-model".to_string(),
-            display_name: "Fake 1M Model".to_string(),
-            provider: "fake-provider".to_string(),
-            tier: ModelTier::Custom,
-            context_window: 1_000_000,
-            ..Default::default()
-        });
-    });
-
-    let manifest = AgentManifest {
-        name: "ctx-report-test-agent".to_string(),
-        description: "agent for context_report regression test".to_string(),
-        author: "test".to_string(),
-        module: "builtin:chat".to_string(),
-        model: ModelConfig {
-            provider: "fake-provider".to_string(),
-            model: "fake-1m-model".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let agent_id = kernel.spawn_agent(manifest).expect("agent spawn");
-    let report = kernel
-        .context_report(agent_id)
-        .expect("context_report must succeed");
-
-    assert_ne!(
-        report.context_window, 200_000,
-        "context_report must not use the 200K hardcoded placeholder (#5200)"
-    );
-    assert_eq!(
-        report.context_window, 1_000_000,
-        "context_report must resolve the catalog's 1M window for fake-1m-model"
-    );
-
-    kernel.shutdown();
-}
-
-/// `context_report` must honour the agent manifest's explicit
-/// `model.context_window` override (L1 in the resolution chain) over the
-/// catalog value (#5200).
-#[test]
-fn test_context_report_honours_manifest_context_window_override() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-kernel-ctx-override-test");
-    std::fs::create_dir_all(&home_dir).unwrap();
-
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-
-    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
-
-    let manifest = AgentManifest {
-        name: "ctx-override-test-agent".to_string(),
-        description: "agent with explicit context_window in manifest".to_string(),
-        author: "test".to_string(),
-        module: "builtin:chat".to_string(),
-        model: ModelConfig {
-            provider: "ollama".to_string(),
-            model: "some-local-model".to_string(),
-            context_window: Some(262_144),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let agent_id = kernel.spawn_agent(manifest).expect("agent spawn");
-    let report = kernel
-        .context_report(agent_id)
-        .expect("context_report must succeed");
-
-    assert_eq!(
-        report.context_window, 262_144,
-        "manifest model.context_window override must be used as the denominator"
-    );
-
-    kernel.shutdown();
-}
-
-/// #5137: `suspend_agent` / `resume_agent` previously discarded the
-/// `set_state` `Result` with `let _ =`, so the API could report success
-/// while the in-memory `AgentState` never changed — yet
-/// `persist_agent_enabled` still flipped the on-disk `enabled` flag,
-/// leaving state and disk in disagreement. With the fix the call
-/// propagates; on the happy path it must still succeed AND the in-memory
-/// state must actually be the new value (proving the write was observed,
-/// not silently dropped).
-#[test]
-fn suspend_resume_actually_transition_in_memory_state() {
-    use librefang_types::agent::AgentState;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-kernel-suspend-resume-5137");
-    std::fs::create_dir_all(&home_dir).unwrap();
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-    let agent_id = kernel
-        .spawn_agent_inner(
-            AgentManifest {
-                name: "suspend-resume-agent".to_string(),
-                description: "exercises suspend/resume state propagation".to_string(),
-                author: "test".to_string(),
-                module: "builtin:chat".to_string(),
-                ..Default::default()
-            },
-            None,
-            None,
-            None,
-        )
-        .expect("agent should spawn");
-
-    kernel
-        .suspend_agent(agent_id)
-        .expect("suspend should succeed on happy path");
-    let after_suspend = kernel
-        .agents
-        .registry
-        .get(agent_id)
-        .expect("agent entry after suspend");
-    assert_eq!(
-        after_suspend.state,
-        AgentState::Suspended,
-        "in-memory state must actually be Suspended — the set_state Result \
-         is now propagated, not swallowed (#5137)"
-    );
-
-    kernel
-        .resume_agent(agent_id)
-        .expect("resume should succeed on happy path");
-    let after_resume = kernel
-        .agents
-        .registry
-        .get(agent_id)
-        .expect("agent entry after resume");
-    assert_eq!(
-        after_resume.state,
-        AgentState::Running,
-        "in-memory state must actually be Running after resume (#5137)"
-    );
-
-    kernel.shutdown();
-}
-
-/// #5137: `sync_default_model_agents` previously returned `()` and
-/// discarded the `update_model_and_provider` / `save_agent` Results, so a
-/// provider switch could half-apply with no signal. It now returns a
-/// per-agent partial-failure list. On the happy path the list must be
-/// empty AND the eligible agent must have been migrated to the new
-/// provider/model — proving the writes are observed, not swallowed, and
-/// that the new return contract is wired through the trait.
-#[test]
-fn sync_default_model_agents_reports_no_failures_and_migrates() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().join("librefang-kernel-sync-default-5137");
-    std::fs::create_dir_all(&home_dir).unwrap();
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-    // Agent spawned with provider="default" — eligible for default-model sync.
-    let agent_id = kernel
-        .spawn_agent_inner(
-            AgentManifest {
-                name: "default-tracking-agent".to_string(),
-                description: "tracks the kernel default model".to_string(),
-                author: "test".to_string(),
-                module: "builtin:chat".to_string(),
-                model: ModelConfig {
-                    provider: "default".to_string(),
-                    model: "default".to_string(),
-                    max_tokens: 4096,
-                    temperature: 0.7,
-                    system_prompt: String::new(),
-                    api_key_env: None,
-                    base_url: None,
-                    context_window: None,
-                    max_output_tokens: None,
-                    extra_params: std::collections::HashMap::new(),
-                },
-                ..Default::default()
-            },
-            None,
-            None,
-            None,
-        )
-        .expect("agent should spawn");
-
-    let new_dm = DefaultModelConfig {
-        provider: "openrouter".to_string(),
-        model: "anthropic/claude-3.5-sonnet".to_string(),
-        api_key_env: "OPENROUTER_API_KEY".to_string(),
-        base_url: None,
-        ..Default::default()
-    };
-
-    let failures = kernel.sync_default_model_agents("anthropic", &new_dm);
-    assert!(
-        failures.is_empty(),
-        "happy-path sync must report zero per-agent failures, got: {failures:?} (#5137)"
-    );
-
-    let entry = kernel
-        .agents
-        .registry
-        .get(agent_id)
-        .expect("agent entry after sync");
-    assert_eq!(
-        entry.manifest.model.provider, "openrouter",
-        "eligible agent must be migrated to the new provider — the \
-         update_model_and_provider Result is no longer swallowed (#5137)"
-    );
-    assert_eq!(entry.manifest.model.model, "anthropic/claude-3.5-sonnet");
-
-    kernel.shutdown();
-}
-
-// ── resolve_scope_channel: reserved-name defense-in-depth ──────────────────
-// Audit: cron-channel-name-not-reserved. The kernel's channel-derived session
-// resolver re-sanitizes reserved channel names from UNtrusted callers, but
-// must leave the kernel's own trusted internal system constructors (cron,
-// autonomous, webui) untouched so their persistent SessionIds stay continuous
-// (the issue mandated zero migration).
-
-#[test]
-fn resolve_scope_channel_sanitizes_reserved_names_from_external_callers() {
-    // is_internal_system = false (external / channel-bridge ingress):
-    // every reserved name must be rewritten to `ext-<name>` so it cannot
-    // derive the same SessionId as the internal system path.
-    for reserved in [
-        crate::SYSTEM_CHANNEL_CRON,
-        crate::SYSTEM_CHANNEL_AUTONOMOUS,
-        crate::SYSTEM_CHANNEL_WEBUI,
-    ] {
-        assert_eq!(
-            LibreFangKernel::resolve_scope_channel(reserved, false),
-            format!("ext-{reserved}"),
-            "external reserved channel {reserved:?} must be rewritten to ext-<name>"
-        );
-        // Case-insensitively too — `for_channel` lowercases internally.
-        let upper = reserved.to_ascii_uppercase();
-        assert_eq!(
-            LibreFangKernel::resolve_scope_channel(&upper, false),
-            format!("ext-{reserved}"),
-            "external reserved channel {upper:?} must be rewritten case-insensitively"
-        );
-    }
-}
-
-#[test]
-fn resolve_scope_channel_preserves_reserved_names_for_internal_system_paths() {
-    // is_internal_system = true (cron tick / autonomous tick / web UI):
-    // the reserved name passes through verbatim so the legacy
-    // for_channel(agent, "<name>") SessionId is preserved. This is the
-    // regression guard for the autonomous internal path, which sets a
-    // reserved "autonomous" channel WITHOUT is_internal_cron.
-    for reserved in [
-        crate::SYSTEM_CHANNEL_CRON,
-        crate::SYSTEM_CHANNEL_AUTONOMOUS,
-        crate::SYSTEM_CHANNEL_WEBUI,
-    ] {
-        assert_eq!(
-            LibreFangKernel::resolve_scope_channel(reserved, true),
-            reserved,
-            "trusted internal reserved channel {reserved:?} must pass through unchanged \
-             so existing persistent history is not orphaned"
-        );
-    }
-}
-
-#[test]
-fn resolve_scope_channel_leaves_legitimate_channels_untouched() {
-    // Non-reserved channels pass through regardless of the trust flag, so
-    // ordinary channel traffic (telegram, slack, …) is never disturbed.
-    for channel in ["telegram", "slack", "discord", "api", "ext-cron"] {
-        assert_eq!(
-            LibreFangKernel::resolve_scope_channel(channel, false),
-            channel,
-            "legitimate channel {channel:?} must pass through unchanged (external)"
-        );
-        assert_eq!(
-            LibreFangKernel::resolve_scope_channel(channel, true),
-            channel,
-            "legitimate channel {channel:?} must pass through unchanged (internal)"
-        );
-    }
 }

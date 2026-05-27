@@ -34,8 +34,6 @@ struct CachedToken {
 enum CredentialSource {
     ServiceAccountJson(serde_json::Value),
     GcloudCli,
-    /// Pre-set static token — bypasses OAuth2 entirely. Used by test constructors.
-    StaticToken(String),
 }
 
 struct TokenManager {
@@ -65,10 +63,6 @@ impl TokenManager {
                 Self::token_from_service_account(json).await?
             }
             CredentialSource::GcloudCli => Self::token_from_gcloud().await?,
-            CredentialSource::StaticToken(t) => CachedToken {
-                access_token: t.clone(),
-                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-            },
         };
 
         self.cached = Some(token.clone());
@@ -560,15 +554,6 @@ pub struct VertexAiDriver {
     region: String,
     token_manager: Arc<RwLock<TokenManager>>,
     client: reqwest::Client,
-    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
-    /// headers on outbound requests. Mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
-    /// trace headers are emitted regardless of whether `CompletionRequest`'s
-    /// caller-id fields are populated.
-    emit_caller_trace_headers: bool,
-    /// When set, replaces the full aiplatform base URL. Used by test
-    /// constructors to redirect requests to a mock server.
-    base_url_override: Option<String>,
 }
 
 impl VertexAiDriver {
@@ -583,36 +568,7 @@ impl VertexAiDriver {
             region,
             token_manager: Arc::new(RwLock::new(TokenManager::new(credential_source))),
             client: librefang_http::new_client(),
-            emit_caller_trace_headers: true,
-            base_url_override: None,
         })
-    }
-
-    /// Override the trace-header emission flag (mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
-    /// meaning the three `x-librefang-{agent,session,step}-id` headers are
-    /// emitted on every request that has those fields populated. Pass `false`
-    /// to suppress them entirely.
-    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
-        self.emit_caller_trace_headers = emit;
-        self
-    }
-
-    /// Test-only constructor: creates a driver with a pre-set access token and
-    /// a custom base URL (e.g. a `wiremock::MockServer` URI). Bypasses OAuth2
-    /// token exchange entirely. Requests go to
-    /// `{base_url}/v1/projects/test-project/locations/us-central1/publishers/google/models/{model}:{method}`.
-    #[doc(hidden)]
-    pub fn new_for_test(access_token: String, base_url: String) -> Self {
-        let tm = TokenManager::new(CredentialSource::StaticToken(access_token));
-        Self {
-            project_id: "test-project".to_string(),
-            region: "us-central1".to_string(),
-            token_manager: Arc::new(RwLock::new(tm)),
-            client: librefang_http::proxied_client(),
-            emit_caller_trace_headers: true,
-            base_url_override: Some(base_url),
-        }
     }
 
     /// Build the full endpoint URL for a model.
@@ -624,15 +580,6 @@ impl VertexAiDriver {
         } else {
             "generateContent"
         };
-        if let Some(ref base) = self.base_url_override {
-            return format!(
-                "{base}/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:{method}",
-                project = self.project_id,
-                region = self.region,
-                model = model_name,
-                method = method,
-            );
-        }
         format!(
             "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:{method}",
             region = self.region,
@@ -819,11 +766,6 @@ impl LlmDriver for VertexAiDriver {
                 .post(&url)
                 .header("Authorization", format!("Bearer {token}"))
                 .header("Content-Type", "application/json")
-                .headers(super::trace_headers::build_trace_header_map(
-                    &[],
-                    &request,
-                    self.emit_caller_trace_headers,
-                ))
                 .json(&body)
                 .send()
                 .await
@@ -913,11 +855,6 @@ impl LlmDriver for VertexAiDriver {
                 .post(&url)
                 .header("Authorization", format!("Bearer {token}"))
                 .header("Content-Type", "application/json")
-                .headers(super::trace_headers::build_trace_header_map(
-                    &[],
-                    &request,
-                    self.emit_caller_trace_headers,
-                ))
                 .json(&body)
                 .send()
                 .await
@@ -1015,8 +952,6 @@ mod tests {
             region: "us-central1".to_string(),
             token_manager: Arc::new(RwLock::new(TokenManager::new(CredentialSource::GcloudCli))),
             client: librefang_http::new_client(),
-            emit_caller_trace_headers: true,
-            base_url_override: None,
         };
 
         let url = driver.endpoint_url("vertex-ai/gemini-2.5-pro", false);
@@ -1044,7 +979,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "us-central1");
@@ -1066,7 +1000,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "europe-west4");

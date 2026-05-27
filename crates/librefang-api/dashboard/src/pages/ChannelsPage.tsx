@@ -1,14 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { ChannelItem } from "../api";
-import { useChannels, useChannelQr } from "../lib/queries/channels";
-import {
-  useReloadChannels,
-  useSaveSidecarConfig,
-} from "../lib/mutations/channels";
-import QRCode from "qrcode";
+import { wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type ChannelItem } from "../api";
+import { useChannels } from "../lib/queries/channels";
+import { useConfigureChannel, useTestChannel, useReloadChannels } from "../lib/mutations/channels";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
+import { copyToClipboard } from "../lib/clipboard";
+import QRCode from "qrcode";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -16,12 +14,11 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
-import { Select } from "../components/ui/Select";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import {
-  Network, Search, CheckCircle2, ChevronRight, X, Grid3X3, List,
-  Settings, AlertCircle, CheckSquare, Square, Plus, XCircle,
-  MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Globe
+  Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
+  Settings, AlertCircle, CheckSquare, Square, Plus,
+  MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Wifi, Globe
 } from "lucide-react";
 
 const channelIcons: Record<string, React.ReactNode> = {
@@ -34,6 +31,7 @@ const channelIcons: Record<string, React.ReactNode> = {
   webhook: <Link2 className="w-5 h-5" />,
   http: <Globe className="w-5 h-5" />,
   websocket: <Radio className="w-5 h-5" />,
+  mqtt: <Wifi className="w-5 h-5" />,
   slack_events: <Bell className="w-5 h-5" />,
   teams: <MessageCircle className="w-5 h-5" />,
 };
@@ -59,7 +57,7 @@ interface ChannelCardProps {
   t: (key: string, opts?: { defaultValue?: string }) => string;
 }
 
-const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onViewDetails, t }: ChannelCardProps) {
+function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onViewDetails, t }: ChannelCardProps) {
   // Whole-card click opens the details drawer. Inner controls
   // (checkbox, Configure button) call e.stopPropagation() so the
   // card-level handler doesn't fire when the user clicks them.
@@ -121,160 +119,28 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
           {msgs > 0 ? t("common.running") : t("common.idle")}
         </span>
       </Badge>
-      {/* Sidecar channels are config.toml-managed (no /api/channels
-          configure endpoint — it would 404), so suppress the inline
-          Configure affordance; the whole-card click still opens the
-          read-only details drawer. */}
-      {c.category !== "sidecar" && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
-          className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 transition-colors"
-          aria-label={t("channels.config")}
-          title={t("channels.config")}
-        >
-          <Settings className="w-3.5 h-3.5" />
-        </button>
-      )}
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
+        className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 transition-colors"
+        aria-label={t("channels.config")}
+        title={t("channels.config")}
+      >
+        <Settings className="w-3.5 h-3.5" />
+      </button>
       {viewMode === "grid" && (
         <ChevronRight className="w-4 h-4 text-text-dim/60 shrink-0" aria-hidden="true" />
       )}
     </Card>
   );
-});
-
-// QR section embedded inside DetailsModal for channels whose
-// sidecar publishes a `qr_ready` event. The pre-migration dedicated
-// "QR Login Dialog" was deleted in #5470 when the page went
-// sidecar-only; reintroducing it as a *section* here keeps the page's
-// "click card -> details" flow intact and avoids a second top-level
-// modal stack just for QR.
-//
-// Wire model: the sidecar drives the QR lifecycle (start, poll,
-// confirm) on its own. This section is a passive observer — it polls
-// `GET /api/channels/{name}/qr` every 2s while the details modal is
-// open and reacts to state transitions. On `confirmed` it auto-calls
-// `configureChannel` with the captured `bot_token` to restore the
-// pre-migration "scan once, never again" UX (writes `secrets.env` so
-// the next sidecar restart skips QR).
-function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: string) => string }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const renderedQrRef = useRef<string | null>(null);
-  // Two-phase polling: keep refetching at the default 2s cadence
-  // while the QR is pre-terminal (no data yet, `pending`, or
-  // `scanning`); stop entirely once we reach `confirmed` / `expired`
-  // / `failed`. The sidecar's own QR-flow internals are still alive
-  // (an expired QR will be re-fetched on the sidecar's next restart
-  // cycle and re-published as a fresh `qr_ready`), so there's no
-  // value in hammering the daemon at 2s while we wait for the
-  // operator to react.
-  const [terminal, setTerminal] = useState(false);
-  const qrQuery = useChannelQr(channelName, {
-    enabled: true,
-    refetchInterval: terminal ? false : undefined,
-  });
-  useEffect(() => {
-    const s = qrQuery.data?.status;
-    if (s === "confirmed" || s === "expired" || s === "failed") {
-      setTerminal(true);
-    }
-  }, [qrQuery.data?.status]);
-
-  useEffect(() => {
-    const qr = qrQuery.data;
-    if (!qr) return;
-    if (qr.status !== "pending" && qr.status !== "scanning") return;
-    const content = qr.qr_url || qr.qr_code;
-    if (!canvasRef.current || !content) return;
-    if (renderedQrRef.current === content) return;
-    QRCode.toCanvas(canvasRef.current, content, { width: 256, margin: 2 });
-    renderedQrRef.current = content;
-  }, [qrQuery.data]);
-
-  // Auto-persist of the captured `bot_token` was removed on review:
-  // the only available secrets endpoint is a full-form upsert that
-  // would wipe other schema-managed env keys on a partial save (see
-  // `crates/librefang-api/src/routes/channels.rs::configure_sidecar_channel`
-  // + `sidecar_toml::write_form_managed`). The sidecar logs the
-  // token at DEBUG; the `confirmed`-state `message` instructs the
-  // operator to set `WECHAT_BOT_TOKEN` in `secrets.env` themselves.
-  // A future narrow `/api/channels/sidecar/{name}/secrets` endpoint
-  // can safely reintroduce the auto-persist path.
-
-  // Loading: query hasn't returned yet. Don't render anything visible
-  // — the section only matters once we know whether a session exists.
-  if (qrQuery.isLoading) return null;
-
-  // Hard error from the API layer (404 = no sidecar, anything else =
-  // surfaced ApiError). 404 / "not running" is the common case for
-  // channels that don't use QR auth at all — silently hide.
-  if (qrQuery.isError) return null;
-
-  // 204 — sidecar running, no QR session. Most likely the channel
-  // doesn't need QR (telegram, slack, …) or wechat authenticated from
-  // a cached token. Hide the section entirely.
-  if (qrQuery.data === null) return null;
-
-  const qr = qrQuery.data!;
-
-  return (
-    <div className="space-y-3">
-      <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">
-        {t("channels.qr_login") || "QR Login"}
-      </h3>
-      <div className="p-4 rounded-xl bg-main/30 flex flex-col items-center gap-3">
-        {(qr.status === "pending" || qr.status === "scanning") && (
-          <div className="bg-white rounded-xl p-2">
-            <canvas ref={canvasRef} aria-label={t("mobile_pairing.qr_aria_label") || "QR code"} />
-          </div>
-        )}
-        {qr.status === "confirmed" && (
-          <div className="w-16 h-16 flex items-center justify-center bg-success/10 rounded-xl">
-            <CheckCircle2 className="w-10 h-10 text-success" />
-          </div>
-        )}
-        {(qr.status === "expired" || qr.status === "failed") && (
-          <div className="w-16 h-16 flex items-center justify-center bg-error/10 rounded-xl">
-            <XCircle className="w-10 h-10 text-error" />
-          </div>
-        )}
-        <p className="text-xs text-text-dim text-center max-w-xs">
-          {qr.message ||
-            (qr.status === "confirmed"
-              ? t("channels.login_success") || "Login successful"
-              : qr.status === "expired"
-              ? "QR code expired — restart the sidecar to try again"
-              : qr.status === "failed"
-              ? t("channels.qr_failed") || "QR login failed"
-              : `Scan with your ${channelName} app`)}
-        </p>
-        {terminal && qr.status !== "confirmed" && (
-          <Button
-            variant="secondary"
-            onClick={() => {
-              // Re-arm the 2s poll so a fresh sidecar-published QR
-              // (e.g. after restart) actually surfaces here instead
-              // of waiting for the user to close + reopen the modal.
-              setTerminal(false);
-              renderedQrRef.current = null;
-              qrQuery.refetch();
-            }}
-          >
-            {t("common.retry") || "Retry"}
-          </Button>
-        )}
-      </div>
-    </div>
-  );
 }
 
-// Details Modal — read-only view onto a single channel. Configure /
-// reload flows live on the page header + the SidecarForm drawer; this
-// modal exists for "what is this thing" inspection plus the
-// copy-into-config.toml snippet for unconfigured discovery rows.
-function DetailsModal({ channel, onClose, t }: {
+// Details Modal
+function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
   channel: Channel;
   onClose: () => void;
+  onConfigure: () => void;
+  onTest: () => void;
   t: (key: string) => string
 }) {
   return (
@@ -314,6 +180,24 @@ function DetailsModal({ channel, onClose, t }: {
                   {channel.configured ? t("common.online") : t("common.setup")}
                 </Badge>
               </div>
+              {channel.difficulty && (
+                <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
+                  <span className="text-xs font-bold text-text-dim">{t("channels.difficulty")}</span>
+                  <span className="text-xs font-bold">{channel.difficulty}</span>
+                </div>
+              )}
+              {channel.setup_time && (
+                <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
+                  <span className="text-xs font-bold text-text-dim">{t("channels.setup_time")}</span>
+                  <span className="text-xs font-bold">{channel.setup_time}</span>
+                </div>
+              )}
+              {channel.setup_type && (
+                <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
+                  <span className="text-xs font-bold text-text-dim">{t("channels.setup_type")}</span>
+                  <span className="text-xs font-bold">{channel.setup_type}</span>
+                </div>
+              )}
               <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
                 <span className="text-xs font-bold text-text-dim">{t("channels.has_token")}</span>
                 <span className={`text-xs font-bold ${channel.has_token ? "text-success" : "text-warning"}`}>
@@ -322,6 +206,32 @@ function DetailsModal({ channel, onClose, t }: {
               </div>
             </div>
           </div>
+
+          {/* Webhook Endpoint */}
+          {channel.webhook_endpoint && (
+            <div className="space-y-2">
+              <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">Webhook Endpoint</h3>
+              <div className="p-3 rounded-lg bg-brand/5 border border-brand/20">
+                <code className="text-xs font-mono text-brand break-all select-all">{channel.webhook_endpoint}</code>
+                <p className="text-[10px] text-text-dim mt-1">Configure this path on the external platform. Port is the API listen port (default 4545).</p>
+              </div>
+            </div>
+          )}
+
+          {/* Setup Steps */}
+          {channel.setup_steps && channel.setup_steps.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("channels.setup_steps")}</h3>
+              <div className="space-y-2">
+                {channel.setup_steps.map((step, idx) => (
+                  <div key={idx} className="flex items-start gap-3 p-3 rounded-lg bg-main/20">
+                    <span className="w-5 h-5 rounded-full bg-brand/20 text-brand text-xs font-bold flex items-center justify-center shrink-0">{idx + 1}</span>
+                    <p className="text-xs text-text-main">{step}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Fields */}
           {channel.fields && channel.fields.length > 0 && (
@@ -350,23 +260,16 @@ function DetailsModal({ channel, onClose, t }: {
             </div>
           )}
 
-          {/* QR-login section. Renders nothing for channels whose
-              sidecar doesn't publish a QR session (most of them), so
-              it's safe to always mount — the hook self-disables once
-              it observes a 204 / 404 from the daemon. */}
-          {channel.configured && <ChannelQrSection channelName={channel.name} t={t} />}
-
-          {/* Every channel runs as an out-of-process sidecar. The modal
-              is read-only; the save flow lives in `SidecarForm` (Plus →
-              picker → schema-driven drawer, or the gear on a card). The
-              copyable `config_template` snippet (also emitted by the
-              backend on each row) is intentionally surfaced inside
-              `SidecarForm` rather than here, since this modal only
-              opens for already-configured channels. */}
-          <div className="p-4 rounded-xl bg-brand/5 border border-brand/20">
-            <p className="text-xs text-text-dim">
-              Runs as an out-of-process sidecar adapter. Manage it in <code className="font-mono">config.toml</code> (<code className="font-mono">[[sidecar_channels]]</code>) — Config → Sidecar Channels, or use the gear on the channel card to open the configure drawer.
-            </p>
+          {/* Actions */}
+          <div className="flex gap-2 pt-2">
+            <Button variant="primary" className="flex-1" onClick={onConfigure} leftIcon={<Settings className="w-4 h-4" />}>
+              {channel.configured ? t("channels.update_config") : t("channels.setup_adapter")}
+            </Button>
+            {channel.configured && (
+              <Button variant="secondary" onClick={onTest} leftIcon={<CheckCircle2 className="w-4 h-4" />}>
+                {t("channels.test") || "Test"}
+              </Button>
+            )}
           </div>
         </div>
 
@@ -378,182 +281,282 @@ function DetailsModal({ channel, onClose, t }: {
   );
 }
 
-// Schema-driven save form for every channel (all sidecar after the
-// in-process registry was retired). Sidecar adapters expose their config
-// schema via `python -m <module> --describe`; the daemon caches that
-// schema and surfaces `channel.fields[]` on `/api/channels`. Submit hits
-// `POST /api/channels/sidecar/{name}/configure`, which splits values
-// across `secrets.env` (secret-typed fields) and `config.toml`
-// (everything else) — see `useSaveSidecarConfig` for the wire shape.
-function SidecarForm({
-  channel,
-  onClose,
-  t,
-}: {
-  channel: Channel;
-  onClose: () => void;
-  t: (key: string, opts?: { defaultValue?: string; keys?: string }) => string;
-}) {
+// Config Dialog — standard form with controlled inputs
+function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
   const addToast = useUIStore((s) => s.addToast);
-  const saveMut = useSaveSidecarConfig();
-  const allFields = channel.fields ?? [];
-  const fields = allFields.filter((f) => !f.advanced);
-  const advanced = allFields.filter((f) => f.advanced);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const visible = showAdvanced ? [...fields, ...advanced] : fields;
+  const fields = useMemo(() => (channel.fields ?? []).filter(f => !f.advanced), [channel.fields]);
 
-  // Pre-populate from the schema:
-  //  - non-secret fields with a `value` get their value
-  //  - secret fields are never echoed back as plaintext, so they
-  //    start empty; we surface `has_value: true` via the placeholder
-  //    below ("•••• (set — leave blank to keep)") so the operator
-  //    knows the slot is already filled and won't be wiped if they
-  //    don't retype.
-  const [values, setValues] = useState<Record<string, string>>(() =>
-    Object.fromEntries(
-      allFields.map((f) => [
-        f.key,
-        f.type !== "secret" && typeof f.value === "string" ? f.value : "",
-      ]),
-    ),
+  // Build initial form values: non-secret fields use saved value, secrets start empty
+  const initialValues = useMemo(() => {
+    const vals: Record<string, string> = {};
+    for (const f of fields) {
+      if (f.readonly) continue;
+      if (f.type === "select" && f.options?.length) {
+        // Select: use saved value or fall back to first option
+        vals[f.key] = f.value || f.options[0];
+      } else {
+        vals[f.key] = (f.type !== "secret" && f.value) ? f.value : "";
+      }
+    }
+    return vals;
+  }, [fields]);
+  const [values, setValues] = useState<Record<string, string>>(initialValues);
+
+  const setValue = (key: string, val: string) => setValues(prev => ({ ...prev, [key]: val }));
+
+  // Find the "controlling" select field (e.g. mode) to drive show_when visibility
+  const controlField = useMemo(() => fields.find(f => f.type === "select" && f.options), [fields]);
+  const controlValue = controlField ? (values[controlField.key] || "") : "";
+
+  // Filter visible fields: hide those whose show_when doesn't match the control value
+  const visibleFields = useMemo(
+    () => fields.filter(f => !f.show_when || f.show_when === controlValue),
+    [fields, controlValue],
   );
 
+  // Only submit non-readonly, non-empty values (skip untouched secrets)
+  const configMutation = useConfigureChannel();
   const handleSubmit = () => {
-    // Drop empty optional values: server interprets a missing key
-    // as "leave the existing value alone" (partial update). For
-    // secret fields with `has_value: true`, an empty submission
-    // therefore preserves the stored secret rather than clearing it.
     const payload: Record<string, string> = {};
-    for (const f of allFields) {
-      const v = values[f.key]?.trim();
+    for (const f of visibleFields) {
+      if (f.readonly) continue;
+      const v = values[f.key];
       if (v) payload[f.key] = v;
     }
-    saveMut.mutate(
-      { name: channel.name, values: payload },
+    configMutation.mutate(
+      { channelName: channel.name, config: payload },
       {
-        onSuccess: (res) => {
-          addToast(
-            res.restart_required
-              ? t("channels.saved_restart_required", {
-                  defaultValue: "Saved — restart daemon to apply",
-                })
-              : t("channels.saved", { defaultValue: "Saved" }),
-            "success",
-          );
-          // Plan Risk #5: surface shell-environment shadowing of secret
-          // fields. `addToast` has no "warning" variant (success | error
-          // | info), so fall back to "error" with an explicit prefix —
-          // visually distinct from the "Saved" success toast above, and
-          // tells the operator the save *did* happen but the new value
-          // is being shadowed until they unset the shell export.
-          if (res.shadowed_secrets && res.shadowed_secrets.length > 0) {
-            addToast(
-              t("channels.shadowed_secrets_warning", {
-                defaultValue:
-                  "Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: {{keys}}",
-                keys: res.shadowed_secrets.join(", "),
-              }),
-              "error",
-            );
-          }
+        onSuccess: () => {
+          addToast(t("channels.config_success") || `${channel.display_name || channel.name} configured`, "success");
           onClose();
         },
-        onError: (err) =>
-          addToast(toastErr(err, t("common.error", { defaultValue: "Error" })), "error"),
+        onError: (err) => addToast(toastErr(err, t("channels.config_failed") || "Failed to configure channel"), "error"),
       },
     );
   };
 
   return (
-    <DrawerPanel isOpen onClose={onClose} size="lg" hideCloseButton>
-      <div className="h-2 bg-linear-to-r from-brand via-brand/60 to-brand/30" />
-      <div className="p-6 border-b border-border-subtle flex items-center justify-between">
-        <h2 className="text-xl font-black">{channel.display_name || channel.name}</h2>
-        <button onClick={onClose} className="p-2" aria-label={t("common.close", { defaultValue: "Close" })}>
-          <X className="w-5 h-5" />
-        </button>
-      </div>
-      <div className="p-6 space-y-3">
-        {visible.map((f) => (
-          <div key={f.key} className="space-y-1">
-            <label className="text-xs font-bold">
-              {f.label || f.key}
-              {f.required && <span className="text-error">*</span>}
-              {f.type === "secret" && f.env_var && (
-                <span className="ml-2 font-mono text-[10px] text-text-dim/80 normal-case">
-                  {f.env_var}
-                </span>
-              )}
-            </label>
-            {f.type === "select" && f.options && f.options.length > 0 ? (
-              <Select
-                options={f.options.map((o) => ({ value: o, label: o }))}
-                value={values[f.key] ?? ""}
-                placeholder={f.placeholder ?? undefined}
-                onChange={(e) =>
-                  setValues((v) => ({ ...v, [f.key]: e.target.value }))
-                }
-              />
-            ) : (
-              <Input
-                type={f.type === "secret" ? "password" : "text"}
-                value={values[f.key] ?? ""}
-                placeholder={
-                  f.type === "secret" && f.has_value
-                    ? t("channels.secret_set_placeholder", {
-                        defaultValue: "•••• (set — leave blank to keep)",
-                      })
-                    : f.placeholder ?? undefined
-                }
-                onChange={(e) =>
-                  setValues((v) => ({ ...v, [f.key]: e.target.value }))
-                }
-              />
-            )}
+    <DrawerPanel isOpen onClose={onClose} size="md" hideCloseButton>
+        <div className="px-6 py-5 border-b border-border-subtle">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
+                <Settings className="w-5 h-5 text-brand" />
+              </div>
+              <div>
+                <h3 className="text-base font-black">{channel.display_name || channel.name}</h3>
+                <p className="text-[10px] text-text-dim mt-0.5">{t("channels.configure")}</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close")}><X className="w-4 h-4" /></button>
           </div>
-        ))}
-        {advanced.length > 0 && (
-          <button
-            type="button"
-            className="text-xs text-text-dim underline"
-            onClick={() => setShowAdvanced((s) => !s)}
-          >
-            {showAdvanced
-              ? t("common.hide_advanced", { defaultValue: "Hide advanced" })
-              : t("common.show_advanced", { defaultValue: "Show advanced" })}
-          </button>
+        </div>
+        <div className="p-6">
+        <p className="text-xs text-text-dim mb-5">{channel.description}</p>
+
+        {/* Configuration Fields */}
+        {visibleFields.length > 0 ? (
+          <div className="space-y-3 mb-6 max-h-80 overflow-y-auto">
+            {visibleFields.map((field) => (
+              <div key={field.key}>
+                <label className="text-xs font-bold text-text-dim mb-1 block">
+                  {field.label || field.key} {field.required && <span className="text-error">*</span>}
+                </label>
+                {field.readonly ? (
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={field.value || field.placeholder || ""}
+                      readOnly
+                      className="flex-1 rounded-lg border border-border-subtle bg-main/50 px-3 py-2 text-xs text-text-dim font-mono"
+                    />
+                    <button
+                      onClick={async () => {
+                        const ok = await copyToClipboard(field.value || field.placeholder || "");
+                        addToast(ok ? t("common.copied") : t("common.copy_failed"), ok ? "success" : "error");
+                      }}
+                      className="px-3 py-2 rounded-lg bg-brand/10 text-brand text-xs hover:bg-brand/20 transition-colors shrink-0"
+                      title={t("common.copy")}
+                    >
+                      {t("common.copy")}
+                    </button>
+                  </div>
+                ) : field.type === "select" && field.options ? (
+                  <select
+                    value={values[field.key] || ""}
+                    onChange={(e) => setValue(field.key, e.target.value)}
+                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+                  >
+                    {field.options.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type={field.type === "secret" ? "password" : "text"}
+                    value={values[field.key] || ""}
+                    onChange={(e) => setValue(field.key, e.target.value)}
+                    placeholder={field.has_value ? "••••••••  (leave empty to keep)" : (field.placeholder || field.env_var || field.key)}
+                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="mb-6 p-4 rounded-lg bg-main/30 text-center">
+            <p className="text-xs text-text-dim">{t("channels.no_fields_required")}</p>
+          </div>
         )}
-        {channel.config_template && (
-          <details className="pt-2">
-            <summary className="text-xs text-text-dim cursor-pointer select-none">
-              {t("channels.config_template_summary", {
-                defaultValue: "Or paste this into config.toml by hand",
-              })}
-            </summary>
-            <pre className="mt-2 p-3 rounded-md bg-main/30 border border-border-subtle text-[11px] font-mono text-text-main whitespace-pre overflow-x-auto select-all">
-              {channel.config_template}
-            </pre>
-          </details>
-        )}
-      </div>
-      <div className="p-4 border-t border-border-subtle flex justify-end gap-2">
-        <Button variant="ghost" onClick={onClose} disabled={saveMut.isPending}>
-          {t("common.cancel")}
-        </Button>
-        <Button
-          variant="primary"
-          onClick={handleSubmit}
-          disabled={saveMut.isPending}
-        >
-          {saveMut.isPending
-            ? t("common.saving", { defaultValue: "Saving…" })
-            : t("common.save", { defaultValue: "Save" })}
-        </Button>
-      </div>
+
+        {/* Buttons */}
+        <div className="flex gap-3">
+          <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button variant="primary" className="flex-1" onClick={handleSubmit} disabled={configMutation.isPending}>
+            {configMutation.isPending ? t("common.saving") : t("common.save")}
+          </Button>
+        </div>
+        </div>
     </DrawerPanel>
   );
 }
 
+// QR Login Dialog for channels with setup_type === "qr" (e.g. WeChat, WhatsApp)
+function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
+  const configureChannelMutation = useConfigureChannel();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const cancelledRef = useRef(false);
+  const pollIdRef = useRef(0);
+  const [phase, setPhase] = useState<"idle" | "loading" | "scanning" | "success" | "error">("idle");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => () => { cancelledRef.current = true; pollIdRef.current += 1; }, []);
+
+  const startQr = useCallback(async () => {
+    const pollId = ++pollIdRef.current;
+    cancelledRef.current = false;
+    setPhase("loading");
+    setMessage("");
+    try {
+      // QR start/status are imperative long-poll probes, so they stay raw instead of going through cached query hooks.
+      const qrStart = channel.name === "whatsapp" ? whatsappQrStart : wechatQrStart;
+      const qrStatus = channel.name === "whatsapp" ? whatsappQrStatus : wechatQrStatus;
+      const displayName = channel.name === "whatsapp" ? "WhatsApp" : "WeChat";
+
+      const res = await qrStart();
+      if (!res.available || !res.qr_code) {
+        setPhase("error");
+        setMessage(res.message || t("channels.qr_failed"));
+        return;
+      }
+      setPhase("scanning");
+      setMessage(res.message || `Scan this QR code with your ${displayName} app`);
+
+      // Render QR code to canvas — use the full URL so the app recognises the scan
+      const qrContent = res.qr_url || res.qr_code;
+      if (canvasRef.current && qrContent) {
+        QRCode.toCanvas(canvasRef.current, qrContent, { width: 256, margin: 2 });
+      }
+
+      // Serial long-poll: wait for each request to finish before sending the next.
+      // The backend holds each request ~30s (long-poll), so setInterval would
+      // stack up parallel requests that all resolve at once on scan → flashing UI.
+      const pollLoop = async () => {
+        while (!cancelledRef.current && pollIdRef.current === pollId) {
+          try {
+            const status = await qrStatus(res.qr_code!);
+            if (cancelledRef.current || pollIdRef.current !== pollId) break;
+            if (status.connected && status.bot_token) {
+              cancelledRef.current = true;
+              try {
+                await configureChannelMutation.mutateAsync({
+                  channelName: channel.name,
+                  config: { bot_token_env: status.bot_token },
+                });
+              } catch (error) {
+                setPhase("error");
+                setMessage(error instanceof Error ? error.message : t("channels.qr_failed"));
+                return;
+              }
+              setPhase("success");
+              setMessage(t("channels.login_success"));
+              setTimeout(onClose, 1500);
+              return;
+            } else if (status.expired) {
+              cancelledRef.current = true;
+              setPhase("error");
+              setMessage(status.message || "QR code expired");
+              return;
+            }
+          } catch {
+            // Transient error — wait briefly then retry
+            if (cancelledRef.current || pollIdRef.current !== pollId) break;
+            await new Promise(r => setTimeout(r, 3000));
+          }
+        }
+      };
+      pollLoop();
+    } catch (e) {
+      setPhase("error");
+      setMessage(e instanceof Error ? e.message : "Failed to start QR login");
+    }
+  }, [channel.name, configureChannelMutation, onClose, t]);
+
+  // Auto-start on mount
+  useEffect(() => { startQr(); }, [startQr]);
+
+  return (
+    <DrawerPanel isOpen onClose={onClose} size="md" hideCloseButton>
+        <div className="px-6 py-5 border-b border-border-subtle">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center text-brand text-sm font-bold">
+                {channel.icon || "QR"}
+              </div>
+              <div>
+                <h3 className="text-base font-black">{channel.display_name || channel.name}</h3>
+                <p className="text-[10px] text-text-dim mt-0.5">{t("channels.qr_login") || "QR Code Login"}</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close")}><X className="w-4 h-4" /></button>
+          </div>
+        </div>
+
+        <div className="p-6 flex flex-col items-center gap-4">
+          {phase === "loading" && (
+            <div className="w-64 h-64 flex items-center justify-center bg-main/30 rounded-xl">
+              <div className="animate-spin w-8 h-8 border-2 border-brand border-t-transparent rounded-full" />
+            </div>
+          )}
+
+          {phase === "scanning" && (
+            <div className="bg-white rounded-xl p-2">
+              <canvas ref={canvasRef} />
+            </div>
+          )}
+
+          {phase === "success" && (
+            <div className="w-64 h-64 flex items-center justify-center bg-success/10 rounded-xl">
+              <CheckCircle2 className="w-16 h-16 text-success" />
+            </div>
+          )}
+
+          {phase === "error" && (
+            <div className="w-64 h-64 flex flex-col items-center justify-center bg-error/10 rounded-xl gap-3">
+              <XCircle className="w-16 h-16 text-error" />
+              <Button variant="secondary" onClick={startQr}>{t("common.retry") || "Retry"}</Button>
+            </div>
+          )}
+
+          <p className="text-xs text-text-dim text-center max-w-xs">{message}</p>
+        </div>
+
+        <div className="p-4 border-t border-border-subtle flex justify-end">
+          <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
+        </div>
+    </DrawerPanel>
+  );
+}
 
 export function ChannelsPage() {
   const { t } = useTranslation();
@@ -563,9 +566,8 @@ export function ChannelsPage() {
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailsChannel, setDetailsChannel] = useState<Channel | null>(null);
-  // Every channel is sidecar now (the in-process registry was removed),
-  // so configure always lands on the schema-driven SidecarForm drawer.
-  const [sidecarFormChannel, setSidecarFormChannel] = useState<Channel | null>(null);
+  const [configuringChannel, setConfiguringChannel] = useState<Channel | null>(null);
+  const [qrLoginChannel, setQrLoginChannel] = useState<Channel | null>(null);
   // The picker drawer holds the catalog of unconfigured channel types
   // (slack / discord / email / …). Default view shows only configured
   // channels so the page stays focused on what's actually wired up.
@@ -575,21 +577,25 @@ export function ChannelsPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const channelsQuery = useChannels();
+  const testMut = useTestChannel();
   const reloadMut = useReloadChannels();
 
+  const handleTest = (name: string) => {
+    testMut.mutate(name, {
+      onSuccess: () => addToast(t("channels.test_success", { defaultValue: `Channel "${name}" test passed` }), "success"),
+      onError: (err) => addToast(toastErr(err, t("channels.test_failed", { defaultValue: `Channel "${name}" test failed` })), "error"),
+    });
+  };
   const handleReload = () => {
     reloadMut.mutate(undefined, {
       onSuccess: () => addToast(t("channels.reload_success", { defaultValue: "Channels reloaded" }), "success"),
       onError: (err) => addToast(toastErr(err, t("common.error")), "error"),
     });
   };
-  const handleCardConfigure = useCallback((ch: Channel) => {
-    setSidecarFormChannel(ch);
-  }, []);
 
   const channels = channelsQuery.data ?? [];
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
-  const unconfiguredCount = channels.length - configuredCount;
+  const unconfiguredCount = useMemo(() => channels.filter(c => !c.configured).length, [channels]);
 
   // Configured channels are the main page content. Filter/sort applies
   // to those only; the unconfigured catalog lives behind the Add picker.
@@ -609,6 +615,8 @@ export function ChannelsPage() {
     [channels, search, sortField, sortOrder],
   );
 
+  const paginatedChannels = filteredChannels;
+
   // Catalog of unconfigured channel types, surfaced in the Add picker.
   const pickerChannels = useMemo(
     () => [...channels]
@@ -626,10 +634,8 @@ export function ChannelsPage() {
   };
   const handlePick = (ch: Channel) => {
     setPickerOpen(false);
-    // Schema-driven save endpoint
-    // (`POST /api/channels/sidecar/{name}/configure`) is the only
-    // configure path now — every channel runs as a sidecar.
-    setSidecarFormChannel(ch);
+    if (ch.setup_type === "qr") setQrLoginChannel(ch);
+    else setConfiguringChannel(ch);
   };
 
   const handleSort = (field: SortField) => {
@@ -641,24 +647,24 @@ export function ChannelsPage() {
     }
   };
 
-  const handleSelect = useCallback((name: string, checked: boolean) => {
+  const handleSelect = (name: string, checked: boolean) => {
     setSelectedIds(prev => {
       const next = new Set(prev);
       if (checked) next.add(name);
       else next.delete(name);
       return next;
     });
-  }, []);
+  };
 
   const handleSelectAll = () => {
-    if (selectedIds.size === filteredChannels.length) {
+    if (selectedIds.size === paginatedChannels.length) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(filteredChannels.map(c => c.name)));
+      setSelectedIds(new Set(paginatedChannels.map(c => c.name)));
     }
   };
 
-  const allSelected = filteredChannels.length > 0 && selectedIds.size === filteredChannels.length;
+  const allSelected = paginatedChannels.length > 0 && selectedIds.size === paginatedChannels.length;
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -795,14 +801,14 @@ export function ChannelsPage() {
           </div>
 
           <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
-            {filteredChannels.map((c) => (
+            {paginatedChannels.map((c) => (
               <ChannelCard
                 key={c.name}
                 channel={c}
                 isSelected={selectedIds.has(c.name)}
                 viewMode={viewMode}
                 onSelect={handleSelect}
-                onConfigure={handleCardConfigure}
+                onConfigure={(ch) => ch.setup_type === "qr" ? setQrLoginChannel(ch) : setConfiguringChannel(ch)}
                 onViewDetails={setDetailsChannel}
                 t={t}
               />
@@ -812,27 +818,45 @@ export function ChannelsPage() {
       )}
       </div>
 
-      {/* Details Modal — read-only "what is this" view. */}
+      {/* Details Modal */}
       {detailsChannel && (
         <DetailsModal
           channel={detailsChannel}
           onClose={() => setDetailsChannel(null)}
+          onConfigure={() => {
+            const ch = detailsChannel;
+            setDetailsChannel(null);
+            if (ch.setup_type === "qr") {
+              setQrLoginChannel(ch);
+            } else {
+              setConfiguringChannel(ch);
+            }
+          }}
+          onTest={() => handleTest(detailsChannel.name)}
           t={t}
         />
       )}
 
-      {/* Sidecar configure form — schema-driven, hits
-          `POST /api/channels/sidecar/{name}/configure`. */}
-      {sidecarFormChannel && (
-        <SidecarForm
-          channel={sidecarFormChannel}
-          onClose={() => setSidecarFormChannel(null)}
+      {/* Config Dialog */}
+      {configuringChannel && (
+        <ConfigDialog
+          channel={configuringChannel}
+          onClose={() => setConfiguringChannel(null)}
+          t={t}
+        />
+      )}
+
+      {/* QR Login Dialog */}
+      {qrLoginChannel && (
+        <QrLoginDialog
+          channel={qrLoginChannel}
+          onClose={() => setQrLoginChannel(null)}
           t={t}
         />
       )}
 
       {/* Add-channel picker — shows the catalog of unconfigured channel
-          types. Click one to launch the SidecarForm drawer. */}
+          types. Click one to launch the existing configure / QR flow. */}
       <DrawerPanel
         isOpen={pickerOpen}
         onClose={() => setPickerOpen(false)}

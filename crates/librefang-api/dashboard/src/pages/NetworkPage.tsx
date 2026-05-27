@@ -1,8 +1,6 @@
 import { useCallback } from "react";
 import { formatDateTime } from "../lib/datetime";
 import { useTranslation } from "react-i18next";
-import { useUIStore } from "../lib/store";
-import { toastErr } from "../lib/errors";
 import {
   useNetworkStatus,
   usePeers,
@@ -25,8 +23,6 @@ import {
   ShieldCheck,
 } from "lucide-react";
 
-const NETWORK_ICON = <Network className="h-4 w-4" />;
-
 export function NetworkPage() {
   const { t } = useTranslation();
 
@@ -37,18 +33,15 @@ export function NetworkPage() {
   const status = statusQuery.data;
   const peers = peersQuery.data ?? [];
   const trustedPeers = trustedQuery.data ?? [];
-  const addToast = useUIStore((s) => s.addToast);
-  const isLoading = statusQuery.isPending || peersQuery.isPending || trustedQuery.isPending;
+  const isLoading = statusQuery.isPending || peersQuery.isPending;
 
   const handleRefresh = useCallback(() => {
-    Promise.all([
+    void Promise.all([
       statusQuery.refetch(),
       peersQuery.refetch(),
       trustedQuery.refetch(),
-    ]).catch((e) => {
-      addToast(toastErr(e, t("common.error")), "error");
-    });
-  }, [statusQuery, peersQuery, trustedQuery, addToast, t]);
+    ]);
+  }, [statusQuery, peersQuery, trustedQuery]);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -58,7 +51,7 @@ export function NetworkPage() {
         subtitle={t("network.subtitle")}
         isFetching={statusQuery.isFetching || peersQuery.isFetching}
         onRefresh={handleRefresh}
-        icon={NETWORK_ICON}
+        icon={<Network className="h-4 w-4" />}
         helpText={t("network.help")}
       />
 
@@ -150,13 +143,9 @@ export function NetworkPage() {
               >
                 {status.identity_fingerprint}
               </p>
-            ) : status?.online ? (
+            ) : (
               <p className="text-xs text-warning mt-2">
                 {t("network.identity_missing")}
-              </p>
-            ) : (
-              <p className="text-xs text-text-dim mt-2">
-                {t("network.ofp_disabled")}
               </p>
             )}
             <p className="text-[10px] text-text-dim mt-2">
@@ -207,13 +196,7 @@ export function NetworkPage() {
                 ))}
               </StaggerList>
             </div>
-          ) : (
-            <EmptyState
-              icon={<ShieldCheck className="h-8 w-8" />}
-              title={t("network.no_trusted_peers")}
-              description={t("network.no_trusted_peers_desc")}
-            />
-          )}
+          ) : null}
 
           {/* Peers list */}
           <div>
@@ -251,14 +234,14 @@ export function NetworkPage() {
                         {peer.status || t("common.unknown")}
                       </Badge>
                     </div>
-                    {(peer.version != null || peer.last_seen != null) ? (
+                    {(peer.version || peer.last_seen) ? (
                       <div className="flex items-center gap-3 mt-3 text-[10px] text-text-dim">
-                        {peer.version != null ? (
+                        {peer.version ? (
                           <span className="flex items-center gap-1">
                             <Globe className="w-3 h-3" /> v{peer.version}
                           </span>
                         ) : null}
-                        {peer.last_seen != null ? (
+                        {peer.last_seen ? (
                           <span className="flex items-center gap-1">
                             <Clock className="w-3 h-3" /> {formatDateTime(peer.last_seen)}
                           </span>

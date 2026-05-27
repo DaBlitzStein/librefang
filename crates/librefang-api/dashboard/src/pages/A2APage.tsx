@@ -15,8 +15,6 @@ import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
-import { useUIStore } from "../lib/store";
-import { toastErr } from "../lib/errors";
 import { Globe, Search, Send, ExternalLink, Clock, CheckCircle2, XCircle, Loader2, Plus } from "lucide-react";
 
 export function A2APage() {
@@ -35,7 +33,6 @@ export function A2APage() {
   const [taskMessage, setTaskMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [trackedTasks, setTrackedTasks] = useState<A2ATaskStatus[]>([]);
-  const addToast = useUIStore((s) => s.addToast);
 
   const agentsQuery = useA2AAgents();
   const discoverMutation = useDiscoverA2AAgent();
@@ -64,18 +61,15 @@ export function A2APage() {
       // Track the task if we get an ID back
       const taskId = result.task_id as string | undefined;
       if (taskId) {
-        setTrackedTasks((prev) => {
-          const next = [
-            { id: taskId, status: "pending", created_at: new Date().toISOString() },
-            ...prev,
-          ];
-          return next.length > 50 ? next.slice(0, 50) : next;
-        });
+        setTrackedTasks((prev) => [
+          { id: taskId, status: "pending", created_at: new Date().toISOString() },
+          ...prev,
+        ]);
       }
       setTaskMessage("");
       setTaskAgent(null);
-    } catch (err) {
-      addToast(toastErr(err, t("common.error")), "error");
+    } catch {
+      // error silenced
     } finally {
       setIsSending(false);
     }
@@ -182,7 +176,7 @@ export function A2APage() {
             ) : (
               <StaggerList className="grid gap-3 md:grid-cols-2">
                 {agents.map((agent, idx) => (
-                  <Card key={agent.url || agent.name || `agent-${idx}`} hover padding="md">
+                  <Card key={agent.url || idx} hover padding="md">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 rounded-xl bg-linear-to-br from-accent/20 to-brand/20 flex items-center justify-center">
@@ -293,7 +287,7 @@ export function A2APage() {
                             task.status === "failed" ? "error" : "brand"
                           }
                         >
-                          {t(`a2a.status_${task.status}`, { defaultValue: task.status ?? "" })}
+                          {task.status}
                         </Badge>
                       </div>
                       <div className="flex items-center gap-2">

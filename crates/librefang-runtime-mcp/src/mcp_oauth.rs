@@ -11,7 +11,7 @@ use librefang_types::config::McpOAuthConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use url::Url;
 
 // Canonical OAuth token type lives in `librefang-types`.  Re-export so existing
@@ -165,80 +165,36 @@ pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) 
 
 /// Return `true` when the given host string is a literal IP address or
 /// known internal hostname that must not be reachable via OAuth metadata
-/// fetches or MCP transport connections (SSRF defence-in-depth).  No DNS
-/// resolution is performed — only the literal value is matched.  A public
-/// hostname that DNS-rebinds to an internal IP at fetch time is out of
-/// scope; mitigate at the network layer.
+/// fetches (SSRF defence-in-depth).  No DNS resolution is performed —
+/// only the literal value is matched.  A public hostname that DNS-rebinds
+/// to an internal IP at fetch time is out of scope; mitigate at the
+/// network layer.
 ///
 /// Blocked values:
-/// * Exact hostnames:   `localhost`, `ip6-localhost`, `metadata.google.internal`,
-///   `metadata.aws.internal`, `instance-data`
+/// * Exact hostnames:   `localhost`, `metadata.google.internal`
 /// * IPv4 loopback      127.0.0.0/8
-/// * IPv4 unspecified   0.0.0.0
 /// * IPv4 private       10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-/// * IPv4 CGNAT         100.64.0.0/10 (incl. Alibaba Cloud IMDS 100.100.100.200)
 /// * IPv4 link-local    169.254.0.0/16 (covers IMDS 169.254.169.254)
-/// * IPv4 Azure IMDS    192.0.0.192 (legacy Azure metadata endpoint)
 /// * IPv6 loopback      ::1
 /// * IPv6 unique-local  fc00::/7
 /// * IPv6 link-local    fe80::/10
-/// * IPv4-mapped IPv6   `::ffff:x.x.x.x` when the embedded v4 is blocked
-/// * NAT64              `64:ff9b::x.x.x.x` when the embedded v4 is blocked
-///
-/// Used in two modes (`metadata_only`):
-/// * `false` — full block (loopback / private / link-local / IMDS).
-///   Used for URLs whose host is influenced by a remote response
-///   (OAuth discovery & token exchange) where SSRF protection is
-///   essential. This is the historical behaviour for every caller.
-/// * `true`  — block only the cloud-metadata pivots that are *never* a
-///   legitimate operator-configured backend (IMDS hostnames,
-///   `0.0.0.0`, `169.254/16`, `100.64/10`, `192.0.0.192`, and their
-///   IPv6-embedded forms). Loopback / RFC1918 are allowed. Used by the
-///   operator-configured MCP connect URL (`McpConnection::check_ssrf`),
-///   where pointing at a local MCP server on `127.0.0.1` /
-///   `localhost` / a LAN address is a legitimate, common setup.
+/// * IPv4-mapped IPv6   `::ffff:x.x.x.x` when the embedded v4 is private
+/// * NAT64              `64:ff9b::x.x.x.x` when the embedded v4 is private
 fn is_ssrf_blocked_host(host: &str) -> bool {
-    is_ssrf_blocked_host_impl(host, false)
-}
-
-/// Cloud-metadata / IMDS pivots only — see [`is_ssrf_blocked_host`]
-/// `metadata_only` mode. Always blocked, including on the
-/// operator-configured connect path.
-fn is_cloud_metadata_host(host: &str) -> bool {
-    is_ssrf_blocked_host_impl(host, true)
-}
-
-fn is_ssrf_blocked_host_impl(host: &str, metadata_only: bool) -> bool {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    fn blocked_v4(v4: Ipv4Addr, metadata_only: bool) -> bool {
+    fn blocked_v4(v4: Ipv4Addr) -> bool {
         let o = v4.octets();
-        // Cloud-metadata pivots — never a legitimate operator backend,
-        // blocked on every path including connect.
-        let meta =
-            // 0.0.0.0 unspecified — connects to every interface incl. loopback
-            (o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0)
-            // 100.64.0.0/10 CGNAT (also Alibaba Cloud IMDS at 100.100.100.200)
-            || (o[0] == 100 && (o[1] & 0xc0) == 64)
-            // 169.254.0.0/16 link-local (incl. cloud IMDS 169.254.169.254)
-            || (o[0] == 169 && o[1] == 254)
-            // 192.0.0.192 — Azure IMDS alternative endpoint. Public IANA-
-            // assigned (192.0.0.0/24 IETF reserved) but used by Azure for
-            // legacy metadata access; web_fetch::check_ssrf blocks it and
-            // this helper must stay aligned.
-            || (o[0] == 192 && o[1] == 0 && o[2] == 0 && o[3] == 192);
-        if metadata_only {
-            return meta;
-        }
-        meta
         // 127.0.0.0/8 loopback
-        || o[0] == 127
+        o[0] == 127
         // 10.0.0.0/8
         || o[0] == 10
         // 172.16.0.0/12
         || (o[0] == 172 && (o[1] & 0xf0) == 16)
         // 192.168.0.0/16
         || (o[0] == 192 && o[1] == 168)
+        // 169.254.0.0/16 link-local (incl. cloud IMDS 169.254.169.254)
+        || (o[0] == 169 && o[1] == 254)
     }
 
     /// IPv4 embedded in an IPv6 address through one of the two forms
@@ -268,24 +224,7 @@ fn is_ssrf_blocked_host_impl(host: &str, metadata_only: bool) -> bool {
     // Strip a trailing dot ("localhost." is the same host as "localhost"
     // to a resolver) before the hostname comparison.
     let lower = host.trim_end_matches('.').to_lowercase();
-    // IMDS hostnames are never a legitimate backend — blocked on every
-    // path. Keep this list aligned with
-    // `librefang_runtime::web_fetch::check_ssrf`.
-    if matches!(
-        lower.as_str(),
-        "metadata.google.internal" | "metadata.aws.internal" | "instance-data"
-    ) {
-        return true;
-    }
-    // `localhost` / `ip6-localhost` / `ip6-loopback` are loopback
-    // aliases an operator legitimately runs a local MCP server on —
-    // only blocked on the server-response-influenced paths.
-    if !metadata_only
-        && matches!(
-            lower.as_str(),
-            "localhost" | "ip6-localhost" | "ip6-loopback"
-        )
-    {
+    if lower == "localhost" || lower == "metadata.google.internal" {
         return true;
     }
 
@@ -297,17 +236,12 @@ fn is_ssrf_blocked_host_impl(host: &str, metadata_only: bool) -> bool {
 
     if let Ok(ip) = ip_str.parse::<IpAddr>() {
         return match ip {
-            IpAddr::V4(v4) => blocked_v4(v4, metadata_only),
+            IpAddr::V4(v4) => blocked_v4(v4),
             IpAddr::V6(v6) => {
                 if let Some(v4) = ipv6_embedded_ipv4(v6) {
-                    if blocked_v4(v4, metadata_only) {
+                    if blocked_v4(v4) {
                         return true;
                     }
-                }
-                if metadata_only {
-                    // Generic IPv6 loopback / ULA / link-local are
-                    // private-tier — allowed on the connect path.
-                    return false;
                 }
                 let segs = v6.segments();
                 // ::1 loopback
@@ -350,25 +284,6 @@ fn is_ssrf_blocked_host_impl(host: &str, metadata_only: bool) -> bool {
 /// endpoint URLs before making outbound requests against values written
 /// before policy tightened.
 pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
-    is_ssrf_blocked_url_with(url_str, is_ssrf_blocked_host)
-}
-
-/// Connect-path variant of [`is_ssrf_blocked_url`]: same scheme +
-/// userinfo + parse rejection, but the host check only blocks the
-/// cloud-metadata pivots (see [`is_cloud_metadata_host`]). Used for the
-/// operator-configured MCP backend URL (SSE / Streamable-HTTP /
-/// HTTP-compat connect) where loopback / RFC1918 destinations are
-/// legitimate. OAuth discovery / token exchange keep the full
-/// [`is_ssrf_blocked_url`] block since those hosts come from a remote
-/// response.
-pub fn is_ssrf_blocked_url_for_connect(url_str: &str) -> Result<(), String> {
-    is_ssrf_blocked_url_with(url_str, is_cloud_metadata_host)
-}
-
-fn is_ssrf_blocked_url_with(
-    url_str: &str,
-    host_blocked: impl Fn(&str) -> bool,
-) -> Result<(), String> {
     let parsed = Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
@@ -381,7 +296,7 @@ fn is_ssrf_blocked_url_with(
     let host = parsed
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
-    if host_blocked(host) {
+    if is_ssrf_blocked_host(host) {
         return Err(format!("host '{host}' is a blocked address"));
     }
     Ok(())
@@ -404,118 +319,28 @@ pub fn well_known_url(server_url: &str) -> Option<String> {
     Some(format!("{}/.well-known/oauth-authorization-server", origin))
 }
 
-/// Returns true when `endpoint_host` and `server_host` resolve to the same
-/// registrable domain (eTLD+1) under the Public Suffix List.
-///
-/// IP literals are rejected: PSL has no opinion on them, and its default
-/// rule for an unknown TLD label produces shared-tail false matches
-/// (`psl::domain_str("10.0.0.1") == Some("0.1")` would let `10.0.0.1` and
-/// `10.0.0.2` collide). They must only ever match via Rule 1 (strict
-/// origin equality) — see [`validate_metadata_endpoints`].
-///
-/// Mirrors the policy of
-/// `librefang-api::routes::mcp_auth::token_endpoint_host_matches`'s Rule 2
-/// (#4779, #4665).
-fn shares_registrable_domain(endpoint_host: &str, server_host: &str) -> bool {
-    use std::net::IpAddr;
-
-    // Strip IPv6 brackets — `Url::host_str` keeps them.
-    fn strip_brackets(h: &str) -> &str {
-        h.trim_start_matches('[').trim_end_matches(']')
-    }
-    let eh = strip_brackets(endpoint_host);
-    let sh = strip_brackets(server_host);
-
-    if eh.parse::<IpAddr>().is_ok() || sh.parse::<IpAddr>().is_ok() {
-        return false;
-    }
-
-    match (psl::domain_str(eh), psl::domain_str(sh)) {
-        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-        _ => false,
-    }
-}
-
 /// Verify that every OAuth endpoint URL returned by a metadata document
-/// shares the same origin (scheme + host + port) as `server_url`, or
-/// at minimum the same registrable domain (eTLD+1) **AND** the same
-/// scheme as `server_url`.
+/// shares the same scheme and host (origin) as `server_url`.
 ///
-/// Two-rule acceptance policy (mirrors api-side
-/// `token_endpoint_host_matches`):
-/// - **Rule 1** (#3713): strict origin equality.
-/// - **Rule 2** (#4665, #4779): both endpoint host and server host are
-///   DNS names sharing the same eTLD+1, and `parsed.scheme() ==
-///   server_parsed.scheme()`.
-///
-/// The scheme floor on Rule 2 is load-bearing: the api-side
-/// `token_endpoint_host_matches` is host-only, so without this, a rogue
-/// metadata document could declare `http://<sibling>.<eTLD+1>/token`
-/// against an `https` MCP server, pass Rule 2, and the discovered
-/// metadata would later be POSTed to over cleartext (the SSRF guard
-/// `is_ssrf_blocked_url` allows both http and https). Pinning the
-/// scheme keeps the #3713 floor on the dimension Rule 2 must not loosen.
-///
-/// **Port is not pinned on Rule 2** — only scheme and registrable
-/// domain. A metadata document on `https://example.com:8443/token` is
-/// accepted against `https://example.com/mcp` (origin differs by port,
-/// so Rule 1 fails; eTLD+1 + scheme match, so Rule 2 accepts). The
-/// reasoning is that the same registrable domain implies the same
-/// org, and an org running an OAuth endpoint on a non-default port
-/// within its own domain is legitimate. If a future threat model
-/// requires per-port pinning, tighten Rule 2 to compare
-/// `parsed.port_or_known_default()` as well — see the
-/// `accepts_same_etld1_different_port` test for the contract this
-/// documents.
-///
-/// **Maintenance:** this Rule 1 + Rule 2 + IP-carve-out policy is
-/// duplicated in api-side `librefang_api::routes::mcp_auth::
-/// token_endpoint_host_matches` (host-only there — no scheme floor).
-/// Both sides must change together, otherwise discovery and
-/// token-exchange will disagree on what's an acceptable endpoint.
+/// This prevents a rogue metadata document from redirecting the token
+/// exchange or authorization flow to an attacker-controlled host.
 pub fn validate_metadata_endpoints(
     metadata: &OAuthMetadata,
     server_url: &str,
 ) -> Result<(), String> {
     let server_parsed = Url::parse(server_url).map_err(|e| format!("Invalid server URL: {e}"))?;
     let server_origin = server_parsed.origin();
-    let server_scheme = server_parsed.scheme();
 
     let check = |endpoint: &str, label: &str| -> Result<(), String> {
         let parsed =
             Url::parse(endpoint).map_err(|e| format!("Invalid {label} URL '{endpoint}': {e}"))?;
-
-        // Rule 1 (#3713): strict origin equality.
-        if parsed.origin() == server_origin {
-            return Ok(());
+        if parsed.origin() != server_origin {
+            return Err(format!(
+                "OAuth metadata endpoint domain mismatch: {label} '{endpoint}' \
+                 does not share the same scheme+host as the MCP server '{server_url}'"
+            ));
         }
-
-        // Rule 2 (#4665, #4779): same registrable domain, same scheme.
-        if parsed.scheme() == server_scheme {
-            let endpoint_host = parsed.host_str().unwrap_or("");
-            let server_host = server_parsed.host_str().unwrap_or("");
-            if !endpoint_host.is_empty()
-                && !server_host.is_empty()
-                && shares_registrable_domain(endpoint_host, server_host)
-            {
-                let registrable = psl::domain_str(endpoint_host).unwrap_or("");
-                info!(
-                    endpoint = %endpoint,
-                    endpoint_host = %endpoint_host,
-                    server_url = %server_url,
-                    server_host = %server_host,
-                    registrable_domain = %registrable,
-                    label = %label,
-                    "accepted OAuth metadata endpoint on sibling subdomain within same registrable domain (#4665)"
-                );
-                return Ok(());
-            }
-        }
-
-        Err(format!(
-            "OAuth metadata endpoint domain mismatch: {label} '{endpoint}' \
-             does not share the same scheme+host as the MCP server '{server_url}'"
-        ))
+        Ok(())
     };
 
     check(&metadata.authorization_endpoint, "authorization_endpoint")?;
@@ -635,16 +460,6 @@ pub enum McpOAuthError {
     Io(#[from] std::io::Error),
     #[error("vault crypto/format error: {0}")]
     Crypto(String),
-    /// A cached token expired and the automatic refresh attempt failed for a
-    /// reason that is **not** "the refresh token is revoked" — a 5xx / timeout
-    /// / network error (transient), or another non-`invalid_grant` failure
-    /// (permanent). Distinct from `Ok(None)` so the connection layer does
-    /// NOT discard a still-valid refresh token and force a re-auth on a
-    /// transient outage (audit: `oauth-refresh-error-body-token-leak`).
-    /// The message carries only a status code / sanitized reason — never the
-    /// token-endpoint response body.
-    #[error("token refresh failed: {0}")]
-    RefreshFailed(String),
 }
 
 /// Trait for OAuth token storage and management.
@@ -1363,187 +1178,6 @@ mod tests {
             server_url: "https://example.com/mcp".to_string(),
         };
         assert!(validate_metadata_endpoints(&meta, "https://example.com/mcp").is_ok());
-    }
-
-    // -- #4665, #4779: Rule 2 eTLD+1 acceptance with scheme floor --
-
-    #[test]
-    fn validate_metadata_endpoints_accepts_cross_subdomain_within_registrable_domain() {
-        // Slack-shaped delegation: server URL on mcp.slack.com, metadata
-        // declares endpoints on slack.com. Both share eTLD+1 = slack.com,
-        // schemes match — Rule 2 accepts (#4665, #4779).
-        let meta = OAuthMetadata {
-            authorization_endpoint: "https://slack.com/oauth/v2/authorize".to_string(),
-            token_endpoint: "https://slack.com/api/oauth.v2.access".to_string(),
-            client_id: None,
-            registration_endpoint: None,
-            scopes: Vec::new(),
-            user_scopes: Vec::new(),
-            server_url: "https://mcp.slack.com/mcp".to_string(),
-        };
-        assert!(
-            validate_metadata_endpoints(&meta, "https://mcp.slack.com/mcp").is_ok(),
-            "expected legitimate cross-subdomain delegation to be accepted"
-        );
-    }
-
-    #[test]
-    fn validate_metadata_endpoints_accepts_deeper_subdomain_within_registrable_domain() {
-        let meta = OAuthMetadata {
-            authorization_endpoint: "https://c.foo.com/auth".to_string(),
-            token_endpoint: "https://c.foo.com/token".to_string(),
-            client_id: None,
-            registration_endpoint: None,
-            scopes: Vec::new(),
-            user_scopes: Vec::new(),
-            server_url: "https://a.b.foo.com/mcp".to_string(),
-        };
-        assert!(validate_metadata_endpoints(&meta, "https://a.b.foo.com/mcp").is_ok());
-    }
-
-    #[test]
-    fn validate_metadata_endpoints_accepts_multilabel_psl_pair() {
-        // mcp.bbc.co.uk and bbc.co.uk share eTLD+1 = bbc.co.uk under the
-        // PSL multi-label public suffix. Pin against a naive `split('.')`
-        // implementation that would treat `co.uk` as the eTLD+1.
-        let meta = OAuthMetadata {
-            authorization_endpoint: "https://bbc.co.uk/auth".to_string(),
-            token_endpoint: "https://bbc.co.uk/token".to_string(),
-            client_id: None,
-            registration_endpoint: None,
-            scopes: Vec::new(),
-            user_scopes: Vec::new(),
-            server_url: "https://mcp.bbc.co.uk/mcp".to_string(),
-        };
-        assert!(validate_metadata_endpoints(&meta, "https://mcp.bbc.co.uk/mcp").is_ok());
-    }
-
-    #[test]
-    fn validate_metadata_endpoints_accepts_same_etld1_different_port() {
-        // Server URL on the default https port, endpoint on a non-default
-        // port within the same registrable domain. Url::origin() normalises
-        // default ports to the scheme's default, so origins differ — Rule 1
-        // fails. eTLD+1 + scheme match — Rule 2 accepts.
-        //
-        // Pins the policy from the validate_metadata_endpoints doc comment:
-        // port is NOT compared on Rule 2. If a future threat model demands
-        // per-port pinning, that change must update this test (and the
-        // matching api-side `token_endpoint_host_matches`) together.
-        let meta = OAuthMetadata {
-            authorization_endpoint: "https://example.com/auth".to_string(),
-            token_endpoint: "https://example.com:8443/token".to_string(),
-            client_id: None,
-            registration_endpoint: None,
-            scopes: Vec::new(),
-            user_scopes: Vec::new(),
-            server_url: "https://example.com/mcp".to_string(),
-        };
-        assert!(
-            validate_metadata_endpoints(&meta, "https://example.com/mcp").is_ok(),
-            "expected same-eTLD+1 different-port to be accepted under Rule 2"
-        );
-    }
-
-    #[test]
-    fn validate_metadata_endpoints_rejects_co_uk_neighbour() {
-        // attacker.co.uk and bbc.co.uk live under the SAME public suffix
-        // (`co.uk`) but are different registrable domains — must reject.
-        let meta = OAuthMetadata {
-            authorization_endpoint: "https://attacker.co.uk/auth".to_string(),
-            token_endpoint: "https://attacker.co.uk/token".to_string(),
-            client_id: None,
-            registration_endpoint: None,
-            scopes: Vec::new(),
-            user_scopes: Vec::new(),
-            server_url: "https://mcp.bbc.co.uk/mcp".to_string(),
-        };
-        let err = validate_metadata_endpoints(&meta, "https://mcp.bbc.co.uk/mcp").unwrap_err();
-        assert!(err.contains("domain mismatch"), "{err}");
-    }
-
-    #[test]
-    fn validate_metadata_endpoints_rejects_under_public_suffix_boundary() {
-        // *.github.io is a PSL private suffix; userA and userB are
-        // different registrable domains and must not trust each other.
-        let meta = OAuthMetadata {
-            authorization_endpoint: "https://userB.github.io/auth".to_string(),
-            token_endpoint: "https://userA.github.io/token".to_string(),
-            client_id: None,
-            registration_endpoint: None,
-            scopes: Vec::new(),
-            user_scopes: Vec::new(),
-            server_url: "https://userA.github.io/mcp".to_string(),
-        };
-        let err = validate_metadata_endpoints(&meta, "https://userA.github.io/mcp").unwrap_err();
-        assert!(err.contains("domain mismatch"), "{err}");
-        assert!(err.contains("authorization_endpoint"), "{err}");
-    }
-
-    #[test]
-    fn validate_metadata_endpoints_rejects_http_downgrade_within_same_registrable_domain() {
-        // Server URL is https; metadata declares an http token endpoint
-        // on the same eTLD+1. Without the scheme floor on Rule 2, this
-        // would pass (eTLD+1 = slack.com matches), the SSRF guard
-        // `is_ssrf_blocked_url` allows http, and credentials would be
-        // POSTed in cleartext. Rule 2 must refuse.
-        let meta = OAuthMetadata {
-            authorization_endpoint: "https://mcp.slack.com/oauth/v2/authorize".to_string(),
-            token_endpoint: "http://slack.com/api/oauth.v2.access".to_string(),
-            client_id: None,
-            registration_endpoint: None,
-            scopes: Vec::new(),
-            user_scopes: Vec::new(),
-            server_url: "https://mcp.slack.com/mcp".to_string(),
-        };
-        let err = validate_metadata_endpoints(&meta, "https://mcp.slack.com/mcp").unwrap_err();
-        assert!(err.contains("domain mismatch"), "{err}");
-        assert!(err.contains("token_endpoint"), "{err}");
-    }
-
-    #[test]
-    fn validate_metadata_endpoints_rejects_ip_literal_with_shared_psl_default_rule() {
-        // `psl::domain_str`'s unknown-TLD default rule produces shared
-        // trailing labels for unrelated IPv4 literals
-        // (`psl::domain_str("10.0.0.1") == Some("0.1")`,
-        // `psl::domain_str("10.0.0.2") == Some("0.2")` ... but
-        // `psl::domain_str("10.0.0.1") == psl::domain_str("11.0.0.1") == "0.1"`).
-        // The IP carve-out in `shares_registrable_domain` must reject all
-        // IP-literal pairs that fail Rule 1 (strict origin equality), no
-        // matter how the PSL default rule labels them. Mirrors #4779's
-        // `token_endpoint_ip_host_requires_exact_match`.
-        let meta = OAuthMetadata {
-            authorization_endpoint: "https://10.0.0.1/auth".to_string(),
-            token_endpoint: "https://11.0.0.1/token".to_string(),
-            client_id: None,
-            registration_endpoint: None,
-            scopes: Vec::new(),
-            user_scopes: Vec::new(),
-            server_url: "https://10.0.0.1/mcp".to_string(),
-        };
-        let err = validate_metadata_endpoints(&meta, "https://10.0.0.1/mcp").unwrap_err();
-        assert!(err.contains("domain mismatch"), "{err}");
-        assert!(err.contains("token_endpoint"), "{err}");
-    }
-
-    #[test]
-    fn validate_metadata_endpoints_rejects_bracketed_ipv6_pair() {
-        // `Url::host_str` returns IPv6 in bracketed form (`[::1]`); the
-        // IP carve-out must strip brackets before parsing or both sides
-        // would fail the IpAddr parse and slip past into the PSL path,
-        // where they'd fail again — but we want the failure to be
-        // unambiguous and on the IP carve-out (so a future PSL upgrade
-        // that started recognising IPv6 literals doesn't regress).
-        let meta = OAuthMetadata {
-            authorization_endpoint: "https://[2001:db8::1]/auth".to_string(),
-            token_endpoint: "https://[2001:db8::2]/token".to_string(),
-            client_id: None,
-            registration_endpoint: None,
-            scopes: Vec::new(),
-            user_scopes: Vec::new(),
-            server_url: "https://[2001:db8::1]/mcp".to_string(),
-        };
-        let err = validate_metadata_endpoints(&meta, "https://[2001:db8::1]/mcp").unwrap_err();
-        assert!(err.contains("domain mismatch"), "{err}");
     }
 
     // -- #3727: generate_flow_id tests --

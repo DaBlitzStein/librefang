@@ -7,9 +7,6 @@ use crate::routes::{self, AppState};
 use crate::webchat;
 use axum::response::IntoResponse;
 use axum::Router;
-use librefang_kernel::config_reload::HotAction;
-use librefang_kernel::kernel_api::KernelApi;
-use librefang_kernel::kernel_handle::{ApiAuth, ApiAuthSnapshot, DashboardRawConfig};
 use librefang_kernel::LibreFangKernel;
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -150,50 +147,62 @@ fn resolve_dashboard_credential(
 }
 
 #[allow(deprecated)]
-pub(crate) fn dashboard_session_token(snap: &ApiAuthSnapshot) -> Option<String> {
-    let DashboardRawConfig {
-        user,
-        pass,
-        pass_hash,
-    } = &snap.dashboard;
-    let username = resolve_dashboard_credential(user, "LIBREFANG_DASHBOARD_USER", &snap.home_dir);
-    let password = resolve_dashboard_credential(pass, "LIBREFANG_DASHBOARD_PASS", &snap.home_dir);
+pub(crate) fn dashboard_session_token(kernel: &LibreFangKernel) -> Option<String> {
+    let cfg = kernel.config_ref();
+    let username = resolve_dashboard_credential(
+        &cfg.dashboard_user,
+        "LIBREFANG_DASHBOARD_USER",
+        kernel.home_dir(),
+    );
+    let password = resolve_dashboard_credential(
+        &cfg.dashboard_pass,
+        "LIBREFANG_DASHBOARD_PASS",
+        kernel.home_dir(),
+    );
 
     crate::password_hash::derive_dashboard_session_token(
         username.trim(),
         password.trim(),
-        pass_hash.trim(),
+        cfg.dashboard_pass_hash.trim(),
     )
 }
 
-pub(crate) fn valid_api_tokens(snap: &ApiAuthSnapshot) -> Vec<String> {
+pub(crate) fn valid_api_tokens(kernel: &LibreFangKernel) -> Vec<String> {
     let mut tokens = Vec::new();
-    let explicit_api_key = snap.api_key.trim();
+    let cfg = kernel.config_ref();
+    let explicit_api_key = cfg.api_key.trim();
     if explicit_api_key.is_empty() {
         // No api_key configured — API is open, no auth required.
         // Dashboard login is handled separately by session cookie checks.
         return tokens;
     }
     tokens.push(explicit_api_key.to_string());
-    if let Some(token) = dashboard_session_token(snap) {
+    if let Some(token) = dashboard_session_token(kernel) {
         tokens.push(token);
     }
     tokens
 }
 
-pub(crate) fn has_dashboard_credentials(snap: &ApiAuthSnapshot) -> bool {
-    let DashboardRawConfig {
-        user,
-        pass,
-        pass_hash,
-    } = &snap.dashboard;
-    let username = resolve_dashboard_credential(user, "LIBREFANG_DASHBOARD_USER", &snap.home_dir);
-    let password = resolve_dashboard_credential(pass, "LIBREFANG_DASHBOARD_PASS", &snap.home_dir);
-    !username.trim().is_empty() && (!pass_hash.trim().is_empty() || !password.trim().is_empty())
+pub(crate) fn has_dashboard_credentials(kernel: &LibreFangKernel) -> bool {
+    let cfg = kernel.config_ref();
+    let username = resolve_dashboard_credential(
+        &cfg.dashboard_user,
+        "LIBREFANG_DASHBOARD_USER",
+        kernel.home_dir(),
+    );
+    let password = resolve_dashboard_credential(
+        &cfg.dashboard_pass,
+        "LIBREFANG_DASHBOARD_PASS",
+        kernel.home_dir(),
+    );
+    !username.trim().is_empty()
+        && (!cfg.dashboard_pass_hash.trim().is_empty() || !password.trim().is_empty())
 }
 
-pub(crate) fn configured_user_api_keys(snap: &ApiAuthSnapshot) -> Vec<middleware::ApiUserAuth> {
-    snap.config_users
+pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middleware::ApiUserAuth> {
+    kernel
+        .config_ref()
+        .users
         .iter()
         .filter_map(|user| {
             let api_key_hash = user.api_key_hash.as_deref()?.trim();
@@ -215,15 +224,17 @@ pub(crate) fn configured_user_api_keys(snap: &ApiAuthSnapshot) -> Vec<middleware
 /// table it uses for config-defined users. `device:{id}` namespacing keeps
 /// device entries distinguishable from regular users — `pairing_remove_device`
 /// also keys on this prefix when revoking access.
-pub(crate) fn paired_device_user_keys(snap: &ApiAuthSnapshot) -> Vec<middleware::ApiUserAuth> {
-    snap.device_api_keys
-        .iter()
+pub(crate) fn paired_device_user_keys(kernel: &LibreFangKernel) -> Vec<middleware::ApiUserAuth> {
+    kernel
+        .pairing_ref()
+        .device_api_keys()
+        .into_iter()
         .map(|(device_id, api_key_hash)| {
             let name = format!("device:{device_id}");
             middleware::ApiUserAuth {
                 user_id: librefang_types::agent::UserId::from_name(&name),
                 role: middleware::UserRole::User,
-                api_key_hash: api_key_hash.clone(),
+                api_key_hash,
                 name,
             }
         })
@@ -234,16 +245,16 @@ pub(crate) fn paired_device_user_keys(snap: &ApiAuthSnapshot) -> Vec<middleware:
 /// the daemon: an explicit `api_key`, any `[[users]]` entry with an
 /// `api_key_hash`, any paired device, or dashboard credentials. Used at boot
 /// (#3572) to decide whether a non-loopback bind is safe.
-fn any_auth_configured(snap: &ApiAuthSnapshot) -> bool {
-    let api_key_set = !snap.api_key.trim().is_empty();
-    let users_have_keys = snap.config_users.iter().any(|u| {
+fn any_auth_configured(kernel: &LibreFangKernel) -> bool {
+    let api_key_set = !kernel.config_ref().api_key.trim().is_empty();
+    let users_have_keys = kernel.config_ref().users.iter().any(|u| {
         u.api_key_hash
             .as_deref()
             .map(|h| !h.trim().is_empty())
             .unwrap_or(false)
     });
-    let paired_devices = !snap.device_api_keys.is_empty();
-    let dashboard = has_dashboard_credentials(snap);
+    let paired_devices = !kernel.pairing_ref().device_api_keys().is_empty();
+    let dashboard = has_dashboard_credentials(kernel);
     api_key_set || users_have_keys || paired_devices || dashboard
 }
 
@@ -308,10 +319,10 @@ pub(crate) fn evaluate_bind_auth_safety(
 /// CLI prints it and exits non-zero rather than running open and dropping
 /// every request at the middleware layer.
 pub(crate) fn check_bind_auth_safety(
-    snap: &ApiAuthSnapshot,
+    kernel: &LibreFangKernel,
     addr: &SocketAddr,
 ) -> Result<(), String> {
-    match evaluate_bind_auth_safety(addr, any_auth_configured(snap), allow_no_auth_env()) {
+    match evaluate_bind_auth_safety(addr, any_auth_configured(kernel), allow_no_auth_env()) {
         BindAuthCheck::Ok => Ok(()),
         BindAuthCheck::OkWithExplicitOptIn => {
             tracing::error!(
@@ -332,35 +343,11 @@ pub(crate) fn check_bind_auth_safety(
 /// cloudflared, traefik, nginx, …). Used to decide whether cookies should be
 /// issued with the `Secure` attribute.
 ///
-/// SECURITY (audit: `x-forwarded-proto-trusted-proxies`): the
-/// `X-Forwarded-Proto` header is only honored when the immediate TCP peer
-/// is in the operator-configured `trusted_proxies` allowlist. This mirrors
-/// the existing trust gate in `client_ip.rs` for `X-Forwarded-For` /
-/// `CF-Connecting-IP` etc.
-///
-/// - Untrusted peer (open internet, including the spoofing case where a
-///   plain-HTTP daemon receives a forged `X-Forwarded-Proto: https`):
-///   the header is ignored and we return `false`. Cookies will not be
-///   issued with `Secure`, which matches the actual transport.
-/// - Trusted peer (TLS-terminating proxy that the operator allow-listed):
-///   the header is honored. Multi-proxy comma-separated values follow
-///   RFC 7239 semantics — the client-facing proto is leftmost
-///   (`https, http` = HTTPS reached the outermost proxy, HTTP was the
-///   back-channel), so we split and check the first value only.
-///
-/// Fail-closed: when `trusted_proxies` is empty (default), no peer is
-/// trusted, so the header is always ignored. Operators of plain-HTTP
-/// dev binds don't lose `Secure` (it was already absent); operators
-/// behind TLS proxies must allow-list their proxy or use option 1 of
-/// the audit recommendation (always `Secure` when auth is enabled).
-fn request_is_https(
-    peer: std::net::IpAddr,
-    headers: &axum::http::HeaderMap,
-    trusted_proxies: &crate::client_ip::TrustedProxies,
-) -> bool {
-    if trusted_proxies.is_empty() || !trusted_proxies.contains(peer) {
-        return false;
-    }
+/// Handles the multi-proxy case where the header is comma-separated — RFC 7239
+/// semantics put the client-facing proto first (`https, http` = HTTPS reached
+/// the outermost proxy, HTTP was the back-channel), so we split and check the
+/// first value only.
+fn request_is_https(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
@@ -371,35 +358,14 @@ fn request_is_https(
 
 /// Build the base attribute list for the `librefang_session` cookie. `Secure`
 /// is added only when the request came in over HTTPS so local-HTTP dev keeps
-/// working; any public deployment should be proxied behind TLS *and* have
-/// the proxy address allow-listed via `trusted_proxies` (at which point
+/// working; any public deployment should be proxied behind TLS (at which point
 /// `X-Forwarded-Proto` flips the flag on automatically).
-fn session_cookie_attrs(
-    peer: std::net::IpAddr,
-    headers: &axum::http::HeaderMap,
-    trusted_proxies: &crate::client_ip::TrustedProxies,
-) -> &'static str {
-    if request_is_https(peer, headers, trusted_proxies) {
+fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
+    if request_is_https(headers) {
         "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
     } else {
         "Path=/dashboard; HttpOnly; SameSite=Lax"
     }
-}
-
-/// Cookie-clear attributes used by the logout path. Unlike
-/// [`session_cookie_attrs`], we ALWAYS emit `Secure` — RFC 6265bis §5.6
-/// and current browser behaviour require the Set-Cookie attributes on a
-/// clear (`Max-Age=0`) response to match those on the original cookie,
-/// otherwise the browser keeps the live `Secure` cookie. A logout
-/// request that happened to land over plain HTTP (proxy misconfig,
-/// `X-Forwarded-Proto` missing, local-HTTP dev mode where the user
-/// signed in via HTTPS) would otherwise invalidate server-side state
-/// but leave the cookie pinned client-side until next failed auth.
-/// Modern browsers (Chromium, Firefox, Safari 16.4+) accept `Secure`
-/// on `Max-Age=0` responses regardless of transport.
-/// (audit: logout-no-secure-cookie).
-fn session_cookie_clear_attrs() -> &'static str {
-    "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
 }
 
 /// Dashboard credential login — validates username/password using Argon2id
@@ -409,15 +375,14 @@ fn session_cookie_clear_attrs() -> &'static str {
     post,
     path = "/api/auth/dashboard-login",
     tag = "auth",
-    request_body = crate::types::JsonObject,
+    request_body = serde_json::Value,
     responses(
-        (status = 200, description = "Login outcome — returns session token on success or `requires_totp` when 2FA is needed", body = crate::types::JsonObject),
+        (status = 200, description = "Login outcome — returns session token on success or `requires_totp` when 2FA is needed", body = serde_json::Value),
         (status = 401, description = "Invalid username, password, or TOTP code")
     )
 )]
 pub(crate) async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
-    axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
@@ -455,60 +420,15 @@ pub(crate) async fn dashboard_login(
             token,
             upgrade_hash,
         } => {
-            // If we successfully verified via legacy plaintext, surface
-            // the upgrade hash to the operator. (audit:
-            // dashboard-login-logs-phc-hash)
-            //
-            // Pre-fix, this branch logged the Argon2id PHC string at
-            // INFO. The PHC IS the verifier — `verify_dashboard_password`
-            // short-circuits on it at `password_hash.rs:214` — so anyone
-            // with read access to the daemon log stream (journald,
-            // container stdout, log aggregator, Sentry) could copy the
-            // string from the log, paste it into their own
-            // `config.toml: dashboard_pass_hash`, restart their daemon,
-            // and authenticate as the victim operator. No cracking
-            // required. Logs typically retain longer than passwords (no
-            // rotation story for log archives).
-            //
-            // Fix: write the upgrade hint to
-            // `~/.librefang/dashboard-pass-hash.upgrade-hint` with
-            // `chmod 0600` (same pattern as the secrets.env hardening
-            // at `librefang-import::openclaw.rs:655` and the sqlite
-            // file-permissions fix). The log just SIGNALS that an
-            // upgrade is available + points the operator at the file
-            // — the verifier value never enters the log stream.
+            // If we successfully verified via legacy plaintext, log that an
+            // upgrade hash is available. The admin can persist it to config.
             if let Some(ref hash) = upgrade_hash {
-                let hint_path = cfg.home_dir.join("dashboard-pass-hash.upgrade-hint");
-                match write_upgrade_hint(&hint_path, hash) {
-                    Ok(()) => {
-                        tracing::info!(
-                            path = %hint_path.display(),
-                            "Dashboard password verified via legacy plaintext. \
-                             An Argon2id upgrade hash has been written to the file \
-                             above (mode 0600). Persist it as \
-                             `dashboard_pass_hash = \"<value>\"` in config.toml, \
-                             remove `dashboard_pass`, then delete the hint file."
-                        );
-                    }
-                    Err(e) => {
-                        // Filesystem write failure — fall back to a
-                        // log line that still describes the upgrade
-                        // posture without leaking the hash itself.
-                        // Operator can re-login (the hash will be
-                        // re-derived next time) once the FS issue is
-                        // resolved.
-                        tracing::warn!(
-                            path = %hint_path.display(),
-                            error = %e,
-                            "Dashboard password verified via legacy plaintext but \
-                             we could not write the upgrade-hint file. The Argon2id \
-                             hash is held in memory only; re-login after fixing the \
-                             filesystem error to regenerate it. The hash is NOT \
-                             logged — it is the verifier and would let anyone with \
-                             log access authenticate as you."
-                        );
-                    }
-                }
+                tracing::info!(
+                    "Dashboard password verified via legacy plaintext. \
+                     Set `dashboard_pass_hash = \"{}\"` in config.toml \
+                     and remove `dashboard_pass` to complete the migration.",
+                    hash
+                );
             }
 
             // TOTP second-factor check for login
@@ -607,7 +527,7 @@ pub(crate) async fn dashboard_login(
             let cookie = format!(
                 "librefang_session={}; {}; Max-Age={}",
                 token.token,
-                session_cookie_attrs(peer_addr.ip(), &headers, &state.trusted_proxies),
+                session_cookie_attrs(&headers),
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS
             );
             (
@@ -639,7 +559,7 @@ pub(crate) async fn dashboard_login(
     path = "/api/auth/dashboard-check",
     tag = "auth",
     responses(
-        (status = 200, description = "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`", body = crate::types::JsonObject)
+        (status = 200, description = "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`", body = serde_json::Value)
     )
 )]
 pub(crate) async fn dashboard_auth_check(
@@ -696,7 +616,7 @@ pub(crate) async fn dashboard_auth_check(
     path = "/api/auth/logout",
     tag = "auth",
     responses(
-        (status = 200, description = "Session invalidated and cookie cleared", body = crate::types::JsonObject)
+        (status = 200, description = "Session invalidated and cookie cleared", body = serde_json::Value)
     )
 )]
 pub(crate) async fn dashboard_logout(
@@ -742,11 +662,9 @@ pub(crate) async fn dashboard_logout(
         }
     }
 
-    // Always emit `Secure` on the clear cookie, regardless of the
-    // logout-request transport — see `session_cookie_clear_attrs`.
     let expired_cookie = format!(
         "librefang_session=; {}; Max-Age=0",
-        session_cookie_clear_attrs(),
+        session_cookie_attrs(&headers),
     );
     (
         axum::http::StatusCode::OK,
@@ -758,7 +676,6 @@ pub(crate) async fn dashboard_logout(
 
 /// Request body for POST /api/auth/change-password.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct ChangePasswordRequest {
     pub current_password: String,
     /// New password — optional, omit to keep the current password.
@@ -778,7 +695,7 @@ pub(crate) struct ChangePasswordRequest {
     tag = "auth",
     request_body = ChangePasswordRequest,
     responses(
-        (status = 200, description = "Credentials updated and existing sessions invalidated", body = crate::types::JsonObject),
+        (status = 200, description = "Credentials updated and existing sessions invalidated", body = serde_json::Value),
         (status = 400, description = "Missing required fields or password too short"),
         (status = 401, description = "Current password is incorrect")
     )
@@ -959,8 +876,7 @@ pub(crate) async fn change_password(
     }
 
     // Update api_key_lock so the derived static token reflects new credentials immediately
-    let snap = state.kernel.auth_snapshot();
-    let new_api_key = valid_api_tokens(&snap).join("\n");
+    let new_api_key = valid_api_tokens(state.kernel.as_ref()).join("\n");
     *state.api_key_lock.write().await = new_api_key;
 
     // Invalidate all existing sessions to force re-login
@@ -981,11 +897,6 @@ fn sessions_path(home_dir: &std::path::Path) -> std::path::PathBuf {
     home_dir.join("data").join("sessions.json")
 }
 
-/// Prefix that marks a `sessions.json` map key as already hashed (the new
-/// post-#5494 on-disk format). Matches the `$sha256$` tag emitted by
-/// `password_hash::hash_device_token`.
-const SESSIONS_HASH_PREFIX: &str = "$sha256$";
-
 /// Load persisted sessions from disk, dropping any that have already expired.
 ///
 /// SECURITY (#3725): An older daemon revision wrote `sessions.json` at the
@@ -995,23 +906,6 @@ const SESSIONS_HASH_PREFIX: &str = "$sha256$";
 /// permissive mode until something rewrites it. Tighten on load so a daemon
 /// upgraded onto a multi-user host stops leaking bearer tokens immediately
 /// instead of waiting for the next session mutation.
-///
-/// SECURITY (#5494): the on-disk map key is hashed by `save_sessions` so
-/// `sessions.json` lifted out of a backup snapshot (Time Machine, restic,
-/// BorgBackup pipelines often do NOT honor source 0600 perms) does not
-/// yield a usable set of bearer tokens. Entries whose key carries the
-/// `$sha256$` prefix are dropped on load — there is no cleartext to re-key
-/// the in-memory auth map with, so they cannot authenticate any presented
-/// token. The daemon trades cross-restart session continuity for
-/// backup-snapshot replay resistance; operators get one re-login per
-/// restart, an attacker with a month-old `sessions.json` gets nothing.
-///
-/// Entries whose key does NOT carry the `$sha256$` prefix are treated as
-/// legacy cleartext from a pre-#5494 daemon. They authenticate normally
-/// for one session lifetime and are rewritten in the new hashed form by
-/// the very next `save_sessions` call (every login, every logout, the
-/// periodic GC sweep), so the migration window is at most one mutation
-/// deep.
 fn load_sessions(
     home_dir: &std::path::Path,
 ) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
@@ -1047,14 +941,6 @@ fn load_sessions(
         serde_json::from_str(&content).unwrap_or_default();
     sessions
         .into_iter()
-        .filter(|(key, _)| {
-            // New-format hashed entries (post-#5494) cannot be reversed
-            // into the cleartext key the auth middleware looks up against
-            // — keeping them would just bloat the map with rows that
-            // match no presented token. Drop them; operator must
-            // re-authenticate after restart.
-            !key.starts_with(SESSIONS_HASH_PREFIX)
-        })
         .filter(|(_, st)| {
             !crate::password_hash::is_token_expired(
                 st,
@@ -1064,53 +950,16 @@ fn load_sessions(
         .collect()
 }
 
-/// Build the on-disk view of the in-memory session map: each key is
-/// replaced with `hash_device_token(key)` and the duplicate copy of the
-/// token carried inside `SessionToken.token` is cleared. The resulting
-/// map serialises into a `sessions.json` that contains no usable bearer
-/// token in either map position — only opaque hashes and session
-/// metadata (created_at / user_name / user_role) the daemon needs for
-/// GC.
-///
-/// SECURITY (#5494): exposed at module scope so the
-/// `sessions_for_disk_redacts_token_field` regression test in this
-/// crate can assert the redaction directly without booting a daemon.
-fn sessions_for_disk(
-    sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
-) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
-    sessions
-        .iter()
-        .map(|(token, st)| {
-            let mut redacted = st.clone();
-            // Wipe the inner copy of the token so a backup snapshot
-            // doesn't hand the attacker the same secret via the value
-            // payload that the key already hid.
-            redacted.token.clear();
-            (crate::password_hash::hash_device_token(token), redacted)
-        })
-        .collect()
-}
-
 /// Persist active sessions to disk so they survive daemon restarts.
 ///
 /// SECURITY: The file is written with owner-only permissions (0600) so that
 /// bearer tokens stored in it cannot be read by other local users (#3589/#3725).
-///
-/// SECURITY (#5494): each map key is hashed via `hash_device_token` (and
-/// the duplicate `SessionToken.token` field is cleared) before
-/// serialization, so `sessions.json` cannot be replayed even if leaked
-/// through a backup pipeline that did not honor the source 0600 perms
-/// (Time Machine, restic, BorgBackup snapshots). The in-memory
-/// `active_sessions` map keeps the cleartext token as the key, so live
-/// auth lookups in `middleware.rs` (`sessions.get(token_str)`) are
-/// unchanged.
 fn save_sessions(
     home_dir: &std::path::Path,
     sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
 ) {
     let path = sessions_path(home_dir);
-    let on_disk = sessions_for_disk(sessions);
-    match serde_json::to_string(&on_disk) {
+    match serde_json::to_string(sessions) {
         Ok(content) => {
             // Atomic save with mode(0o600) at create-time to close the
             // TOCTOU window left by #3939: std::fs::write opened the
@@ -1146,50 +995,6 @@ fn save_sessions(
     }
 }
 
-/// Atomically write the Argon2id upgrade-hint file at owner-only (0600) mode.
-///
-/// SECURITY (audit: dashboard-login-logs-phc-hash): the `hash` is the
-/// Argon2id PHC verifier — `verify_dashboard_password` short-circuits on it
-/// — so the file holding it must NEVER exist at a group/world-readable mode,
-/// not even transiently. The previous `std::fs::write` + post-write
-/// `set_permissions(0o600)` left a TOCTOU window where the file sat at
-/// `0644 & ~umask` between the two syscalls; a parallel local reader could
-/// grab the verifier in that gap. Mirror `save_sessions`: open a sibling temp
-/// file with `mode(0o600)` at create-time, `write_all` + `flush` + `sync_all`,
-/// then `rename` into place — the destination is owner-only for its entire
-/// lifetime. On non-unix the temp+rename atomicity is preserved without the
-/// mode bit (same as `save_sessions`).
-fn write_upgrade_hint(hint_path: &std::path::Path, hash: &str) -> std::io::Result<()> {
-    let body = format!(
-        "# Generated by librefang on legacy-plaintext dashboard login.\n\
-         # Set this value in config.toml as `dashboard_pass_hash = \"…\"`,\n\
-         # then remove the plaintext `dashboard_pass` field, then DELETE this file.\n\
-         # File mode is 0600 — readable only to the daemon UID.\n\
-         {hash}\n"
-    );
-    let tmp_path = hint_path.with_extension(format!("upgrade-hint.tmp.{}", std::process::id()));
-    let result = (|| -> std::io::Result<()> {
-        use std::io::Write as _;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp_path)?;
-        f.write_all(body.as_bytes())?;
-        f.flush()?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp_path, hint_path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    result
-}
-
 /// Remove the sessions persistence file (called on password change to force re-login).
 fn clear_sessions_file(home_dir: &std::path::Path) {
     let path = sessions_path(home_dir);
@@ -1208,7 +1013,7 @@ fn clear_sessions_file(home_dir: &std::path::Path) {
 /// Returns `(router, shared_state)`. The caller can use `state.bridge_manager`
 /// to shut down the bridge on exit.
 pub async fn build_router(
-    kernel: Arc<dyn KernelApi>,
+    kernel: Arc<LibreFangKernel>,
     listen_addr: SocketAddr,
 ) -> (Router<()>, Arc<AppState>) {
     // Start channel bridges (Telegram, etc.)
@@ -1216,13 +1021,6 @@ pub async fn build_router(
     // for mounting on this server instead of starting separate HTTP servers.
     let (bridge, initial_webhook_router) =
         channel_bridge::start_channel_bridge(kernel.clone()).await;
-
-    // Probe first-party sidecar adapters (`telegram`, `ntfy`) with
-    // `--describe` and cache their schemas so `GET /api/channels`
-    // can emit `fields[]` for unconfigured discovery rows. Runs once
-    // at boot — failures (SDK not installed, describe crashed) are
-    // logged at WARN and the dashboard falls back to an empty form.
-    routes::channels::populate_sidecar_schema_cache().await;
 
     // Initialize Prometheus metrics recorder if telemetry feature is enabled
     // and the config has prometheus_enabled = true. The handle is parked in a
@@ -1241,10 +1039,7 @@ pub async fn build_router(
     let webhook_router = Arc::new(tokio::sync::RwLock::new(Arc::new(initial_webhook_router)));
 
     // Create api_key_lock before AppState so both AppState and AuthState share the same Arc.
-    // Snapshot once so api_key, dashboard creds, user keys, and device keys all
-    // come from the same hot-reload generation (#3744 review #2).
-    let auth_snap = kernel.auth_snapshot();
-    let api_key = valid_api_tokens(&auth_snap).join("\n");
+    let api_key = valid_api_tokens(kernel.as_ref()).join("\n");
     let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
     // Per-user API key snapshot is wrapped in a `RwLock` so the rotate-key
     // endpoint (`POST /api/users/{name}/rotate-key`) can swap entries live —
@@ -1252,8 +1047,8 @@ pub async fn build_router(
     // the next request after rotation sees the new hash and the old plaintext
     // bearer token immediately fails authentication.
     let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new({
-        let mut keys = configured_user_api_keys(&auth_snap);
-        keys.extend(paired_device_user_keys(&auth_snap));
+        let mut keys = configured_user_api_keys(kernel.as_ref());
+        keys.extend(paired_device_user_keys(kernel.as_ref()));
         keys
     }));
 
@@ -1277,23 +1072,15 @@ pub async fn build_router(
     };
     let trust_forwarded_for_cached = kernel.config_ref().trust_forwarded_for;
 
-    // Build the Idempotency-Key replay store (#3637) on top of the
-    // substrate's shared SQLite connection. Reuses the WAL pool so
-    // there's no separate file and no second open call.
-    let idempotency_store: Arc<dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync> =
-        Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
-            kernel.memory_substrate().pool(),
-        ));
-
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
-        bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(bridge)),
+        bridge_manager: tokio::sync::Mutex::new(bridge),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
+        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
         provider_test_cache: dashmap::DashMap::new(),
         webhook_store: crate::webhook_store::WebhookStore::load(
             kernel.home_dir().join("data").join("webhooks.json"),
@@ -1301,7 +1088,7 @@ pub async fn build_router(
         active_sessions: active_sessions.clone(),
         api_key_lock: api_key_lock.clone(),
         user_api_keys: user_api_keys_lock.clone(),
-        media_drivers: librefang_kernel::media::MediaDriverCache::new_with_urls(
+        media_drivers: librefang_runtime::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
         ),
         webhook_router,
@@ -1311,7 +1098,6 @@ pub async fn build_router(
         gcra_limiter: gcra_limiter_arc.clone(),
         trusted_proxies: trusted_proxies_arc.clone(),
         trust_forwarded_for: trust_forwarded_for_cached,
-        idempotency_store,
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.
@@ -1360,11 +1146,8 @@ pub async fn build_router(
     // change_password / rotate-key can update them live without a daemon
     // restart.
     let user_api_keys_initial_len = state.user_api_keys.read().await.len();
-    // Atomic snapshot so dashboard_auth_enabled and api_key_set come from
-    // the same config generation (#3744 review #2).
-    let snap = state.kernel.auth_snapshot();
-    let dashboard_auth_enabled = has_dashboard_credentials(&snap);
-    let api_key_set = !snap.api_key.trim().is_empty();
+    let dashboard_auth_enabled = has_dashboard_credentials(state.kernel.as_ref());
+    let api_key_set = !state.kernel.config_ref().api_key.trim().is_empty();
     let any_auth = api_key_set || user_api_keys_initial_len > 0 || dashboard_auth_enabled;
 
     // Resolve the effective value of `require_auth_for_reads`.
@@ -1380,28 +1163,8 @@ pub async fn build_router(
     //   operators to remember a separate flag before reads stop leaking
     //   agent IDs to the LAN.
     let configured_require_auth_for_reads = state.kernel.config_ref().require_auth_for_reads;
-    let external_auth_proxy = state.kernel.config_ref().external_auth_proxy;
-    let require_auth_for_reads = derive_require_auth_for_reads(
-        configured_require_auth_for_reads,
-        any_auth,
-        external_auth_proxy,
-    );
-    // Audit `require-auth-for-reads-false-leak`: surface the
-    // bypass-refused case loudly so an operator who set
-    // `require_auth_for_reads = false` without an external proxy
-    // sees that the bypass did NOT take effect. Without this log,
-    // the auto-clamp is silent and the operator wrongly assumes
-    // reads are open.
-    if configured_require_auth_for_reads == Some(false) && !external_auth_proxy && any_auth {
-        tracing::warn!(
-            "require_auth_for_reads = false is being IGNORED — \
-             external_auth_proxy is unset, so the reads-allowlist \
-             bypass has not been activated; dashboard reads still \
-             require a bearer token. Set `external_auth_proxy = true` \
-             only when an external auth proxy (nginx auth_request, \
-             Cloudflare Access, etc.) actually fronts the daemon."
-        );
-    }
+    let require_auth_for_reads =
+        derive_require_auth_for_reads(configured_require_auth_for_reads, any_auth);
     if require_auth_for_reads && !any_auth {
         tracing::warn!(
             "require_auth_for_reads = true but no authentication is configured \
@@ -1455,30 +1218,6 @@ pub async fn build_router(
         }
     }
 
-    // Audit `require-auth-for-reads-false-leak`: warn separately
-    // when bound to a non-loopback address WITHOUT
-    // `external_auth_proxy = true`. This is a posture mismatch even
-    // when auth is configured — an operator running `0.0.0.0`
-    // expecting their reverse proxy to attach credentials needs to
-    // explicitly opt in, both so the
-    // `require_auth_for_reads = false` escape hatch becomes
-    // honour-able AND so the operator sees that the boot-time
-    // assumption is recorded. Suppress when bound to loopback (the
-    // default, where no proxy is in play) and when the flag is
-    // already on (operator acknowledged).
-    if !bind_is_loopback && !state.kernel.config_ref().external_auth_proxy {
-        tracing::warn!(
-            "librefang is listening on a non-loopback bind ({}) with \
-             `external_auth_proxy = false` — the in-tree auth layer is the only \
-             gate. If a reverse proxy (nginx auth_request, Cloudflare Access, \
-             corporate SSO) actually fronts this daemon, set \
-             `external_auth_proxy = true` in config.toml so \
-             `require_auth_for_reads = false` is honoured and the operator \
-             posture is recorded.",
-            listen_addr
-        );
-    }
-
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
@@ -1516,27 +1255,8 @@ pub async fn build_router(
     let v1_routes = api_v1_routes();
 
     // Upload routes are defined separately so they can share the auth/rate-limit
-    // layers but bypass the *global* `RequestBodyLimitLayer` applied at
-    // `app.layer(...)` below — uploads have their own, larger, operator-
-    // configurable cap (`max_upload_size_bytes`, default 10 MB) which
-    // would otherwise be clamped by the global cap intended for JSON
-    // request bodies.
-    //
-    // Pre-#audit, the upload sub-router was merged into `app` BEFORE the
-    // global limit ran but had no limit of its own — `body: axum::body::Bytes`
-    // forces axum to buffer the entire request into RAM before the
-    // handler's after-the-fact `body.len() > upload_limit` check at
-    // `agents.rs:6054` runs. An authenticated user (the route sits inside
-    // the auth-required tree) could push a multi-gigabyte body and
-    // exhaust the daemon's RAM. The 10 MB cap was an after-the-fact
-    // check, not a wire-level cap.
-    //
-    // Fix per audit (upload-route-bypasses-body-limit): apply a
-    // route-local `RequestBodyLimitLayer` sized to the operator's
-    // `max_upload_size_bytes`. The handler's same-value check stays in
-    // place as defence-in-depth (and to surface a localised error
-    // message instead of the framework-default 413).
-    let upload_body_cap = kernel.config_ref().max_upload_size_bytes;
+    // layers but bypass RequestBodyLimitLayer — the handler enforces its own
+    // configurable max_upload_size_bytes (default 10 MB).
     let upload_routes = Router::new()
         .route(
             "/api/agents/{id}/upload",
@@ -1545,8 +1265,7 @@ pub async fn build_router(
         .route(
             "/api/v1/agents/{id}/upload",
             axum::routing::post(routes::agents::upload_file),
-        )
-        .layer(RequestBodyLimitLayer::new(upload_body_cap));
+        );
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
@@ -1628,14 +1347,6 @@ pub async fn build_router(
             rate_limiter::auth_rate_limit_layer,
         ))
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
-        // JSON depth guard — buffers `application/json` bodies once,
-        // checks nesting depth against MAX_JSON_BODY_DEPTH, rejects
-        // adversarial `[[[[…]]]]` payloads at the layer boundary
-        // before any handler sees them. Sits below auth/rate-limit
-        // (so the cost of buffering is gated by auth) and above
-        // request-logging (so rejections show up in the request log
-        // with the right status). Audit: check-json-depth-unused.
-        .layer(axum::middleware::from_fn(middleware::enforce_json_body_depth))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())
@@ -1654,11 +1365,8 @@ pub async fn build_router(
     // were merged before the security layers above and therefore covered by
     // auth/rate-limit, but they are NOT wrapped by this layer — Axum layers
     // only apply to routes registered before the layer call, so routes merged
-    // after this point (channel_routes below) are also exempt.  The upload
-    // sub-router now carries its OWN `RequestBodyLimitLayer` sized to
-    // `max_upload_size_bytes` (added above), so the upload path remains
-    // wire-level capped — the global limit here is intentionally the
-    // smaller JSON-body cap and is not the upload safety net.
+    // after this point (channel_routes below) are also exempt.  Upload handler
+    // enforces its own max_upload_size_bytes cap instead.
     let app = app.layer(RequestBodyLimitLayer::new(
         kernel.config_ref().max_request_body_bytes,
     ));
@@ -1723,7 +1431,7 @@ pub async fn run_daemon(
     // boot makes the misconfiguration impossible to miss — instead of every
     // unauthenticated request returning 401 indefinitely, the daemon refuses
     // to come up and prints an actionable error.
-    if let Err(msg) = check_bind_auth_safety(&kernel.auth_snapshot(), &addr) {
+    if let Err(msg) = check_bind_auth_safety(&kernel, &addr) {
         return Err(msg.into());
     }
 
@@ -1736,17 +1444,7 @@ pub async fn run_daemon(
     let _daemon_lock = acquire_daemon_lock(&lock_path)?;
 
     let kernel = Arc::new(kernel);
-    // `set_self_handle` takes `self: Arc<Self>` on the trait, so it
-    // moves the Arc; clone first so subsequent uses on this scope
-    // (`start_background_agents` etc.) keep their handle.
-    kernel.clone().set_self_handle();
-    // Install the OAuth cache invalidator so `apply_hot_actions_inner`
-    // can flush the OIDC discovery + JWKS `LazyLock` caches owned by
-    // `crate::oauth` when `[external_auth]` IdP identity changes via
-    // hot-reload (refs `docs/issues/jwks-cache-no-reload-evict.md`).
-    // Idempotent; safe to call once per process.
-    kernel
-        .set_oauth_cache_invalidator(std::sync::Arc::new(crate::oauth::OauthCacheInvalidatorImpl));
+    kernel.set_self_handle();
     kernel.start_background_agents().await;
 
     // Auto-start observability stack (OTLP collector + Prometheus + Grafana)
@@ -1853,33 +1551,6 @@ pub async fn run_daemon(
     // every 10 seconds and handles their resolution.
     kernel.clone().spawn_approval_sweep_task();
 
-    // ACP listener (#3313) — accepts editor-side `librefang acp`
-    // connections in proxy mode. CLI-side detects the live transport
-    // and pipes stdin/stdout through it; daemon-side runs the ACP
-    // server with the daemon's existing kernel so multiple editor
-    // tabs share state, agent history, and remembered approval
-    // decisions. Unix uses a UDS at `~/.librefang/acp.sock`; Windows
-    // uses the named pipe `\\.\pipe\librefang-acp`.
-    #[cfg(unix)]
-    {
-        let kernel = kernel.clone();
-        let sock_path = kernel.home_dir().join("acp.sock");
-        bg_tasks.push(tokio::spawn(async move {
-            if let Err(e) = crate::acp_uds::run_listener(kernel, sock_path).await {
-                tracing::warn!(error = %e, "ACP UDS listener exited");
-            }
-        }));
-    }
-    #[cfg(windows)]
-    {
-        let kernel = kernel.clone();
-        bg_tasks.push(tokio::spawn(async move {
-            if let Err(e) = crate::acp_pipe::run_listener(kernel).await {
-                tracing::warn!(error = %e, "ACP named-pipe listener exited");
-            }
-        }));
-    }
-
     // Task-board stuck-task sweep — auto-resets in_progress tasks whose worker
     // stalled without calling `task_complete` (issue #2923 / #2926). Runs on
     // `task_board.sweep_interval_secs` (default 30s).
@@ -1930,7 +1601,7 @@ pub async fn run_daemon(
                             }
                             // Restart channel bridge if channel config changed
                             if plan.hot_actions.contains(
-                                &HotAction::ReloadChannels,
+                                &librefang_kernel::config_reload::HotAction::ReloadChannels,
                             ) {
                                 match crate::channel_bridge::reload_channels_from_disk(&st).await {
                                     Ok(names) => {
@@ -2012,7 +1683,7 @@ pub async fn run_daemon(
         bg_tasks.push(tokio::spawn(async move {
             loop {
                 let cfg = kernel.config_snapshot();
-                match librefang_kernel::catalog_sync::sync_catalog_to(
+                match librefang_runtime::catalog_sync::sync_catalog_to(
                     kernel.home_dir(),
                     &cfg.registry.registry_mirror,
                 )
@@ -2023,26 +1694,21 @@ pub async fn run_daemon(
                             "Model catalog synced: {} files downloaded",
                             result.files_downloaded
                         );
-                        // Pre-read cfg fields once: the RCU closure may
-                        // re-run on CAS retry, and cloning the relevant
-                        // bits up-front keeps the closure cheap and pure.
-                        let cfg = kernel.config_ref();
-                        let home_dir = cfg.home_dir.clone();
-                        let provider_regions = cfg.provider_regions.clone();
-                        let provider_urls = cfg.provider_urls.clone();
-                        kernel.model_catalog_update(&mut |catalog| {
-                            catalog.load_cached_catalog_for(&home_dir);
-                            if !provider_regions.is_empty() {
-                                let region_urls = catalog.resolve_region_urls(&provider_regions);
+                        if let Ok(mut catalog) = kernel.model_catalog_ref().write() {
+                            let cfg = kernel.config_ref();
+                            catalog.load_cached_catalog_for(&cfg.home_dir);
+                            if !cfg.provider_regions.is_empty() {
+                                let region_urls =
+                                    catalog.resolve_region_urls(&cfg.provider_regions);
                                 if !region_urls.is_empty() {
                                     catalog.apply_url_overrides(&region_urls);
                                 }
                             }
-                            if !provider_urls.is_empty() {
-                                catalog.apply_url_overrides(&provider_urls);
+                            if !cfg.provider_urls.is_empty() {
+                                catalog.apply_url_overrides(&cfg.provider_urls);
                             }
                             catalog.detect_auth();
-                        });
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -2081,16 +1747,8 @@ pub async fn run_daemon(
                 st.skillhub_cache
                     .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
 
-                // Evict expired session tokens and persist the
-                // trimmed state to disk. Audit:
-                // active-sessions-unbounded — the in-memory `retain`
-                // here resolves the "WS upgrade is the only sweep"
-                // half of the audit, but the trimmed state never made
-                // it back to `~/.librefang/sessions.json`, so every
-                // expired token came back to life on the next daemon
-                // boot via `load_sessions`. Persisting after the
-                // prune closes that survives-restart loop.
-                let (expired_sessions, sessions_snapshot) = {
+                // Evict expired session tokens
+                let expired_sessions = {
                     let mut sessions = st.active_sessions.write().await;
                     let before = sessions.len();
                     sessions.retain(|_, token| {
@@ -2099,19 +1757,8 @@ pub async fn run_daemon(
                             crate::password_hash::DEFAULT_SESSION_TTL_SECS,
                         )
                     });
-                    let removed = before - sessions.len();
-                    // Snapshot for disk write so we can drop the
-                    // write guard before the (potentially blocking)
-                    // file syscall. Only snapshot when there's
-                    // actually something to persist — the token map
-                    // is shallow but cloning on every tick when
-                    // nothing expired would be wasted work.
-                    let snap = (removed > 0).then(|| sessions.clone());
-                    (removed, snap)
+                    before - sessions.len()
                 };
-                if let Some(snap) = sessions_snapshot {
-                    save_sessions(st.kernel.home_dir(), &snap);
-                }
 
                 // Prune stale auth-rate-limit entries (windows older than 30 minutes).
                 let before_auth_rl = st.auth_login_limiter.map.len();
@@ -2175,27 +1822,6 @@ pub async fn run_daemon(
     .with_graceful_shutdown(shutdown_signal(api_shutdown))
     .await?;
 
-    // Once axum has returned (the shutdown signal fired), bound the total
-    // post-shutdown cleanup window with a watchdog. If we are still holding
-    // the daemon.lock after `SHUTDOWN_HARD_DEADLINE`, abort the process so
-    // launchd / systemd / the operator's `librefang restart` script does
-    // not see a half-dead daemon hold the lock while a new one tries to
-    // start (#5477). flock(2) releases on process exit even via abort.
-    const SHUTDOWN_HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-    let _shutdown_watchdog = tokio::spawn(async move {
-        tokio::time::sleep(SHUTDOWN_HARD_DEADLINE).await;
-        tracing::error!(
-            deadline_secs = SHUTDOWN_HARD_DEADLINE.as_secs(),
-            "shutdown cleanup exceeded hard deadline; aborting process to \
-             release daemon.lock and avoid a zombie-vs-respawn race (#5477)"
-        );
-        // `process::abort` is async-signal-safe and skips Drop impls — by
-        // this point the operator has already lost any clean-shutdown
-        // benefit, and holding the lock for another minute is strictly
-        // worse than restarting.
-        std::process::abort();
-    });
-
     // Signal background tasks to exit their loops gracefully, then wait up to
     // 5 seconds for each to finish. Abort any that haven't exited by then so
     // we don't stall shutdown indefinitely.
@@ -2225,27 +1851,9 @@ pub async fn run_daemon(
         }
     }
 
-    // Stop channel bridges. Swap out the bridge atomically so no new readers
-    // can acquire it, then unwrap the Arc (we just removed the only strong
-    // reference stored in AppState) and call stop().
-    //
-    // Bounded with a 5-second hard timeout (#5477): a hung sidecar
-    // subprocess that does not drain on its shutdown channel must not
-    // hold the whole daemon shutdown open until the outer watchdog
-    // fires. The bridge `stop()` is best-effort cleanup — losing it
-    // means orphan sidecar processes the operator must reap, which is
-    // strictly less bad than a zombie daemon holding daemon.lock.
-    {
-        let old = state.bridge_manager.swap(std::sync::Arc::new(None));
-        if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), b.stop()).await {
-                Ok(()) => {}
-                Err(_) => tracing::warn!(
-                    "channel bridge stop did not finish within 5s; \
-                     continuing shutdown without waiting (#5477)"
-                ),
-            }
-        }
+    // Stop channel bridges
+    if let Some(ref mut b) = *state.bridge_manager.lock().await {
+        b.stop().await;
     }
 
     // Stop observability stack — graceful path. `.take()` consumes the guard
@@ -2274,16 +1882,10 @@ pub async fn run_daemon(
             tmux_cleanup_path,
             crate::terminal_tmux::DEFAULT_TMUX_SESSION_NAME.to_string(),
         );
-        // 5s bound (#5477): `tmux kill-session` over a socket can stall
-        // if the tmux daemon itself is wedged. Don't let that hold up
-        // daemon.lock release.
-        match tokio::time::timeout(std::time::Duration::from_secs(5), ctrl.kill_session()).await {
-            Ok(Ok(())) => info!("tmux session cleaned up"),
-            Ok(Err(e)) => tracing::debug!("tmux session cleanup: {e}"),
-            Err(_) => tracing::warn!(
-                "tmux session cleanup did not finish within 5s; \
-                 skipping (#5477)"
-            ),
+        if let Err(e) = ctrl.kill_session().await {
+            tracing::debug!("tmux session cleanup: {e}");
+        } else {
+            info!("tmux session cleaned up");
         }
     }
 
@@ -2526,101 +2128,6 @@ mod observability_tests {
         );
     }
 
-    /// Audit: active-sessions-unbounded. The 5-minute GC loop in
-    /// `run_server` evicts expired tokens from the in-memory
-    /// `active_sessions` map AND persists the trimmed snapshot to
-    /// disk. Without the persist step, the in-memory state was clean
-    /// (the load_sessions filter already drops expired tokens at
-    /// boot), but the file on disk grew unbounded — every successful
-    /// login left a token there forever. Persisting after the prune
-    /// stops the audit-flagged "RAM + disk usage grow as
-    /// `n_logins × token_size`" regression on the disk side.
-    ///
-    /// This test inspects the raw file contents (not the in-memory
-    /// view from `load_sessions`, which already filters expired
-    /// tokens at load time) to confirm the trimmed write reaches
-    /// disk.
-    #[test]
-    fn save_sessions_after_retain_drops_expired_tokens_from_disk() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        std::fs::create_dir_all(home.join("data")).unwrap();
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let live = crate::password_hash::SessionToken {
-            token: "live-token".to_string(),
-            created_at: now.saturating_sub(60),
-            user_name: None,
-            user_role: None,
-        };
-        let expired = crate::password_hash::SessionToken {
-            token: "expired-token".to_string(),
-            created_at: now.saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
-            user_name: None,
-            user_role: None,
-        };
-
-        let mut sessions = std::collections::HashMap::new();
-        sessions.insert("live-token".to_string(), live);
-        sessions.insert("expired-token".to_string(), expired);
-
-        // Per #5494, the on-disk form is keyed by the SHA-256 hash of
-        // the cleartext token (and the inner token field is wiped), so
-        // the assertion shape changed from "raw file contains the
-        // cleartext literal" to "raw file contains the token's hash
-        // AND never the cleartext".
-        let live_hash = crate::password_hash::hash_device_token("live-token");
-        let expired_hash = crate::password_hash::hash_device_token("expired-token");
-
-        // Initial persist — both tokens on disk (in hashed form). Read
-        // raw bytes because `load_sessions` filters expired tokens at
-        // load, hiding the on-disk state from the in-memory caller.
-        save_sessions(home, &sessions);
-        let raw_before = std::fs::read_to_string(sessions_path(home)).unwrap();
-        assert!(
-            raw_before.contains(&live_hash) && raw_before.contains(&expired_hash),
-            "baseline: both token HASHES must be on disk before the GC step: {raw_before}"
-        );
-        assert!(
-            !raw_before.contains("live-token") && !raw_before.contains("expired-token"),
-            "baseline: NEITHER cleartext bearer must appear on disk (#5494): {raw_before}"
-        );
-
-        // Simulate the GC retain step — same shape as the
-        // background loop in `run_server`.
-        sessions.retain(|_, token| {
-            !crate::password_hash::is_token_expired(
-                token,
-                crate::password_hash::DEFAULT_SESSION_TTL_SECS,
-            )
-        });
-        assert_eq!(
-            sessions.len(),
-            1,
-            "retain dropped the expired entry in memory"
-        );
-        save_sessions(home, &sessions);
-
-        let raw_after = std::fs::read_to_string(sessions_path(home)).unwrap();
-        assert!(
-            raw_after.contains(&live_hash),
-            "live token's hash must still be on disk after the GC sweep: {raw_after}"
-        );
-        assert!(
-            !raw_after.contains(&expired_hash),
-            "expired token MUST NOT be on disk after the GC sweep — \
-             the audit-flagged disk-bloat lever was that expired tokens \
-             survived restart in the file: {raw_after}"
-        );
-        assert!(
-            !raw_after.contains("live-token"),
-            "live cleartext bearer must NEVER leak to disk (#5494): {raw_after}"
-        );
-    }
-
     // #3725: a sessions.json file already on disk at world-readable
     // permissions (i.e. left over from a daemon revision before the
     // 0600-on-write fix) must be tightened on the next load so an
@@ -2641,156 +2148,6 @@ mod observability_tests {
         assert_eq!(
             after, 0o600,
             "legacy permissive sessions.json must be tightened on load"
-        );
-    }
-
-    // audit: dashboard-login-logs-phc-hash — the upgrade-hint file holds the
-    // Argon2id PHC verifier and must land at 0600 atomically (created at the
-    // tight mode, never transiently world-readable). Guards against a
-    // regression to `std::fs::write` + post-write `set_permissions`.
-    #[cfg(unix)]
-    #[test]
-    fn write_upgrade_hint_creates_file_at_0600() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let hint_path = tmp.path().join("dashboard-pass-hash.upgrade-hint");
-        let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaA";
-        write_upgrade_hint(&hint_path, hash).unwrap();
-        let mode = std::fs::metadata(&hint_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "upgrade-hint file holds the PHC verifier and must be owner-only"
-        );
-        let contents = std::fs::read_to_string(&hint_path).unwrap();
-        assert!(
-            contents.contains(hash),
-            "the hint file must contain the upgrade hash"
-        );
-        // No temp sibling left behind after a successful rename.
-        let leftover: Vec<_> = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
-            .collect();
-        assert!(
-            leftover.is_empty(),
-            "temp file must be renamed away, not left behind"
-        );
-    }
-
-    // ---- #5494: sessions.json must never contain a usable bearer token ----
-
-    fn make_session_5494(token: &str) -> crate::password_hash::SessionToken {
-        crate::password_hash::SessionToken {
-            token: token.to_string(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            user_name: Some("admin".to_string()),
-            user_role: Some("owner".to_string()),
-        }
-    }
-
-    /// `sessions_for_disk` must replace the map key with a `$sha256$`
-    /// hash AND wipe the inner duplicate of the token, so the on-disk
-    /// `SessionToken.token` field carries no cleartext either. Without
-    /// the second wipe the hash on the key would be theatre — the
-    /// value payload still holds the same secret in a recoverable form.
-    #[test]
-    fn sessions_for_disk_redacts_token_field() {
-        let cleartext = "f0e1d2c3b4a596878695a4b3c2d1e0f0e1d2c3b4a596878695a4b3c2d1e0f0e1";
-        let mut sessions = std::collections::HashMap::new();
-        sessions.insert(cleartext.to_string(), make_session_5494(cleartext));
-
-        let on_disk = sessions_for_disk(&sessions);
-
-        assert_eq!(on_disk.len(), 1, "must preserve all rows");
-        for (key, value) in &on_disk {
-            assert!(
-                key.starts_with(SESSIONS_HASH_PREFIX),
-                "on-disk key must be hashed, got {key}"
-            );
-            assert_ne!(
-                key, cleartext,
-                "on-disk key must NOT equal the cleartext bearer"
-            );
-            assert!(
-                value.token.is_empty(),
-                "inner SessionToken.token must be wiped so the file holds no replayable bearer"
-            );
-        }
-    }
-
-    /// End-to-end audit threat model: a daemon writes a session to
-    /// `sessions.json`, the file is later restored from a backup
-    /// snapshot (Time Machine, restic, BorgBackup), and the original
-    /// cleartext token must NOT authenticate against the re-loaded
-    /// map. Asserts both that the raw file holds no cleartext AND that
-    /// `load_sessions` does not produce a row keyed by it.
-    #[test]
-    fn save_then_load_does_not_resurrect_cleartext_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        std::fs::create_dir_all(home.join("data")).unwrap();
-
-        // 64-hex, matching the real generate_session_token CSPRNG output shape.
-        let cleartext = "deadbeef".repeat(8);
-        let mut live = std::collections::HashMap::new();
-        live.insert(cleartext.clone(), make_session_5494(&cleartext));
-        save_sessions(home, &live);
-
-        let raw = std::fs::read_to_string(sessions_path(home)).unwrap();
-        assert!(
-            !raw.contains(&cleartext),
-            "sessions.json must not contain the cleartext bearer: {raw}"
-        );
-
-        // `load_sessions` simulates both the boot path and what a
-        // forensic reader would derive from a backup. The middleware's
-        // auth lookup is `sessions.get(presented_token_cleartext)`, so
-        // absence of the cleartext key here means a presented
-        // `Bearer <cleartext>` returns None ⇒ 401.
-        let reloaded = load_sessions(home);
-        assert!(
-            !reloaded.contains_key(&cleartext),
-            "disk-recovered map must not authenticate the original cleartext token"
-        );
-    }
-
-    /// Legacy `sessions.json` (written by a pre-#5494 daemon, cleartext
-    /// keys) must continue to authenticate so that upgrading the
-    /// daemon does not log every active user out instantly. On the
-    /// next mutation the file is migrated to the hashed form.
-    #[test]
-    fn load_sessions_accepts_legacy_cleartext_keys_for_one_cycle() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        std::fs::create_dir_all(home.join("data")).unwrap();
-
-        let cleartext = "a".repeat(64);
-        let legacy: std::collections::HashMap<String, crate::password_hash::SessionToken> =
-            std::iter::once((cleartext.clone(), make_session_5494(&cleartext))).collect();
-        // Simulate the pre-#5494 on-disk layout by writing the
-        // in-memory form directly (no hashing).
-        std::fs::write(sessions_path(home), serde_json::to_string(&legacy).unwrap()).unwrap();
-
-        let reloaded = load_sessions(home);
-        assert!(
-            reloaded.contains_key(&cleartext),
-            "legacy cleartext sessions.json entries must continue to auth across one upgrade cycle"
-        );
-
-        // Next save_sessions migrates the file in place.
-        save_sessions(home, &reloaded);
-        let migrated_raw = std::fs::read_to_string(sessions_path(home)).unwrap();
-        assert!(
-            !migrated_raw.contains(&cleartext),
-            "save_sessions after legacy load must rewrite the file in the hashed form"
-        );
-        assert!(
-            migrated_raw.contains(SESSIONS_HASH_PREFIX),
-            "migrated file must carry the $sha256$ marker for the rewritten entry: {migrated_raw}"
         );
     }
 }
@@ -2938,40 +2295,15 @@ fn is_process_alive(pid: u32) -> bool {
 }
 
 /// Resolve the effective value of `require_auth_for_reads` from the explicit
-/// config option, whether any authentication method is configured, and the
-/// operator's acknowledgement that an external auth proxy fronts the daemon.
+/// config option and whether any authentication method is configured.
 ///
-/// - `Some(true)` is always honoured (operator forcing the allowlist closed).
-/// - `Some(false)` is honoured ONLY when `external_auth_proxy = true`. The
-///   audit (`require-auth-for-reads-false-leak`) found this branch was
-///   indistinguishable from a config typo on `0.0.0.0` binds — without the
-///   acknowledgement flag, `Some(false)` is dropped to a safe default
-///   (i.e. enforce auth when `any_auth` is set) and the operator is warned at
-///   boot. The proxy assumption was not enforced in code.
-/// - `None` (default) derives from `any_auth` so that setting any form of
+/// - `Some(explicit)` preserves the operator's stated intent verbatim.
+/// - `None` derives the value from `any_auth` so that setting any form of
 ///   auth (api_key / user keys / dashboard credentials) automatically closes
 ///   the dashboard reads allowlist.
-fn derive_require_auth_for_reads(
-    configured: Option<bool>,
-    any_auth: bool,
-    external_auth_proxy: bool,
-) -> bool {
+fn derive_require_auth_for_reads(configured: Option<bool>, any_auth: bool) -> bool {
     match configured {
-        Some(true) => true,
-        Some(false) => {
-            // Refuse to honour the bypass without explicit
-            // acknowledgement of the proxy fronting it. When the
-            // operator hasn't flipped `external_auth_proxy`, fall
-            // back to the `None`-equivalent derivation so we close
-            // automatically once any auth is configured. This means
-            // a single-line typo in `require_auth_for_reads` cannot
-            // by itself expose dashboard reads on `0.0.0.0`.
-            if external_auth_proxy {
-                false
-            } else {
-                any_auth
-            }
-        }
+        Some(explicit) => explicit,
         None => any_auth,
     }
 }
@@ -2997,182 +2329,27 @@ fn is_daemon_responding(addr: &str) -> bool {
 }
 
 #[cfg(test)]
-mod session_cookie_attrs_tests {
-    use super::{request_is_https, session_cookie_attrs, session_cookie_clear_attrs};
-    use crate::client_ip::TrustedProxies;
-    use axum::http::HeaderMap;
-    use std::net::IpAddr;
-
-    fn tp(entries: &[&str]) -> TrustedProxies {
-        TrustedProxies::compile(&entries.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-    }
-
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
-    }
-
-    #[test]
-    fn clear_attrs_always_contain_secure() {
-        // Audit: logout-no-secure-cookie. The browser refuses to
-        // overwrite a `Secure` cookie with a clear response that lacks
-        // `Secure`, so the logout-cookie clear MUST emit `Secure`
-        // regardless of the logout request's transport.
-        let attrs = session_cookie_clear_attrs();
-        assert!(
-            attrs.contains("Secure"),
-            "clear attrs must include `Secure` so browsers actually drop the cookie: {attrs}"
-        );
-        assert!(attrs.contains("HttpOnly"));
-        assert!(attrs.contains("SameSite=Lax"));
-        assert!(attrs.contains("Path=/dashboard"));
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // Audit: `x-forwarded-proto-trusted-proxies`
-    //
-    // `X-Forwarded-Proto` is now interpreted only when the immediate
-    // TCP peer is in `trusted_proxies`. These tests pin the gate.
-    // ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn xfp_ignored_when_peer_is_untrusted() {
-        // Forged `X-Forwarded-Proto: https` from the open internet
-        // against a plain-HTTP daemon. Operator has not allow-listed
-        // the source. The header MUST be ignored — `Secure` would
-        // pin the cookie to HTTPS even though the actual transport
-        // is plain HTTP, and the attacker controls the input.
-        let trusted = tp(&["172.19.0.0/16"]);
-        let peer = ip("203.0.113.7");
-        let mut h = HeaderMap::new();
-        h.insert("x-forwarded-proto", "https".parse().unwrap());
-        assert!(
-            !request_is_https(peer, &h, &trusted),
-            "forged X-Forwarded-Proto from an untrusted peer must be ignored"
-        );
-        assert!(
-            !session_cookie_attrs(peer, &h, &trusted).contains("Secure"),
-            "untrusted peer + forged xfp must not produce `Secure` cookie"
-        );
-    }
-
-    #[test]
-    fn xfp_honored_when_peer_is_trusted() {
-        // Operator-allow-listed reverse proxy on 172.19.0.0/16
-        // (e.g. docker bridge for nginx) forwarding a real HTTPS
-        // request. We honor its claim and emit `Secure`.
-        let trusted = tp(&["172.19.0.0/16"]);
-        let peer = ip("172.19.0.5");
-        let mut h = HeaderMap::new();
-        h.insert("x-forwarded-proto", "https".parse().unwrap());
-        assert!(request_is_https(peer, &h, &trusted));
-        assert!(session_cookie_attrs(peer, &h, &trusted).contains("Secure"));
-    }
-
-    #[test]
-    fn trusted_peer_without_xfp_is_plain_http() {
-        // The naive-nginx case the audit calls out. Proxy is
-        // allow-listed but the operator forgot to forward
-        // `X-Forwarded-Proto`. We have no positive evidence of
-        // TLS, so we MUST treat the request as plain HTTP. The
-        // resulting missing-`Secure` cookie is intentional — the
-        // operator notices at deploy time and fixes the proxy
-        // config, rather than discovering the gap after a leak.
-        let trusted = tp(&["172.19.0.0/16"]);
-        let peer = ip("172.19.0.5");
-        let h = HeaderMap::new(); // no x-forwarded-proto
-        assert!(!request_is_https(peer, &h, &trusted));
-        assert!(!session_cookie_attrs(peer, &h, &trusted).contains("Secure"));
-    }
-
-    #[test]
-    fn empty_trusted_proxies_ignores_xfp_unconditionally() {
-        // Fail-closed default: no `trusted_proxies` configured means
-        // we never honor `X-Forwarded-Proto`, regardless of peer.
-        // (Operators of an HTTPS-direct bind don't reach this code
-        // path with a header at all; operators behind a TLS proxy
-        // must allow-list it.)
-        let trusted = tp(&[]);
-        let peer = ip("172.19.0.5"); // would be trusted under non-empty list
-        let mut h = HeaderMap::new();
-        h.insert("x-forwarded-proto", "https".parse().unwrap());
-        assert!(!request_is_https(peer, &h, &trusted));
-    }
-
-    #[test]
-    fn xfp_multi_value_uses_leftmost_when_peer_trusted() {
-        // RFC 7239 multi-proxy chain: leftmost is client-facing.
-        // Behavior preserved across the trust-gate refactor.
-        let trusted = tp(&["172.19.0.0/16"]);
-        let peer = ip("172.19.0.5");
-        let mut h = HeaderMap::new();
-        h.insert("x-forwarded-proto", "https, http".parse().unwrap());
-        assert!(request_is_https(peer, &h, &trusted));
-
-        let mut h2 = HeaderMap::new();
-        h2.insert("x-forwarded-proto", "http, https".parse().unwrap());
-        assert!(!request_is_https(peer, &h2, &trusted));
-    }
-}
-
-#[cfg(test)]
 mod derive_require_auth_for_reads_tests {
     use super::derive_require_auth_for_reads;
 
-    // Legacy callers / `external_auth_proxy = false` (the default) —
-    // the bypass-without-proxy behaviour is the audit fix.
-
     #[test]
     fn none_with_auth_enables() {
-        assert!(derive_require_auth_for_reads(None, true, false));
+        assert!(derive_require_auth_for_reads(None, true));
     }
 
     #[test]
     fn none_without_auth_disables() {
-        assert!(!derive_require_auth_for_reads(None, false, false));
+        assert!(!derive_require_auth_for_reads(None, false));
+    }
+
+    #[test]
+    fn some_false_is_preserved_even_when_auth_configured() {
+        assert!(!derive_require_auth_for_reads(Some(false), true));
     }
 
     #[test]
     fn some_true_is_preserved_even_when_no_auth_configured() {
-        assert!(derive_require_auth_for_reads(Some(true), false, false));
-    }
-
-    // Audit `require-auth-for-reads-false-leak`: refuse to honour
-    // `Some(false)` without `external_auth_proxy = true`.
-
-    #[test]
-    fn some_false_without_proxy_falls_back_to_any_auth() {
-        // any_auth = true → fall back to enforce-reads
-        assert!(
-            derive_require_auth_for_reads(Some(false), true, false),
-            "Some(false) without external_auth_proxy must not bypass auth when auth is configured",
-        );
-        // any_auth = false → still don't enforce (matches None)
-        assert!(
-            !derive_require_auth_for_reads(Some(false), false, false),
-            "Some(false) without external_auth_proxy + no auth = no enforcement \
-             (the bypass is meaningless without auth)",
-        );
-    }
-
-    #[test]
-    fn some_false_with_proxy_is_honoured() {
-        assert!(
-            !derive_require_auth_for_reads(Some(false), true, true),
-            "Some(false) WITH external_auth_proxy must bypass auth as intended",
-        );
-        assert!(
-            !derive_require_auth_for_reads(Some(false), false, true),
-            "Some(false) WITH external_auth_proxy must bypass auth even without local auth",
-        );
-    }
-
-    #[test]
-    fn some_true_overrides_external_auth_proxy() {
-        // Explicit close-down always wins, even with the proxy
-        // bypass flag set. An operator forcing the allowlist closed
-        // is unambiguous.
-        assert!(derive_require_auth_for_reads(Some(true), true, true));
-        assert!(derive_require_auth_for_reads(Some(true), false, true));
+        assert!(derive_require_auth_for_reads(Some(true), false));
     }
 }
 

@@ -24,12 +24,9 @@ use tracing::{debug, info, warn};
 /// to prevent leaking API keys from other providers. We keep the full env
 /// intact (so Node.js, NVM, SSL, proxies, etc. all work) and only remove
 /// secrets that belong to other LLM providers.
-///
-/// Note: ANTHROPIC_API_KEY is intentionally absent — the Claude Code CLI
-/// is Anthropic's own tool and requires its own key to authenticate API
-/// calls (OAuth alone is insufficient in -p/--print mode).
 const SENSITIVE_ENV_EXACT: &[&str] = &[
     "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "GROQ_API_KEY",
@@ -52,9 +49,7 @@ const SENSITIVE_ENV_EXACT: &[&str] = &[
 ];
 
 /// Suffixes that indicate a secret — remove any env var ending with these
-/// unless it starts with `CLAUDE_` or `ANTHROPIC_` (our own provider's
-/// credentials, including gateway / proxy variants like
-/// `ANTHROPIC_AUTH_TOKEN`).
+/// unless it starts with `CLAUDE_`.
 const SENSITIVE_SUFFIXES: &[&str] = &["_SECRET", "_TOKEN", "_PASSWORD"];
 
 /// Default subprocess timeout in seconds (5 minutes).
@@ -74,10 +69,6 @@ pub struct ClaudeCodeDriver {
     config_dir: Option<std::path::PathBuf>,
     /// Optional MCP bridge config (see [`McpBridgeConfig`]).
     mcp_bridge: Option<McpBridgeConfig>,
-    /// When `true` (the default), set `LIBREFANG_AGENT_ID`, `LIBREFANG_SESSION_ID`,
-    /// and `LIBREFANG_STEP_ID` env vars on the spawned subprocess so operators can
-    /// correlate process-tree entries with LibreFang agent sessions.
-    emit_caller_trace_headers: bool,
 }
 
 impl ClaudeCodeDriver {
@@ -104,7 +95,6 @@ impl ClaudeCodeDriver {
             message_timeout_secs: DEFAULT_MESSAGE_TIMEOUT_SECS,
             config_dir: None,
             mcp_bridge: None,
-            emit_caller_trace_headers: true,
         }
     }
 
@@ -119,39 +109,6 @@ impl ClaudeCodeDriver {
     pub fn with_mcp_bridge(mut self, bridge: McpBridgeConfig) -> Self {
         self.mcp_bridge = Some(bridge);
         self
-    }
-
-    /// Control whether caller-trace env vars are injected into the spawned
-    /// subprocess. When `true` (the default), `LIBREFANG_AGENT_ID`,
-    /// `LIBREFANG_SESSION_ID`, and `LIBREFANG_STEP_ID` are set from the
-    /// `CompletionRequest` fields so operators can correlate OS process-tree
-    /// entries with LibreFang agent sessions.
-    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
-        self.emit_caller_trace_headers = emit;
-        self
-    }
-
-    /// Inject caller-trace env vars into a subprocess command when the flag is on.
-    ///
-    /// Sets `LIBREFANG_AGENT_ID`, `LIBREFANG_SESSION_ID`, and
-    /// `LIBREFANG_STEP_ID` from the `CompletionRequest`. Empty / `None` values
-    /// are skipped so the subprocess environment stays clean.
-    fn apply_caller_trace_envs(cmd: &mut tokio::process::Command, request: &CompletionRequest) {
-        if let Some(ref id) = request.agent_id {
-            if !id.is_empty() {
-                cmd.env("LIBREFANG_AGENT_ID", id);
-            }
-        }
-        if let Some(ref sid) = request.session_id {
-            if !sid.is_empty() {
-                cmd.env("LIBREFANG_SESSION_ID", sid);
-            }
-        }
-        if let Some(ref step) = request.step_id {
-            if !step.is_empty() {
-                cmd.env("LIBREFANG_STEP_ID", step);
-            }
-        }
     }
 
     /// Create a new Claude Code driver with a custom timeout.
@@ -401,16 +358,8 @@ impl ClaudeCodeDriver {
             cmd.env_remove(key);
         }
         // Remove any env var with a sensitive suffix, unless it's CLAUDE_*
-        // or ANTHROPIC_*. The ANTHROPIC_ exception covers gateway / proxy
-        // credentials such as ANTHROPIC_AUTH_TOKEN, typically paired with
-        // ANTHROPIC_BASE_URL for Bedrock-style routing.
-        //
-        // The prefix match is case-sensitive by design — Unix env var names
-        // are case-sensitive, and the exact-list above also matches verbatim.
-        // A user typing `anthropic_foo_token` would still hit the suffix
-        // strip below, which is the intended fail-safe.
         for (key, _) in std::env::vars() {
-            if key.starts_with("CLAUDE_") || key.starts_with("ANTHROPIC_") {
+            if key.starts_with("CLAUDE_") {
                 continue;
             }
             let upper = key.to_uppercase();
@@ -423,106 +372,16 @@ impl ClaudeCodeDriver {
         }
     }
 
-    /// Force the spawned CLI's home directory to a path where it can
-    /// actually find its credentials.
-    ///
-    /// Containers that drop privileges to a numeric uid without a matching
-    /// passwd entry inherit a placeholder home directory from the OS:
-    ///   * glibc / Linux: `/nonexistent`
-    ///   * BSD / Alpine `nobody`: `/var/empty`
-    ///   * Some hardened images: `/dev/null`
-    ///   * Some misconfigured services: empty string
-    ///
-    /// The spawned `claude.exe` then tries to read
-    /// `~/.claude/.credentials.json` under that path, finds nothing, and
-    /// exits silently before draining its stdin. The kernel-side
-    /// `stdin.write_all(prompt)` then hits `Broken pipe (os error 32)` once
-    /// the prompt exceeds the pipe buffer (~64 KiB) and the caller sees
-    /// `Failed to write prompt to Claude Code CLI stdin: Broken pipe`
-    /// with no actionable detail.
-    ///
-    /// Resolution order:
-    ///   1. `CLAUDE_CODE_HOME` — the documented kernel-boot override, set by
-    ///      the wrapper / Lazycat init (see `CLAUDE.md` "Environment").
-    ///   2. The platform's home variable: `$HOME` on Unix,
-    ///      `%USERPROFILE%` on Windows.
-    ///
-    /// The candidate must resolve to an existing directory on disk. That
-    /// single `is_dir()` check rejects every placeholder above — and any
-    /// future passwd-less sentinel some distro might invent — without us
-    /// having to enumerate them. If neither source yields a real
-    /// directory we leave the inherited home alone; the caller has
-    /// bigger problems and the existing diagnostic surfaces them.
-    ///
-    /// `CLAUDE_CODE_HOME` is a LibreFang-private contract; the Anthropic CLI
-    /// itself does not read it. We resolve it here and project the value
-    /// onto the platform-native home variable so the upstream CLI sees a
-    /// real directory through its normal lookup.
-    ///
-    /// Multi-tenant note: all agents in the process share a single
-    /// `~/.claude/.credentials.json` (whichever directory this helper picks
-    /// for the parent process). Per-agent credential isolation is out of
-    /// scope for this helper — if it ever becomes necessary it belongs in
-    /// the spawn site, not here.
-    fn ensure_home_env(cmd: &mut tokio::process::Command) {
-        // Spawned CLI resolves `~` via `$HOME` on Unix and `%USERPROFILE%`
-        // on Windows. Override only the platform-relevant variable; the
-        // other one is either ignored by the CLI or already correct.
-        #[cfg(unix)]
-        let env_var = "HOME";
-        #[cfg(windows)]
-        let env_var = "USERPROFILE";
-
-        // Warn (once per spawn) when the operator set CLAUDE_CODE_HOME but
-        // it does not resolve to a directory: without this they get the
-        // exact same "Broken pipe" symptom as the no-override case and
-        // assume the override is being honoured. The fallback to the
-        // platform home below still runs.
-        if let Some(raw) = std::env::var_os("CLAUDE_CODE_HOME") {
-            let is_bad = raw.is_empty() || !std::path::Path::new(&raw).is_dir();
-            if is_bad {
-                warn!(
-                    claude_code_home = %raw.to_string_lossy(),
-                    "CLAUDE_CODE_HOME is set but does not resolve to a directory; \
-                     falling back to inherited platform home",
-                );
-            }
-        }
-
-        // Two-step resolution (houko review of #4997): when
-        // CLAUDE_CODE_HOME is set-but-invalid, `Option::or_else` skips
-        // the platform-home branch (the receiver is `Some`), so the
-        // documented fallback never ran. Validate the override first;
-        // only fall through to HOME/USERPROFILE when the override is
-        // absent **or** rejected.
-        let validate = |raw: std::ffi::OsString| -> Option<std::ffi::OsString> {
-            if raw.is_empty() || !std::path::Path::new(&raw).is_dir() {
-                None
-            } else {
-                Some(raw)
-            }
-        };
-        let candidate = std::env::var_os("CLAUDE_CODE_HOME")
-            .and_then(validate)
-            .or_else(|| std::env::var_os(env_var).and_then(validate));
-
-        if let Some(home) = candidate {
-            cmd.env(env_var, home);
-        }
-    }
-
     fn build_command_args(
         &self,
+        prompt: &str,
         output_format: &str,
         verbose: bool,
         model_flag: Option<&str>,
     ) -> Vec<String> {
-        // Prompt is fed via stdin, not argv. Passing the full rendered
-        // prompt as a CLI argument crashed `execve` with `E2BIG` once the
-        // skill catalog + history + tool registry pushed it past Linux
-        // ARG_MAX (~128 KB on most kernels).
         let mut args = vec![
             "-p".to_string(),
+            prompt.to_string(),
             "--output-format".to_string(),
             output_format.to_string(),
         ];
@@ -555,60 +414,6 @@ impl ClaudeCodeDriver {
         // tool-name convention for MCP-sourced tools is `mcp__<server>__<tool>`,
         // and passing just the server prefix permits all of them.
         args.push("mcp__librefang".to_string());
-    }
-
-    /// On stdin write failure (typically EPIPE because the CLI exited
-    /// during its own init) drain the CLI's stderr for up to 2 s and
-    /// fold the captured snippet into the surfaced error message.
-    /// Without this the caller sees only `Broken pipe` and has no clue
-    /// why the CLI quit — invalid auth profile, missing/unreadable cwd,
-    /// bad `--mcp-config`, etc. Kills the child as a side effect.
-    async fn diagnose_stdin_write_failure(
-        child: &mut tokio::process::Child,
-        write_err: &std::io::Error,
-    ) -> String {
-        use tokio::io::AsyncReadExt;
-        const STDERR_CAP: usize = 4096;
-        const STDERR_WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
-
-        let stderr_pipe = child.stderr.take();
-        // Best-effort kill: the child is almost certainly already dead
-        // (that's why the pipe broke), but never leak a stuck process.
-        let _ = child.kill().await;
-
-        let stderr_snippet = if let Some(mut err) = stderr_pipe {
-            let mut buf: Vec<u8> = Vec::with_capacity(STDERR_CAP);
-            let _ = tokio::time::timeout(STDERR_WAIT, async {
-                let mut chunk = [0u8; 1024];
-                while buf.len() < STDERR_CAP {
-                    match err.read(&mut chunk).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let take = (STDERR_CAP - buf.len()).min(n);
-                            buf.extend_from_slice(&chunk[..take]);
-                        }
-                    }
-                }
-            })
-            .await;
-            String::from_utf8_lossy(&buf).trim().to_string()
-        } else {
-            String::new()
-        };
-
-        if stderr_snippet.is_empty() {
-            format!(
-                "Failed to write prompt to Claude Code CLI stdin: {write_err}. \
-                 The CLI exited before reading stdin (no stderr captured). \
-                 Common causes: invalid auth profile (run `claude /status` to verify), \
-                 missing or unreadable workspace cwd, invalid `--mcp-config` path."
-            )
-        } else {
-            format!(
-                "Failed to write prompt to Claude Code CLI stdin: {write_err}. \
-                 The CLI exited before reading stdin. Captured stderr: {stderr_snippet}"
-            )
-        }
     }
 }
 
@@ -774,7 +579,8 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        let mut args = self.build_command_args("json", false, model_flag.as_deref());
+        let mut args =
+            self.build_command_args(&prepared.text, "json", false, model_flag.as_deref());
         if let Some(ref path) = prepared.mcp_config_path {
             Self::append_mcp_args(&mut args, path);
         }
@@ -789,27 +595,14 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         Self::apply_env_filter(&mut cmd);
-        Self::ensure_home_env(&mut cmd);
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
-        if self.emit_caller_trace_headers {
-            Self::apply_caller_trace_envs(&mut cmd, &request);
-        }
 
-        // Prompt is piped to the CLI's stdin. Passing it as argv crashed
-        // execve with E2BIG once the skill catalog + history + tool registry
-        // pushed the rendered text past Linux ARG_MAX (~128 KB).
-        cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        debug!(
-            cli = %self.cli_path,
-            skip_permissions = self.skip_permissions,
-            prompt_bytes = prepared.text.len(),
-            "Spawning Claude Code CLI"
-        );
+        debug!(cli = %self.cli_path, skip_permissions = self.skip_permissions, "Spawning Claude Code CLI");
 
         // Spawn child process instead of cmd.output() so we can track PID and timeout
         let mut child = cmd.spawn().map_err(|e| {
@@ -820,21 +613,6 @@ impl LlmDriver for ClaudeCodeDriver {
                 e
             ))
         })?;
-
-        // Write the prompt to stdin and close it so the CLI sees EOF and
-        // begins processing. tokio::io::AsyncWriteExt::write_all chunks
-        // automatically — no per-write size limit applies here, only the
-        // pipe-buffer ceiling, which the kernel handles transparently.
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
-                let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
-                prepared.cleanup();
-                return Err(LlmError::Http(diag));
-            }
-            // Drop closes stdin; CLI proceeds with the full prompt.
-            drop(stdin);
-        }
 
         // Track the PID using model + UUID to avoid collisions on concurrent same-model requests
         let pid_label = format!("{}:{}", request.model, uuid::Uuid::new_v4());
@@ -993,7 +771,6 @@ impl LlmDriver for ClaudeCodeDriver {
                     output_tokens: usage.output_tokens,
                     ..Default::default()
                 },
-                actual_provider: None,
             });
         }
 
@@ -1018,7 +795,6 @@ impl LlmDriver for ClaudeCodeDriver {
                 output_tokens: 0,
                 ..Default::default()
             },
-            actual_provider: None,
         })
     }
 
@@ -1056,7 +832,8 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        let mut args = self.build_command_args("stream-json", true, model_flag.as_deref());
+        let mut args =
+            self.build_command_args(&prepared.text, "stream-json", true, model_flag.as_deref());
         if let Some(ref path) = prepared.mcp_config_path {
             Self::append_mcp_args(&mut args, path);
         }
@@ -1071,25 +848,14 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         Self::apply_env_filter(&mut cmd);
-        Self::ensure_home_env(&mut cmd);
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
-        if self.emit_caller_trace_headers {
-            Self::apply_caller_trace_envs(&mut cmd, &request);
-        }
 
-        // Same stdin-piping rationale as the non-streaming path: prompt
-        // exceeds ARG_MAX once the skill catalog and history grow.
-        cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        debug!(
-            cli = %self.cli_path,
-            prompt_bytes = prepared.text.len(),
-            "Spawning Claude Code CLI (streaming)"
-        );
+        debug!(cli = %self.cli_path, "Spawning Claude Code CLI (streaming)");
 
         let mut child = cmd.spawn().map_err(|e| {
             prepared.cleanup();
@@ -1099,16 +865,6 @@ impl LlmDriver for ClaudeCodeDriver {
                 e
             ))
         })?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
-                let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
-                prepared.cleanup();
-                return Err(LlmError::Http(diag));
-            }
-            drop(stdin);
-        }
 
         // Track PID with unique key to avoid collisions on concurrent same-model requests
         let pid_label = format!("{}-stream:{}", request.model, uuid::Uuid::new_v4());
@@ -1205,30 +961,6 @@ impl LlmDriver for ClaudeCodeDriver {
                             || (l.contains("resets") && l.contains("utc"))
                             || t.trim() == "NO_REPLY"
                             || t.trim().ends_with("NO_REPLY")
-                            // Suppress CLI progress placeholders that leak
-                            // into channel text when the model emits a
-                            // status preamble alone (no real reply). Both
-                            // bracket and paren shapes — observed live as
-                            // `[Reading the conversation context]` and
-                            // `(thinking)` whole-message replies. Narrow
-                            // on purpose so legitimate user content that
-                            // happens to start with a paren or bracket
-                            // (e.g. `[1] First...` lists) is not suppressed.
-                            || {
-                                let trimmed = t.trim();
-                                let bracket_wrapped = (trimmed.starts_with('[')
-                                    && trimmed.ends_with(']'))
-                                    || (trimmed.starts_with('(')
-                                        && trimmed.ends_with(')'));
-                                bracket_wrapped
-                                    && (l.contains("reading")
-                                        || l.contains("thinking")
-                                        || l.contains("loading")
-                                        || l.contains("processing")
-                                        || l.contains("analyzing")
-                                        || l.contains("conversation context")
-                                        || l.contains("still working"))
-                            }
                     };
 
                     match serde_json::from_str::<ClaudeStreamEvent>(&line) {
@@ -1458,7 +1190,6 @@ impl LlmDriver for ClaudeCodeDriver {
             stop_reason: StopReason::EndTurn,
             tool_calls: Vec::new(),
             usage: final_usage,
-            actual_provider: None,
         })
     }
 
@@ -1521,133 +1252,6 @@ fn home_dir() -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
 
-    /// Spawn a tiny cross-platform child process for the
-    /// `diagnose_stdin_write_failure` tests. POSIX runners can rely on
-    /// `/bin/sh`, but the Windows CI runner does not ship a POSIX shell on
-    /// PATH that round-trips stderr from a single-quoted echo back through
-    /// tokio's piped handle reliably (the test would observe an empty
-    /// stderr capture and trip the "no stderr captured" fallback branch
-    /// instead of the captured-stderr branch). Python 3 is preinstalled
-    /// on every GitHub Actions runner the project supports, so we use a
-    /// single-line `python -c` payload that exits immediately, optionally
-    /// writing a known string to stderr first. This keeps the failure
-    /// mode under test — child dies before reading stdin → caller sees
-    /// `BrokenPipe` on write — identical across all platforms.
-    fn spawn_dying_child(stderr_payload: Option<&str>) -> tokio::process::Child {
-        let script = match stderr_payload {
-            Some(msg) => {
-                // Explicit `flush()` before `sys.exit` because Python's
-                // text-IO layer over stderr is line-buffered: a no-newline
-                // payload sits in the wrapper buffer until interpreter
-                // shutdown flushes it. On loaded macOS GHA runners the
-                // diagnostic helper's `child.kill()` (SIGKILL) has been
-                // observed to land before that shutdown flush completes,
-                // dropping the payload before the OS pipe sees it and
-                // tripping the silent-fallback branch under test.
-                // `{msg:?}` writes the payload as a Rust-debug quoted
-                // string, which is also a valid Python string literal for
-                // the ASCII payloads these tests use.
-                format!("import sys; sys.stderr.write({msg:?}); sys.stderr.flush(); sys.exit(7)")
-            }
-            None => "import sys; sys.exit(0)".to_string(),
-        };
-        // Try `python3` first (canonical on Linux/macOS), fall back to
-        // `python` (the launcher name on the Windows GitHub runners).
-        // Either binary on PATH satisfies the test; spawning a known-good
-        // child avoids the brittle Git-Bash-on-Windows `sh` path that
-        // silently dropped piped stderr on the Test / Windows lane.
-        let build_cmd = |exe: &str| -> tokio::process::Command {
-            let mut cmd = tokio::process::Command::new(exe);
-            // `-u` forces Python's stdio binary layer unbuffered, defence
-            // in depth alongside the explicit flush in the script body.
-            cmd.arg("-u").arg("-c").arg(&script);
-            cmd.stdin(std::process::Stdio::piped());
-            cmd.stdout(std::process::Stdio::piped());
-            cmd.stderr(std::process::Stdio::piped());
-            cmd
-        };
-        match build_cmd("python3").spawn() {
-            Ok(child) => child,
-            Err(_) => build_cmd("python")
-                .spawn()
-                .expect("neither python3 nor python is on PATH; install Python 3 to run this test"),
-        }
-    }
-
-    /// Wait deterministically for `child` to exit, polling `try_wait`
-    /// with a 2 s budget. Replaces fixed `tokio::time::sleep` guesses
-    /// (150 ms / 100 ms in earlier revisions of these tests) that left a
-    /// race window: on a loaded macOS GHA runner the Python interpreter's
-    /// startup + shutdown can exceed the budget, so the subsequent
-    /// `child.kill()` inside `diagnose_stdin_write_failure` lands during
-    /// interpreter teardown and steals the stderr that hadn't yet
-    /// reached the OS pipe. Polling until exit removes the guess.
-    async fn await_child_exit(child: &mut tokio::process::Child) {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                Err(_) => return,
-            }
-        }
-    }
-
-    /// Pin: when stdin write fails (child exits during init), the error
-    /// surface must include any stderr the CLI emitted before death.
-    /// Without this the operator gets a bare "Broken pipe" with no clue
-    /// whether to re-auth, fix the workspace, or rebuild the binary.
-    #[tokio::test]
-    async fn diagnose_stdin_write_failure_includes_child_stderr() {
-        // Child prints a recognisable error to stderr and immediately
-        // exits without ever reading stdin → next stdin write will EPIPE
-        // just like a real claude-code init failure.
-        let mut child = spawn_dying_child(Some("mock cli: auth profile invalid"));
-
-        // Wait until the child has actually exited so its stdio is fully
-        // flushed and its stdin pipe is closed before we ask the
-        // diagnostic helper to read stderr.
-        await_child_exit(&mut child).await;
-
-        let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
-        let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
-
-        assert!(
-            diag.contains("Failed to write prompt to Claude Code CLI stdin"),
-            "diag must keep the original failure header, got: {diag}"
-        );
-        assert!(
-            diag.contains("mock cli: auth profile invalid"),
-            "diag must include captured stderr from the dying child, got: {diag}"
-        );
-    }
-
-    /// When the child produces no stderr at all, the diagnostic must
-    /// still be actionable — fall back to a hint pointing at the common
-    /// auth/cwd/MCP causes rather than just leaking the io::Error.
-    #[tokio::test]
-    async fn diagnose_stdin_write_failure_falls_back_to_hint_when_silent() {
-        let mut child = spawn_dying_child(None);
-        await_child_exit(&mut child).await;
-
-        let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
-        let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
-
-        assert!(
-            diag.contains("Common causes"),
-            "silent-child diag must surface the hint block, got: {diag}"
-        );
-        assert!(
-            diag.contains("claude /status"),
-            "hint must mention the auth check command, got: {diag}"
-        );
-    }
-
     #[test]
     fn test_build_prompt_simple() {
         use librefang_types::message::{Message, MessageContent};
@@ -1667,14 +1271,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1716,14 +1316,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1782,14 +1378,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1864,14 +1456,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1948,12 +1536,13 @@ mod tests {
     #[test]
     fn test_complete_args_include_skip_permissions_when_enabled() {
         let driver = ClaudeCodeDriver::new(None, true);
-        let args = driver.build_command_args("json", false, Some("sonnet"));
+        let args = driver.build_command_args("hello", "json", false, Some("sonnet"));
 
         assert_eq!(
             args,
             vec![
                 "-p",
+                "hello",
                 "--output-format",
                 "json",
                 "--dangerously-skip-permissions",
@@ -1966,12 +1555,13 @@ mod tests {
     #[test]
     fn test_stream_args_include_verbose_and_skip_permissions() {
         let driver = ClaudeCodeDriver::new(None, true);
-        let args = driver.build_command_args("stream-json", true, Some("sonnet"));
+        let args = driver.build_command_args("hello", "stream-json", true, Some("sonnet"));
 
         assert_eq!(
             args,
             vec![
                 "-p",
+                "hello",
                 "--output-format",
                 "stream-json",
                 "--verbose",
@@ -1985,7 +1575,7 @@ mod tests {
     #[test]
     fn test_args_omit_skip_permissions_when_disabled() {
         let driver = ClaudeCodeDriver::new(None, false);
-        let args = driver.build_command_args("json", false, Some("sonnet"));
+        let args = driver.build_command_args("hello", "json", false, Some("sonnet"));
 
         assert!(!args
             .iter()
@@ -1993,574 +1583,13 @@ mod tests {
     }
 
     #[test]
-    fn test_args_no_longer_carry_prompt_in_argv() {
-        // Regression: passing the prompt as a CLI argument crashed
-        // execve with E2BIG once the rendered text exceeded ARG_MAX
-        // (~128 KB on most kernels). Prompt is now piped to stdin.
-        let driver = ClaudeCodeDriver::new(None, true);
-        let args = driver.build_command_args("json", false, None);
-        // Argument vector must be small and bounded — no prompt body in it.
-        assert!(args.iter().all(|a| a.len() < 256));
-        assert!(args.contains(&"-p".to_string()));
-    }
-
-    /// Pin: when the daemon inherited `HOME=/nonexistent` (Lazycat-style
-    /// containers default uid-without-passwd to that path), `ensure_home_env`
-    /// MUST override it with `CLAUDE_CODE_HOME` or the spawned `claude.exe`
-    /// can't find its credentials and the next `stdin.write_all` hits
-    /// `Broken pipe`.
-    ///
-    /// `#[serial]` because every test in this module that mutates `HOME` /
-    /// `CLAUDE_CODE_HOME` must run sequentially: `std::env::{set,remove}_var`
-    /// is UB while other threads exist, and `cargo test` /  `cargo nextest`
-    /// run tests concurrently by default.
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::serial]
-    fn ensure_home_env_overrides_nonexistent_when_claude_code_home_set() {
-        // A real on-disk directory so the new `is_dir()` filter accepts it.
-        let dir = tempfile::tempdir().unwrap();
-        let saved_home = std::env::var_os("HOME");
-        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
-        // SAFETY: #[serial_test::serial] serialises every env-mutating test
-        // in this binary, so no other thread reads or writes these vars.
-        unsafe {
-            std::env::set_var("HOME", "/nonexistent");
-            std::env::set_var("CLAUDE_CODE_HOME", dir.path());
-        }
-        let mut cmd = tokio::process::Command::new("/bin/true");
-        ClaudeCodeDriver::ensure_home_env(&mut cmd);
-        // Round-trip via Command::get_envs() — env() overrides land here.
-        let resolved: Vec<(String, Option<String>)> = cmd
-            .as_std()
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|s| s.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
-        // SAFETY: restore env BEFORE asserting — a failed assert otherwise
-        // poisons sibling tests that read these vars.
-        unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match saved_claude_code_home {
-                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
-                None => std::env::remove_var("CLAUDE_CODE_HOME"),
-            }
-        }
-        assert_eq!(
-            home,
-            Some((
-                "HOME".to_string(),
-                Some(dir.path().to_string_lossy().into_owned()),
-            )),
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::serial]
-    fn ensure_home_env_keeps_real_home_when_no_claude_code_home() {
-        let dir = tempfile::tempdir().unwrap();
-        let saved_home = std::env::var_os("HOME");
-        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
-        // SAFETY: see the comment on the test above.
-        unsafe {
-            std::env::set_var("HOME", dir.path());
-            std::env::remove_var("CLAUDE_CODE_HOME");
-        }
-        let mut cmd = tokio::process::Command::new("/bin/true");
-        ClaudeCodeDriver::ensure_home_env(&mut cmd);
-        let resolved: Vec<(String, Option<String>)> = cmd
-            .as_std()
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|s| s.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
-        unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match saved_claude_code_home {
-                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
-                None => std::env::remove_var("CLAUDE_CODE_HOME"),
-            }
-        }
-        assert_eq!(
-            home,
-            Some((
-                "HOME".to_string(),
-                Some(dir.path().to_string_lossy().into_owned()),
-            )),
-        );
-    }
-
-    /// Regression for the houko 2026-05-22 review on #4997. Earlier
-    /// the resolver used
-    /// `var_os("CLAUDE_CODE_HOME").or_else(|| var_os(env_var)).filter(is_dir)`
-    /// — `or_else` short-circuits when the override is `Some(invalid)`,
-    /// so the platform-home fallback documented in CLAUDE.md never ran
-    /// and the child inherited `HOME=/nonexistent` (the exact failure
-    /// this PR exists to fix). The fix validates the override **before**
-    /// falling back; this test pins it.
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::serial]
-    fn ensure_home_env_falls_back_to_platform_home_when_override_is_invalid() {
-        let dir = tempfile::tempdir().unwrap();
-        let saved_home = std::env::var_os("HOME");
-        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
-        // SAFETY: #[serial_test::serial] serialises env-mutating tests.
-        unsafe {
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("CLAUDE_CODE_HOME", "/this/path/definitely/does/not/exist");
-        }
-        let mut cmd = tokio::process::Command::new("/bin/true");
-        ClaudeCodeDriver::ensure_home_env(&mut cmd);
-        let resolved: Vec<(String, Option<String>)> = cmd
-            .as_std()
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|s| s.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
-        // SAFETY: restore env BEFORE asserting.
-        unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match saved_claude_code_home {
-                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
-                None => std::env::remove_var("CLAUDE_CODE_HOME"),
-            }
-        }
-        // Invalid override → fallback to the *valid* platform HOME. The
-        // child must NOT inherit the broken `/this/path/...` value.
-        assert_eq!(
-            home,
-            Some((
-                "HOME".to_string(),
-                Some(dir.path().to_string_lossy().into_owned()),
-            )),
-            "invalid CLAUDE_CODE_HOME must fall back to valid platform HOME",
-        );
-    }
-
-    /// Companion to the test above: when BOTH the override AND the
-    /// platform HOME are invalid, no override is written (the existing
-    /// diagnostic warning surfaces it).
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::serial]
-    fn ensure_home_env_writes_nothing_when_both_override_and_home_invalid() {
-        let saved_home = std::env::var_os("HOME");
-        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
-        unsafe {
-            std::env::set_var("HOME", "/nonexistent");
-            std::env::set_var("CLAUDE_CODE_HOME", "/also/not/a/dir");
-        }
-        let mut cmd = tokio::process::Command::new("/bin/true");
-        ClaudeCodeDriver::ensure_home_env(&mut cmd);
-        let resolved: Vec<(String, Option<String>)> = cmd
-            .as_std()
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|s| s.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match saved_claude_code_home {
-                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
-                None => std::env::remove_var("CLAUDE_CODE_HOME"),
-            }
-        }
-        assert!(
-            resolved.iter().all(|(k, _)| k != "HOME"),
-            "no HOME override expected when both override and platform HOME are invalid, got: {resolved:?}",
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::serial]
-    fn ensure_home_env_leaves_command_alone_when_no_candidate() {
-        let saved_home = std::env::var_os("HOME");
-        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
-        // SAFETY: see the comment on the first test in this group.
-        unsafe {
-            std::env::set_var("HOME", "/nonexistent");
-            std::env::remove_var("CLAUDE_CODE_HOME");
-        }
-        let mut cmd = tokio::process::Command::new("/bin/true");
-        ClaudeCodeDriver::ensure_home_env(&mut cmd);
-        // No HOME override should be added when neither CLAUDE_CODE_HOME nor a
-        // valid HOME is available. The child will inherit the broken HOME and
-        // we surface the underlying issue via the existing diagnostic.
-        let resolved: Vec<(String, Option<String>)> = cmd
-            .as_std()
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|s| s.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match saved_claude_code_home {
-                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
-                None => std::env::remove_var("CLAUDE_CODE_HOME"),
-            }
-        }
-        assert!(
-            resolved.iter().all(|(k, _)| k != "HOME"),
-            "no HOME override expected, got: {resolved:?}",
-        );
-    }
-
-    /// Beyond `/nonexistent`, the broader class of passwd-less placeholders
-    /// — `/var/empty` (BSD / Alpine `nobody`), `/dev/null` (some hardened
-    /// images), the empty string, plus any path that does not resolve to
-    /// an existing directory — must also be rejected. The single
-    /// `Path::is_dir()` check in `ensure_home_env` covers them all
-    /// without us having to enumerate.
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::serial]
-    fn ensure_home_env_rejects_broader_placeholders() {
-        let saved_home = std::env::var_os("HOME");
-        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
-
-        // `/dev/null` exists but is a character device, not a directory.
-        // `/this/.../does/not/exist` is the catch-all for unknown sentinels.
-        // Empty string is the "misconfigured uid" case.
-        for placeholder in &["", "/dev/null", "/this/path/should/not/exist"] {
-            // SAFETY: see the comment on the first test in this group.
-            unsafe {
-                std::env::set_var("HOME", placeholder);
-                std::env::remove_var("CLAUDE_CODE_HOME");
-            }
-            let mut cmd = tokio::process::Command::new("/bin/true");
-            ClaudeCodeDriver::ensure_home_env(&mut cmd);
-            let resolved: Vec<(String, Option<String>)> = cmd
-                .as_std()
-                .get_envs()
-                .map(|(k, v)| {
-                    (
-                        k.to_string_lossy().into_owned(),
-                        v.map(|s| s.to_string_lossy().into_owned()),
-                    )
-                })
-                .collect();
-            // Restore env before each potential assert! failure (loop).
-            // SAFETY: same as above.
-            unsafe {
-                match &saved_home {
-                    Some(v) => std::env::set_var("HOME", v),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &saved_claude_code_home {
-                    Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
-                    None => std::env::remove_var("CLAUDE_CODE_HOME"),
-                }
-            }
-            assert!(
-                resolved.iter().all(|(k, _)| k != "HOME"),
-                "placeholder HOME={placeholder:?} should be rejected, got: {resolved:?}",
-            );
-        }
-    }
-
-    /// Pin the resolution order: when both `CLAUDE_CODE_HOME` and `HOME`
-    /// point at real directories, the explicit override must win. Without
-    /// this guard a future refactor could accidentally swap the two
-    /// `var_os` calls in `ensure_home_env` and the change would still
-    /// compile, still pass every other test, and silently demote the
-    /// operator-set override to a no-op.
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::serial]
-    fn ensure_home_env_override_beats_real_home() {
-        let override_dir = tempfile::tempdir().unwrap();
-        let inherited_dir = tempfile::tempdir().unwrap();
-        let saved_home = std::env::var_os("HOME");
-        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
-        // SAFETY: see the comment on the first test in this group.
-        unsafe {
-            std::env::set_var("HOME", inherited_dir.path());
-            std::env::set_var("CLAUDE_CODE_HOME", override_dir.path());
-        }
-        let mut cmd = tokio::process::Command::new("/bin/true");
-        ClaudeCodeDriver::ensure_home_env(&mut cmd);
-        let resolved: Vec<(String, Option<String>)> = cmd
-            .as_std()
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|s| s.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
-        // SAFETY: restore env BEFORE asserting — see first test in group.
-        unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match saved_claude_code_home {
-                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
-                None => std::env::remove_var("CLAUDE_CODE_HOME"),
-            }
-        }
-        assert_eq!(
-            home,
-            Some((
-                "HOME".to_string(),
-                Some(override_dir.path().to_string_lossy().into_owned()),
-            )),
-            "CLAUDE_CODE_HOME must beat HOME even when HOME is a valid directory",
-        );
-    }
-
-    /// Windows mirror of the Unix override test. On Windows the spawned
-    /// CLI resolves `~` via `%USERPROFILE%`, so `ensure_home_env` must
-    /// project the candidate onto `USERPROFILE` instead of `HOME`.
-    /// Without an assertion here the `cfg(windows)` branch of the
-    /// function compiles and clippy-checks but is never exercised — a
-    /// silent typo (`USERPROILE`, anyone?) would survive review.
-    ///
-    /// Full env-mutation coverage on the Windows branch additionally
-    /// depends on the Windows runner in the CI matrix; the unit lane
-    /// here verifies the helper's contract once the platform is right.
-    #[cfg(windows)]
-    #[test]
-    #[serial_test::serial]
-    fn ensure_home_env_injects_userprofile_on_windows() {
-        let dir = tempfile::tempdir().unwrap();
-        let saved_userprofile = std::env::var_os("USERPROFILE");
-        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
-        // SAFETY: see the comment on the first Unix test in this group.
-        unsafe {
-            std::env::set_var("USERPROFILE", "C:\\nonexistent-librefang-test");
-            std::env::set_var("CLAUDE_CODE_HOME", dir.path());
-        }
-        let mut cmd = tokio::process::Command::new("cmd");
-        ClaudeCodeDriver::ensure_home_env(&mut cmd);
-        let resolved: Vec<(String, Option<String>)> = cmd
-            .as_std()
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|s| s.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        let userprofile = resolved.iter().find(|(k, _)| k == "USERPROFILE").cloned();
-        // SAFETY: restore env BEFORE asserting.
-        unsafe {
-            match saved_userprofile {
-                Some(v) => std::env::set_var("USERPROFILE", v),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match saved_claude_code_home {
-                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
-                None => std::env::remove_var("CLAUDE_CODE_HOME"),
-            }
-        }
-        assert_eq!(
-            userprofile,
-            Some((
-                "USERPROFILE".to_string(),
-                Some(dir.path().to_string_lossy().into_owned()),
-            )),
-            "CLAUDE_CODE_HOME must project onto USERPROFILE on Windows",
-        );
-    }
-
-    /// Wiring-pin tests: confirm both `LlmDriver::complete` (~line 753)
-    /// and `LlmDriver::stream` (~line 1035) call `ensure_home_env` on
-    /// the freshly built `tokio::process::Command`. Behavioural tests
-    /// on those entry points would require the full async driver
-    /// harness; a source-level grep is the cheapest, most stable
-    /// regression guard against a future refactor silently dropping
-    /// one of the two calls — which is exactly the failure mode the
-    /// review feedback flagged (deferred 3 times before this round).
-    ///
-    /// The file path is computed via `file!()` at compile time and the
-    /// tests run only when the source is reachable from the test's
-    /// working directory — which is the case for in-tree `cargo test`
-    /// invocations (the only ones that actually exercise this crate).
-    /// If the file is missing the test is skipped rather than failing
-    /// (e.g. an out-of-tree consumer running our published tests).
-    fn read_claude_code_source() -> Option<String> {
-        let path = std::path::Path::new(file!());
-        let abs = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            // CARGO_MANIFEST_DIR points at the crate root; file!() is
-            // relative to that.
-            let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")?;
-            std::path::PathBuf::from(manifest_dir).join(path)
-        };
-        std::fs::read_to_string(&abs).ok()
-    }
-
-    #[test]
-    fn ensure_home_env_is_wired_in_complete_spawn_site() {
-        let Some(source) = read_claude_code_source() else {
-            // Test source unavailable — skip rather than failing.
-            return;
-        };
-        // Slice the source from the `impl LlmDriver for ClaudeCodeDriver`
-        // marker through the `async fn stream` marker; the `complete`
-        // function lives entirely inside that window.
-        let trait_impl_start = source
-            .find("impl LlmDriver for ClaudeCodeDriver")
-            .expect("LlmDriver impl block must exist");
-        let stream_start = source[trait_impl_start..]
-            .find("async fn stream(")
-            .map(|off| trait_impl_start + off)
-            .expect("LlmDriver::stream must exist");
-        let complete_body = &source[trait_impl_start..stream_start];
-        assert!(
-            complete_body.contains("Self::ensure_home_env(&mut cmd)"),
-            "LlmDriver::complete must call Self::ensure_home_env(&mut cmd) \
-             on the spawned Command — without it, containers with a \
-             placeholder $HOME silently fail with `Broken pipe`",
-        );
-    }
-
-    #[test]
-    fn ensure_home_env_is_wired_in_stream_spawn_site() {
-        let Some(source) = read_claude_code_source() else {
-            return;
-        };
-        let stream_start = source
-            .find("async fn stream(")
-            .expect("LlmDriver::stream must exist");
-        // The test module begins with `#[cfg(test)]\nmod tests`; cap the
-        // search there so the wiring assertion can't be satisfied by
-        // text inside the test module itself (including these tests).
-        let tests_marker = source
-            .find("#[cfg(test)]\nmod tests")
-            .expect("test module marker must exist");
-        assert!(
-            stream_start < tests_marker,
-            "stream impl must precede the test module",
-        );
-        let stream_body = &source[stream_start..tests_marker];
-        assert!(
-            stream_body.contains("Self::ensure_home_env(&mut cmd)"),
-            "LlmDriver::stream must call Self::ensure_home_env(&mut cmd) \
-             on the spawned Command — without it, containers with a \
-             placeholder $HOME silently fail with `Broken pipe`",
-        );
-    }
-
-    #[test]
     fn test_sensitive_env_list_coverage() {
         // Ensure all major provider keys are in the strip list
         assert!(SENSITIVE_ENV_EXACT.contains(&"OPENAI_API_KEY"));
+        assert!(SENSITIVE_ENV_EXACT.contains(&"ANTHROPIC_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GEMINI_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GROQ_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"DEEPSEEK_API_KEY"));
-    }
-
-    #[test]
-    fn test_apply_env_filter_keeps_anthropic_auth_token() {
-        // Regression for #5006: the suffix-sweep used to strip
-        // ANTHROPIC_AUTH_TOKEN because it ends in _TOKEN and lacks the
-        // CLAUDE_ prefix. The ANTHROPIC_* exception keeps gateway / proxy
-        // credentials (ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL pattern)
-        // intact while still stripping other providers' secrets.
-        //
-        // SAFETY: unique env var names; the test removes each one before
-        // returning.
-        unsafe {
-            std::env::set_var("ANTHROPIC_AUTH_TOKEN", "keep-me-5006");
-            std::env::set_var("OPENAI_API_KEY", "strip-openai-5006");
-            std::env::set_var("GROQ_API_KEY", "strip-groq-5006");
-            std::env::set_var("GEMINI_API_KEY", "strip-gemini-5006");
-            std::env::set_var("LIBREFANG_TEST_5006_OTHER_TOKEN", "strip-suffix-5006");
-        }
-
-        let mut cmd = tokio::process::Command::new("echo");
-        ClaudeCodeDriver::apply_env_filter(&mut cmd);
-
-        // `env_remove` records `(key, None)` in the Command's env table.
-        // Inspect it to learn which keys the filter targeted for removal.
-        let removed: std::collections::HashSet<String> = cmd
-            .as_std()
-            .get_envs()
-            .filter_map(|(k, v)| {
-                if v.is_none() {
-                    Some(k.to_string_lossy().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        assert!(
-            !removed.contains("ANTHROPIC_AUTH_TOKEN"),
-            "ANTHROPIC_AUTH_TOKEN must be preserved for gateway / proxy users (#5006)"
-        );
-        assert!(
-            removed.contains("OPENAI_API_KEY"),
-            "OPENAI_API_KEY must still be stripped"
-        );
-        assert!(
-            removed.contains("GROQ_API_KEY"),
-            "GROQ_API_KEY must still be stripped"
-        );
-        assert!(
-            removed.contains("GEMINI_API_KEY"),
-            "GEMINI_API_KEY must still be stripped"
-        );
-        assert!(
-            removed.contains("LIBREFANG_TEST_5006_OTHER_TOKEN"),
-            "Generic *_TOKEN env vars (no CLAUDE_/ANTHROPIC_ prefix) must still be stripped"
-        );
-
-        // SAFETY: matches the set_var calls above.
-        unsafe {
-            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
-            std::env::remove_var("OPENAI_API_KEY");
-            std::env::remove_var("GROQ_API_KEY");
-            std::env::remove_var("GEMINI_API_KEY");
-            std::env::remove_var("LIBREFANG_TEST_5006_OTHER_TOKEN");
-        }
     }
 
     #[test]
@@ -2625,105 +1654,6 @@ mod tests {
         let dir = make_claude_tmp_dir("empty");
         assert!(!claude_credentials_in_dir(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_caller_trace_envs_set_when_flag_on() {
-        // apply_caller_trace_envs must set all three vars when all IDs are present.
-        let mut cmd = tokio::process::Command::new("echo");
-        let request = CompletionRequest {
-            model: "claude-code/sonnet".to_string(),
-            messages: std::sync::Arc::new(vec![]),
-            tools: std::sync::Arc::new(vec![]),
-            max_tokens: 1,
-            temperature: 0.0,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: Some("agent-abc".to_string()),
-            session_id: Some("sess-xyz".to_string()),
-            step_id: Some("step-001".to_string()),
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        };
-        ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
-        let envs: std::collections::HashMap<_, _> = cmd
-            .as_std()
-            .get_envs()
-            .filter_map(|(k, v)| {
-                v.map(|v| {
-                    (
-                        k.to_string_lossy().to_string(),
-                        v.to_string_lossy().to_string(),
-                    )
-                })
-            })
-            .collect();
-        assert_eq!(
-            envs.get("LIBREFANG_AGENT_ID").map(|s| s.as_str()),
-            Some("agent-abc")
-        );
-        assert_eq!(
-            envs.get("LIBREFANG_SESSION_ID").map(|s| s.as_str()),
-            Some("sess-xyz")
-        );
-        assert_eq!(
-            envs.get("LIBREFANG_STEP_ID").map(|s| s.as_str()),
-            Some("step-001")
-        );
-    }
-
-    #[test]
-    fn test_caller_trace_envs_absent_when_flag_off() {
-        // When emit_caller_trace_headers is false the driver must not inject any
-        // LIBREFANG_* env vars onto the subprocess command.
-        let driver = ClaudeCodeDriver::new(None, false).with_emit_caller_trace_headers(false);
-        assert!(!driver.emit_caller_trace_headers);
-    }
-
-    #[test]
-    fn test_caller_trace_envs_skips_empty_values() {
-        // None / empty IDs must not produce empty env var entries.
-        let mut cmd = tokio::process::Command::new("echo");
-        let request = CompletionRequest {
-            model: "claude-code/sonnet".to_string(),
-            messages: std::sync::Arc::new(vec![]),
-            tools: std::sync::Arc::new(vec![]),
-            max_tokens: 1,
-            temperature: 0.0,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: Some(String::new()),
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        };
-        ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
-        let envs: std::collections::HashMap<_, _> = cmd
-            .as_std()
-            .get_envs()
-            .filter_map(|(k, v)| {
-                v.map(|v| {
-                    (
-                        k.to_string_lossy().to_string(),
-                        v.to_string_lossy().to_string(),
-                    )
-                })
-            })
-            .collect();
-        assert!(!envs.contains_key("LIBREFANG_AGENT_ID"));
-        assert!(!envs.contains_key("LIBREFANG_SESSION_ID"));
-        assert!(!envs.contains_key("LIBREFANG_STEP_ID"));
     }
 
     #[test]

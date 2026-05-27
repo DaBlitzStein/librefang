@@ -9,7 +9,6 @@ readme = "README.md"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 librefang-memory = { path = "../librefang-memory" }
-librefang-memory-wiki = { path = "../librefang-memory-wiki" }
 librefang-kernel-router = { path = "../librefang-kernel-router" }
 librefang-kernel-metering = { path = "../librefang-kernel-metering" }
 librefang-runtime = { path = "../librefang-runtime" }
@@ -17,7 +16,6 @@ librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
-librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-wire = { path = "../librefang-wire" }
 librefang-channels = { path = "../librefang-channels", default-features = false }
 tokio = { workspace = true }
@@ -28,8 +26,6 @@ toml = { workspace = true }
 serde_yaml = { workspace = true }
 dashmap = { workspace = true }
 rusqlite = { workspace = true }
-r2d2 = { workspace = true }
-r2d2_sqlite = { workspace = true }
 arc-swap = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
@@ -47,19 +43,9 @@ reqwest = { workspace = true }
 regex-lite = { workspace = true }
 regex = { workspace = true }
 cron = "0.16"
-parking_lot = "0.12"
-# Tera — workflow `Transform` operator (#4980 step 3). Sandboxed
-# Jinja2-style templating; no I/O, no shell escape. Used to render
-# previous-step output into a formatted string without an LLM call.
-tera = { workspace = true }
 totp-rs = { workspace = true }
 zeroize = { workspace = true }
 sha2 = { workspace = true }
-# Used by the boot-time LIBREFANG_STATE_SECRET shape validator
-# (audit: state-secret-default-random) — mirrors the 32-byte base64
-# contract enforced by librefang_extensions::vault::decode_master_key
-# without taking a fresh dep on the extensions crate.
-base64 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -69,15 +55,9 @@ name = "purge_sentinels"
 path = "bin/purge_sentinels.rs"
 
 [dev-dependencies]
-# `test-util` enables `tokio::time::{pause,advance,resume}` and
-# `#[tokio::test(start_paused = true)]`, used by the workflow / cron
-# timing tests. (Not in the `full` feature set; previously pulled in
-# transitively by the now-removed `tokio-test` dev-dep.)
-tokio = { workspace = true, features = ["test-util"] }
+tokio-test = { workspace = true }
 tempfile = { workspace = true }
 serial_test = "3"
-proptest = "1"
-tracing-subscriber = { workspace = true }
 librefang-testing = { path = "../librefang-testing" }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 

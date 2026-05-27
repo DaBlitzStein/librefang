@@ -23,17 +23,17 @@ librefang config set-key telegram             # .env 文件
 5. 添加到配置文件：
 
 ```toml
-[[sidecar_channels]]
-name = "telegram"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.telegram"]
-channel_type = "telegram"
-[sidecar_channels.env]
-TELEGRAM_BOT_TOKEN = "..."
-# ALLOWED_USERS = "123456789,@alice"
-```
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+default_agent = "assistant"
+# 可选：限制为特定 Telegram 用户 ID
+# allowed_users = ["123456789"]
 
-`[channels.telegram]` 配置块已不再被接受（#5241 已移除内置适配器）。请改用以上 `[[sidecar_channels]]` 声明。
+[channels.telegram.overrides]
+# 可选：使用 Telegram 原生 HTML 格式
+# output_format = "telegram_html"
+# group_policy = "mention_only"
+```
 
 6. 重启守护进程：
 
@@ -43,9 +43,9 @@ librefang start
 
 ### 工作原理
 
-Telegram sidecar 适配器（`librefang.sidecar.adapters.telegram`，随 `librefang-sdk` 发布）使用 `getUpdates` API 进行长轮询，服务端超时 30 秒。API 调用失败时由 supervisor 应用指数退避，进程崩溃后自动重启。
+Telegram 适配器使用 `getUpdates` API 进行长轮询，每隔几秒轮询一次，长轮询超时为 30 秒。API 调用失败时应用指数退避（从 1 秒开始，最长 60 秒）。通过 `watch::channel` 协调关闭。
 
-来自授权用户的消息会转换为 `ChannelMessage` 事件并路由到配置的 Agent。响应通过 `sendMessage` API 发回。过长的响应会自动拆分为多条消息，以遵守 Telegram 4096 字符限制。
+来自授权用户的消息会转换为 `ChannelMessage` 事件并路由到配置的 Agent。响应通过 `sendMessage` API 发回。过长的响应会使用共享的 `split_message()` 工具自动拆分为多条消息，以遵守 Telegram 4096 字符限制。
 
 ### 文件附件
 
@@ -88,28 +88,21 @@ librefang config set-key discord              # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-8. 添加到配置文件（Discord 现为进程外 sidecar 适配器）：
+8. 添加到配置文件：
 
 ```toml
-[[sidecar_channels]]
-name = "discord"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.discord"]
-channel_type = "discord"
-
-[sidecar_channels.env]
-DISCORD_BOT_TOKEN = "..."
-# DISCORD_ALLOWED_GUILDS = "123,456"
-# DISCORD_INTENTS = "37376"
+[channels.discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+default_agent = "coder"
 ```
 
 9. 重启守护进程。
 
 ### 工作原理
 
-Discord sidecar（Python SDK 中的 `librefang.sidecar.adapters.discord`）作为受守护进程监管的子进程运行，通过 WebSocket（v10）连接到 Discord Gateway，并使用基于换行符分隔的 JSON-RPC 通过 stdio 与守护进程通信。它监听 `MESSAGE_CREATE` 事件并以 `message` 事件发出；Agent 回复通过 REST API 的 `channels/{id}/messages` 端点 POST。
+Discord 适配器通过 WebSocket（v10）连接到 Discord Gateway。它监听 `MESSAGE_CREATE` 事件并将消息路由到配置的 Agent。响应通过 REST API 的 `channels/{id}/messages` 端点发送。
 
-Sidecar 自动处理 Gateway 重连、周期性心跳（首次心跳带 RFC 要求的抖动）、会话恢复以及 Gateway 关闭码处理。守护进程侧的监管（restart、指数退避、断路器）通过 `[[sidecar_channels]]` 的通用字段配置——详见 [Sidecar channels](/zh/configuration/channels#sidecar_channels)。
+适配器自动处理 Gateway 重连、心跳和会话恢复。
 
 ---
 
@@ -144,19 +137,18 @@ librefang config set-key slack                # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-7. 添加到配置文件（Slack 现为进程外 sidecar 适配器）：
+7. 添加到配置文件：
 
 ```toml
-[[sidecar_channels]]
-name = "slack"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.slack"]
-channel_type = "slack"
+[channels.slack]
+bot_token_env = "SLACK_BOT_TOKEN"
+app_token_env = "SLACK_APP_TOKEN"
+default_agent = "ops"
 
-[sidecar_channels.env]
-SLACK_APP_TOKEN = "xapp-..."
-SLACK_BOT_TOKEN = "xoxb-..."
-# SLACK_FORCE_FLAT_REPLIES = "false"   # 设为 "true" 将回复以顶层消息发送
+[channels.slack.overrides]
+# 可选：使用 Slack 原生 mrkdwn 格式
+# output_format = "slack_mrkdwn"
+# threading = true
 ```
 
 8. 重启守护进程。
@@ -171,115 +163,113 @@ Slack 适配器通过给用户消息加 reaction 显示"我在处理"反馈：�
 
 ---
 
-## WhatsApp（Sidecar）
-
-WhatsApp 已从进程内 Rust 适配器迁移到 Python sidecar（`librefang.sidecar.adapters.whatsapp`，仅依赖标准库）。原 `[channels.whatsapp]` 块不再识别。**Cloud API**（Meta 官方 Business API）和 **Web/QR 模式**（Node.js 的 `@librefang/whatsapp-gateway` Baileys 进程）两种模式都保留。
+## WhatsApp
 
 ### 前置条件
 
-- Cloud API：拥有 WhatsApp Cloud API 访问权限的 Meta Business 账户（phone number ID、access token、app secret）
-- Web/QR 模式：守护进程主机上有 Node.js ≥ 18，以及一个个人微信账号
-- 守护进程主机上有 `python3`（无须任何 Python 第三方包）
+- 一个拥有 WhatsApp Cloud API 访问权限的 Meta Business 账户
 
-### Cloud API 模式设置
+### 设置步骤
 
-1. 前往 [Meta for Developers](https://developers.facebook.com/) 创建一个带 WhatsApp 产品的 Business App。
-2. 配置电话号码；记下 **Phone Number ID** 和 **永久访问令牌**。**Verify Token** 自己取一个字符串。
-3. 在 App 的 Settings 里复制 **App Secret** —— 这是入站 `X-Hub-Signature-256` 的 HMAC-SHA256 密钥。
-4. 添加到 `config.toml`：
-
-```toml
-[[sidecar_channels]]
-name = "whatsapp"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.whatsapp"]
-channel_type = "whatsapp"
-[sidecar_channels.env]
-WHATSAPP_PHONE_NUMBER_ID = "your-phone-id"
-WHATSAPP_WEBHOOK_PORT = "8460"
-# WHATSAPP_DM_POLICY = "respond"
-# WHATSAPP_GROUP_POLICY = "all"
-```
-
-5. 把 `WHATSAPP_ACCESS_TOKEN`、`WHATSAPP_VERIFY_TOKEN`、`WHATSAPP_APP_SECRET` 写入 `~/.librefang/secrets.env`。
-6. Meta 后台填 Webhook URL：`https://your-domain.com:8460/webhook`（端口/路径按你 `WHATSAPP_WEBHOOK_PORT` / `WHATSAPP_WEBHOOK_PATH` 来），订阅 `messages`，Verify Token 填上一步选的值。
-7. 重启守护进程。
-
-sidecar 自己监听 webhook、用 App Secret 验签 `X-Hub-Signature-256`，出站通过 `https://graph.facebook.com/v17.0/{phone_id}/messages`。原 Rust 适配器的 `start()` 只是一个 TODO 桩、从未真正解析入站事件——sidecar 实现了完整的 Cloud API webhook handler。
-
-### Web/QR 模式设置
-
-1. 单独安装并启动 Baileys 网关：
+1. 前往 [Meta for Developers](https://developers.facebook.com/)。
+2. 创建一个 Business App。
+3. 添加 WhatsApp 产品。
+4. 设置一个测试电话号码（或使用生产号码）。
+5. 复制：
+   - Phone Number ID
+   - 永久访问令牌
+   - 选择一个 Verify Token（你自定义的任意字符串）
+6. 设置环境变量：
 
 ```bash
-npx @librefang/whatsapp-gateway
-# 默认监听 http://127.0.0.1:3009
+export WA_PHONE_ID=your-phone-id              # 环境变量
+export WA_ACCESS_TOKEN=your-access-token
+export WA_VERIFY_TOKEN=your-verify-token
+librefang vault set WA_PHONE_ID               # 加密金库（推荐）
+librefang vault set WA_ACCESS_TOKEN
+librefang vault set WA_VERIFY_TOKEN
+librefang config set-key whatsapp             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-2. 用 WhatsApp → 已连接的设备扫描网关打印的二维码。
-3. 添加到 `config.toml`：
+7. 添加到配置文件：
 
 ```toml
-[[sidecar_channels]]
-name = "whatsapp"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.whatsapp"]
-channel_type = "whatsapp"
-[sidecar_channels.env]
-WHATSAPP_GATEWAY_URL = "http://localhost:3009"
+[channels.whatsapp]
+mode = "cloud_api"
+phone_number_id_env = "WA_PHONE_ID"
+access_token_env = "WA_ACCESS_TOKEN"
+verify_token_env = "WA_VERIFY_TOKEN"
+default_agent = "assistant"
 ```
 
-4. 重启守护进程。
+8. 在 Meta 管理后台设置 Webhook，指向你服务器的公网 URL：
+   - URL：`https://your-domain.com:4545/channels/whatsapp/webhook`
+   - Verify Token：你上面选择的值
+   - 订阅：`messages`
 
-Web/QR 模式下，网关直接把入站 POST 到 LibreFang REST API（`/api/agents/{id}/message`），绕过 sidecar；出站回复经 sidecar 路由到 `{gateway_url}/message/send`。**kernel 不再自动 spawn 网关**（原嵌入的 `whatsapp_gateway.rs` 模块在本次迁移中已移除）—— 需要你自己单独启动它。
+9. 重启守护进程。
 
-### 群聊与 DM 策略
+### 工作原理
 
-sidecar 保留原 Rust 适配器的 DM × group 策略：
+WhatsApp 适配器在主 API 服务器（默认端口 4545）上注册 webhook 路由，接收来自 WhatsApp Cloud API 的 Webhook 请求。它处理 Webhook 验证（GET）和消息接收（POST）。响应通过 Cloud API 的 `messages` 端点发送。
 
-| `WHATSAPP_DM_POLICY` | 行为 |
-|---|---|
-| `respond`（默认） | 回复所有 DM |
-| `allowed_only` | 仅当发送方手机号在 `WHATSAPP_ALLOWED_USERS` 时回复 |
-| `ignore` | 丢弃所有 DM |
+### 群聊支持
 
-| `WHATSAPP_GROUP_POLICY` | 行为 |
-|---|---|
-| `all`（默认） | 回复所有群消息 |
-| `mention_only` | 仅当文本里出现 bot 手机号或 `WHATSAPP_BOT_NAME` 时回复 |
-| `commands_only` | 仅回复 `/cmd` 命令 |
-| `ignore` | 丢弃所有群消息 |
+WhatsApp 群消息会被自动检测。机器人在群聊中的行为由渠道覆盖中的 `group_policy` 设置控制：
 
-`mention_only` 模式下，设置 `WHATSAPP_BOT_PHONE`（带 `+`，例如 `+15551234567`）和/或 `WHATSAPP_BOT_NAME`（大小写不敏感的子串匹配）。
+| 策略 | 行为 |
+|------|------|
+| `mention_only`（默认） | 仅在被 @提及时回复 |
+| `all` | 回复所有群消息 |
+| `commands_only` | 仅回复斜杠命令 |
+| `ignore` | 忽略所有群消息 |
+
+`mention_only` 通过匹配机器人电话号码或 bot 名字识别提及——配置 `bot_phone` 和 `bot_name`(或代码里用 `with_bot_phone()` / `with_bot_name()` 传入),让匹配器知道要找什么。`trigger_only` 改用 `group_trigger_patterns`(正则列表)匹配。
+
+配置示例：
+
+```toml
+[channels.whatsapp.overrides]
+group_policy = "mention_only"
+bot_phone = "+15551234567"
+bot_name = "librefang"
+# Or use trigger_only with regex patterns:
+# group_policy = "trigger_only"
+# group_trigger_patterns = ["(?i)\\bbot\\b", "(?i)\\bhelp\\b"]
+```
+
+### 语音消息
+
+WhatsApp 适配器可通过 `send_voice(to, audio, mime_type)` 发送语音回复。Cloud API 模式上传到 `/{phone_number_id}/media`,再用返回的 `media_id` 发 `audio` 消息;Gateway 模式 base64 编码后 POST 到 `/message/send-voice`。详见 channels overview 的 [WhatsApp Voice + DM/Group Policies](/zh/integrations/channels#whatsapp-voice--dmgroup-policies)。
 
 ---
 
-## 微信（个人）— sidecar
-
-微信现以 Python sidecar 适配器（`librefang.sidecar.adapters.wechat`）提供。原 in-process `[channels.wechat]` 配置块已被移除。请改为通过 `[[sidecar_channels]]` 条目声明。
+## 微信（个人）
 
 ### 前置条件
 
 - 一个个人微信账号（推荐 iOS 8.0.70+ 版本）
 - WeChat ClawBot 插件访问权限（目前灰度发布中）
-- 守护进程主机上有 `python3`（无须第三方 Python 包——sidecar 仅依赖标准库）
 
 ### 设置步骤
 
-1. 添加到 `config.toml`：
+1. 添加到配置文件：
 
 ```toml
-[[sidecar_channels]]
-name = "wechat"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.wechat"]
-channel_type = "wechat"
-[sidecar_channels.env]
-# WECHAT_BOT_TOKEN = ""        # 留空触发二维码登录
-# WECHAT_ALLOWED_USERS = ""    # 逗号分隔 hash@im.wechat
+[channels.wechat]
+# bot_token 通过扫码自动获取
+# 如果保存了上次会话的 token，在此设置可跳过扫码登录：
+# bot_token_env = "WECHAT_BOT_TOKEN"
+default_agent = "assistant"
+allowed_users = []        # 留空允许所有人；格式: "hash@im.wechat"
 ```
 
-2. 启动（或重启）LibreFang 守护进程。sidecar 会以 INFO 级日志输出二维码字符串 —— 用微信扫码确认。首次登录后，把 `bot_token` 填到 `WECHAT_BOT_TOKEN`（放在 `~/.librefang/secrets.env`）就能跳过后续扫码。
+2. 启动（或重启）LibreFang 守护进程。
+3. 守护进程日志中会显示一个二维码 -- 用微信扫码确认。
+4. 确认后，适配器开始接收消息。
+
+> **提示：** 首次扫码登录后，将 `bot_token` 保存到环境变量，这样后续重启时可以跳过扫码流程。
 
 ### 工作原理
 
@@ -304,94 +294,76 @@ channel_type = "wechat"
 
 ---
 
-## Signal（Sidecar）
-
-Signal 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.signal`）。
+## Signal
 
 ### 前置条件
 
-- 独立运行的 [`signal-cli-rest-api`](https://github.com/bbernhard/signal-cli-rest-api) 实例（推荐用官方 Docker 镜像），并完成手机号注册
-- Python 3 + `librefang` SDK（`pip install -e sdk/python`）
+- 已安装 Signal CLI 并关联了一个手机号
 
 ### 设置步骤
 
-1. 部署 `signal-cli-rest-api`（通常放在 HTTPS 反向代理后），并完成 Bot 手机号在 Signal 上的注册。
-2. 在 `~/.librefang/config.toml` 中声明 sidecar：
+1. 安装 [signal-cli](https://github.com/AsamK/signal-cli)。
+2. 注册或关联一个手机号。
+3. 添加到配置文件：
 
 ```toml
-[[sidecar_channels]]
-name = "signal"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.signal"]
-channel_type = "signal"
+[channels.signal]
+signal_cli_path = "/usr/local/bin/signal-cli"
+phone_number = "+1234567890"
 default_agent = "assistant"
-[sidecar_channels.env]
-SIGNAL_API_URL = "https://signal-cli.example.com"
-SIGNAL_NUMBER  = "+15555550100"
-# SIGNAL_ALLOWED_USERS = "+15555550199,+15555550200"   # 可选
-# SIGNAL_POLL_INTERVAL_SECS = "2"                       # 可选
-# SIGNAL_ALLOW_LOCAL = "1"                              # 仅当 API 跑在 localhost
 ```
 
-3.（可选）若 `signal-cli-rest-api` 启动时带了 `--api-key`，在 `~/.librefang/secrets.env` 加上 `SIGNAL_API_KEY=…`。
 4. 重启守护进程。
 
 ### 工作原理
 
-Sidecar 每 `SIGNAL_POLL_INTERVAL_SECS`（默认 2 秒）轮询 `GET /v1/receive/{phone}`，将每条新 `dataMessage.message` 通过 stdio 推送给内核；出站用 `POST /v2/send`。SSRF 保护拒绝解析到 private / loopback / CGNAT / link-local 的 `SIGNAL_API_URL`，除非显式设置 `SIGNAL_ALLOW_LOCAL=1`。
+Signal 适配器以守护进程模式将 `signal-cli` 作为子进程启动，通过 JSON-RPC 通信。传入的消息从 signal-cli 输出流中读取并路由到配置的 Agent。
 
 ### 默认纯文本输出
 
-Signal 默认 `OutputFormat::PlainText`，因为 `signal-cli` 会把 Markdown 的 `*` 和 `_` 当字面量渲染。这个默认值按 sidecar 配置里的 `channel_type = "signal"` 匹配，迁移后照常生效。`[[sidecar_channels]]` 目前不暴露 `output_format` 的逐通道覆盖；如需发送 Markdown，请在 agent 这一端翻转 format —— 详见 channels overview 的 [Signal Plain-Text Default](/zh/integrations/channels#signal-plain-text-default)。
+Signal 默认用 `OutputFormat::PlainText`,因为 `signal-cli` 会把 Markdown 的 `*` 和 `_` 当字面量渲染。要恢复 Markdown 输出,在 agent 或 channel 上覆盖 format —— 详见 channels overview 的 [Signal Plain-Text Default](/zh/integrations/channels#signal-plain-text-default)。
 
 ### 媒体附件
 
-Rust 适配器原本支持把 `Image`、`Voice`、`Video`、`Audio`、`Animation`、`File`、`FileData`、`MediaGroup` 下载后 base64 化通过 `/v2/send` 的 `base64_attachments` 投递。Sidecar 当前对非文本内容统一返回 `(Unsupported content type)` 占位，后续会单独补一个 PR 把 base64 附件链路接回来。
+Signal 适配器投递 `Image`、`Voice`、`Video`、`Audio`、`Animation`、`File`、`FileData`、`MediaGroup` content block。媒体 URL 会被下载、base64 编码,放进 `/v2/send` 的 `base64_attachments`。不支持的类型(`Poll`、`Sticker` 等)优雅降级 —— 退回纯文本或跳过 —— 而不是让整个回复失败。完整类型列表见 [Signal Media Attachments](/zh/integrations/channels#signal-media-attachments)。
 
 ---
 
-## Matrix（Sidecar）
-
-Matrix 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.matrix`）。
+## Matrix
 
 ### 前置条件
 
-- 一个 Matrix homeserver 账户和访问令牌（Element 发的 token 即可）。
-- Python 3 + `librefang` SDK（`pip install -e sdk/python`）。
+- 一个 Matrix homeserver 账户和访问令牌
 
 ### 设置步骤
 
-1. 在 homeserver 上创建（或选用已有）Bot 账户。
-2. 生成访问令牌（Element 设置 → 帮助与关于 → 访问令牌；或 `POST /_matrix/client/v3/login`）。
-3. 把 token 写入 `~/.librefang/secrets.env`：
+1. 在你的 Matrix homeserver 上创建一个 Bot 账户。
+2. 生成访问令牌。
+3. 设置环境变量：
 
 ```bash
-MATRIX_ACCESS_TOKEN=syt_...
+export MATRIX_TOKEN=your-token                # 环境变量
+librefang vault set MATRIX_TOKEN              # 加密金库（推荐）
+librefang config set-key matrix               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-4. 在 `~/.librefang/config.toml` 中声明 sidecar：
+4. 添加到配置文件：
 
 ```toml
-[[sidecar_channels]]
-name = "matrix"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.matrix"]
-channel_type = "matrix"
+[channels.matrix]
+homeserver_url = "https://matrix.org"
+access_token_env = "MATRIX_TOKEN"
+user_id = "@librefang-bot:matrix.org"
 default_agent = "assistant"
-[sidecar_channels.env]
-MATRIX_HOMESERVER_URL = "https://matrix.org"
-MATRIX_USER_ID = "@librefang-bot:matrix.org"
-# MATRIX_ALLOWED_ROOMS = "!abc:matrix.org,!def:matrix.org"  # 可选
-# MATRIX_ACCOUNT_ID = "prod-bot"                             # 可选
-# MATRIX_MAX_UPLOAD_BYTES = "52428800"                       # 可选，默认 50 MiB
 ```
 
-5. 把 Bot 邀请到你希望它监控的房间。
+5. 将 Bot 邀请到你希望它监控的房间。
 6. 重启守护进程。
 
 ### 工作原理
 
-Sidecar 用 Bot 的 access token 长轮询 `GET /_matrix/client/v3/sync`（30 s server timeout、`since` 游标增量交付）。入站 `m.room.message`（`m.text` / `m.notice` / `m.emote` / `m.image` / `m.file` / `m.audio` / `m.video`）转发给内核；出站回复走 `PUT /_matrix/client/v3/rooms/{room}/send/{type}/{txn}`。Markdown 会渲染成 Matrix 子集 HTML 放进 `formatted_body`；`m.thread` 和 `m.replace`（edit）关系都串好了，所以线程回复和流式 edit 直接能用。
+Matrix 适配器使用 Matrix Client-Server API。它通过长轮询（带超时的 `/sync`）与 homeserver 同步，处理已加入房间中的新消息。响应通过 `/rooms/{roomId}/send` 端点发送。
 
 ---
 
@@ -413,26 +385,21 @@ librefang config set-key email                # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-3. 添加到配置文件（Email 以独立进程 sidecar 形式运行，模块 `librefang.sidecar.adapters.email`）：
+3. 添加到配置文件：
 
 ```toml
-[[sidecar_channels]]
-name = "email"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.email"]
-channel_type = "email"
-[sidecar_channels.env]
-EMAIL_IMAP_HOST = "imap.gmail.com"
-EMAIL_SMTP_HOST = "smtp.gmail.com"
-EMAIL_USERNAME = "you@gmail.com"
-# EMAIL_IMAP_PORT = "993"
-# EMAIL_SMTP_PORT = "587"
-# EMAIL_POLL_INTERVAL_SECS = "30"
+[channels.email]
+imap_host = "imap.gmail.com"
+imap_port = 993
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+username = "you@gmail.com"
+password_env = "EMAIL_PASSWORD"
+poll_interval = 30
+default_agent = "email-assistant"
 ```
 
-`EMAIL_PASSWORD` 写入 `~/.librefang/secrets.env`。
-
-4. 热加载（`curl -X POST http://127.0.0.1:4545/api/channels/reload`）或者重启 daemon。
+4. 重启守护进程。
 
 ### 工作原理
 
@@ -489,6 +456,13 @@ http://127.0.0.1:4545/
 
 `split_to_utf16_chunks(text, limit)` 将消息分割为多个连续块，每块的 UTF-16 单元数均在 `limit` 以内。LibreFang 按顺序发送各块，保留所有内容。拆分边界遵守 Unicode 标量边界——不会在字符中间结束一个块。
 
-### 拆分 / 截断现在由 sidecar 自己负责
+### 禁用自动拆分
 
-所有 channel adapter 现在都以独立进程 sidecar 形式运行，**各自负责** 在平台限制处做切块。`ChannelsConfig` 已被清空，迁移前 `[channels.<name>]` 上的 `split_long_messages` 选项随之消失。daemon 侧不能再告诉 sidecar "改成截断而不是拆分"；如果你的自定义 sidecar 需要这个行为，请在 sidecar 内部实现。
+如需 LibreFang 对特定渠道的超长消息进行截断而非拆分，可在渠道配置中设置 `split_long_messages = false`：
+
+```toml
+[channels.telegram]
+split_long_messages = false   # 在 4096 处截断，不拆分
+```
+
+Telegram 和 Discord 的默认值为 `true`。

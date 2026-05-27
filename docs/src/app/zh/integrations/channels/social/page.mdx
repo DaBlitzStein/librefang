@@ -4,57 +4,45 @@
 
 ### 前置条件
 
-- Reddit 账户和已注册的 [Reddit API 应用](https://www.reddit.com/prefs/apps)（script 类型）
-
-Reddit 以 Python sidecar (`librefang.sidecar.adapters.reddit`, 随 `librefang-sdk` 发布) 形式运行。
+- Reddit 账户和已注册的 [Reddit API 应用](https://www.reddit.com/dev/api/)（script 类型）
 
 ### 设置步骤
 
-1. 前往 [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) 创建一个新的 **script** 类型应用，记录应用名称下方的 Client ID 与 Client Secret。
-2. 打开仪表板 Channels 页面选择 Reddit 并填表 —— 仪表板会把 `REDDIT_CLIENT_SECRET` 和 `REDDIT_PASSWORD` 写入 `~/.librefang/secrets.env`，把其余字段写入 `~/.librefang/config.toml` 的 `[sidecar_channels.env]` 表。等价的手工配置：
-
-```toml
-[[sidecar_channels]]
-name = "reddit"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.reddit"]
-channel_type = "reddit"
-default_agent = "assistant"
-[sidecar_channels.env]
-REDDIT_CLIENT_ID = "abc123"
-REDDIT_USERNAME = "librefang-bot"
-REDDIT_SUBREDDITS = "mysubreddit,rust"
-REDDIT_USER_AGENT = "myorg/1.0 (by /u/myactual-reddit-name)"   # 必填，见下方
-# REDDIT_ACCOUNT_ID = "prod"               # 可选，多 Bot 路由
-# REDDIT_POLL_INTERVAL_SECS = "30"         # 可选，默认 30，下限 5
-```
-
-### 防封号 —— 上线前必读
-
-Reddit 对 bot 行为有严格审查。adapter 自动做了能做的：
-
-- **`REDDIT_USER_AGENT` 必填。** Reddit API 规则要求 UA 标明真实维护者（`by /u/<你的 Reddit 用户名>`）。占位默认值会在启动时被拒绝以避免 IP + 账号双封。请使用你自己的 Reddit 用户名。
-- **默认 30 秒轮询间隔。** 低于 5 秒会快速烧掉每账号 60 req/min 的预算。下限是 5 秒，活跃度低的 sub 可以把 `REDDIT_POLL_INTERVAL_SECS` 调更高。
-- **自动节流。** 当 Reddit 返回 `X-Ratelimit-Remaining < 10` 时，poller 会提前睡到 reset 窗口。Polling 收到 429 会退避；`/api/comment` 收到 429 会读取 `Retry-After` 重试一次。
-
-adapter 无法强制、需要你自己保证的：
-
-- Bot 账号至少 30 天 + 评论 karma > 100，否则容易被 shadowban。
-- 进入任何 subreddit 前先跟 mod 报备。在陌生 sub 自动回复是常见的封号触发点。
-- 通过 agent 配置里的 `group_trigger_patterns` 限制触发条件，让 bot 只回应 `/cmd` 或具名 @mention —— 对每条新评论都回复是最快的全站封号路径。
-
-3. 把两个密钥写入 `~/.librefang/secrets.env`：
+1. 前往 [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)，创建新的 **script** 类型应用。
+2. 记录 Client ID（在应用名称下方）和 Client Secret。
+3. 设置环境变量：
 
 ```bash
-REDDIT_CLIENT_SECRET=your-client-secret
-REDDIT_PASSWORD=your-reddit-password
+export REDDIT_CLIENT_ID=your-client-id        # 环境变量
+export REDDIT_CLIENT_SECRET=your-client-secret
+export REDDIT_USERNAME=your-reddit-username
+export REDDIT_PASSWORD=your-reddit-password
+librefang vault set REDDIT_CLIENT_ID          # 加密金库（推荐）
+librefang vault set REDDIT_CLIENT_SECRET
+librefang vault set REDDIT_USERNAME
+librefang vault set REDDIT_PASSWORD
+librefang config set-key reddit               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-4. 重启守护进程。
+4. 添加到配置文件：
+
+```toml
+[channels.reddit]
+client_id_env = "REDDIT_CLIENT_ID"
+client_secret_env = "REDDIT_CLIENT_SECRET"
+username_env = "REDDIT_USERNAME"
+password_env = "REDDIT_PASSWORD"
+subreddits = ["mysubreddit"]
+poll_interval = 30
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
 
 ### 工作原理
 
-Reddit sidecar 适配器使用 OAuth2（script 应用的 password grant）认证，按 5 秒间隔轮询每个已配置子版块的最新评论流，并通过 `POST /api/comment` 把回复以评论形式发出。Reddit 每个父项只允许一条回复，因此被分块的回复会以 `\n\n---\n\n` 拼接而不是拆成多条评论。
+Reddit 适配器使用 script 类型凭证通过 OAuth2 认证，按配置的间隔轮询指定子版块的新帖子和评论。响应通过 Reddit REST API 作为回复发布。
 
 ---
 
@@ -65,33 +53,36 @@ Reddit sidecar 适配器使用 OAuth2（script 应用的 password grant）认证
 - 任意实例上的 Mastodon 账户
 - 应用访问令牌（从实例的 **Preferences > Development** 页面生成，参见 [Mastodon API 文档](https://docs.joinmastodon.org/api/)）
 
-Mastodon 以 Python sidecar (`librefang.sidecar.adapters.mastodon`, 随 `librefang-sdk` 发布) 形式运行。
-
 ### 设置步骤
 
 1. 在 Mastodon 实例上，前往 **Preferences > Development > New Application**。
 2. 授予 `read` 和 `write` 作用域。
-3. 复制访问令牌（即 `MASTODON_ACCESS_TOKEN`）。
-4. 在仪表盘 Channels 页面选择 Mastodon，填入实例 URL 与访问令牌——`MASTODON_ACCESS_TOKEN` 会写到 `~/.librefang/secrets.env`，`MASTODON_INSTANCE_URL` 写到 `~/.librefang/config.toml` 的 `[sidecar_channels.env]`。等价的手工配置：
+3. 复制访问令牌。
+4. 设置环境变量：
 
-```toml
-[[sidecar_channels]]
-name = "mastodon"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.mastodon"]
-channel_type = "mastodon"
-[sidecar_channels.env]
-MASTODON_INSTANCE_URL = "https://mastodon.social"
-# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
-# MASTODON_MAX_MESSAGE_LEN = "500"          # 实例若放宽限制可调高
-# MASTODON_ACCOUNT_ID = "prod"              # 可选，多 bot 路由
+```bash
+export MASTODON_INSTANCE_URL=https://mastodon.social  # 环境变量
+export MASTODON_ACCESS_TOKEN=your-access-token
+librefang vault set MASTODON_INSTANCE_URL     # 加密金库（推荐）
+librefang vault set MASTODON_ACCESS_TOKEN
+librefang config set-key mastodon             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-5. 守护进程通过热加载自动起停 sidecar，无需手动重启。
+5. 添加到配置文件：
+
+```toml
+[channels.mastodon]
+instance_env = "MASTODON_INSTANCE_URL"
+token_env = "MASTODON_ACCESS_TOKEN"
+default_agent = "social-media"
+```
+
+6. 重启守护进程。
 
 ### 工作原理
 
-Mastodon sidecar 通过 Server-Sent Events (SSE) 连接到实例的用户流式 API 实时接收提及通知；SSE 失败时自动回退为 REST 轮询 `/api/v1/notifications`。出站回复通过 `POST /api/v1/statuses` 带 `in_reply_to_id` 链式发布，保证分片回复在客户端仍然是同一线程。
+Mastodon 适配器通过 Server-Sent Events (SSE) 连接到实例的流式 API，实时接收通知（提及、私信）。响应通过 Mastodon REST API 以嘟文或私信形式发布。
 
 ---
 
@@ -102,31 +93,70 @@ Mastodon sidecar 通过 Server-Sent Events (SSE) 连接到实例的用户流式 
 - Bluesky 账户（参见 [Bluesky API 文档](https://docs.bsky.app)）
 - 应用密码（在 Bluesky **Settings > App Passwords** 中生成）
 
-Bluesky 以 Python sidecar (`librefang.sidecar.adapters.bluesky`, 随 `librefang-sdk` 发布) 形式运行。
-
 ### 设置步骤
 
 1. 在 Bluesky 中，前往 **Settings > App Passwords**，创建新的应用密码。
-2. 添加 `[[sidecar_channels]]` 配置块：
+2. 设置环境变量：
 
-```toml
-[[sidecar_channels]]
-name = "bluesky"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.bluesky"]
-channel_type = "bluesky"
-[sidecar_channels.env]
-BLUESKY_IDENTIFIER = "your-handle.bsky.social"
-# BLUESKY_SERVICE_URL = "https://bsky.social"   # 自定义 PDS
-# BLUESKY_ACCOUNT_ID = "prod"                   # 可选，多 bot 路由键
+```bash
+export BLUESKY_IDENTIFIER=your-handle.bsky.social  # 环境变量
+export BLUESKY_APP_PASSWORD=your-app-password
+librefang vault set BLUESKY_IDENTIFIER        # 加密金库（推荐）
+librefang vault set BLUESKY_APP_PASSWORD
+librefang config set-key bluesky              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-3. 通过仪表盘 Channels 页设置应用密码（自动写入 `~/.librefang/secrets.env` 的 `BLUESKY_APP_PASSWORD`），或直接放入 vault / `.env`。
+3. 添加到配置文件：
+
+```toml
+[channels.bluesky]
+identifier_env = "BLUESKY_IDENTIFIER"
+app_password_env = "BLUESKY_APP_PASSWORD"
+default_agent = "social-media"
+```
+
 4. 重启守护进程。
 
 ### 工作原理
 
-sidecar 使用 `com.atproto.server.createSession` 认证，并在 JWT 过期前自动刷新。每 5 秒轮询 `app.bsky.notification.listNotifications`（仅过滤 `mention` + `reply` 通知），并通过 `com.atproto.repo.createRecord` 用 `app.bsky.feed.post` lexicon 发布回复。内存 LRU 缓存（容量 200）将入站通知 URI 映射到 `{root, parent}` 回复引用，从而把外发响应线程化关联到原帖子；分片回复时每个分片复用相同 reply ref，保证线程紧凑。
+Bluesky 适配器使用 AT Protocol 认证，并通过 REST 轮询监控通知（提及）。响应通过 AT Protocol 的 `com.atproto.repo.createRecord` 端点作为回复帖子发布。
+
+---
+
+## LinkedIn
+
+### 前置条件
+
+- 具备 Messaging API 访问权限的 LinkedIn 开发者应用（参见 [LinkedIn API 文档](https://learn.microsoft.com/en-us/linkedin/)）
+- 具有消息权限的 OAuth2 访问令牌
+
+### 设置步骤
+
+1. 在 [LinkedIn 开发者门户](https://www.linkedin.com/developers/) 创建应用。
+2. 申请 Messaging API 访问权限并完成 OAuth2 流程。
+3. 设置环境变量：
+
+```bash
+export LINKEDIN_ACCESS_TOKEN=your-token       # 环境变量
+librefang vault set LINKEDIN_ACCESS_TOKEN     # 加密金库（推荐）
+librefang config set-key linkedin             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.linkedin]
+token_env = "LINKEDIN_ACCESS_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+LinkedIn 适配器定期轮询 LinkedIn Messaging API 获取新消息。响应通过 LinkedIn REST API 发送。注意：LinkedIn 的消息 API 访问受限，需要 LinkedIn 审批。
 
 ---
 
@@ -136,43 +166,223 @@ sidecar 使用 `com.atproto.server.createSession` 认证，并在 JWT 过期前�
 
 - Twitch 账户和具有聊天权限的 OAuth 令牌（从 [Twitch 开发者门户](https://dev.twitch.tv/docs/irc/) 获取）
 
-Twitch 由独立进程的 Python sidecar 适配器 (`librefang.sidecar.adapters.twitch`，随 `librefang-sdk` 一同发布) 提供。
-
 ### 设置步骤
 
 1. 在 [Twitch Developer Console](https://dev.twitch.tv/console/apps) 注册应用。
 2. 生成具有 `chat:read` 和 `chat:edit` 作用域的 OAuth 令牌（可使用 [twitchtokengenerator.com](https://twitchtokengenerator.com/) 等工具）。
-3. 在 Dashboard 的 Channels 页面选择 Twitch 并填表 — Dashboard 会自动将 `TWITCH_OAUTH_TOKEN` 写入 `~/.librefang/secrets.env`，其余字段写入 `~/.librefang/config.toml` 的 `[sidecar_channels.env]` 表。等价的手工配置：
-
-```toml
-[[sidecar_channels]]
-name = "twitch"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.twitch"]
-channel_type = "twitch"
-default_agent = "assistant"
-[sidecar_channels.env]
-TWITCH_NICK = "librefang-bot"
-TWITCH_CHANNELS = "channel1,channel2"      # 逗号分隔，不带 '#'
-# TWITCH_ACCOUNT_ID = "prod"                # 可选，多机器人路由
-# TWITCH_RATE_LIMIT_MSGS = "20"             # 非 mod 账号 20/30s；mod 可设为 100
-# TWITCH_RATE_LIMIT_SECS = "30"
-```
-
-4. 将 OAuth 令牌写入 `~/.librefang/secrets.env`：
+3. 设置环境变量：
 
 ```bash
-TWITCH_OAUTH_TOKEN=oauth:your-token
+export TWITCH_OAUTH_TOKEN=oauth:your-token    # 环境变量
+export TWITCH_NICK=your-bot-username
+export TWITCH_CHANNELS=channel1,channel2
+librefang vault set TWITCH_OAUTH_TOKEN        # 加密金库（推荐）
+librefang vault set TWITCH_NICK
+librefang vault set TWITCH_CHANNELS
+librefang config set-key twitch               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-缺失 `oauth:` 前缀时会自动补齐。重启守护进程。
+4. 添加到配置文件：
 
-### 上线前必读 — 安全
+```toml
+[channels.twitch]
+oauth_token_env = "TWITCH_OAUTH_TOKEN"
+nick_env = "TWITCH_NICK"
+channels = ["channel1", "channel2"]
+default_agent = "assistant"
+```
 
-- **默认启用 TLS。** Sidecar 通过 `ssl.create_default_context()` 连接 `irc.chat.twitch.tv:6697`。原 in-process Rust 适配器使用明文 6667，每次重连都会泄露 OAuth 令牌 — 升级即默认修复。
-- **逐条消息回复线程。** Sidecar 请求 `twitch.tv/tags` 能力，每条入站 PRIVMSG 都带 `@id` 标签；出站回复附加 `@reply-parent-msg-id=<id>` 标签，Twitch 会以线程方式渲染机器人的回复。
-- **发送速率限制。** Twitch 反垃圾会在非 mod 账号超过 20 msg / 30s 时踢出聊天室（mod 为 100 / 30s）。Sidecar 用进程内 token bucket 对每条 PRIVMSG 限流。mod 账号可通过 `TWITCH_RATE_LIMIT_MSGS=100` 放宽；多进程运营者仍应每个账号保持一个进程，因为限流是本地的。
+5. 重启守护进程。
 
 ### 工作原理
 
-Twitch sidecar 适配器维持一个持久 TLS IRC 连接到 `irc.chat.twitch.tv:6697`，通过 `PASS oauth:<token>` / `NICK` 完成认证，请求 `twitch.tv/tags twitch.tv/commands` 能力后 JOIN 所有配置的频道。它解析入站 PRIVMSG 帧（包括 IRCv3 `@`-tag 块），把 `@id` 标签作为 `thread_id` 透出以便回复时回填线程，按 tag id 去重，并把 `/cmd` / `!cmd` 行路由为 Command。出站 `on_send` 经 token bucket 限流后发出 PRIVMSG 帧，并在守护进程提供 `thread_id` 时附加 reply-parent 标签。
+Twitch 适配器通过 TLS 连接到 Twitch IRC 网关（`irc.chat.twitch.tv:6697`）并加入配置的频道。它监听 PRIVMSG 事件并路由到配置的 Agent。响应通过 IRC 协议作为聊天消息发送。
+
+---
+
+## Discourse
+
+### 前置条件
+
+- 启用了 API 访问的 Discourse 论坛（参见 [Discourse API 文档](https://docs.discourse.org)）
+- 管理员用户生成的 API 密钥
+
+### 设置步骤
+
+1. 在 Discourse 中，前往 **Admin > API** 并创建新的 API 密钥。
+2. 记录 API 密钥所有者的用户名。
+3. 设置环境变量：
+
+```bash
+export DISCOURSE_URL=https://forum.example.com  # 环境变量
+export DISCOURSE_API_KEY=your-api-key
+export DISCOURSE_USERNAME=bot-user
+librefang vault set DISCOURSE_URL             # 加密金库（推荐）
+librefang vault set DISCOURSE_API_KEY
+librefang vault set DISCOURSE_USERNAME
+librefang config set-key discourse            # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.discourse]
+url_env = "DISCOURSE_URL"
+api_key_env = "DISCOURSE_API_KEY"
+username_env = "DISCOURSE_USERNAME"
+poll_interval = 30
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Discourse 适配器按配置的间隔轮询 Discourse REST API 获取新帖子和通知。响应通过 Discourse 帖子 API 作为回复发布。
+
+---
+
+## Gitter
+
+### 前置条件
+
+- Gitter 账户和个人访问令牌（从 [Gitter 开发者门户](https://developer.gitter.im/docs/) 获取）
+
+### 设置步骤
+
+1. 前往 [developer.gitter.im](https://developer.gitter.im/)，生成个人访问令牌。
+2. 设置环境变量：
+
+```bash
+export GITTER_TOKEN=your-gitter-token         # 环境变量
+librefang vault set GITTER_TOKEN              # 加密金库（推荐）
+librefang config set-key gitter               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.gitter]
+token_env = "GITTER_TOKEN"
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+Gitter 适配器连接到 Gitter Streaming API 实时接收消息。响应通过 Gitter REST API 的消息端点发送。
+
+---
+
+## Revolt
+
+### 前置条件
+
+- Revolt Bot 令牌（从 [Revolt 开发者门户](https://developers.revolt.chat/api/) 获取）
+
+### 设置步骤
+
+1. 前往 [app.revolt.chat/settings/bots](https://app.revolt.chat/settings/bots)，创建新 Bot。
+2. 复制 Bot 令牌。
+3. 设置环境变量：
+
+```bash
+export REVOLT_TOKEN=your-revolt-bot-token     # 环境变量
+librefang vault set REVOLT_TOKEN              # 加密金库（推荐）
+librefang config set-key revolt               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.revolt]
+token_env = "REVOLT_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Revolt 适配器通过 WebSocket 连接到 Revolt API 接收实时消息事件。响应通过 Revolt REST API 的频道消息端点发送。
+
+---
+
+## Keybase
+
+### 前置条件
+
+- Keybase 账户和 Paper Key（参见 [Keybase API 文档](https://keybase.io/docs/api/)）
+
+### 设置步骤
+
+1. 安装 [Keybase 客户端](https://keybase.io/download)。
+2. 登录并通过 `keybase paperkey` 生成 Paper Key。
+3. 设置环境变量：
+
+```bash
+export KEYBASE_USERNAME=your-username         # 环境变量
+export KEYBASE_PAPERKEY="your paper key words here"
+librefang vault set KEYBASE_USERNAME          # 加密金库（推荐）
+librefang vault set KEYBASE_PAPERKEY
+librefang config set-key keybase              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.keybase]
+username_env = "KEYBASE_USERNAME"
+paperkey_env = "KEYBASE_PAPERKEY"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Keybase 适配器使用 Keybase Bot API 轮询新消息。它使用 Paper Key 认证，监听团队和私聊对话中的消息。响应通过 Keybase 聊天 API 发送。
+
+---
+
+## Nostr
+
+### 前置条件
+
+- Nostr 私钥（hex 或 nsec 格式）和一个或多个 relay URL（参见 [Nostr 协议 NIPs](https://github.com/nostr-protocol/nips)）
+
+### 设置步骤
+
+1. 如果还没有密钥对，生成一个（例如使用 Nostr 客户端或 `openssl`）。
+2. 选择一个或多个 relay URL。
+3. 设置环境变量：
+
+```bash
+export NOSTR_PRIVATE_KEY=nsec1your-key        # 环境变量
+export NOSTR_RELAYS=wss://relay.damus.io,wss://nos.lol
+librefang vault set NOSTR_PRIVATE_KEY         # 加密金库（推荐）
+librefang vault set NOSTR_RELAYS
+librefang config set-key nostr                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.nostr]
+private_key_env = "NOSTR_PRIVATE_KEY"
+relays = ["wss://relay.damus.io", "wss://nos.lol"]
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Nostr 适配器使用 NIP-01 协议通过 WebSocket 连接到配置的 relay。它订阅提及或标记 Bot 公钥的事件，并路由到配置的 Agent。响应以签名的 Nostr 事件形式发布到所有已连接的 relay。

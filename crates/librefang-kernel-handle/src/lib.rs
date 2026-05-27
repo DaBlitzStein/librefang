@@ -29,34 +29,6 @@
 
 use async_trait::async_trait;
 
-// ============================================================================
-// Typed kernel-op errors (#3541)
-// ============================================================================
-//
-// `KernelOpError` is a re-export of `librefang_types::error::LibreFangError`
-// — the canonical structured business-error enum that already existed in
-// the workspace before this migration. The trait surface uses the alias
-// for two reasons:
-//
-//   1. Callers that crossed the runtime↔kernel seam used to get
-//      `Result<_, String>`, throwing away the variant info and forcing
-//      substring-matching back to a category. The alias resolves that
-//      directly: `match err { LibreFangError::AgentNotFound(_) => 404,
-//      CapabilityDenied(_) => 403, Unavailable(_) => 503, … }`.
-//   2. Reusing the existing enum (rather than introducing a parallel
-//      "kernel handle error") keeps every layer (runtime, kernel, api)
-//      working with the same vocabulary, so converting between layers is
-//      a no-op rather than a `match`-and-rewrap dance.
-//
-// Use [`KernelResult<T>`] in new role-trait method signatures so the
-// shape `Result<T, LibreFangError>` is consistent and self-documenting.
-pub use librefang_types::error::LibreFangError as KernelOpError;
-
-/// Canonical result type for `KernelHandle` role-trait methods (#3541).
-/// Use this in new method signatures rather than respelling
-/// `Result<T, KernelOpError>` each time.
-pub type KernelResult<T> = Result<T, KernelOpError>;
-
 /// Agent info returned by list and discovery operations.
 #[derive(Debug, Clone)]
 pub struct AgentInfo {
@@ -85,7 +57,7 @@ pub trait AgentControl: Send + Sync {
         &self,
         manifest_toml: &str,
         parent_id: Option<&str>,
-    ) -> Result<(String, String), KernelOpError>;
+    ) -> Result<(String, String), String>;
 
     /// Spawn an agent with capability inheritance enforcement.
     /// `parent_caps` are the parent's granted capabilities. The kernel MUST verify
@@ -95,7 +67,7 @@ pub trait AgentControl: Send + Sync {
         manifest_toml: &str,
         parent_id: Option<&str>,
         parent_caps: &[librefang_types::capability::Capability],
-    ) -> Result<(String, String), KernelOpError> {
+    ) -> Result<(String, String), String> {
         // Default: delegate to spawn_agent (no enforcement)
         // The kernel MUST override this with real enforcement
         let _ = parent_caps;
@@ -103,7 +75,7 @@ pub trait AgentControl: Send + Sync {
     }
 
     /// Send a message to another agent and get the response.
-    async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, KernelOpError>;
+    async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
 
     /// Like [`send_to_agent`](Self::send_to_agent), but records that the
     /// call was made on behalf of `parent_agent_id`, so a `/stop` issued to
@@ -116,7 +88,7 @@ pub trait AgentControl: Send + Sync {
         agent_id: &str,
         message: &str,
         parent_agent_id: &str,
-    ) -> Result<String, KernelOpError> {
+    ) -> Result<String, String> {
         tracing::trace!(
             agent = %agent_id,
             parent = %parent_agent_id,
@@ -125,46 +97,11 @@ pub trait AgentControl: Send + Sync {
         self.send_to_agent(agent_id, message).await
     }
 
-    /// Like [`send_to_agent`](Self::send_to_agent), but pins the callee to a
-    /// deterministic session derived from `conversation_key`. The kernel maps
-    /// the key to `SessionId::for_channel(target, "agent_send:<key>")`, so
-    /// the same key always resolves to the same session (history preserved)
-    /// and a different key always resolves to a distinct session. Defaults to
-    /// the plain `send_to_agent` behaviour for implementations that do not
-    /// support session pinning.
-    async fn send_to_agent_with_key(
-        &self,
-        agent_id: &str,
-        message: &str,
-        conversation_key: &str,
-    ) -> Result<String, KernelOpError> {
-        let _ = conversation_key;
-        self.send_to_agent(agent_id, message).await
-    }
-
-    /// Like [`send_to_agent_as`](Self::send_to_agent_as), but also pins the
-    /// callee session via `conversation_key` (see
-    /// [`send_to_agent_with_key`](Self::send_to_agent_with_key)). Explicit
-    /// `conversation_key` takes precedence over the target manifest
-    /// `session_mode`. Defaults to `send_to_agent_as` for implementations
-    /// that do not support session pinning.
-    async fn send_to_agent_as_with_key(
-        &self,
-        agent_id: &str,
-        message: &str,
-        parent_agent_id: &str,
-        conversation_key: &str,
-    ) -> Result<String, KernelOpError> {
-        let _ = conversation_key;
-        self.send_to_agent_as(agent_id, message, parent_agent_id)
-            .await
-    }
-
     /// List all running agents.
     fn list_agents(&self) -> Vec<AgentInfo>;
 
     /// Kill an agent by ID.
-    fn kill_agent(&self, agent_id: &str) -> Result<(), KernelOpError>;
+    fn kill_agent(&self, agent_id: &str) -> Result<(), String>;
 
     /// Find agents by query (matches on name substring, tag, or tool name; case-insensitive).
     fn find_agents(&self, query: &str) -> Vec<AgentInfo>;
@@ -205,8 +142,8 @@ pub trait AgentControl: Send + Sync {
         _agent_id: &str,
         _prompt: &str,
         _allowed_tools: Option<Vec<String>>,
-    ) -> Result<String, KernelOpError> {
-        Err(KernelOpError::unavailable("run_forked_agent_oneshot"))
+    ) -> Result<String, String> {
+        Err("run_forked_agent_oneshot not available in this handle".to_string())
     }
 
     /// Maximum inter-agent call depth (from config). Default: 5.
@@ -216,52 +153,31 @@ pub trait AgentControl: Send + Sync {
 }
 
 // ============================================================================
-// 2. MemoryAccess — per-agent key/value memory + per-user RBAC ACL resolution
-//
-// DESIGN NOTE: Internal kernel subsystems (messaging, agent_execution,
-// prompt_context, goal_control) write to the shared namespace via
-// `shared_memory_agent_id()`. LLM-facing tools use per-agent scoping
-// (`agent_id: Some(caller_uuid)`). The `None` fallback exists for backward
-// compatibility and internal kernel callers, not for agent tools.
+// 2. MemoryAccess — shared cross-agent memory + per-user RBAC ACL resolution
 // ============================================================================
 
 pub trait MemoryAccess: Send + Sync {
-    /// Store a value in the agent's memory.
-    /// When `agent_id` is `Some`, the key is scoped to that agent so each agent
-    /// gets its own isolated memory namespace.
-    /// When `None`, uses the shared memory namespace (backward compatible;
-    /// internal kernel subsystems use this, LLM-facing tools do not).
-    /// When `peer_id` is `Some`, the key is further scoped to that peer.
+    /// Store a value in shared memory (cross-agent accessible).
+    /// When `peer_id` is `Some`, the key is scoped to that peer so different
+    /// users of the same agent get isolated memory namespaces.
     fn memory_store(
         &self,
         key: &str,
         value: serde_json::Value,
-        agent_id: Option<&str>,
         peer_id: Option<&str>,
-    ) -> Result<(), KernelOpError>;
+    ) -> Result<(), String>;
 
-    /// Recall a value from the agent's memory.
-    /// When `agent_id` is `Some`, only returns values stored under that agent's namespace.
-    /// When `None`, uses the shared memory namespace (backward compatible;
-    /// internal kernel subsystems use this, LLM-facing tools do not).
+    /// Recall a value from shared memory.
     /// When `peer_id` is `Some`, only returns values stored under that peer's namespace.
     fn memory_recall(
         &self,
         key: &str,
-        agent_id: Option<&str>,
         peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, KernelOpError>;
+    ) -> Result<Option<serde_json::Value>, String>;
 
-    /// List all keys in the agent's memory.
-    /// When `agent_id` is `Some`, only returns keys within that agent's namespace.
-    /// When `None`, uses the shared memory namespace (backward compatible;
-    /// internal kernel subsystems use this, LLM-facing tools do not).
+    /// List all keys in shared memory.
     /// When `peer_id` is `Some`, only returns keys within that peer's namespace.
-    fn memory_list(
-        &self,
-        agent_id: Option<&str>,
-        peer_id: Option<&str>,
-    ) -> Result<Vec<String>, KernelOpError>;
+    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String>;
 
     /// Resolve the per-user memory ACL for the given sender + channel
     /// pair (RBAC M3, #3054 Phase 2). Returns the resolved
@@ -286,66 +202,6 @@ pub trait MemoryAccess: Send + Sync {
 }
 
 // ============================================================================
-// 2b. WikiAccess — durable markdown knowledge vault (issue #3329)
-// ============================================================================
-//
-// `WikiAccess` mirrors `MemoryAccess` but targets the `librefang-memory-wiki`
-// vault instead of the SQLite/vector substrate. Results cross the seam as
-// `serde_json::Value` so this trait does not need to depend on
-// `librefang-memory-wiki`; the kernel impl serialises owned vault types
-// (`WikiPage`, `SearchHit`, `WikiWriteOutcome`) before returning. Each method
-// returns `KernelOpError::unavailable(...)` by default so test stubs keep
-// compiling unchanged when `[memory_wiki]` is off (the kernel-side impl
-// overrides these only when the vault is constructed).
-
-pub trait WikiAccess: Send + Sync {
-    /// Fetch a single wiki page. Returns a JSON object of the shape
-    /// `{ "topic": ..., "frontmatter": { ... }, "body": "..." }`.
-    ///
-    /// `KernelOpError::unavailable("wiki")` when the vault is disabled,
-    /// and `KernelOpError::not_found(topic)` when the topic does not exist.
-    fn wiki_get(&self, topic: &str) -> Result<serde_json::Value, KernelOpError> {
-        let _ = topic;
-        Err(KernelOpError::unavailable("wiki_get"))
-    }
-
-    /// Naive case-insensitive substring search across every page body.
-    /// Returns a JSON array of `{ "topic": ..., "snippet": ..., "score": ... }`
-    /// sorted by score descending; topic-name hits outrank body hits.
-    fn wiki_search(&self, query: &str, limit: usize) -> Result<serde_json::Value, KernelOpError> {
-        let _ = (query, limit);
-        Err(KernelOpError::unavailable("wiki_search"))
-    }
-
-    /// Write or update a wiki page.
-    ///
-    /// `body` may use `[[topic]]` placeholders for cross-references — the
-    /// vault rewrites them according to its render mode (`native` keeps the
-    /// markdown link form `[topic](topic.md)`; `obsidian` keeps `[[topic]]`).
-    ///
-    /// `provenance` must be a JSON object carrying at least `agent` (string)
-    /// and may carry `session`, `channel`, `turn`, `at` (RFC 3339). The
-    /// vault appends it to the existing provenance list — provenance is
-    /// monotonic, never overwritten.
-    ///
-    /// `force = false` (default) refuses to silently overwrite a page whose
-    /// on-disk mtime *or* sha256 has drifted since the last compiler run —
-    /// the caller gets `KernelOpError::conflict(...)` so they can re-read
-    /// the file before deciding what to do. `force = true` preserves the
-    /// external body and only appends the new provenance entry.
-    fn wiki_write(
-        &self,
-        topic: &str,
-        body: &str,
-        provenance: serde_json::Value,
-        force: bool,
-    ) -> Result<serde_json::Value, KernelOpError> {
-        let _ = (topic, body, provenance, force);
-        Err(KernelOpError::unavailable("wiki_write"))
-    }
-}
-
-// ============================================================================
 // 3. TaskQueue — shared task queue: post / claim / complete / list / etc.
 // ============================================================================
 
@@ -358,10 +214,10 @@ pub trait TaskQueue: Send + Sync {
         description: &str,
         assigned_to: Option<&str>,
         created_by: Option<&str>,
-    ) -> Result<String, KernelOpError>;
+    ) -> Result<String, String>;
 
     /// Claim the next available task (optionally filtered by assignee). Returns task JSON or None.
-    async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, KernelOpError>;
+    async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String>;
 
     /// Mark a task as completed with a result string. `agent_id` identifies the completer.
     async fn task_complete(
@@ -369,30 +225,23 @@ pub trait TaskQueue: Send + Sync {
         agent_id: &str,
         task_id: &str,
         result: &str,
-    ) -> Result<(), KernelOpError>;
+    ) -> Result<(), String>;
 
     /// List tasks, optionally filtered by status.
-    async fn task_list(
-        &self,
-        status: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>, KernelOpError>;
+    async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String>;
 
     /// Delete a task by ID. Returns true if deleted.
-    async fn task_delete(&self, task_id: &str) -> Result<bool, KernelOpError>;
+    async fn task_delete(&self, task_id: &str) -> Result<bool, String>;
 
     /// Retry a task by resetting it to pending. Returns true if reset.
-    async fn task_retry(&self, task_id: &str) -> Result<bool, KernelOpError>;
+    async fn task_retry(&self, task_id: &str) -> Result<bool, String>;
 
     /// Get a single task by ID including its result and retry_count.
-    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, KernelOpError>;
+    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String>;
 
     /// Update a task's status to `pending` (reset) or `cancelled`.
     /// Returns true if the task was found and updated.
-    async fn task_update_status(
-        &self,
-        task_id: &str,
-        new_status: &str,
-    ) -> Result<bool, KernelOpError>;
+    async fn task_update_status(&self, task_id: &str, new_status: &str) -> Result<bool, String>;
 }
 
 // ============================================================================
@@ -406,7 +255,7 @@ pub trait EventBus: Send + Sync {
         &self,
         event_type: &str,
         payload: serde_json::Value,
-    ) -> Result<(), KernelOpError>;
+    ) -> Result<(), String>;
 }
 
 // ============================================================================
@@ -426,7 +275,7 @@ pub trait KnowledgeGraph: Send + Sync {
     async fn knowledge_add_entity(
         &self,
         entity: &librefang_types::memory::Entity,
-    ) -> Result<String, KernelOpError>;
+    ) -> Result<String, String>;
 
     /// Add a relation to the knowledge graph.
     ///
@@ -435,13 +284,13 @@ pub trait KnowledgeGraph: Send + Sync {
     async fn knowledge_add_relation(
         &self,
         relation: &librefang_types::memory::Relation,
-    ) -> Result<String, KernelOpError>;
+    ) -> Result<String, String>;
 
     /// Query the knowledge graph with a pattern.
     async fn knowledge_query(
         &self,
         pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, KernelOpError>;
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String>;
 }
 
 // ============================================================================
@@ -455,21 +304,21 @@ pub trait CronControl: Send + Sync {
         &self,
         agent_id: &str,
         job_json: serde_json::Value,
-    ) -> Result<String, KernelOpError> {
+    ) -> Result<String, String> {
         let _ = (agent_id, job_json);
-        Err(KernelOpError::unavailable("Cron scheduler"))
+        Err("Cron scheduler not available".to_string())
     }
 
     /// List cron jobs for the calling agent.
-    async fn cron_list(&self, agent_id: &str) -> Result<Vec<serde_json::Value>, KernelOpError> {
+    async fn cron_list(&self, agent_id: &str) -> Result<Vec<serde_json::Value>, String> {
         let _ = agent_id;
-        Err(KernelOpError::unavailable("Cron scheduler"))
+        Err("Cron scheduler not available".to_string())
     }
 
     /// Cancel a cron job by ID.
-    async fn cron_cancel(&self, job_id: &str) -> Result<(), KernelOpError> {
+    async fn cron_cancel(&self, job_id: &str) -> Result<(), String> {
         let _ = job_id;
-        Err(KernelOpError::unavailable("Cron scheduler"))
+        Err("Cron scheduler not available".to_string())
     }
 }
 
@@ -545,7 +394,7 @@ pub trait ApprovalGate: Send + Sync {
         tool_name: &str,
         action_summary: &str,
         session_id: Option<&str>,
-    ) -> Result<librefang_types::approval::ApprovalDecision, KernelOpError> {
+    ) -> Result<librefang_types::approval::ApprovalDecision, String> {
         let _ = (agent_id, tool_name, action_summary, session_id);
         Ok(librefang_types::approval::ApprovalDecision::Approved)
     }
@@ -558,9 +407,9 @@ pub trait ApprovalGate: Send + Sync {
         action_summary: &str,
         deferred: librefang_types::tool::DeferredToolExecution,
         session_id: Option<&str>,
-    ) -> Result<librefang_types::tool::ToolApprovalSubmission, KernelOpError> {
+    ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
         let _ = (agent_id, tool_name, action_summary, deferred, session_id);
-        Err(KernelOpError::unavailable("Approval system"))
+        Err("Approval system not available".to_string())
     }
 
     /// Resolve an approval request and get the deferred payload.
@@ -576,17 +425,17 @@ pub trait ApprovalGate: Send + Sync {
             librefang_types::approval::ApprovalResponse,
             Option<librefang_types::tool::DeferredToolExecution>,
         ),
-        KernelOpError,
+        String,
     > {
         let _ = (request_id, decision, decided_by, totp_verified, user_id);
-        Err(KernelOpError::unavailable("Approval system"))
+        Err("Approval system not available".to_string())
     }
 
     /// Check current status of an approval request.
     fn get_approval_status(
         &self,
         request_id: uuid::Uuid,
-    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, KernelOpError> {
+    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, String> {
         let _ = request_id;
         Ok(None)
     }
@@ -599,8 +448,8 @@ pub trait ApprovalGate: Send + Sync {
 #[async_trait]
 pub trait HandsControl: Send + Sync {
     /// List available Hands and their activation status.
-    async fn hand_list(&self) -> Result<Vec<serde_json::Value>, KernelOpError> {
-        Err(KernelOpError::unavailable("Hands system"))
+    async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
+        Err("Hands system not available".to_string())
     }
 
     /// Install a Hand from TOML content.
@@ -608,9 +457,9 @@ pub trait HandsControl: Send + Sync {
         &self,
         toml_content: &str,
         skill_content: &str,
-    ) -> Result<serde_json::Value, KernelOpError> {
+    ) -> Result<serde_json::Value, String> {
         let _ = (toml_content, skill_content);
-        Err(KernelOpError::unavailable("Hands system"))
+        Err("Hands system not available".to_string())
     }
 
     /// Activate a Hand — spawns a specialized autonomous agent.
@@ -618,21 +467,21 @@ pub trait HandsControl: Send + Sync {
         &self,
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
-    ) -> Result<serde_json::Value, KernelOpError> {
+    ) -> Result<serde_json::Value, String> {
         let _ = (hand_id, config);
-        Err(KernelOpError::unavailable("Hands system"))
+        Err("Hands system not available".to_string())
     }
 
     /// Check the status and dashboard metrics of an active Hand.
-    async fn hand_status(&self, hand_id: &str) -> Result<serde_json::Value, KernelOpError> {
+    async fn hand_status(&self, hand_id: &str) -> Result<serde_json::Value, String> {
         let _ = hand_id;
-        Err(KernelOpError::unavailable("Hands system"))
+        Err("Hands system not available".to_string())
     }
 
     /// Deactivate a running Hand and stop its agent.
-    async fn hand_deactivate(&self, instance_id: &str) -> Result<(), KernelOpError> {
+    async fn hand_deactivate(&self, instance_id: &str) -> Result<(), String> {
         let _ = instance_id;
-        Err(KernelOpError::unavailable("Hands system"))
+        Err("Hands system not available".to_string())
     }
 }
 
@@ -670,9 +519,9 @@ pub trait ChannelSender: Send + Sync {
         message: &str,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, KernelOpError> {
+    ) -> Result<String, String> {
         let _ = (channel, recipient, message, thread_id, account_id);
-        Err(KernelOpError::unavailable("Channel send"))
+        Err("Channel send not available".to_string())
     }
 
     /// Send media content (image/file) to a user on a named channel adapter.
@@ -690,11 +539,11 @@ pub trait ChannelSender: Send + Sync {
         filename: Option<&str>,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, KernelOpError> {
+    ) -> Result<String, String> {
         let _ = (
             channel, recipient, media_type, media_url, caption, filename, thread_id, account_id,
         );
-        Err(KernelOpError::unavailable("Channel media send"))
+        Err("Channel media send not available".to_string())
     }
 
     /// Send a local file (raw bytes) to a user on a named channel adapter.
@@ -717,11 +566,11 @@ pub trait ChannelSender: Send + Sync {
         mime_type: &str,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, KernelOpError> {
+    ) -> Result<String, String> {
         let _ = (
             channel, recipient, data, filename, mime_type, thread_id, account_id,
         );
-        Err(KernelOpError::unavailable("Channel file data send"))
+        Err("Channel file data send not available".to_string())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -735,7 +584,7 @@ pub trait ChannelSender: Send + Sync {
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<(), KernelOpError> {
+    ) -> Result<(), String> {
         let _ = (
             channel,
             recipient,
@@ -746,7 +595,7 @@ pub trait ChannelSender: Send + Sync {
             explanation,
             account_id,
         );
-        Err(KernelOpError::unavailable("Channel poll send"))
+        Err("Channel poll send not available".to_string())
     }
 
     /// Upsert a group roster member (channel bridge → persistent storage).
@@ -757,7 +606,7 @@ pub trait ChannelSender: Send + Sync {
         _user_id: &str,
         _display_name: &str,
         _username: Option<&str>,
-    ) -> Result<(), KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 
@@ -766,7 +615,7 @@ pub trait ChannelSender: Send + Sync {
         &self,
         _channel: &str,
         _chat_id: &str,
-    ) -> Result<Vec<serde_json::Value>, KernelOpError> {
+    ) -> Result<Vec<serde_json::Value>, String> {
         Ok(Vec::new())
     }
 
@@ -776,26 +625,8 @@ pub trait ChannelSender: Send + Sync {
         _channel: &str,
         _chat_id: &str,
         _user_id: &str,
-    ) -> Result<(), KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
-    }
-
-    /// Resolve the agent that owns a given `(channel, chat_id)` pair.
-    ///
-    /// Returns the `AgentId` of the agent whose channel config has
-    /// `default_agent` pointing at the named channel instance.  Used by
-    /// `tool_channel_send` to mirror outbound messages into the inbound-
-    /// routing session so the channel-owning agent has context for the
-    /// user's reply.
-    ///
-    /// Returns `None` when no agent is bound to that channel (e.g. in test
-    /// stubs or when the channel has no `default_agent` configured).
-    fn resolve_channel_owner(
-        &self,
-        _channel: &str,
-        _chat_id: &str,
-    ) -> Option<librefang_types::agent::AgentId> {
-        None
     }
 }
 
@@ -808,7 +639,7 @@ pub trait PromptStore: Send + Sync {
     fn get_running_experiment(
         &self,
         _agent_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptExperiment>, KernelOpError> {
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
         Ok(None)
     }
 
@@ -820,7 +651,7 @@ pub trait PromptStore: Send + Sync {
         _latency_ms: u64,
         _cost_usd: f64,
         _success: bool,
-    ) -> Result<(), KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 
@@ -828,7 +659,7 @@ pub trait PromptStore: Send + Sync {
     fn get_prompt_version(
         &self,
         _version_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptVersion>, KernelOpError> {
+    ) -> Result<Option<librefang_types::agent::PromptVersion>, String> {
         Ok(None)
     }
 
@@ -836,7 +667,7 @@ pub trait PromptStore: Send + Sync {
     fn list_prompt_versions(
         &self,
         _agent_id: librefang_types::agent::AgentId,
-    ) -> Result<Vec<librefang_types::agent::PromptVersion>, KernelOpError> {
+    ) -> Result<Vec<librefang_types::agent::PromptVersion>, String> {
         Ok(Vec::new())
     }
 
@@ -848,29 +679,25 @@ pub trait PromptStore: Send + Sync {
     fn create_prompt_version(
         &self,
         _version: &librefang_types::agent::PromptVersion,
-    ) -> Result<(), KernelOpError> {
-        Err(KernelOpError::unavailable("Prompt store"))
+    ) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
     }
 
     /// Delete a prompt version. Default: error.
-    fn delete_prompt_version(&self, _version_id: &str) -> Result<(), KernelOpError> {
-        Err(KernelOpError::unavailable("Prompt store"))
+    fn delete_prompt_version(&self, _version_id: &str) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
     }
 
     /// Set a prompt version as active. Default: error.
-    fn set_active_prompt_version(
-        &self,
-        _version_id: &str,
-        _agent_id: &str,
-    ) -> Result<(), KernelOpError> {
-        Err(KernelOpError::unavailable("Prompt store"))
+    fn set_active_prompt_version(&self, _version_id: &str, _agent_id: &str) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
     }
 
     /// List all experiments for an agent. Default: empty vec.
     fn list_experiments(
         &self,
         _agent_id: librefang_types::agent::AgentId,
-    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, KernelOpError> {
+    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, String> {
         Ok(Vec::new())
     }
 
@@ -881,15 +708,15 @@ pub trait PromptStore: Send + Sync {
     fn create_experiment(
         &self,
         _experiment: &librefang_types::agent::PromptExperiment,
-    ) -> Result<(), KernelOpError> {
-        Err(KernelOpError::unavailable("Prompt store"))
+    ) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
     }
 
     /// Get an experiment by ID. Default: None.
     fn get_experiment(
         &self,
         _experiment_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptExperiment>, KernelOpError> {
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
         Ok(None)
     }
 
@@ -898,15 +725,15 @@ pub trait PromptStore: Send + Sync {
         &self,
         _experiment_id: &str,
         _status: librefang_types::agent::ExperimentStatus,
-    ) -> Result<(), KernelOpError> {
-        Err(KernelOpError::unavailable("Prompt store"))
+    ) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
     }
 
     /// Get experiment metrics. Default: empty vec.
     fn get_experiment_metrics(
         &self,
         _experiment_id: &str,
-    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, KernelOpError> {
+    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, String> {
         Ok(Vec::new())
     }
 
@@ -915,7 +742,7 @@ pub trait PromptStore: Send + Sync {
         &self,
         _agent_id: librefang_types::agent::AgentId,
         _system_prompt: &str,
-    ) -> Result<(), KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 }
@@ -923,214 +750,6 @@ pub trait PromptStore: Send + Sync {
 // ============================================================================
 // 12. WorkflowRunner — declarative workflow execution
 // ============================================================================
-
-/// Summary of a registered workflow definition, used by `workflow_list`.
-///
-/// `#[non_exhaustive]` because the #4982 rich-invocation work is staged
-/// across PRs and additional fields (param-type strictness, dashboard
-/// hints) are expected next; future additions stay non-breaking for
-/// external consumers that pattern-match.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct WorkflowSummary {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub step_count: usize,
-    /// `true` when the workflow advertises typed input parameters that the
-    /// agent can discover via `workflow_describe`. `false` when the workflow
-    /// has neither an explicit `input_schema` nor any `{{var}}` placeholder
-    /// in its step templates (i.e. nothing parametric to discover).
-    pub has_input_schema: bool,
-}
-
-/// One parameter advertised by a workflow's input schema (#4982 — gap 2).
-///
-/// Authored explicitly via `[[input_schema]]` blocks in the workflow TOML
-/// **or** auto-detected from `{{var_name}}` placeholders in step
-/// `prompt_template`s when no explicit schema is present (matching the
-/// existing `Workflow::to_template()` extraction behaviour).
-///
-/// Lives on the trait boundary as a plain struct (no `serde` derives) so
-/// `librefang-kernel-handle` stays free of a `serde` dep — consumers
-/// (`librefang-runtime::tool_runner`) build the JSON shape they ship to
-/// the agent by hand from these fields.
-///
-/// `#[non_exhaustive]` — see [`WorkflowSummary`].
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct WorkflowInputParam {
-    /// Parameter name — corresponds to the `{{name}}` placeholder key in
-    /// step prompt templates and to the JSON-object key the caller passes
-    /// in `workflow_run` / `workflow_start` input.
-    pub name: String,
-    /// Expected value type. One of `"string" | "number" | "boolean" |
-    /// "file" | "image" | "agent_id"`. `"file"` / `"image"` indicate the
-    /// caller may pass an `{"_artifact": "sha256:<64-hex>"}` reference
-    /// (#4982 — gap 3) that the runtime resolves to the artifact-store
-    /// handle string before the workflow engine substitutes it into the
-    /// step prompt.
-    pub param_type: String,
-    /// Whether the caller must supply this parameter. Defaults to `true`
-    /// when auto-detected (every `{{var}}` is presumed required absent
-    /// schema information).
-    pub required: bool,
-    /// Optional human-readable description shown in the discovery surface.
-    pub description: Option<String>,
-}
-
-/// Result of `workflow_describe` — workflow metadata plus the input schema
-/// the agent needs to call `workflow_run` / `workflow_start` correctly.
-///
-/// `#[non_exhaustive]` — see [`WorkflowSummary`].
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct WorkflowDescription {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    /// Each step's display name. **Preserves declaration order** —
-    /// downstream consumers (and the agent's user-facing confirmation
-    /// dialog) rely on this being the same order the steps execute, so
-    /// the "stage 3 output" lookup by index lines up.
-    pub step_names: Vec<String>,
-    /// Parameters the caller can supply. **Sorted by name** for
-    /// deterministic LLM prompt output (#3298); the workflow's authoring
-    /// order is intentionally not preserved here.
-    pub input_schema: Vec<WorkflowInputParam>,
-}
-
-/// One step's name + final output in a completed workflow run. Returned
-/// alongside the top-level workflow output so the agent can navigate into
-/// intermediate-stage results rather than only seeing the final string
-/// (#4982 — gap 3 / "structured results").
-///
-/// `#[non_exhaustive]` — see [`WorkflowSummary`].
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct StepOutputSummary {
-    pub step_name: String,
-    pub output: String,
-}
-
-/// Summary of a workflow run instance, used by `workflow_status`.
-///
-/// `#[non_exhaustive]` — see [`WorkflowSummary`].
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct WorkflowRunSummary {
-    pub run_id: String,
-    pub workflow_id: String,
-    pub workflow_name: String,
-    pub state: String,
-    pub started_at: String,
-    pub completed_at: Option<String>,
-    pub output: Option<String>,
-    pub error: Option<String>,
-    pub step_count: usize,
-    pub last_step_name: Option<String>,
-    /// Per-step name + output in execution order (#4982 — structured
-    /// results). Empty for runs that have not yet produced any step
-    /// output. The full step prompt / token-usage / duration shape stays
-    /// on the kernel-side `StepResult`; this trimmed view ships only the
-    /// fields the agent navigates against.
-    pub step_outputs: Vec<StepOutputSummary>,
-}
-
-// Constructors for the `#[non_exhaustive]` types above. The attribute
-// blocks struct-literal construction from outside this crate; downstream
-// crates (`librefang-kernel`, `librefang-runtime`'s tests + tool surface)
-// build instances through these `new()` methods instead. Future field
-// additions land here as `with_<field>(self, …)` setters so existing
-// callers keep compiling.
-impl WorkflowSummary {
-    pub fn new(
-        id: String,
-        name: String,
-        description: String,
-        step_count: usize,
-        has_input_schema: bool,
-    ) -> Self {
-        Self {
-            id,
-            name,
-            description,
-            step_count,
-            has_input_schema,
-        }
-    }
-}
-
-impl WorkflowInputParam {
-    pub fn new(
-        name: String,
-        param_type: String,
-        required: bool,
-        description: Option<String>,
-    ) -> Self {
-        Self {
-            name,
-            param_type,
-            required,
-            description,
-        }
-    }
-}
-
-impl WorkflowDescription {
-    pub fn new(
-        id: String,
-        name: String,
-        description: String,
-        step_names: Vec<String>,
-        input_schema: Vec<WorkflowInputParam>,
-    ) -> Self {
-        Self {
-            id,
-            name,
-            description,
-            step_names,
-            input_schema,
-        }
-    }
-}
-
-impl StepOutputSummary {
-    pub fn new(step_name: String, output: String) -> Self {
-        Self { step_name, output }
-    }
-}
-
-impl WorkflowRunSummary {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        run_id: String,
-        workflow_id: String,
-        workflow_name: String,
-        state: String,
-        started_at: String,
-        completed_at: Option<String>,
-        output: Option<String>,
-        error: Option<String>,
-        step_count: usize,
-        last_step_name: Option<String>,
-        step_outputs: Vec<StepOutputSummary>,
-    ) -> Self {
-        Self {
-            run_id,
-            workflow_id,
-            workflow_name,
-            state,
-            started_at,
-            completed_at,
-            output,
-            error,
-            step_count,
-            last_step_name,
-            step_outputs,
-        }
-    }
-}
 
 #[async_trait]
 pub trait WorkflowRunner: Send + Sync {
@@ -1141,80 +760,9 @@ pub trait WorkflowRunner: Send + Sync {
         &self,
         workflow_id: &str,
         input: &str,
-    ) -> Result<(String, String), KernelOpError> {
+    ) -> Result<(String, String), String> {
         let _ = (workflow_id, input);
-        Err(KernelOpError::unavailable("Workflow engine"))
-    }
-
-    /// List all registered workflow definitions, sorted by name for determinism.
-    async fn list_workflows(&self) -> Vec<WorkflowSummary> {
-        Vec::new()
-    }
-
-    /// Describe a workflow by ID or name — returns its declared input
-    /// parameters, step names, and human-readable description so the agent
-    /// can discover *how to call* a workflow before invoking it (#4982 —
-    /// gap 2). Returns `None` when no workflow matches.
-    async fn describe_workflow(&self, workflow_id: &str) -> Option<WorkflowDescription> {
-        let _ = workflow_id;
-        None
-    }
-
-    /// Get the status of a workflow run by its UUID string.
-    /// Returns `None` if the run ID is not found (including UUID parse failure).
-    async fn get_workflow_run(&self, run_id: &str) -> Option<WorkflowRunSummary> {
-        let _ = run_id;
-        None
-    }
-
-    /// Start a workflow asynchronously (fire-and-forget). Creates the run,
-    /// spawns execution in the background, and returns the `run_id`
-    /// immediately without blocking. Use `get_workflow_run` to poll status.
-    ///
-    /// Default impl forwards to [`Self::start_workflow_async_tracked`]
-    /// with no caller context — historical callers that don't carry an
-    /// `(agent, session)` keep working but get no async-task tracker
-    /// registration (#4983).
-    async fn start_workflow_async(
-        &self,
-        workflow_id: &str,
-        input: &str,
-    ) -> Result<String, KernelOpError> {
-        self.start_workflow_async_tracked(workflow_id, input, None, None)
-            .await
-    }
-
-    /// Tracker-aware variant of [`Self::start_workflow_async`] introduced
-    /// for the async task tracker (#4983). When the optional
-    /// `caller_agent_id` and `caller_session_id` are both `Some`, the
-    /// kernel registers a [`librefang_types::task::TaskKind::Workflow`]
-    /// entry against the originating session and will inject a
-    /// [`librefang_types::task::TaskCompletionEvent`] when the workflow
-    /// reaches a terminal state.
-    ///
-    /// Both inputs are `&str` for trait-object compatibility: the kernel
-    /// parses them into `AgentId` / `SessionId` internally. If either
-    /// parses to `None`, the call still spawns the workflow normally but
-    /// skips the registry registration (no completion event will be
-    /// injected). This mirrors the existing pattern in
-    /// `KernelHandle::run_workflow`'s string-id surface.
-    async fn start_workflow_async_tracked(
-        &self,
-        workflow_id: &str,
-        input: &str,
-        caller_agent_id: Option<&str>,
-        caller_session_id: Option<&str>,
-    ) -> Result<String, KernelOpError> {
-        let _ = (workflow_id, input, caller_agent_id, caller_session_id);
-        Err(KernelOpError::unavailable("Workflow engine"))
-    }
-
-    /// Cancel a running or paused workflow run by its UUID string.
-    /// Returns `Ok(())` on success, or an error describing why cancellation
-    /// failed (not found, already in a terminal state, etc.).
-    async fn cancel_workflow_run(&self, run_id: &str) -> Result<(), KernelOpError> {
-        let _ = run_id;
-        Err(KernelOpError::unavailable("Workflow engine"))
+        Err("Workflow engine not available".to_string())
     }
 }
 
@@ -1225,10 +773,7 @@ pub trait WorkflowRunner: Send + Sync {
 pub trait GoalControl: Send + Sync {
     /// List active goals (pending or in_progress), optionally filtered by agent ID.
     /// Returns a JSON array of goal objects.
-    fn goal_list_active(
-        &self,
-        _agent_id: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>, KernelOpError> {
+    fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
         Ok(Vec::new())
     }
 
@@ -1238,8 +783,8 @@ pub trait GoalControl: Send + Sync {
         _goal_id: &str,
         _status: Option<&str>,
         _progress: Option<u8>,
-    ) -> Result<serde_json::Value, KernelOpError> {
-        Err(KernelOpError::unavailable("Goal system"))
+    ) -> Result<serde_json::Value, String> {
+        Err("Goal system not available".to_string())
     }
 }
 
@@ -1312,16 +857,6 @@ pub trait ToolPolicy: Send + Sync {
         None
     }
 
-    /// Whether the runtime should collapse repeated `file_read` calls on the
-    /// same path within a session into a short stub (#4971). Backed by
-    /// `[context_engine] deduplicate_file_reads` — default `true`. Stub
-    /// implementations leave the legacy "always full content" behaviour by
-    /// returning `false` so they don't have to think about session-scoped
-    /// state.
-    fn deduplicate_file_reads(&self) -> bool {
-        false
-    }
-
     /// Return the effective directory for storing runtime-generated uploads
     /// (image_generate, browser_screenshot, etc.). Honors operator-configured
     /// `[channels].file_download_dir` when set, otherwise falls back to the
@@ -1332,360 +867,7 @@ pub trait ToolPolicy: Send + Sync {
 }
 
 // ============================================================================
-// 15. ApiAuth — raw auth-config values needed by the HTTP server layer to
-//     build middleware token tables and bind-safety checks at startup.
-//
-//     Deliberately returns *raw* (unresolved) config strings so the API
-//     server can apply its own credential-resolution logic (env-var override,
-//     vault: prefix, literal) without pulling KernelConfig into that layer.
-// ============================================================================
-
-/// A snapshot of the user-config values needed for API-key table construction.
-#[derive(Debug, Clone, Default)]
-pub struct ApiUserConfigSnapshot {
-    pub name: String,
-    pub role: String,
-    pub api_key_hash: Option<String>,
-}
-
-/// Raw dashboard credential strings from config (before env-var / vault
-/// resolution). The HTTP server resolves them with `LIBREFANG_DASHBOARD_USER`,
-/// `LIBREFANG_DASHBOARD_PASS`, and the `vault:KEY` prefix logic.
-#[derive(Debug, Clone, Default)]
-pub struct DashboardRawConfig {
-    pub user: String,
-    pub pass: String,
-    pub pass_hash: String,
-}
-
-/// One-shot snapshot of every auth-relevant config field. Returned by
-/// [`ApiAuth::auth_snapshot`] from a single `config.load()` so all fields
-/// observe the same hot-reload generation — preventing per-request
-/// middleware (`valid_api_tokens`, `paired_device_user_keys`) from mixing
-/// pre-reload and post-reload config when a reload races with the request.
-#[derive(Debug, Clone, Default)]
-pub struct ApiAuthSnapshot {
-    /// Raw `api_key` value from config (may be empty when auth is open).
-    pub api_key: String,
-    /// Raw dashboard credential strings (before env-var / vault resolution).
-    pub dashboard: DashboardRawConfig,
-    /// Absolute path to the daemon home directory (owned so the snapshot
-    /// is fully self-contained and not tied to the kernel's lifetime).
-    pub home_dir: std::path::PathBuf,
-    /// Paired-device (mobile) API key hashes: `(device_id, api_key_hash)`.
-    pub device_api_keys: Vec<(String, String)>,
-    /// Per-user config entries used to build the user API-key table.
-    pub config_users: Vec<ApiUserConfigSnapshot>,
-}
-
-pub trait ApiAuth: Send + Sync {
-    /// Atomic snapshot of every auth-relevant config field. Implementations
-    /// MUST acquire all values from a single config snapshot so callers see
-    /// a consistent view across hot-reload boundaries.
-    fn auth_snapshot(&self) -> ApiAuthSnapshot;
-}
-
-// ============================================================================
-// 16. SessionWriter — pre-inject content blocks into an agent session before
-//     an LLM turn, used by the HTTP attachment upload path (#3744).
-//
-//     Abstracts over `agent_registry()` + `memory_substrate()` so callers
-//     in librefang-api do not need to import the concrete kernel type.
-// ============================================================================
-
-pub trait SessionWriter: Send + Sync {
-    /// Pre-insert `blocks` as a User-role message into the agent's current
-    /// session so the LLM sees the content in the next turn.  No-op (with a
-    /// `warn!`) when the agent is not found; best-effort on save failure.
-    ///
-    /// **Blocking I/O notice.**  The current production implementation
-    /// (`LibreFangKernel`) calls `MemorySubstrate::save_session` synchronously,
-    /// which blocks on a SQLite write.  Callers running inside an async
-    /// runtime should wrap the call in `tokio::task::spawn_blocking` to
-    /// avoid stalling worker threads under contention. (#3579 will move the
-    /// substrate to `tokio::fs`-aware async; once that lands, the trait
-    /// itself can become `async fn` and this caveat goes away.)
-    fn inject_attachment_blocks(
-        &self,
-        agent_id: librefang_types::agent::AgentId,
-        blocks: Vec<librefang_types::message::ContentBlock>,
-    );
-
-    /// Append a single message to an existing session identified by
-    /// `session_id`.  Used by `tool_channel_send` to mirror outbound
-    /// messages into the channel-owner agent's inbound-routing session.
-    ///
-    /// Best-effort: implementations should log a `warn!` on failure rather
-    /// than propagating the error — the platform send already succeeded and
-    /// the caller must not fail the tool call because of a persistence blip.
-    ///
-    /// **Blocking I/O notice** — same caveat as `inject_attachment_blocks`.
-    fn append_to_session(
-        &self,
-        session_id: librefang_types::agent::SessionId,
-        agent_id: librefang_types::agent::AgentId,
-        message: librefang_types::message::Message,
-    ) {
-        let _ = (session_id, agent_id, message);
-    }
-}
-
-// ============================================================================
-// 17. AcpFsBridge — editor-backed `fs/read_text_file` / `fs/write_text_file`
-//
-// Used by runtime tools to route file I/O through an attached ACP editor
-// instead of the agent's local filesystem (#3313). The kernel maps a
-// LibreFang `SessionId` back to a registered `AcpFsClient` (an opaque
-// trait object the ACP adapter installs at `initialize`-time) and
-// forwards the read / write request. Sessions without an attached
-// editor (the dashboard / TUI / cron / channel-bridge cases) get
-// `Unavailable` — runtime tools that opt into ACP backing should
-// fall back to local fs in that case rather than failing the call.
-// ============================================================================
-
-/// Object-safe client side of the `fs/*` reverse-RPC. Implemented by
-/// `librefang-acp::FsClientHandle`; the kernel stores
-/// `Arc<dyn AcpFsClient>` per ACP session and dispatches through it.
-#[async_trait]
-pub trait AcpFsClient: Send + Sync {
-    /// `fs/read_text_file` — return the file content as a string.
-    /// `line` is 1-based per the ACP schema.
-    async fn read_text_file(
-        &self,
-        path: std::path::PathBuf,
-        line: Option<u32>,
-        limit: Option<u32>,
-    ) -> KernelResult<String>;
-
-    /// `fs/write_text_file` — overwrite the file with `content`.
-    async fn write_text_file(&self, path: std::path::PathBuf, content: String) -> KernelResult<()>;
-
-    /// `(read_text_file, write_text_file)` capability snapshot the editor
-    /// declared at `initialize`. Runtime tools can use this to short-
-    /// circuit before paying the round-trip when the editor doesn't
-    /// support the operation.
-    fn capabilities(&self) -> (bool, bool);
-}
-
-/// Runtime-facing role trait for editor-backed file I/O.
-#[async_trait]
-pub trait AcpFsBridge: Send + Sync {
-    /// Register an `fs/*` client for `session_id`, replacing any prior
-    /// registration. Called by the ACP adapter once per accepted
-    /// connection. Default impl is a no-op so kernel stubs without
-    /// ACP support compile.
-    fn register_acp_fs_client(
-        &self,
-        session_id: librefang_types::agent::SessionId,
-        client: std::sync::Arc<dyn AcpFsClient>,
-    ) {
-        let _ = (session_id, client);
-    }
-
-    /// Drop the registration for `session_id`. Called when the editor
-    /// disconnects so a stale handle can't keep firing requests onto
-    /// a closed connection.
-    fn unregister_acp_fs_client(&self, session_id: librefang_types::agent::SessionId) {
-        let _ = session_id;
-    }
-
-    /// Look up the `fs/*` client registered for `session_id`. Returns
-    /// `None` when no editor is bound — runtime tools should treat
-    /// that as "fall back to local fs", not as a hard error.
-    fn acp_fs_client(
-        &self,
-        session_id: librefang_types::agent::SessionId,
-    ) -> Option<std::sync::Arc<dyn AcpFsClient>> {
-        let _ = session_id;
-        None
-    }
-
-    /// Convenience: run `fs/read_text_file` against the editor bound to
-    /// `session_id`. Returns `KernelOpError::Unavailable` when no
-    /// editor is bound for the session.
-    async fn acp_read_text_file(
-        &self,
-        session_id: librefang_types::agent::SessionId,
-        path: std::path::PathBuf,
-        line: Option<u32>,
-        limit: Option<u32>,
-    ) -> KernelResult<String> {
-        match self.acp_fs_client(session_id) {
-            Some(client) => client.read_text_file(path, line, limit).await,
-            None => Err(KernelOpError::unavailable(
-                "ACP fs/read_text_file (no editor bound to session)",
-            )),
-        }
-    }
-
-    /// Convenience: run `fs/write_text_file` against the editor bound to
-    /// `session_id`.
-    async fn acp_write_text_file(
-        &self,
-        session_id: librefang_types::agent::SessionId,
-        path: std::path::PathBuf,
-        content: String,
-    ) -> KernelResult<()> {
-        match self.acp_fs_client(session_id) {
-            Some(client) => client.write_text_file(path, content).await,
-            None => Err(KernelOpError::unavailable(
-                "ACP fs/write_text_file (no editor bound to session)",
-            )),
-        }
-    }
-}
-
-// ============================================================================
-// 18. AcpTerminalBridge — editor-backed `terminal/*` reverse-RPC
-//
-// Used by `shell_exec` and similar runtime tools to host the command's
-// PTY in the editor (so output appears in the editor's terminal panel
-// and the user can kill / interact with it) instead of spawning a
-// detached process the agent never sees (#3313).
-// ============================================================================
-
-/// Result of a single full `terminal/*` create→wait→output→release run.
-/// Mirrors the values the runtime needs to assemble a `shell_exec`
-/// `ToolResult` without taking a `agent-client-protocol` dep.
-#[derive(Debug, Clone)]
-pub struct AcpTerminalRunResult {
-    /// Captured stdout/stderr (interleaved as the PTY received them).
-    pub output: String,
-    /// `true` if the editor truncated the output to fit the
-    /// `output_byte_limit`. Runtime tools should surface this in the
-    /// tool result so the LLM knows it didn't see the whole transcript.
-    pub truncated: bool,
-    /// Process exit code, when the command exited normally. `None`
-    /// when the command was killed by signal — see `signal`.
-    pub exit_code: Option<i32>,
-    /// Signal name (e.g. `"SIGTERM"`) when the command was killed by
-    /// signal rather than a clean exit.
-    pub signal: Option<String>,
-}
-
-/// Object-safe client side of the `terminal/*` reverse-RPC. Implemented
-/// by `librefang-acp::TerminalClientHandle`; the kernel stores
-/// `Arc<dyn AcpTerminalClient>` per session and dispatches through it.
-#[async_trait]
-pub trait AcpTerminalClient: Send + Sync {
-    /// Run a single command to completion through the editor's PTY:
-    /// `terminal/create` → `terminal/wait_for_exit` →
-    /// `terminal/output` → `terminal/release`. The default impl on
-    /// `TerminalClientHandle` always releases at the end, even on
-    /// intermediate failure.
-    async fn run_command(
-        &self,
-        command: String,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
-        cwd: Option<std::path::PathBuf>,
-        output_byte_limit: Option<u64>,
-    ) -> KernelResult<AcpTerminalRunResult>;
-
-    /// Whether the editor declared `terminal` capability at
-    /// `initialize` time. Runtime tools can use this to short-circuit
-    /// before paying a round-trip when the editor doesn't support
-    /// terminals.
-    fn capabilities(&self) -> bool;
-}
-
-/// Runtime-facing role trait for editor-backed terminal commands.
-#[async_trait]
-pub trait AcpTerminalBridge: Send + Sync {
-    /// Register a `terminal/*` client for `session_id`. Default impl
-    /// is a no-op.
-    fn register_acp_terminal_client(
-        &self,
-        session_id: librefang_types::agent::SessionId,
-        client: std::sync::Arc<dyn AcpTerminalClient>,
-    ) {
-        let _ = (session_id, client);
-    }
-
-    /// Drop the registration for `session_id`.
-    fn unregister_acp_terminal_client(&self, session_id: librefang_types::agent::SessionId) {
-        let _ = session_id;
-    }
-
-    /// Look up the `terminal/*` client registered for `session_id`.
-    /// Returns `None` when no editor is bound — runtime tools should
-    /// fall back to local process spawning, not error out.
-    fn acp_terminal_client(
-        &self,
-        session_id: librefang_types::agent::SessionId,
-    ) -> Option<std::sync::Arc<dyn AcpTerminalClient>> {
-        let _ = session_id;
-        None
-    }
-
-    /// Convenience: run `command` through the editor bound to
-    /// `session_id`. Returns `KernelOpError::Unavailable` when no
-    /// editor is bound for the session.
-    async fn acp_run_terminal_command(
-        &self,
-        session_id: librefang_types::agent::SessionId,
-        command: String,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
-        cwd: Option<std::path::PathBuf>,
-        output_byte_limit: Option<u64>,
-    ) -> KernelResult<AcpTerminalRunResult> {
-        match self.acp_terminal_client(session_id) {
-            Some(client) => {
-                client
-                    .run_command(command, args, env, cwd, output_byte_limit)
-                    .await
-            }
-            None => Err(KernelOpError::unavailable(
-                "ACP terminal/* (no editor bound to session)",
-            )),
-        }
-    }
-}
-
-// ============================================================================
-// CatalogQuery (#4842)
-// ============================================================================
-//
-// Read-side projection of model-catalog metadata that drivers need at
-// request-build time. Currently surfaces `reasoning_echo_policy_for(model)`
-// so the OpenAI-compat driver can dispatch the right wire shape for
-// `reasoning_content` per model by catalog lookup, replacing the substring
-// match that lived in the driver. Default impl returns `None`, letting
-// existing mocks and the legacy substring fallback continue to work for
-// catalog misses.
-// ============================================================================
-
-pub trait CatalogQuery: Send + Sync {
-    /// How the OpenAI-compatible driver must handle `reasoning_content`
-    /// on historical assistant turns for the given model. Default impl
-    /// returns [`librefang_types::model_catalog::ReasoningEchoPolicy::None`],
-    /// which causes the driver to fall back to substring-based detection
-    /// — see librefang/librefang#4842 for the migration plan.
-    fn reasoning_echo_policy_for(
-        &self,
-        _model: &str,
-    ) -> librefang_types::model_catalog::ReasoningEchoPolicy {
-        librefang_types::model_catalog::ReasoningEchoPolicy::None
-    }
-
-    /// Resolve the effective proactive-memory `extraction_model` for the
-    /// agent identified by `agent_id` (#5475). Looks at the agent's
-    /// manifest `[proactive_memory] extraction_model` and falls back to
-    /// the kernel-global `[proactive_memory] extraction_model`. Returns
-    /// `None` when neither is set — the extractor then uses whatever
-    /// model it was constructed with at boot.
-    ///
-    /// Default impl returns `None` so existing test stubs and tooling
-    /// don't have to opt in; the real kernel impl threads through the
-    /// agent registry + active `KernelConfig` to perform the lookup.
-    fn proactive_memory_extraction_model_for(&self, _agent_id: &str) -> Option<String> {
-        None
-    }
-}
-
-// ============================================================================
-// KernelHandle — supertrait alias of all 19 role traits.
+// KernelHandle — supertrait alias of all 14 role traits.
 //
 // Existing call sites take `Arc<dyn KernelHandle>`; that keeps working because
 // any type that impls every role trait automatically gets `KernelHandle` via
@@ -1696,7 +878,6 @@ pub trait CatalogQuery: Send + Sync {
 pub trait KernelHandle:
     AgentControl
     + MemoryAccess
-    + WikiAccess
     + TaskQueue
     + EventBus
     + KnowledgeGraph
@@ -1709,11 +890,6 @@ pub trait KernelHandle:
     + WorkflowRunner
     + GoalControl
     + ToolPolicy
-    + ApiAuth
-    + SessionWriter
-    + AcpFsBridge
-    + AcpTerminalBridge
-    + CatalogQuery
     + Send
     + Sync
 {
@@ -1722,7 +898,6 @@ pub trait KernelHandle:
 impl<T> KernelHandle for T where
     T: AgentControl
         + MemoryAccess
-        + WikiAccess
         + TaskQueue
         + EventBus
         + KnowledgeGraph
@@ -1735,11 +910,6 @@ impl<T> KernelHandle for T where
         + WorkflowRunner
         + GoalControl
         + ToolPolicy
-        + ApiAuth
-        + SessionWriter
-        + AcpFsBridge
-        + AcpTerminalBridge
-        + CatalogQuery
         + Send
         + Sync
         + ?Sized
@@ -1751,13 +921,9 @@ impl<T> KernelHandle for T where
 /// resolve. Replaces the pre-#3746 single-trait import pattern.
 pub mod prelude {
     pub use super::{
-        A2ARegistry, AcpFsBridge, AcpFsClient, AcpTerminalBridge, AcpTerminalClient,
-        AcpTerminalRunResult, AgentControl, AgentInfo, ApiAuth, ApiAuthSnapshot,
-        ApiUserConfigSnapshot, ApprovalGate, CatalogQuery, ChannelSender, CronControl,
-        DashboardRawConfig, EventBus, GoalControl, HandsControl, KernelHandle, KnowledgeGraph,
-        MemoryAccess, PromptStore, SessionWriter, StepOutputSummary, TaskQueue, ToolPolicy,
-        WikiAccess, WorkflowDescription, WorkflowInputParam, WorkflowRunSummary, WorkflowRunner,
-        WorkflowSummary,
+        A2ARegistry, AgentControl, AgentInfo, ApprovalGate, ChannelSender, CronControl, EventBus,
+        GoalControl, HandsControl, KernelHandle, KnowledgeGraph, MemoryAccess, PromptStore,
+        TaskQueue, ToolPolicy, WorkflowRunner,
     };
 }
 
@@ -1778,21 +944,17 @@ mod tests {
             &self,
             _manifest_toml: &str,
             _parent_id: Option<&str>,
-        ) -> Result<(String, String), super::KernelOpError> {
-            Err("stub".into())
+        ) -> Result<(String, String), String> {
+            Err("stub".to_string())
         }
-        async fn send_to_agent(
-            &self,
-            _agent_id: &str,
-            _message: &str,
-        ) -> Result<String, super::KernelOpError> {
-            Err("stub".into())
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+            Err("stub".to_string())
         }
         fn list_agents(&self) -> Vec<AgentInfo> {
             vec![]
         }
-        fn kill_agent(&self, _agent_id: &str) -> Result<(), super::KernelOpError> {
-            Err("stub".into())
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+            Err("stub".to_string())
         }
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
             vec![]
@@ -1804,24 +966,18 @@ mod tests {
             &self,
             _key: &str,
             _value: serde_json::Value,
-            _agent_id: Option<&str>,
             _peer_id: Option<&str>,
-        ) -> Result<(), super::KernelOpError> {
-            Err("stub".into())
+        ) -> Result<(), String> {
+            Err("stub".to_string())
         }
         fn memory_recall(
             &self,
             _key: &str,
-            _agent_id: Option<&str>,
             _peer_id: Option<&str>,
-        ) -> Result<Option<serde_json::Value>, super::KernelOpError> {
+        ) -> Result<Option<serde_json::Value>, String> {
             Ok(None)
         }
-        fn memory_list(
-            &self,
-            _agent_id: Option<&str>,
-            _peer_id: Option<&str>,
-        ) -> Result<Vec<String>, super::KernelOpError> {
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Ok(vec![])
         }
     }
@@ -1834,13 +990,10 @@ mod tests {
             _description: &str,
             _assigned_to: Option<&str>,
             _created_by: Option<&str>,
-        ) -> Result<String, super::KernelOpError> {
-            Err("stub".into())
+        ) -> Result<String, String> {
+            Err("stub".to_string())
         }
-        async fn task_claim(
-            &self,
-            _agent_id: &str,
-        ) -> Result<Option<serde_json::Value>, super::KernelOpError> {
+        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
             Ok(None)
         }
         async fn task_complete(
@@ -1848,32 +1001,26 @@ mod tests {
             _agent_id: &str,
             _task_id: &str,
             _result: &str,
-        ) -> Result<(), super::KernelOpError> {
-            Err("stub".into())
+        ) -> Result<(), String> {
+            Err("stub".to_string())
         }
-        async fn task_list(
-            &self,
-            _status: Option<&str>,
-        ) -> Result<Vec<serde_json::Value>, super::KernelOpError> {
+        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
             Ok(vec![])
         }
-        async fn task_delete(&self, _task_id: &str) -> Result<bool, super::KernelOpError> {
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
             Ok(false)
         }
-        async fn task_retry(&self, _task_id: &str) -> Result<bool, super::KernelOpError> {
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
             Ok(false)
         }
-        async fn task_get(
-            &self,
-            _task_id: &str,
-        ) -> Result<Option<serde_json::Value>, super::KernelOpError> {
+        async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
             Ok(None)
         }
         async fn task_update_status(
             &self,
             _task_id: &str,
             _new_status: &str,
-        ) -> Result<bool, super::KernelOpError> {
+        ) -> Result<bool, String> {
             Ok(false)
         }
     }
@@ -1884,7 +1031,7 @@ mod tests {
             &self,
             _event_type: &str,
             _payload: serde_json::Value,
-        ) -> Result<(), super::KernelOpError> {
+        ) -> Result<(), String> {
             Ok(())
         }
     }
@@ -1894,19 +1041,19 @@ mod tests {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
-        ) -> Result<String, super::KernelOpError> {
-            Err("stub".into())
+        ) -> Result<String, String> {
+            Err("stub".to_string())
         }
         async fn knowledge_add_relation(
             &self,
             _relation: &librefang_types::memory::Relation,
-        ) -> Result<String, super::KernelOpError> {
-            Err("stub".into())
+        ) -> Result<String, String> {
+            Err("stub".to_string())
         }
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
-        ) -> Result<Vec<librefang_types::memory::GraphMatch>, super::KernelOpError> {
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Ok(vec![])
         }
     }
@@ -1920,23 +1067,6 @@ mod tests {
     impl WorkflowRunner for StubKernel {}
     impl GoalControl for StubKernel {}
     impl ToolPolicy for StubKernel {}
-    impl WikiAccess for StubKernel {}
-    impl CatalogQuery for StubKernel {}
-    impl ApiAuth for StubKernel {
-        fn auth_snapshot(&self) -> ApiAuthSnapshot {
-            ApiAuthSnapshot::default()
-        }
-    }
-    impl SessionWriter for StubKernel {
-        fn inject_attachment_blocks(
-            &self,
-            _agent_id: librefang_types::agent::AgentId,
-            _blocks: Vec<librefang_types::message::ContentBlock>,
-        ) {
-        }
-    }
-    impl AcpFsBridge for StubKernel {}
-    impl AcpTerminalBridge for StubKernel {}
 
     #[test]
     fn stub_satisfies_kernel_handle_via_blanket_impl() {
@@ -1968,31 +1098,5 @@ mod tests {
         let _wf: Arc<dyn WorkflowRunner> = Arc::new(StubKernel);
         let _goal: Arc<dyn GoalControl> = Arc::new(StubKernel);
         let _tp: Arc<dyn ToolPolicy> = Arc::new(StubKernel);
-        let _auth: Arc<dyn ApiAuth> = Arc::new(StubKernel);
-        let _sw: Arc<dyn SessionWriter> = Arc::new(StubKernel);
-        let _cq: Arc<dyn CatalogQuery> = Arc::new(StubKernel);
-    }
-
-    #[test]
-    fn catalog_query_default_returns_none() {
-        // Mocks / stubs that don't override `reasoning_echo_policy_for`
-        // must return `None`, so drivers fall back to substring detection.
-        // Without this guarantee the registry-driven dispatch could
-        // accidentally activate against test fixtures that have no
-        // catalog wired.
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        let stub = StubKernel;
-        assert_eq!(
-            stub.reasoning_echo_policy_for("deepseek-v4-flash"),
-            ReasoningEchoPolicy::None
-        );
-        assert_eq!(
-            stub.reasoning_echo_policy_for("kimi-k2.6"),
-            ReasoningEchoPolicy::None
-        );
-        assert_eq!(
-            stub.reasoning_echo_policy_for("anything-else"),
-            ReasoningEchoPolicy::None
-        );
     }
 }

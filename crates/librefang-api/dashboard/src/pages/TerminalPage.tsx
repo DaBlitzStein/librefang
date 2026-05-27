@@ -8,7 +8,6 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { terminalKeys } from "../lib/queries/keys";
-import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import {
   Terminal as TerminalIcon,
   Maximize2,
@@ -37,16 +36,6 @@ interface ServerMessage {
 
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_ATTEMPTS = 10;
-// #4675: a "fast exit" is the shell process dying within 3 s of `started`.
-// That window is set well above any realistic legitimate `exit 0` from the
-// user (e.g. typing `exit` immediately after connecting still takes a few
-// hundred ms of human latency) but well below tmux's failure mode where it
-// errors out and exits within ~10 ms.
-const FAST_EXIT_WINDOW_MS = 3000;
-// #4675: stop the reconnect loop after this many consecutive fast-failed
-// connections. One fast-fail could be a transient race; two in a row means
-// the daemon is in a state where retrying won't recover it.
-const MAX_CONSECUTIVE_FAST_FAILS = 2;
 
 // Must match the server-side MAX_COLS / MAX_ROWS constants in routes/terminal.rs.
 const TERM_MIN_COLS = 1;
@@ -105,28 +94,12 @@ export function TerminalPage() {
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const wsGenerationRef = useRef(0);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastDismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intentionalDisconnectRef = useRef(false);
   const connectRef = useRef<() => void>(() => {});
   const attemptRef = useRef(0);
   const desiredWindowIdRef = useRef<string | null>(null);
-  // #4675: fast-fail tracking. Two paths flip `connectionFastFailRef` true:
-  // (1) the shell started and then exited with a non-zero code within
-  //     FAST_EXIT_WINDOW_MS of `started` — host could spawn but the shell
-  //     immediately died (tmux missing terminfo, broken rc files, etc.);
-  // (2) the WS opened but `started` never arrived and the close fired
-  //     within FAST_EXIT_WINDOW_MS of `open` — host couldn't even reach
-  //     the spawn-success point (shell binary missing, PTY allocation
-  //     failure, daemon-side panic).
-  // `wsOpenedAtRef` is the anchor for path (2); `startedAtRef` for (1).
-  // `consecutiveFastFailRef` counts how many connections in a row hit
-  // either path; the reconnect loop bails at MAX_CONSECUTIVE_FAST_FAILS.
-  const startedAtRef = useRef<number | null>(null);
-  const wsOpenedAtRef = useRef<number | null>(null);
-  const connectionFastFailRef = useRef(false);
-  const consecutiveFastFailRef = useRef(0);
 
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -139,7 +112,7 @@ export function TerminalPage() {
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [fontSize, setFontSize] = useState<number>(() => {
-    const stored = safeStorageGet("terminal.fontSize");
+    const stored = localStorage.getItem("terminal.fontSize");
     const parsed = stored ? parseInt(stored, 10) : NaN;
     return Number.isFinite(parsed) ? Math.max(10, Math.min(20, parsed)) : 13;
   });
@@ -176,23 +149,13 @@ export function TerminalPage() {
   const connect = useCallback(() => {
     if (terminalEnabled !== true) return;
 
-    const gen = ++wsGenerationRef.current;
-
     if (wsRef.current) {
-      wsRef.current.onclose = null;
-      wsRef.current.onerror = null;
       wsRef.current.close();
     }
 
     setError(null);
     setIsConnecting(true);
     setIsRoot(false);
-    // #4675: reset per-connection fast-fail trackers; cross-connection
-    // counter (`consecutiveFastFailRef`) is left alone so the close handler
-    // can compare this connection's outcome against the previous run.
-    startedAtRef.current = null;
-    wsOpenedAtRef.current = null;
-    connectionFastFailRef.current = false;
     const { url: wsUrl, protocols: wsProtocols } =
       buildAuthenticatedWebSocket("/api/terminal/ws");
     const url = new URL(wsUrl);
@@ -210,10 +173,6 @@ export function TerminalPage() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      if (gen !== wsGenerationRef.current) return;
-      // #4675: anchor the no-started fast-fail window from the moment
-      // the WS handshake completes. Read in the close handler below.
-      wsOpenedAtRef.current = Date.now();
       const wasReconnect = attemptRef.current > 0;
       setIsConnecting(false);
       setIsConnected(true);
@@ -243,14 +202,13 @@ export function TerminalPage() {
         }
       }
       const hintKey = "terminal.copyPasteHintShown";
-      if (!safeStorageGet(hintKey)) {
-        safeStorageSet(hintKey, "1");
+      if (!localStorage.getItem(hintKey)) {
+        localStorage.setItem(hintKey, "1");
         addToast(t("terminal.copy_paste_hint"), "info");
       }
     };
 
     ws.onmessage = (event) => {
-      if (gen !== wsGenerationRef.current) return;
       let msg: ServerMessage;
       try {
         msg = JSON.parse(event.data);
@@ -261,11 +219,6 @@ export function TerminalPage() {
       switch (msg.type) {
         case "started":
           setIsRoot(msg.isRoot ?? false);
-          // #4675: anchor the fast-exit window from the moment the server
-          // tells us the shell is up. Output that arrives between this and
-          // `exit` is the shell's own stderr, e.g. tmux's "open terminal
-          // failed: terminal does not support clear" message.
-          startedAtRef.current = Date.now();
           terminalRef.current?.write(
             t("terminal.started", { shell: msg.shell, pid: msg.pid }) + "\r\n"
           );
@@ -288,18 +241,6 @@ export function TerminalPage() {
           terminalRef.current?.write(
             "\r\n" + t("terminal.exited", { code: msg.code }) + "\r\n"
           );
-          // #4675: classify this connection as a fast-fail when the shell
-          // exits with a non-zero code within the FAST_EXIT_WINDOW_MS slot
-          // that opened on `started`. The close handler reads this flag to
-          // decide whether to keep reconnecting.
-          if (
-            typeof msg.code === "number" &&
-            msg.code !== 0 &&
-            startedAtRef.current !== null &&
-            Date.now() - startedAtRef.current < FAST_EXIT_WINDOW_MS
-          ) {
-            connectionFastFailRef.current = true;
-          }
           break;
         case "error":
           setError(typeof msg.content === "string" && msg.content
@@ -319,13 +260,11 @@ export function TerminalPage() {
     };
 
     ws.onerror = () => {
-      if (gen !== wsGenerationRef.current) return;
       setIsConnecting(false);
       setError(t("terminal.websocket_error"));
     };
 
     ws.onclose = (event: CloseEvent) => {
-      if (gen !== wsGenerationRef.current) return;
       setIsConnected(false);
       setIsConnecting(false);
 
@@ -339,38 +278,6 @@ export function TerminalPage() {
       if (isNonTransient) {
         setError(event.reason || t("terminal.connection_closed_non_recoverable"));
         return;
-      }
-
-      // #4675: ALSO classify the connection as a fast-fail when it opened
-      // but `started` never arrived and the close fired inside the same
-      // window. That covers host-side spawn failures (shell binary
-      // missing, PTY allocation failure, daemon panic during spawn) where
-      // the daemon never reached the point of telling us the shell was
-      // up. The other path (started + non-zero exit fast) sets the flag
-      // in the `case "exit"` branch above.
-      if (
-        !connectionFastFailRef.current &&
-        startedAtRef.current === null &&
-        wsOpenedAtRef.current !== null &&
-        Date.now() - wsOpenedAtRef.current < FAST_EXIT_WINDOW_MS
-      ) {
-        connectionFastFailRef.current = true;
-      }
-
-      // #4675: a connection that fast-failed (either path) is almost
-      // always a host-side configuration problem (TERM/terminfo, missing
-      // tmux binary, missing shell binary, broken shell startup) —
-      // reconnecting won't fix it. Track consecutive occurrences and
-      // bail out of the retry loop after a small ceiling so the user
-      // gets a clear error instead of a forever-spinning page.
-      if (connectionFastFailRef.current) {
-        consecutiveFastFailRef.current += 1;
-        if (consecutiveFastFailRef.current >= MAX_CONSECUTIVE_FAST_FAILS) {
-          setError(t("terminal.fast_exit_giveup"));
-          return;
-        }
-      } else {
-        consecutiveFastFailRef.current = 0;
       }
 
       if (attemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
@@ -390,16 +297,6 @@ export function TerminalPage() {
   }, [t, terminalEnabled, queryClient, addToast]);
 
   connectRef.current = connect;
-
-  // #4675: explicit user-initiated connect resets both ceilings
-  // (auto-reconnect attempts and consecutive fast-fail count) so the user
-  // can recover after fixing host config without reloading the page.
-  const manualConnect = useCallback(() => {
-    attemptRef.current = 0;
-    consecutiveFastFailRef.current = 0;
-    setReconnectAttempt(0);
-    connect();
-  }, [connect]);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -434,7 +331,7 @@ export function TerminalPage() {
     }
   }, [serverOs]);
 
-  const handleSwitchWindow = useCallback((id: string | null) => {
+  const handleSwitchWindow = useCallback((id: string) => {
     desiredWindowIdRef.current = id;
     setPendingWindowId(id);
   }, []);
@@ -469,9 +366,8 @@ export function TerminalPage() {
   // Refit the terminal after fullscreen toggles.
   useEffect(() => {
     if (!terminalRef.current || !fitAddonRef.current) return;
-    let raf2: number | null = null;
     const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
+      const raf2 = requestAnimationFrame(() => {
         try {
           fitAddonRef.current?.fit();
         } catch { /* xterm not attached yet */ }
@@ -482,11 +378,9 @@ export function TerminalPage() {
           if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
         }
       });
+      return () => cancelAnimationFrame(raf2);
     });
-    return () => {
-      cancelAnimationFrame(raf1);
-      if (raf2 !== null) cancelAnimationFrame(raf2);
-    };
+    return () => cancelAnimationFrame(raf1);
   }, [isFullscreen]);
 
   // ESC exits fullscreen, but not when focus is inside the terminal.
@@ -626,20 +520,12 @@ export function TerminalPage() {
       )}
       <div className="flex items-center gap-0.5">
         <button
-          onClick={() => {
-            const n = Math.max(10, fontSize - 1);
-            setFontSize(n);
-            safeStorageSet("terminal.fontSize", String(n));
-          }}
+          onClick={() => setFontSize(s => { const n = Math.max(10, s - 1); localStorage.setItem("terminal.fontSize", String(n)); return n; })}
           className="flex items-center justify-center w-6 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
           title={t("terminal.font_decrease")}
         >A-</button>
         <button
-          onClick={() => {
-            const n = Math.min(20, fontSize + 1);
-            setFontSize(n);
-            safeStorageSet("terminal.fontSize", String(n));
-          }}
+          onClick={() => setFontSize(s => { const n = Math.min(20, s + 1); localStorage.setItem("terminal.fontSize", String(n)); return n; })}
           className="flex items-center justify-center w-7 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
           title={t("terminal.font_increase")}
         >A+</button>
@@ -650,7 +536,7 @@ export function TerminalPage() {
         </Button>
       ) : (
         <Button
-          onClick={manualConnect}
+          onClick={connect}
           isLoading={isConnecting}
           disabled={isConnecting}
           size="sm"

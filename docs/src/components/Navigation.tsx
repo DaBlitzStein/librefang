@@ -354,7 +354,6 @@ const zhNavigation: Array<NavGroup> = [
 			{ title: "系统架构", href: withPrefix("/zh/architecture") },
 			{ title: "安全", href: withPrefix("/zh/architecture/security") },
 			{ title: "OFP 链路加密", href: withPrefix("/zh/architecture/ofp-wire") },
-			{ title: "Manifest 与 MCP 注册表", href: withPrefix("/zh/architecture/manifest-mcp") },
 		],
 	},
 	{
@@ -363,7 +362,6 @@ const zhNavigation: Array<NavGroup> = [
 			{ title: "沙盒与执行", href: withPrefix("/zh/security/sandboxing") },
 			{ title: "完整性与凭据", href: withPrefix("/zh/security/integrity") },
 			{ title: "网络与 API 安全", href: withPrefix("/zh/security/network-api") },
-			{ title: "MCP OAuth 主机钉接", href: withPrefix("/zh/security/mcp-oauth") },
 			{ title: "运维与防护", href: withPrefix("/zh/security/operations") },
 			{ title: "审批与 TOTP", href: withPrefix("/zh/security/approvals") },
 		],
@@ -373,7 +371,6 @@ const zhNavigation: Array<NavGroup> = [
 		links: [
 			{ title: "Agent 模板", href: withPrefix("/zh/agent/templates") },
 			{ title: "自主 Hands", href: withPrefix("/zh/agent/hands") },
-			{ title: "自动进化模式", href: withPrefix("/zh/agent/auto-evolution") },
 			{ title: "内存系统", href: withPrefix("/zh/agent/memory") },
 			{ title: "技能开发", href: withPrefix("/zh/agent/skills") },
 			{ title: "插件开发", href: withPrefix("/zh/agent/plugins") },
@@ -457,7 +454,6 @@ export const enNavigation: Array<NavGroup> = [
 			{ title: "Architecture", href: withPrefix("/architecture") },
 			{ title: "Security", href: withPrefix("/architecture/security") },
 			{ title: "OFP Wire Encryption", href: withPrefix("/architecture/ofp-wire") },
-			{ title: "Manifest & MCP Registry", href: withPrefix("/architecture/manifest-mcp") },
 		],
 	},
 	{
@@ -466,7 +462,6 @@ export const enNavigation: Array<NavGroup> = [
 			{ title: "Sandboxing", href: withPrefix("/security/sandboxing") },
 			{ title: "Integrity & Secrets", href: withPrefix("/security/integrity") },
 			{ title: "Network & API", href: withPrefix("/security/network-api") },
-			{ title: "MCP OAuth Host Pinning", href: withPrefix("/security/mcp-oauth") },
 			{ title: "Operations", href: withPrefix("/security/operations") },
 			{ title: "Approvals & TOTP", href: withPrefix("/security/approvals") },
 		],
@@ -476,7 +471,6 @@ export const enNavigation: Array<NavGroup> = [
 		links: [
 			{ title: "Agent Templates", href: withPrefix("/agent/templates") },
 			{ title: "Autonomous Hands", href: withPrefix("/agent/hands") },
-			{ title: "Auto-Evolution Mode", href: withPrefix("/agent/auto-evolution") },
 			{ title: "Memory System", href: withPrefix("/agent/memory") },
 			{ title: "Skills", href: withPrefix("/agent/skills") },
 			{ title: "Plugins", href: withPrefix("/agent/plugins") },
@@ -508,7 +502,6 @@ export const enNavigation: Array<NavGroup> = [
 			{ title: "CLI Examples", href: withPrefix("/integrations/cli/examples") },
 			{ title: "Android / Termux", href: withPrefix("/integrations/android-termux") },
 			{ title: "MCP/A2A", href: withPrefix("/integrations/mcp-a2a") },
-			{ title: "Editor (ACP)", href: withPrefix("/integrations/acp") },
 			{ title: "Migration", href: withPrefix("/integrations/migration") },
 			{ title: "Desktop", href: withPrefix("/integrations/desktop") },
 			{ title: "Development Guide", href: withPrefix("/integrations/development") },

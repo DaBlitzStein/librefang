@@ -229,10 +229,7 @@ async fn setup_when_already_confirmed_requires_current_code() {
     // Bare setup call must now refuse.
     let (s2, b2) = json_post(&h, "/api/approvals/totp/setup", serde_json::json!({})).await;
     assert_eq!(s2, StatusCode::BAD_REQUEST, "got body: {b2:?}");
-    let err = b2["error"]
-        .as_str()
-        .or_else(|| b2["error"]["message"].as_str())
-        .unwrap_or_default();
+    let err = b2["error"].as_str().unwrap_or_default();
     assert!(
         err.contains("current_code"),
         "error must mention current_code, got: {err}"
@@ -316,10 +313,7 @@ async fn confirm_rejects_replayed_code() {
     )
     .await;
     assert_eq!(s2, StatusCode::BAD_REQUEST, "got body: {b2:?}");
-    let err = b2["error"]
-        .as_str()
-        .or_else(|| b2["error"]["message"].as_str())
-        .unwrap_or_default();
+    let err = b2["error"].as_str().unwrap_or_default();
     assert!(
         err.contains("already been used"),
         "expected replay error, got: {err}"
@@ -343,10 +337,7 @@ async fn revoke_before_enrollment_is_bad_request() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got body: {body:?}");
-    let err = body["error"]
-        .as_str()
-        .or_else(|| body["error"]["message"].as_str())
-        .unwrap_or_default();
+    let err = body["error"].as_str().unwrap_or_default();
     assert!(
         err.contains("not enrolled"),
         "expected 'not enrolled' error, got: {err}"

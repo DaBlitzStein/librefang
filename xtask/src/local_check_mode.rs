@@ -75,8 +75,7 @@ fn detect_cpus() -> usize {
 fn detect_mem_gb() -> u64 {
     // Only refresh RAM — skip processes / disks / networks for a fast probe.
     let sys = sysinfo::System::new_with_specifics(
-        sysinfo::RefreshKind::nothing()
-            .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram()),
+        sysinfo::RefreshKind::new().with_memory(sysinfo::MemoryRefreshKind::new().with_ram()),
     );
     // sysinfo reports bytes; convert to GB rounding down so a 15.9 GB
     // machine is correctly treated as "below 16".

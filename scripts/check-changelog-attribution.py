@@ -42,11 +42,6 @@ from pathlib import Path
 # common typo `(@-foo)` is rejected.
 ATTRIBUTION_RE = re.compile(r"\(@[A-Za-z0-9_][A-Za-z0-9_-]*\)")
 BULLET_RE = re.compile(r"^(\s*)-\s+\S")  # `- text` or `  - text` (nested)
-# Lines ending with `# pragma: no-attribution` are explicitly exempted from the
-# check. Use sparingly — only for entries added before the convention was
-# enforced that cannot be retroactively attributed (e.g. author is unknown or
-# the entry covers work from many people with no single owner).
-NO_ATTRIBUTION_RE = re.compile(r"#\s*pragma:\s*no-attribution\s*$")
 HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 UNRELEASED_RE = re.compile(r"^##\s+\[Unreleased\]\s*$")
 RELEASE_HEADER_RE = re.compile(r"^##\s+\[[^\]]+\]")  # any `## [...]` line
@@ -113,7 +108,7 @@ def is_bullet(line: str) -> bool:
 
 
 def has_attribution(line: str) -> bool:
-    return ATTRIBUTION_RE.search(line) is not None or NO_ATTRIBUTION_RE.search(line) is not None
+    return ATTRIBUTION_RE.search(line) is not None
 
 
 def report(violations: list[tuple[int, str]], scope: str) -> int:
@@ -373,6 +368,20 @@ def main() -> int:
             scope="[Unreleased] section (all bullets)",
         )
     if args.staged:
+        # Skip the check on merge commits in progress: the staged diff against
+        # the first parent unavoidably contains every bullet authored on the
+        # other branch (e.g. an `origin/main → fork/main` sync absorbing
+        # hundreds of upstream commits), and forcing `(@user)` on those
+        # bullets would falsify authorship. Merge commits don't author new
+        # entries — they only weave together two histories that were each
+        # validated at their own commit time.
+        git_dir = run_git(["rev-parse", "--git-dir"], root).strip()
+        if git_dir:
+            gd = Path(git_dir)
+            if not gd.is_absolute():
+                gd = root / gd
+            if (gd / "MERGE_HEAD").exists():
+                return 0
         return report(
             scan_staged_added_lines(root),
             scope="staged additions to [Unreleased]",

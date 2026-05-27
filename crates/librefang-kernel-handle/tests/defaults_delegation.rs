@@ -17,15 +17,11 @@ impl AgentControl for TrackingSendHandle {
         &self,
         _manifest_toml: &str,
         _parent_id: Option<&str>,
-    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(String, String), String> {
         Ok(("id".into(), "name".into()))
     }
 
-    async fn send_to_agent(
-        &self,
-        _agent_id: &str,
-        _message: &str,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
         self.send_called.store(true, Ordering::SeqCst);
         Ok("ok".into())
     }
@@ -34,7 +30,7 @@ impl AgentControl for TrackingSendHandle {
         vec![]
     }
 
-    fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
         Ok(())
     }
 
@@ -48,31 +44,23 @@ impl MemoryAccess for TrackingSendHandle {
         &self,
         _key: &str,
         _value: serde_json::Value,
-        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
-    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 
     fn memory_recall(
         &self,
         _key: &str,
-        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<Option<serde_json::Value>, String> {
         Ok(None)
     }
 
-    fn memory_list(
-        &self,
-        _agent_id: Option<&str>,
-        _peer_id: Option<&str>,
-    ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
+    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
         Ok(vec![])
     }
 }
-
-impl WikiAccess for TrackingSendHandle {}
 
 #[async_trait]
 impl TaskQueue for TrackingSendHandle {
@@ -82,14 +70,11 @@ impl TaskQueue for TrackingSendHandle {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<String, String> {
         Ok("task".into())
     }
 
-    async fn task_claim(
-        &self,
-        _agent_id: &str,
-    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
         Ok(None)
     }
 
@@ -98,43 +83,27 @@ impl TaskQueue for TrackingSendHandle {
         _agent_id: &str,
         _task_id: &str,
         _result: &str,
-    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 
-    async fn task_list(
-        &self,
-        _status: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
         Ok(vec![])
     }
 
-    async fn task_delete(
-        &self,
-        _task_id: &str,
-    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
         Ok(false)
     }
 
-    async fn task_retry(
-        &self,
-        _task_id: &str,
-    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
         Ok(false)
     }
 
-    async fn task_get(
-        &self,
-        _task_id: &str,
-    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
         Ok(None)
     }
 
-    async fn task_update_status(
-        &self,
-        _task_id: &str,
-        _new_status: &str,
-    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, String> {
         Ok(false)
     }
 }
@@ -145,7 +114,7 @@ impl EventBus for TrackingSendHandle {
         &self,
         _event_type: &str,
         _payload: serde_json::Value,
-    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 }
@@ -155,22 +124,21 @@ impl KnowledgeGraph for TrackingSendHandle {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<String, String> {
         Ok("entity".into())
     }
 
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<String, String> {
         Ok("relation".into())
     }
 
     async fn knowledge_query(
         &self,
         _pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
-    {
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
         Ok(vec![])
     }
 }
@@ -194,7 +162,7 @@ async fn test_send_to_agent_as_delegates_to_send_to_agent() {
     let result = handle.send_to_agent_as("agent1", "msg", "parent1").await;
 
     assert!(handle.send_called.load(Ordering::SeqCst));
-    assert_eq!(result.unwrap(), "ok");
+    assert_eq!(result, Ok("ok".into()));
 }
 
 // ---------------------------------------------------------------------------
@@ -211,16 +179,12 @@ impl AgentControl for TrackingSpawnHandle {
         &self,
         _manifest_toml: &str,
         _parent_id: Option<&str>,
-    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(String, String), String> {
         self.spawn_called.store(true, Ordering::SeqCst);
         Ok(("id".into(), "name".into()))
     }
 
-    async fn send_to_agent(
-        &self,
-        _agent_id: &str,
-        _message: &str,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
         Ok("ok".into())
     }
 
@@ -228,7 +192,7 @@ impl AgentControl for TrackingSpawnHandle {
         vec![]
     }
 
-    fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
         Ok(())
     }
 
@@ -242,31 +206,23 @@ impl MemoryAccess for TrackingSpawnHandle {
         &self,
         _key: &str,
         _value: serde_json::Value,
-        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
-    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 
     fn memory_recall(
         &self,
         _key: &str,
-        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<Option<serde_json::Value>, String> {
         Ok(None)
     }
 
-    fn memory_list(
-        &self,
-        _agent_id: Option<&str>,
-        _peer_id: Option<&str>,
-    ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
+    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
         Ok(vec![])
     }
 }
-
-impl WikiAccess for TrackingSpawnHandle {}
 
 #[async_trait]
 impl TaskQueue for TrackingSpawnHandle {
@@ -276,14 +232,11 @@ impl TaskQueue for TrackingSpawnHandle {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<String, String> {
         Ok("task".into())
     }
 
-    async fn task_claim(
-        &self,
-        _agent_id: &str,
-    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
         Ok(None)
     }
 
@@ -292,43 +245,27 @@ impl TaskQueue for TrackingSpawnHandle {
         _agent_id: &str,
         _task_id: &str,
         _result: &str,
-    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 
-    async fn task_list(
-        &self,
-        _status: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
         Ok(vec![])
     }
 
-    async fn task_delete(
-        &self,
-        _task_id: &str,
-    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
         Ok(false)
     }
 
-    async fn task_retry(
-        &self,
-        _task_id: &str,
-    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
         Ok(false)
     }
 
-    async fn task_get(
-        &self,
-        _task_id: &str,
-    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
         Ok(None)
     }
 
-    async fn task_update_status(
-        &self,
-        _task_id: &str,
-        _new_status: &str,
-    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, String> {
         Ok(false)
     }
 }
@@ -339,7 +276,7 @@ impl EventBus for TrackingSpawnHandle {
         &self,
         _event_type: &str,
         _payload: serde_json::Value,
-    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 }
@@ -349,22 +286,21 @@ impl KnowledgeGraph for TrackingSpawnHandle {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<String, String> {
         Ok("entity".into())
     }
 
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<String, String> {
         Ok("relation".into())
     }
 
     async fn knowledge_query(
         &self,
         _pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
-    {
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
         Ok(vec![])
     }
 }
@@ -388,9 +324,7 @@ async fn test_spawn_agent_checked_delegates_to_spawn_agent() {
     let result = handle.spawn_agent_checked("toml", None, &[]).await;
 
     assert!(handle.spawn_called.load(Ordering::SeqCst));
-    let (id, name) = result.unwrap();
-    assert_eq!(id, "id");
-    assert_eq!(name, "name");
+    assert_eq!(result, Ok(("id".into(), "name".into())));
 }
 
 // ---------------------------------------------------------------------------
@@ -407,15 +341,11 @@ impl AgentControl for TrackingApprovalHandle {
         &self,
         _manifest_toml: &str,
         _parent_id: Option<&str>,
-    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(String, String), String> {
         Ok(("id".into(), "name".into()))
     }
 
-    async fn send_to_agent(
-        &self,
-        _agent_id: &str,
-        _message: &str,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
         Ok("ok".into())
     }
 
@@ -423,7 +353,7 @@ impl AgentControl for TrackingApprovalHandle {
         vec![]
     }
 
-    fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
         Ok(())
     }
 
@@ -437,31 +367,23 @@ impl MemoryAccess for TrackingApprovalHandle {
         &self,
         _key: &str,
         _value: serde_json::Value,
-        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
-    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 
     fn memory_recall(
         &self,
         _key: &str,
-        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<Option<serde_json::Value>, String> {
         Ok(None)
     }
 
-    fn memory_list(
-        &self,
-        _agent_id: Option<&str>,
-        _peer_id: Option<&str>,
-    ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
+    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
         Ok(vec![])
     }
 }
-
-impl WikiAccess for TrackingApprovalHandle {}
 
 #[async_trait]
 impl TaskQueue for TrackingApprovalHandle {
@@ -471,14 +393,11 @@ impl TaskQueue for TrackingApprovalHandle {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<String, String> {
         Ok("task".into())
     }
 
-    async fn task_claim(
-        &self,
-        _agent_id: &str,
-    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
         Ok(None)
     }
 
@@ -487,43 +406,27 @@ impl TaskQueue for TrackingApprovalHandle {
         _agent_id: &str,
         _task_id: &str,
         _result: &str,
-    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 
-    async fn task_list(
-        &self,
-        _status: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
         Ok(vec![])
     }
 
-    async fn task_delete(
-        &self,
-        _task_id: &str,
-    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
         Ok(false)
     }
 
-    async fn task_retry(
-        &self,
-        _task_id: &str,
-    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
         Ok(false)
     }
 
-    async fn task_get(
-        &self,
-        _task_id: &str,
-    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
         Ok(None)
     }
 
-    async fn task_update_status(
-        &self,
-        _task_id: &str,
-        _new_status: &str,
-    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, String> {
         Ok(false)
     }
 }
@@ -534,7 +437,7 @@ impl EventBus for TrackingApprovalHandle {
         &self,
         _event_type: &str,
         _payload: serde_json::Value,
-    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+    ) -> Result<(), String> {
         Ok(())
     }
 }
@@ -544,22 +447,21 @@ impl KnowledgeGraph for TrackingApprovalHandle {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<String, String> {
         Ok("entity".into())
     }
 
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<String, String> {
         Ok("relation".into())
     }
 
     async fn knowledge_query(
         &self,
         _pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
-    {
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
         Ok(vec![])
     }
 }
@@ -590,41 +492,4 @@ fn test_requires_approval_with_context_delegates_to_requires_approval() {
 
     assert!(handle.approval_checked.load(Ordering::SeqCst));
     assert!(result);
-}
-
-// ---------------------------------------------------------------------------
-// Test 4: send_to_agent_with_key default delegates to send_to_agent
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_send_to_agent_with_key_delegates_to_send_to_agent() {
-    let handle = TrackingSendHandle {
-        send_called: AtomicBool::new(false),
-    };
-
-    let result = handle
-        .send_to_agent_with_key("agent1", "msg", "my-key")
-        .await;
-
-    assert!(handle.send_called.load(Ordering::SeqCst));
-    assert_eq!(result.unwrap(), "ok");
-}
-
-// ---------------------------------------------------------------------------
-// Test 5: send_to_agent_as_with_key default delegates to send_to_agent_as,
-//         which itself falls through to send_to_agent on this stub
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_send_to_agent_as_with_key_delegates_to_send_to_agent_as() {
-    let handle = TrackingSendHandle {
-        send_called: AtomicBool::new(false),
-    };
-
-    let result = handle
-        .send_to_agent_as_with_key("agent1", "msg", "parent1", "my-key")
-        .await;
-
-    assert!(handle.send_called.load(Ordering::SeqCst));
-    assert_eq!(result.unwrap(), "ok");
 }

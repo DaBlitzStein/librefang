@@ -6,166 +6,437 @@ Messaging platform integrations, protocol adapters, and webhook-based channels.
 
 ## LINE
 
-LINE now ships as the `librefang.sidecar.adapters.line` Python sidecar (the in-process Rust adapter was removed in the sidecar migration). The sidecar runs **its own HTTP webhook server**, so the URL you register at the LINE Developers Console must point at the sidecar host/port, not the LibreFang API port.
-
 ### Prerequisites
 
 - A LINE Messaging API channel (from the [LINE Developers Console](https://developers.line.biz/en/docs/messaging-api/))
-- The `librefang` Python SDK installed where the sidecar will run
-- A publicly accessible webhook URL pointing at the sidecar (typical pattern: an HTTPS reverse proxy in front of the sidecar's `LINE_WEBHOOK_PORT`)
+- A publicly accessible webhook URL
 
 ### Setup
 
 1. Go to the [LINE Developers Console](https://developers.line.biz/console/) and create a new Messaging API channel.
 2. Note the **Channel Secret** and issue a **Channel Access Token**.
-3. Set both secrets in `~/.librefang/secrets.env` (or via the dashboard's "Set API Key" button, which writes the same file):
+3. Set environment variables:
 
 ```bash
-LINE_CHANNEL_SECRET=your-secret
-LINE_CHANNEL_ACCESS_TOKEN=your-access-token
+export LINE_CHANNEL_SECRET=your-secret        # Environment variable
+export LINE_ACCESS_TOKEN=your-access-token
+librefang vault set LINE_CHANNEL_SECRET       # Encrypted vault (recommended)
+librefang vault set LINE_ACCESS_TOKEN
+librefang config set-key line                 # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-4. Declare the sidecar in `config.toml`:
+4. Add to config:
 
 ```toml
-[[sidecar_channels]]
-name = "line"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.line"]
-channel_type = "line"
+[channels.line]
+channel_secret_env = "LINE_CHANNEL_SECRET"
+access_token_env = "LINE_ACCESS_TOKEN"
 default_agent = "assistant"
-[sidecar_channels.env]
-LINE_WEBHOOK_PORT = "9090"
-# LINE_WEBHOOK_PATH = "/webhook"
-# LINE_ACCOUNT_ID = "production"   # optional, multi-bot routing key
 ```
 
-5. In the LINE Developers Console, set the webhook URL to your sidecar host (e.g., `https://your-sidecar-host:9090/webhook`).
-6. Restart the daemon — the supervisor launches the sidecar, which validates the access token via `GET /v2/bot/info` at startup and then accepts inbound webhook POSTs.
+5. In the LINE Developers Console, set the webhook URL to your LibreFang instance (e.g., `https://your-domain.com:4545/channels/line/webhook`).
+6. Restart the daemon.
 
 ### How It Works
 
-The sidecar runs as a supervised subprocess of LibreFang. It serves a standalone HTTP webhook endpoint on `LINE_WEBHOOK_PORT` (default `9090`) and `LINE_WEBHOOK_PATH` (default `/webhook`), verifies every inbound POST's `X-Line-Signature` HMAC-SHA256 over the raw request body (missing → 400, mismatched → 401), and forwards parsed `message` events to the kernel via newline-delimited JSON-RPC over stdio. Outbound responses go through `POST /v2/bot/message/push` with the Bearer access token; 429 responses honour `Retry-After` and chunk-level fail-open keeps a single throttled chunk from dropping the rest of a multi-part reply.
+The LINE adapter registers webhook routes on the shared API server (default port 4545) to receive message events from LINE's Messaging API. Each request is verified using the channel secret's HMAC-SHA256 signature. Responses are sent via the LINE Reply API or Push API.
+
+---
+
+## Viber
+
+### Prerequisites
+
+- A Viber bot token (from the [Viber Developer Portal](https://developers.viber.com/docs/api/))
+- A publicly accessible webhook URL
+
+### Setup
+
+1. Create a bot account on the [Viber Admin Panel](https://partners.viber.com/).
+2. Copy the authentication token.
+3. Set environment variables:
+
+```bash
+export VIBER_AUTH_TOKEN=your-viber-auth-token  # Environment variable
+librefang vault set VIBER_AUTH_TOKEN           # Encrypted vault (recommended)
+librefang config set-key viber                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.viber]
+auth_token_env = "VIBER_AUTH_TOKEN"
+webhook_url = "https://your-domain.com:4545/channels/viber/webhook"
+default_agent = "assistant"
+```
+
+5. Restart the daemon. The adapter automatically registers the webhook URL with Viber on startup.
+
+### How It Works
+
+The Viber adapter registers a webhook with the Viber API on startup and receives message events via HTTPS POST callbacks on the shared API server at `/channels/viber/webhook`. Responses are sent via the Viber REST API's `send_message` endpoint.
+
+---
+
+## Facebook Messenger
+
+### Prerequisites
+
+- A Meta (Facebook) Developer account with a Facebook Page and App (see [Messenger Platform docs](https://developers.facebook.com/docs/messenger-platform/))
+- A publicly accessible webhook URL
+
+### Setup
+
+1. Go to [Meta for Developers](https://developers.facebook.com/) and create or select an app.
+2. Add the **Messenger** product to your app.
+3. Generate a **Page Access Token** for your Facebook Page.
+4. Choose a **Verify Token** (any string you define).
+5. Set environment variables:
+
+```bash
+export MESSENGER_PAGE_TOKEN=your-page-token   # Environment variable
+export MESSENGER_VERIFY_TOKEN=your-verify-token
+librefang vault set MESSENGER_PAGE_TOKEN      # Encrypted vault (recommended)
+librefang vault set MESSENGER_VERIFY_TOKEN
+librefang config set-key messenger            # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+6. Add to config:
+
+```toml
+[channels.messenger]
+page_token_env = "MESSENGER_PAGE_TOKEN"
+verify_token_env = "MESSENGER_VERIFY_TOKEN"
+default_agent = "assistant"
+```
+
+7. In the Meta Developer Dashboard, set the webhook callback URL (e.g., `https://your-domain.com:4545/channels/messenger/webhook`) and enter your verify token. Subscribe to the `messages` event.
+8. Restart the daemon.
+
+### How It Works
+
+The Messenger adapter registers webhook routes on the shared API server (default port 4545) that handle webhook verification (GET) and incoming message events (POST) from the Messenger Platform. Responses are sent via the Send API using the page access token.
+
+---
+
+## Threema
+
+### Prerequisites
+
+- A Threema Gateway ID and API secret (from the [Threema Gateway](https://gateway.threema.ch/en/developer/api))
+
+### Setup
+
+1. Register for a [Threema Gateway](https://gateway.threema.ch/) account.
+2. Create a Gateway ID and note the ID and secret.
+3. Set environment variables:
+
+```bash
+export THREEMA_ID=*YOUR_ID                    # Environment variable
+export THREEMA_SECRET=your-api-secret
+librefang vault set THREEMA_ID                # Encrypted vault (recommended)
+librefang vault set THREEMA_SECRET
+librefang config set-key threema              # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.threema]
+id_env = "THREEMA_ID"
+secret_env = "THREEMA_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Threema adapter uses the Threema Gateway REST API to send and receive end-to-end encrypted messages. Incoming messages are delivered via webhook callbacks on the shared API server at `/channels/threema/webhook`, and responses are sent through the Gateway's message sending endpoint.
 
 ---
 
 ## DingTalk
 
-DingTalk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.dingtalk`), **stream mode only**. The in-process `[channels.dingtalk]` config block was removed in the sidecar migration; declare DingTalk as a `[[sidecar_channels]]` entry instead. The legacy in-process `webhook` mode (HMAC-SHA256 over `timestamp + secret + body`) is NOT ported — switch the robot to stream subscription in the DingTalk admin console.
+Supports two modes:
+- **Stream mode** (default, recommended): WebSocket long-connection via the DingTalk Stream protocol. No public IP or port required.
+- **Webhook mode** (legacy): HTTP callback server. Requires a public-facing URL.
 
 ### Prerequisites
 
 - A DingTalk application from the [DingTalk Open Platform](https://open.dingtalk.com/document/)
-- App Key and App Secret from your DingTalk application
-- `python3` on the daemon host (no third-party packages required — stdlib-only sidecar)
+- For **stream mode**: App Key and App Secret from your DingTalk application
+- For **webhook mode**: A custom robot with webhook access token and signing secret
 
-### Setup
+### Setup (Stream Mode -- Recommended)
 
 1. Go to the [DingTalk Open Platform](https://open.dingtalk.com/), create an application (or use an existing one).
 2. Enable the **Robot** capability and note the **App Key** (Client ID) and **App Secret** (Client Secret).
-3. Add to `config.toml`:
+3. Set environment variables:
 
-```toml
-[[sidecar_channels]]
-name = "dingtalk"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.dingtalk"]
-channel_type = "dingtalk"
-[sidecar_channels.env]
-DINGTALK_APP_KEY = "dingxxx..."
-# DINGTALK_ACCOUNT_ID = "prod-bot"     # optional, multi-bot routing key
-# DINGTALK_ROBOT_CODE = ""             # optional, defaults to app_key
+```bash
+export DINGTALK_APP_KEY=your-app-key          # Environment variable
+export DINGTALK_APP_SECRET=your-app-secret
+librefang vault set DINGTALK_APP_KEY          # Encrypted vault (recommended)
+librefang vault set DINGTALK_APP_SECRET
 ```
 
-4. Put `DINGTALK_APP_SECRET` in `~/.librefang/secrets.env` (the dashboard's Channels page writes it for you).
+4. Add to config:
+
+```toml
+[channels.dingtalk]
+receive_mode = "stream"
+app_key_env = "DINGTALK_APP_KEY"
+app_secret_env = "DINGTALK_APP_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### Setup (Webhook Mode)
+
+1. In DingTalk, open a group chat and go to **Group Settings > Smart Group Assistant > Add Robot**.
+2. Choose **Custom Robot** and enable the **Security Setting** (sign mode recommended).
+3. Note the webhook access token and signing secret.
+4. Set environment variables:
+
+```bash
+export DINGTALK_ACCESS_TOKEN=your-token       # Environment variable
+export DINGTALK_SECRET=your-signing-secret
+librefang vault set DINGTALK_ACCESS_TOKEN     # Encrypted vault (recommended)
+librefang vault set DINGTALK_SECRET
+```
+
+5. Add to config:
+
+```toml
+[channels.dingtalk]
+receive_mode = "webhook"
+access_token_env = "DINGTALK_ACCESS_TOKEN"
+secret_env = "DINGTALK_SECRET"
+default_agent = "assistant"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+In **stream mode**, the adapter registers with the DingTalk gateway API (`/v1.0/gateway/connections/open`) to obtain a WebSocket endpoint and ticket. It then maintains a persistent WebSocket connection, receiving bot message callbacks and responding with ACK frames. Heartbeat ping/pong is handled automatically.
+
+In **webhook mode**, the adapter receives messages via HTTP callback on the shared API server at `/channels/dingtalk/webhook`. Each request is verified using HMAC-SHA256 signature with the configured secret. Responses are sent back through the DingTalk webhook URL with a signed timestamp.
+
+---
+
+## QQ
+
+### Prerequisites
+
+- A QQ Bot registered on the [QQ Bot Platform](https://bot.q.qq.com/wiki/)
+- An App ID and token
+
+### Setup
+
+1. Go to the [QQ Bot Platform](https://bot.q.qq.com/) and register a bot application.
+2. Note the App ID and token.
+3. Set environment variables:
+
+```bash
+export QQ_APP_ID=your-app-id                 # Environment variable
+export QQ_TOKEN=your-bot-token
+librefang vault set QQ_APP_ID                # Encrypted vault (recommended)
+librefang vault set QQ_TOKEN
+librefang config set-key qq                   # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.qq]
+app_id_env = "QQ_APP_ID"
+token_env = "QQ_TOKEN"
+default_agent = "assistant"
+```
+
 5. Restart the daemon.
 
 ### How It Works
 
-The sidecar registers with the DingTalk gateway via `POST /v1.0/gateway/connections/open` to obtain a WebSocket endpoint + ticket, opens the WS connection, ACKs every CALLBACK frame inline, and posts replies to the per-message `sessionWebhook` URL that DingTalk delivers with each inbound event. Heartbeat SYSTEM ping/pong is handled automatically. Reconnect is 3 → 60 s exponential backoff.
+The QQ adapter connects to the QQ Bot API via WebSocket for real-time message delivery. It authenticates using the app credentials, listens for message events in authorized guilds and channels, and sends responses through the QQ Bot REST API.
 
 ---
 
-## QQ (sidecar)
-
-QQ migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.qq`).
+## WeCom
 
 ### Prerequisites
 
-- A QQ Bot registered on the [QQ Bot Platform](https://bot.q.qq.com/wiki/) with App ID and App Secret.
-- Python 3 + the `librefang` SDK (`pip install -e sdk/python`).
+- A WeCom (WeChat Work) enterprise account with an **intelligent bot** created from the [WeCom Admin Console](https://work.weixin.qq.com/)
 
 ### Setup
 
-1. Register a bot on the QQ Open Platform and note the `App ID` + `App Secret`.
-2. Put the secret in `~/.librefang/secrets.env`:
+1. In the WeCom admin console, go to **Apps > Create App** and select **Intelligent Bot**.
+2. Note the **Bot ID** and **Secret** from the bot settings page.
+3. Set the secret environment variable:
 
 ```bash
-QQ_APP_SECRET=your-app-secret
+export WECOM_BOT_SECRET=your-bot-secret       # Environment variable
+librefang vault set WECOM_BOT_SECRET          # Encrypted vault (recommended)
+librefang config set-key wecom                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-3. Declare the sidecar in `~/.librefang/config.toml`:
+4. Add to config:
 
 ```toml
-[[sidecar_channels]]
-name = "qq"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.qq"]
-channel_type = "qq"
+[channels.wecom]
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
+# account_id = "my-bot"          # Optional: unique ID for multi-bot routing
+# default_agent = "assistant"    # Optional: route messages to specific agent
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The WeCom adapter connects to `wss://openws.work.weixin.qq.com` via a persistent WebSocket. It authenticates using the Bot ID and a signed token, then subscribes to incoming messages via `aibot_subscribe`. User messages arrive as `aibot_msg_callback` JSON frames and replies are sent back as `aibot_send_msg` frames. No public HTTP endpoint or AES encryption is required.
+
+---
+
+## IRC
+
+### Prerequisites
+
+- An IRC server address and a nickname for the bot (protocol defined in [RFC 2812](https://datatracker.ietf.org/doc/html/rfc2812))
+
+### Setup
+
+1. Choose an IRC server and channels you want the bot to join.
+2. Set environment variables:
+
+```bash
+export IRC_SERVER=irc.libera.chat:6697        # Environment variable
+export IRC_NICK=librefang-bot
+export IRC_CHANNELS=#channel1,#channel2
+# export IRC_PASSWORD=your-password           # Optional
+librefang vault set IRC_SERVER                # Encrypted vault (recommended)
+librefang vault set IRC_NICK
+librefang vault set IRC_CHANNELS
+# librefang vault set IRC_PASSWORD            # Optional
+librefang config set-key irc                  # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.irc]
+server_env = "IRC_SERVER"
+nick_env = "IRC_NICK"
+channels = ["#channel1", "#channel2"]
+# password_env = "IRC_PASSWORD"   # optional
 default_agent = "assistant"
-[sidecar_channels.env]
-QQ_APP_ID = "your-app-id"
-# QQ_ALLOWED_USERS = "openid-1,openid-2"   # optional
-# QQ_ACCOUNT_ID = "prod-bot"               # optional
-# QQ_INTENTS = "1073746435"                # optional bitmask override
 ```
 
 4. Restart the daemon.
 
 ### How It Works
 
-The sidecar fetches an access token from `https://bots.qq.com/app/getAppAccessToken`, discovers the WebSocket gateway via `GET /gateway`, then maintains a persistent WS connection through the HELLO → IDENTIFY → READY handshake with periodic heartbeats. Inbound `MESSAGE_CREATE` / `AT_MESSAGE_CREATE` / `DIRECT_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` / `C2C_MESSAGE_CREATE` dispatch events are surfaced to the kernel; outbound replies use `POST {api_base}{reply_endpoint}` with the inbound `msg_id` as the passive-reply target.
+The IRC adapter connects to the IRC server over TCP (with optional TLS), authenticates, and joins the configured channels. It listens for PRIVMSG events and routes them to the configured agent. Responses are sent as PRIVMSG replies.
 
 ---
 
-## WeCom (sidecar)
-
-WeCom (WeChat Work / Enterprise WeChat) migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.wecom`). The legacy callback mode (HTTP webhook + AES-CBC-256 inbound decryption) is no longer supported — Python's stdlib has no AES, and the sidecar SDK is stdlib-only by policy. Operators who relied on callback mode must switch the bot to WebSocket mode in the WeCom admin console.
+## XMPP
 
 ### Prerequisites
 
-- A WeCom enterprise account with an **intelligent bot** created from the [WeCom Admin Console](https://work.weixin.qq.com/)
-- `librefang-sdk` installed in the Python environment that runs the sidecar (`pip install -e sdk/python` from the repo root, or `pip install librefang-sdk` once the package is published)
+- An XMPP account (JID) and server (see [XMPP extensions](https://xmpp.org/extensions/))
 
 ### Setup
 
-1. In the WeCom admin console, go to **Apps > Create App** and select **Intelligent Bot**. Note the **Bot ID** and **Secret** from the bot settings page.
-2. Put the secret in `~/.librefang/secrets.env`:
+1. Create an XMPP account on your server (or use an existing one).
+2. Set environment variables:
 
 ```bash
-WECOM_BOT_SECRET=your-bot-secret
+export XMPP_JID=bot@example.com               # Environment variable
+export XMPP_PASSWORD=your-password
+export XMPP_SERVER=example.com
+librefang vault set XMPP_JID                  # Encrypted vault (recommended)
+librefang vault set XMPP_PASSWORD
+librefang vault set XMPP_SERVER
+librefang config set-key xmpp                 # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-3. Add the sidecar to `config.toml`:
+3. Add to config:
 
 ```toml
-[[sidecar_channels]]
-name = "wecom"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.wecom"]
-channel_type = "wecom"
-
-[sidecar_channels.env]
-WECOM_BOT_ID = "aibxxxxxxx"
-# WECOM_ALLOWED_USERS = "alice,bob"   # optional CSV; empty = all
-# WECOM_ACCOUNT_ID    = "prod-bot"    # optional multi-bot routing
+[channels.xmpp]
+jid_env = "XMPP_JID"
+password_env = "XMPP_PASSWORD"
+server_env = "XMPP_SERVER"
+default_agent = "assistant"
 ```
 
 4. Restart the daemon.
 
 ### How It Works
 
-The WeCom sidecar connects to `wss://openws.work.weixin.qq.com` via a persistent WebSocket, subscribes with `cmd: "aibot_subscribe"` carrying the Bot ID and Secret, and sends a `cmd: "ping"` heartbeat every 30 s. Inbound messages arrive as `cmd: "aibot_msg_callback"` JSON frames; replies use `cmd: "aibot_respond_msg"` (passive reply to a cached inbound `req_id`, one-shot) or `cmd: "aibot_send_msg"` (proactive). Outbound bodies are always `msgtype: "markdown"` since the intelligent-bot `aibot_respond_msg` does not accept `msgtype: "text"`. Inbound `req_id`s are deduped via a bounded set (capacity 10000 / evict 5000) so a WS reconnect that races with platform redelivery does not double-emit.
+The XMPP adapter connects to the XMPP server using the specified JID and password, then listens for incoming message stanzas. Responses are sent back as XMPP message stanzas to the originating JID.
+
+---
+
+## MQTT
+
+### Prerequisites
+
+- An MQTT broker (e.g., Mosquitto, HiveMQ, EMQX) accessible from the LibreFang host (see [MQTT specification](https://mqtt.org))
+- Requires the `all-channels` feature flag at compile time
+
+### Setup
+
+1. Ensure your MQTT broker is running and accessible.
+2. Set environment variables (optional, for authenticated brokers):
+
+```bash
+export MQTT_BROKER_URL=mqtt://broker:1883     # Environment variable
+export MQTT_TOPIC=home/agents/input
+# export MQTT_USERNAME=your-username          # Optional
+# export MQTT_PASSWORD=your-password          # Optional
+librefang vault set MQTT_BROKER_URL           # Encrypted vault (recommended)
+librefang vault set MQTT_TOPIC
+# librefang vault set MQTT_USERNAME           # Optional
+# librefang vault set MQTT_PASSWORD           # Optional
+librefang config set-key mqtt                 # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.mqtt]
+host = "broker.example.com"
+port = 1883
+client_id = "librefang-bot"
+subscribe_topics = ["home/agents/input", "home/agents/commands"]
+response_topic = "home/agents/output"
+qos = "at_least_once"                # at_most_once | at_least_once | exactly_once
+# username_env = "MQTT_USERNAME"     # optional
+# password_env = "MQTT_PASSWORD"     # optional
+keep_alive_secs = 30
+default_agent = "home-assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The MQTT adapter uses the `rumqttc` crate to connect to the broker using MQTT v3.1.1/v5. It subscribes to the configured topics for incoming messages and publishes agent responses to the configured response topic. Automatic reconnection with exponential backoff is built in.
 
 ---
 
@@ -191,148 +462,250 @@ librefang config set-key ntfy                 # .env file
 # Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-3. Add to config (ntfy runs as an out-of-process sidecar adapter, `librefang.sidecar.adapters.ntfy`):
+3. Add to config:
 
 ```toml
-[[sidecar_channels]]
-name = "ntfy"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.ntfy"]
-channel_type = "ntfy"
-[sidecar_channels.env]
-NTFY_SERVER_URL = "https://ntfy.sh"
-NTFY_TOPIC = "my-agent-topic"
-# NTFY_ACCOUNT_ID = "assistant"      # optional, multi-bot routing
+[channels.ntfy]
+url_env = "NTFY_URL"
+topic_env = "NTFY_TOPIC"
+# token_env = "NTFY_TOKEN"   # optional
+default_agent = "assistant"
 ```
 
-`NTFY_TOKEN` (auth, optional for public topics) belongs in `~/.librefang/secrets.env`.
-
-4. Hot-reload (`curl -X POST http://127.0.0.1:4545/api/channels/reload`) or restart the daemon.
+4. Restart the daemon.
 
 ### How It Works
 
-The sidecar subscribes to the topic on the ntfy server using Server-Sent Events (SSE) for real-time message delivery. Incoming messages are routed to the configured agent, and responses are published back to the topic via the ntfy REST API.
+The ntfy adapter subscribes to a topic on the ntfy server using Server-Sent Events (SSE) for real-time message delivery. Incoming messages are routed to the configured agent, and responses are published back to the topic via the ntfy REST API.
 
 ---
 
 ## Gotify
 
-Gotify runs as an out-of-process Python sidecar adapter (`librefang.sidecar.adapters.gotify`, ships in `librefang-sdk`).
-
 ### Prerequisites
 
-- A Gotify server instance.
-- An **application** token (used to publish) and a **client** token (used to subscribe via WebSocket) — both created in the Gotify web UI.
+- A Gotify server instance and an application token (see [Gotify docs](https://gotify.net/docs/))
 
 ### Setup
 
-1. In the Gotify web UI, create an Application and copy its token (this becomes `GOTIFY_APP_TOKEN`); create a Client and copy its token (this becomes `GOTIFY_CLIENT_TOKEN`).
-2. Open the dashboard Channels page, pick Gotify, and fill in the server URL and both tokens — the dashboard writes `GOTIFY_APP_TOKEN` / `GOTIFY_CLIENT_TOKEN` to `~/.librefang/secrets.env` and `GOTIFY_SERVER_URL` to the `[sidecar_channels.env]` table in `~/.librefang/config.toml`. Equivalent manual config:
+1. In the Gotify web UI, create a new application and copy the token.
+2. Set environment variables:
 
-```toml
-[[sidecar_channels]]
-name = "gotify"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.gotify"]
-channel_type = "gotify"
-[sidecar_channels.env]
-GOTIFY_SERVER_URL = "https://gotify.example.com"
-# GOTIFY_ACCOUNT_ID = "prod"    # optional, multi-bot routing key
+```bash
+export GOTIFY_URL=https://gotify.example.com  # Environment variable
+export GOTIFY_TOKEN=your-application-token
+librefang vault set GOTIFY_URL                # Encrypted vault (recommended)
+librefang vault set GOTIFY_TOKEN
+librefang config set-key gotify               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-3. The daemon supervises the sidecar — no manual restart is needed; the kernel's hot-reload spawns or replaces the subprocess on config change.
+3. Add to config:
+
+```toml
+[channels.gotify]
+url_env = "GOTIFY_URL"
+token_env = "GOTIFY_TOKEN"
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
 
 ### How It Works
 
-The Gotify sidecar connects to `wss://{server}/stream?token={client_token}` to receive Gotify push messages in real time and POSTs back to `{server}/message?token={app_token}` to publish. The WebSocket client is a stdlib-only RFC 6455 reader on `socket` + `ssl` (no third-party dependency).
+The Gotify adapter connects to the Gotify server via WebSocket to receive messages in real time. Responses are sent back through the Gotify REST API's message endpoint.
 
 ---
 
 ## Nextcloud Talk
 
-Nextcloud Talk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.nextcloud`). The in-process `[channels.nextcloud]` config block was removed in the sidecar migration. Declare Nextcloud as a `[[sidecar_channels]]` entry instead.
-
 ### Prerequisites
 
 - A Nextcloud instance with the Talk app installed (see [Nextcloud Talk API docs](https://nextcloud-talk.readthedocs.io/))
 - An app password or bot user account
-- Python 3.8+ on the daemon host (the sidecar runs as `python3 -m librefang.sidecar.adapters.nextcloud`)
 
 ### Setup
 
-1. In Nextcloud, go to **Settings > Security > Devices & sessions** and create an app password (or create a dedicated bot user).
-2. Add the sidecar entry to your `config.toml`:
+1. In Nextcloud, go to **Settings > Security > Devices & sessions** and create an app password, or create a dedicated bot user.
+2. Set environment variables:
 
 ```bash
-[[sidecar_channels]]
-name = "nextcloud"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.nextcloud"]
-channel_type = "nextcloud"
-[sidecar_channels.env]
-NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
-# NEXTCLOUD_ROOMS = "abc123,def456"           # optional; empty = all joined
-# NEXTCLOUD_ACCOUNT_ID = "prod"               # optional, multi-bot routing key
-# NEXTCLOUD_POLL_INTERVAL_SECS = "3"          # optional, default 3, floor 1
+export NEXTCLOUD_URL=https://nextcloud.example.com  # Environment variable
+export NEXTCLOUD_TOKEN=your-app-password
+librefang vault set NEXTCLOUD_URL             # Encrypted vault (recommended)
+librefang vault set NEXTCLOUD_TOKEN
+librefang config set-key nextcloud            # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-3. Put `NEXTCLOUD_TOKEN` (the app password) in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Nextcloud form.
+3. Add to config:
+
+```toml
+[channels.nextcloud]
+url_env = "NEXTCLOUD_URL"
+token_env = "NEXTCLOUD_TOKEN"
+default_agent = "assistant"
+```
+
 4. Restart the daemon.
 
 ### How It Works
 
-The sidecar polls `GET /ocs/v2.php/apps/spreed/api/v1/chat/<token>?lookIntoFuture=1` per room at the configured interval (default 3 s) using Bearer auth plus the mandatory `OCS-APIRequest: true` header. Slash-command bodies (`/cmd args`) become `Command` events; everything else is plain text. Outbound replies go through `POST /ocs/v2.php/apps/spreed/api/v1/chat/<token>` with a form-encoded body and thread correctly via the `replyTo` parameter when the inbound message lived inside a thread (improvement over the former Rust adapter, which never sent `replyTo`).
+The Nextcloud Talk adapter polls the Nextcloud Talk REST API for new messages in configured conversations. Responses are posted back as chat messages through the Talk API.
 
 ---
 
-## Webhook (sidecar)
-
-Webhook migrated from the in-process Rust adapter to a Python sidecar (`librefang.sidecar.adapters.webhook`, stdlib-only). Same HMAC-SHA256 + timestamp + SSRF-guard semantics, plus inbound dedupe on `message_id` and 429 `Retry-After` that the Rust adapter didn't have.
+## Mumble
 
 ### Prerequisites
 
-- An optional target URL that accepts HTTP POST requests, for outbound delivery
-- A shared HMAC-SHA256 secret
-- `python3` on the daemon host (no third-party packages required)
+- A Mumble server (Murmur) accessible from the LibreFang host (see [Mumble protocol documentation](https://wiki.mumble.info/wiki/Protocol))
 
 ### Setup
 
-1. Choose a shared secret for HMAC-SHA256 signature verification.
-2. Add to `config.toml`:
+1. Ensure your Mumble server is running and accessible.
+2. Set environment variables:
 
-```toml
-[[sidecar_channels]]
-name = "webhook"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.webhook"]
-channel_type = "webhook"
-[sidecar_channels.env]
-WEBHOOK_LISTEN_PORT = "8461"
-# WEBHOOK_LISTEN_PATH = "/webhook"
-# WEBHOOK_CALLBACK_URL = "https://your-service.example.com/hook"
+```bash
+export MUMBLE_SERVER=mumble.example.com:64738 # Environment variable
+export MUMBLE_USERNAME=librefang-bot
+# export MUMBLE_PASSWORD=your-password        # Optional
+librefang vault set MUMBLE_SERVER             # Encrypted vault (recommended)
+librefang vault set MUMBLE_USERNAME
+# librefang vault set MUMBLE_PASSWORD         # Optional
+librefang config set-key mumble               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-3. Put `WEBHOOK_SECRET` in `~/.librefang/secrets.env`.
+3. Add to config:
+
+```toml
+[channels.mumble]
+server_env = "MUMBLE_SERVER"
+username_env = "MUMBLE_USERNAME"
+# password_env = "MUMBLE_PASSWORD"   # optional
+default_agent = "assistant"
+```
+
 4. Restart the daemon.
 
 ### How It Works
 
-The sidecar runs its own `BaseHTTPRequestHandler`-over-`ThreadingTCPServer` listener on `WEBHOOK_LISTEN_PORT`. Incoming POSTs are verified by HMAC-SHA256 (`X-Webhook-Signature: sha256=<hex>`) over the raw request body, with an optional `X-Webhook-Timestamp` (milliseconds since epoch, ±5 min skew) for replay protection. Outbound replies go to `WEBHOOK_CALLBACK_URL` (when set) signed the same way. The SSRF guard rejects private / loopback / link-local / multicast / cloud-metadata callback URLs at startup AND on every outbound POST.
+The Mumble adapter connects to the Mumble server using the Mumble TCP protocol and authenticates with the configured credentials. It listens for text messages in the joined channel and routes them to the configured agent. Responses are sent back as text messages.
+
+---
+
+## Webhook
+
+### Prerequisites
+
+- A target URL that accepts HTTP POST requests (no external service registration needed)
+
+### Setup
+
+1. Choose a URL where webhook payloads should be sent.
+2. Choose a shared secret for HMAC-SHA256 signature verification.
+3. Set environment variables:
+
+```bash
+export WEBHOOK_URL=https://your-service.example.com/hook  # Environment variable
+export WEBHOOK_SECRET=your-shared-secret
+librefang vault set WEBHOOK_URL               # Encrypted vault (recommended)
+librefang vault set WEBHOOK_SECRET
+librefang config set-key webhook              # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.webhook]
+url_env = "WEBHOOK_URL"
+secret_env = "WEBHOOK_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Webhook adapter provides a generic bidirectional HTTP integration. Incoming messages are received as HTTP POST requests on the shared API server at `/channels/webhook/webhook`, verified via HMAC-SHA256 using the shared secret. Responses are delivered as HTTP POST payloads to the configured URL, also signed with HMAC-SHA256.
 
 ### `deliver_only` Pass-through Mode
 
-The webhook sidecar can run as a zero-LLM pass-through: incoming payloads bypass the agent loop entirely (no sanitiser, no rate limiter, no agent lookup) and forward straight to a target channel.
+The webhook channel can also run as a zero-LLM pass-through: incoming payloads bypass the agent loop entirely (no sanitiser, no rate limiter, no agent lookup) and forward straight to a target channel. Useful for push notifications and out-of-band alerts where you only need the message to land in Telegram / Slack / etc.
 
 ```toml
-[[sidecar_channels]]
-name = "webhook"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.webhook"]
-channel_type = "webhook"
-[sidecar_channels.env]
-WEBHOOK_LISTEN_PORT = "8461"
-WEBHOOK_DELIVER_ONLY = "1"
-WEBHOOK_DELIVER = "telegram:123456789"  # required when WEBHOOK_DELIVER_ONLY=1
+[channels.webhook]
+enabled = true
+deliver_only = true
+deliver = "telegram:123456789"     # required when deliver_only is true
 ```
 
-The sidecar **fail-closes at startup** when `WEBHOOK_DELIVER_ONLY=1` but `WEBHOOK_DELIVER` is empty — the Rust validator at the same path only warn-and-continued, leaving inbound messages silently dropped at runtime. See [Webhook `deliver_only` Mode](/integrations/channels#webhook-deliver_only-mode) on the channels overview for the internal `__deliver_only__` / `__deliver_target__` metadata signalling that the kernel's `bridge.rs` reads to short-circuit the LLM call.
+When `deliver_only = true` but `deliver` is unset, librefang emits a startup `warn` and the webhook stays inactive. See [Webhook `deliver_only` Mode](/integrations/channels#webhook-deliver_only-mode) on the channels overview for the internal `__deliver_only__` / `__deliver_target__` metadata signalling.
+
+---
+
+## Voice
+
+### Prerequisites
+
+- An API key for an OpenAI-compatible STT/TTS provider (e.g., OpenAI, Groq, or a self-hosted Whisper instance)
+
+### Setup
+
+1. Set your STT/TTS API key:
+
+```bash
+export OPENAI_API_KEY=sk-...
+librefang vault set OPENAI_API_KEY              # Encrypted vault (recommended)
+```
+
+2. Add to config:
+
+```toml
+[channels.voice]
+api_key_env = "OPENAI_API_KEY"
+stt_url = "https://api.openai.com"
+tts_url = "https://api.openai.com"
+tts_voice = "alloy"
+# buffer_threshold = 32768    # Audio buffer size in bytes before triggering STT
+# default_agent = "assistant"
+```
+
+3. Restart the daemon.
+
+### WebSocket Protocol
+
+Clients connect to `ws://your-host:4545/channels/voice/ws` and exchange binary + text frames:
+
+**Client to Server (binary):** Raw audio data (PCM 16-bit LE mono 16kHz, or Opus packets).
+
+**Client to Server (JSON):**
+```json
+{ "type": "config", "format": "pcm", "sample_rate": 16000 }
+{ "type": "end_of_speech" }
+```
+
+**Server to Client (JSON):**
+```json
+{ "type": "ready" }
+{ "type": "transcript", "text": "..." }
+{ "type": "response", "text": "..." }
+{ "type": "error", "message": "..." }
+```
+
+**Server to Client (binary):** Synthesized audio response data.
+
+### How It Works
+
+The Voice adapter accepts real-time audio streams over WebSocket on the shared API server at `/channels/voice/ws`. Audio data is buffered until it reaches the configured threshold (default 32KB), then transcribed via the STT provider (OpenAI Whisper API by default). The transcribed text is routed to an agent through the channel bridge. The agent's text response can be synthesized back into audio via TTS and streamed to the client. Supported audio formats are PCM (16-bit LE mono) and Opus.
+
+| Config field | Type | Default | Description |
+|---|---|---|---|
+| `api_key_env` | string | `"OPENAI_API_KEY"` | Env var name holding the API key for STT/TTS services. |
+| `stt_url` | string | `"https://api.openai.com"` | Base URL for the STT (Speech-to-Text) API. |
+| `tts_url` | string | `"https://api.openai.com"` | Base URL for the TTS (Text-to-Speech) API. |
+| `tts_voice` | string | `"alloy"` | TTS voice name. Options: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
+| `buffer_threshold` | usize | `32768` | Audio buffer size in bytes before triggering STT. |
+| `default_agent` | string | - | Default agent name to route voice messages to. |

@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
 import { useDrawerStore, type DrawerSize } from "../../lib/drawerStore";
-import { useFocusTrap } from "../../lib/useFocusTrap";
 
 const DESKTOP_WIDTH: Record<DrawerSize, string> = {
   sm: "lg:w-[360px]",
@@ -26,34 +25,6 @@ const MIN_WIDTH: Record<DrawerSize, string> = {
   "5xl": "lg:min-w-[1280px]",
 };
 
-// Mirrors the `--breakpoint-lg: 1000px` override in index.css (#4873) so
-// JS- and CSS-driven layout decisions never disagree at the iPad portrait
-// boundary. Kept in px (not rem) deliberately: `window.matchMedia` does
-// not scale with the root font-size, so a px-vs-rem mix between CSS
-// (`lg:` variant) and JS (this hook) would diverge under iOS text-zoom.
-// If you change one, change the other.
-const MOBILE_QUERY = "(max-width: 999px)";
-
-function readIsMobile(): boolean {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
-  return window.matchMedia(MOBILE_QUERY).matches;
-}
-
-function useIsMobile() {
-  // Lazy-init from matchMedia at first render so we don't flash a desktop
-  // focus-trap target on a phone for one frame before the effect runs.
-  const [isMobile, setIsMobile] = useState(readIsMobile);
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const mql = window.matchMedia(MOBILE_QUERY);
-    setIsMobile(mql.matches);
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
-    mql.addEventListener("change", handler);
-    return () => mql.removeEventListener("change", handler);
-  }, []);
-  return isMobile;
-}
-
 // Push-style global drawer host. Renders as a flex sibling of the main
 // column in App.tsx — its width animates from 0 → target so the main
 // content shrinks to make room (mirrors the left sidebar's collapse).
@@ -68,18 +39,6 @@ export function PushDrawer() {
   const content = useDrawerStore((s) => s.content);
   const close = useDrawerStore((s) => s.close);
 
-  const desktopRef = useRef<HTMLDivElement>(null);
-  const mobileRef = useRef<HTMLDivElement>(null);
-
-  // Scope each focus trap to the viewport actually showing it. Without the
-  // `!isMobile` / `isMobile` split, both traps would activate on every
-  // viewport — wasted work, and also a subtle a11y trap if either
-  // `<aside>` (desktop) or the mobile overlay <div> were visible
-  // simultaneously while the other is `display:none`.
-  const isMobile = useIsMobile();
-  useFocusTrap(isOpen && !isMobile, desktopRef, false, false);
-  useFocusTrap(isOpen && isMobile, mobileRef, false);
-
   // Single dismissal path — DrawerPanel observes the store flip and calls
   // its own onClose to keep parent state in sync. We don't fire content
   // .onClose here directly; the store-flip-watcher in DrawerPanel does
@@ -90,28 +49,7 @@ export function PushDrawer() {
   useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
-      if (e.key !== "Escape") return;
-      const target = e.target;
-      if (!(target instanceof HTMLElement)) return;
-      // Only handle Esc when the *nearest* `[role='dialog']` ancestor IS
-      // this drawer's own mobile overlay (`data-drawer-root`). If a nested
-      // dialog (Modal, ConfirmDialog, …) sits between the focus target and
-      // the drawer-root, defer to that dialog's own Esc handler — closing
-      // the drawer here would tear the surrounding form down before the
-      // nested picker could dismiss itself (#5254 / Codex P2).
-      //
-      // The previous check `target.closest('[role=dialog]') &&
-      // !target.closest('[role=dialog][data-drawer-root]')` was wrong: on
-      // <lg viewports the drawer-root IS a `[role='dialog']`, so a nested
-      // Modal would still see the drawer-root via the outer `.closest()`
-      // call, the second clause would return true, and the guard would
-      // not fire — leaking the Esc into `triggerClose()` and collapsing
-      // the parent drawer along with the nested picker.
-      const nearestDialog = target.closest("[role='dialog']");
-      if (nearestDialog && !nearestDialog.hasAttribute("data-drawer-root")) return;
-      e.stopImmediatePropagation();
-      triggerClose();
+      if (e.key === "Escape") triggerClose();
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
@@ -142,7 +80,6 @@ export function PushDrawer() {
           wrapper has a min-width so content doesn't reflow as the outer
           width animates between 0 and target. */}
       <aside
-        ref={desktopRef}
         className={`hidden lg:flex shrink-0 ${desktopWidth} flex-col border-l border-border-subtle bg-surface overflow-hidden transition-[width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`}
         aria-hidden={!isOpen}
       >
@@ -156,23 +93,13 @@ export function PushDrawer() {
         )}
       </aside>
 
-      {/* Mobile overlay fallback. Backdrop closes on click.
-          z-index: must sit above the slide-in sidebar (z-50 in App.tsx) so
-          the close button stays tappable when both end up in mobile mode at
-          the same time (#4873). Stay BELOW the OfflineBanner (z-[60]) — the
-          banner is a daemon-disconnect signal that must remain visible even
-          when a drawer is open — and below dropdown menus (z-[90]/z-[100]).
-          z-[55] threads the needle. */}
+      {/* Mobile overlay fallback. Backdrop closes on click. */}
       {isOpen && content && (
         <div
-          className="fixed inset-0 z-[55] lg:hidden bg-black/40 backdrop-blur-sm flex items-stretch justify-end"
+          className="fixed inset-0 z-50 lg:hidden bg-black/40 backdrop-blur-sm flex items-stretch justify-end"
           onClick={triggerClose}
-          role="dialog"
-          aria-modal="true"
-          data-drawer-root
         >
           <div
-            ref={mobileRef}
             className="w-full bg-surface flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >

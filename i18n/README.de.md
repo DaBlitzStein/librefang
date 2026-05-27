@@ -121,7 +121,7 @@ librefang-extensions        25 MCP-Templates, AES-256-GCM-Vault, OAuth2 PKCE
 librefang-wire              OFP P2P-Protokoll, HMAC-SHA256 gegenseitige Authentifizierung
 librefang-cli               CLI, Daemon-Management, TUI-Dashboard, MCP-Servermodus
 librefang-desktop           Tauri 2.0 native App (Tray, Benachrichtigungen, Shortcuts)
-librefang-import            OpenClaw, LangChain, AutoGPT Import-/Migrations-Engine
+librefang-migrate           OpenClaw, LangChain, AutoGPT Migrationsengine
 librefang-http              Gemeinsamer HTTP-Client-Builder, Proxy, TLS-Fallback
 librefang-testing           Testinfrastruktur: Mock-Kernel, Mock-LLM-Driver und Testdienstprogramme für API-Routen
 librefang-telemetry         OpenTelemetry + Prometheus Metrik-Instrumentierung für LibreFang
@@ -129,7 +129,9 @@ librefang-llm-driver        LLM-Driver-Trait und gemeinsame Typen für LibreFang
 librefang-llm-drivers       Konkrete LLM-Provider-Driver (Anthropic, OpenAI, Gemini, …), die das librefang-llm-driver Trait implementieren
 librefang-runtime-mcp       MCP (Model Context Protocol) Client für die LibreFang-Runtime
 librefang-kernel-handle     KernelHandle-Trait für In-Process-Aufrufer in den LibreFang-Kernel
+librefang-runtime-wasm      WASM-Skill-Sandbox für die LibreFang-Runtime
 librefang-kernel-router     Hand/Template-Routing-Engine für den LibreFang-Kernel
+librefang-runtime-oauth     OAuth-Flows (ChatGPT, GitHub Copilot) für LibreFang-Runtime-Driver
 librefang-kernel-metering   Kostenmessung und Durchsetzung von Quoten für den LibreFang-Kernel
 xtask                       Build-Automatisierung
 ```

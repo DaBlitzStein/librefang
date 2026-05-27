@@ -17,63 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError, StreamEvent};
 use futures::StreamExt;
-// `chatgpt_oauth` lived in `librefang-runtime-oauth` until #3710 Phase 2
-// collapsed that crate back into `librefang-runtime`. The interactive
-// browser/device flows still live there (used by CLI). This file only
-// needs the bits the driver itself touches at runtime: the base URL,
-// the refresh-token endpoint, and the auth-result shape. Inlined here to
-// avoid a circular dep — `librefang-runtime` now depends on
-// `librefang-llm-drivers`, so `llm-drivers` cannot import from it.
-const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
-const CHATGPT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-
-struct ChatGptAuthResult {
-    access_token: Zeroizing<String>,
-    expires_in: Option<u64>,
-}
-
-async fn refresh_chatgpt_access_token(refresh_token: &str) -> Result<ChatGptAuthResult, String> {
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("client_id", CHATGPT_CLIENT_ID),
-        ("refresh_token", refresh_token),
-    ];
-
-    let client = librefang_http::proxied_client();
-    let resp = client
-        .post(CHATGPT_TOKEN_URL)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| format!("Token refresh request failed: {e}"))?;
-
-    let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read refresh response: {e}"))?;
-
-    if !status.is_success() {
-        return Err(format!("Token refresh failed (HTTP {status}): {body}"));
-    }
-
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse refresh response JSON: {e}"))?;
-
-    let access_token = json
-        .get("access_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Missing access_token in refresh response".to_string())?
-        .to_string();
-
-    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
-
-    Ok(ChatGptAuthResult {
-        access_token: Zeroizing::new(access_token),
-        expires_in,
-    })
-}
+use librefang_runtime_oauth::chatgpt_oauth::CHATGPT_BASE_URL;
 use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
@@ -250,12 +194,6 @@ pub struct ChatGptDriver {
     /// for the in-flight refresh and then re-check the cache — avoiding the
     /// thundering-herd that burns the refresh token.
     refresh_lock: tokio::sync::Mutex<()>,
-    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
-    /// headers on outbound requests. Mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
-    /// trace headers are emitted regardless of whether `CompletionRequest`'s
-    /// caller-id fields are populated.
-    emit_caller_trace_headers: bool,
 }
 
 impl ChatGptDriver {
@@ -281,18 +219,7 @@ impl ChatGptDriver {
             token_cache: ChatGptTokenCache::new(),
             client,
             refresh_lock: tokio::sync::Mutex::new(()),
-            emit_caller_trace_headers: true,
         }
-    }
-
-    /// Override the trace-header emission flag (mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
-    /// meaning the three `x-librefang-{agent,session,step}-id` headers are
-    /// emitted on every request that has those fields populated. Pass `false`
-    /// to suppress them entirely. Non-trace `extra_headers` are unaffected.
-    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
-        self.emit_caller_trace_headers = emit;
-        self
     }
 
     /// Get a valid session token, caching it with an estimated TTL.
@@ -358,7 +285,7 @@ impl ChatGptDriver {
         debug!("ChatGPT session token rejected; attempting OAuth refresh (single-flight)");
         let auth = tokio::time::timeout(
             Duration::from_secs(TOKEN_REFRESH_TIMEOUT_SECS),
-            refresh_chatgpt_access_token(&refresh_tok),
+            librefang_runtime_oauth::chatgpt_oauth::refresh_access_token(&refresh_tok),
         )
         .await
         .map_err(|_| {
@@ -383,12 +310,10 @@ impl ChatGptDriver {
         url: &str,
         api_request: &ResponsesApiRequest,
         bearer_token: &str,
-        trace_headers: reqwest::header::HeaderMap,
     ) -> Result<reqwest::Response, LlmError> {
         self.client
             .post(url)
             .bearer_auth(bearer_token)
-            .headers(trace_headers)
             .json(api_request)
             .send()
             .await
@@ -399,13 +324,10 @@ impl ChatGptDriver {
         &self,
         url: &str,
         api_request: &ResponsesApiRequest,
-        trace_headers: reqwest::header::HeaderMap,
     ) -> Result<reqwest::Response, LlmError> {
         let token = self.ensure_token()?;
-        // Clone the header map for the potential retry path below.
-        let headers_clone = trace_headers.clone();
         let http_resp = self
-            .post_responses_request(url, api_request, token.token.as_str(), trace_headers)
+            .post_responses_request(url, api_request, token.token.as_str())
             .await?;
         match http_resp.status() {
             reqwest::StatusCode::UNAUTHORIZED => {}
@@ -428,7 +350,7 @@ impl ChatGptDriver {
 
         let refreshed = self.refresh_token().await?;
         let http_resp = self
-            .post_responses_request(url, api_request, refreshed.token.as_str(), headers_clone)
+            .post_responses_request(url, api_request, refreshed.token.as_str())
             .await?;
 
         // Preserve post-refresh 403s so higher-level classification can
@@ -883,7 +805,6 @@ impl ChatGptDriver {
             stop_reason,
             tool_calls,
             usage,
-            actual_provider: None,
         })
     }
 
@@ -1049,17 +970,7 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
         let url = format!("{base}/codex/responses");
 
         debug!("ChatGPT Responses API POST {url}");
-        let http_resp = self
-            .send_with_auth_retry(
-                &url,
-                &api_request,
-                super::trace_headers::build_trace_header_map(
-                    &[],
-                    &request,
-                    self.emit_caller_trace_headers,
-                ),
-            )
-            .await?;
+        let http_resp = self.send_with_auth_retry(&url, &api_request).await?;
         let status = http_resp.status();
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -1106,17 +1017,7 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
         let url = format!("{base}/codex/responses");
 
         debug!("ChatGPT Responses API SSE stream POST {url}");
-        let http_resp = self
-            .send_with_auth_retry(
-                &url,
-                &api_request,
-                super::trace_headers::build_trace_header_map(
-                    &[],
-                    &request,
-                    self.emit_caller_trace_headers,
-                ),
-            )
-            .await?;
+        let http_resp = self.send_with_auth_retry(&url, &api_request).await?;
         let status = http_resp.status();
 
         if !status.is_success() {
@@ -1279,14 +1180,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.model, "gpt-4o");
@@ -1321,14 +1218,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.instructions.as_deref(), Some("System prompt."));
@@ -1354,14 +1247,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: Some(ResponseFormat::Json),
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");
@@ -1386,7 +1275,6 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: Some(ResponseFormat::JsonSchema {
                 name: "answer".to_string(),
                 schema: serde_json::json!({
@@ -1401,9 +1289,6 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");

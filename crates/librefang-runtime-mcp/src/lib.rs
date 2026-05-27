@@ -10,7 +10,6 @@ pub mod mcp_oauth;
 
 use arc_swap::ArcSwap;
 use http::{HeaderName, HeaderValue};
-use librefang_types::agent::SessionId;
 use librefang_types::config::{
     HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
     HttpCompatToolConfig,
@@ -26,128 +25,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-
-// ---------------------------------------------------------------------------
-// Caller context (#5699)
-// ---------------------------------------------------------------------------
-
-/// Object-key used to ship the kernel-attested caller context inside the MCP
-/// `tools/call` `arguments` payload for Rmcp and SSE transports. Chosen with a
-/// leading underscore so it sorts deterministically and is visually flagged as
-/// LibreFang-private. Any agent-supplied value under this key is **stripped
-/// then overwritten** by the kernel value just before transmit — see
-/// [`McpConnection::call_tool_with_caller`].
-pub const CALLER_CONTEXT_ARG_KEY: &str = "_librefang_caller";
-
-/// HTTP header used to ship the kernel-attested caller context on the
-/// [`McpTransport::HttpCompat`] transport. The body of an HttpCompat request is
-/// templated against a backend's native API (path params, JSON body, or query
-/// string) — there is no general-purpose `arguments` envelope to inject the
-/// context object into, so we ship it as a side-channel header instead. The
-/// receiving server (when run by the same operator) can opt in to reading it.
-pub const CALLER_CONTEXT_HEADER: &str = "X-Librefang-Caller";
-
-/// Kernel-attested identity of the entity that drove the current agent turn.
-///
-/// Populated from `ToolExecContext.sender_id` / `.channel` / `.chat_id` /
-/// `.session_id` upstream in `librefang-runtime::tool_runner::dispatch`. Every
-/// field is `Option` because legacy call sites (autonomous loops, cron fires
-/// with no human sender, test fixtures) may not have all four signals on hand;
-/// MCP servers must treat missing fields as "do not authorize" rather than
-/// "authorize as default".
-///
-/// **Security invariant**: the kernel is the sole source of these values. The
-/// agent cannot influence them — any [`CALLER_CONTEXT_ARG_KEY`] entry the agent
-/// puts into `arguments` is stripped and overwritten before transmit. See
-/// `tests::caller_context_overwrites_agent_supplied_value` for the regression.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CallerContext {
-    /// Channel peer id that drove this turn (e.g. Telegram user id,
-    /// WhatsApp JID). `None` for non-channel call sites (direct API,
-    /// autonomous loop, cron with no sender attribution).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub peer_id: Option<String>,
-    /// Channel name (`"telegram"`, `"whatsapp"`, `"slack"`, …). `None`
-    /// for direct API / non-channel call sites.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel: Option<String>,
-    /// Platform conversation id (Telegram chat_id, Discord channel_id,
-    /// WhatsApp JID) the originating user message arrived on. Distinct
-    /// from `peer_id` for group chats; coincides in DMs.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chat_id: Option<String>,
-    /// LibreFang `SessionId` (string form) the tool call belongs to.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-}
-
-impl CallerContext {
-    /// Build a context from the discrete identity signals carried in
-    /// `ToolExecContext`. Returns `None` if every signal is missing — the
-    /// caller can skip injection in that case and preserve the legacy
-    /// payload byte-for-byte (relevant for prompt-cache parity).
-    pub fn from_parts(
-        peer_id: Option<&str>,
-        channel: Option<&str>,
-        chat_id: Option<&str>,
-        session_id: Option<SessionId>,
-    ) -> Option<Self> {
-        if peer_id.is_none() && channel.is_none() && chat_id.is_none() && session_id.is_none() {
-            return None;
-        }
-        Some(Self {
-            peer_id: peer_id.map(str::to_string),
-            channel: channel.map(str::to_string),
-            chat_id: chat_id.map(str::to_string),
-            session_id: session_id.map(|s| s.0.to_string()),
-        })
-    }
-
-    /// Serialise to a compact JSON string suitable for the
-    /// [`CALLER_CONTEXT_HEADER`] HTTP header. Returns `Err` only if the
-    /// underlying `serde_json` serialiser fails, which is unreachable for
-    /// this all-`Option<String>` shape.
-    pub fn to_header_value(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
-}
-
-/// Build the wire arguments object: clone `arguments` (coercing non-object /
-/// null inputs to `{}` to match the MCP spec), **strip** any agent-supplied
-/// [`CALLER_CONTEXT_ARG_KEY`] entry, then **set** the kernel-attested value
-/// (when `caller` is `Some`).
-///
-/// The strip-then-set ordering is the security boundary — see
-/// [`McpConnection::call_tool_with_caller`].
-fn inject_caller_into_arguments(
-    arguments: &serde_json::Value,
-    caller: Option<&CallerContext>,
-) -> serde_json::Map<String, serde_json::Value> {
-    let mut obj = arguments.as_object().cloned().unwrap_or_default();
-    // ALWAYS strip the agent-supplied key, even when `caller` is None —
-    // otherwise an agent that learned the key name could populate it and
-    // have it forwarded to a context-blind legacy MCP server.
-    obj.remove(CALLER_CONTEXT_ARG_KEY);
-    if let Some(c) = caller {
-        match serde_json::to_value(c) {
-            Ok(v) => {
-                obj.insert(CALLER_CONTEXT_ARG_KEY.to_string(), v);
-            }
-            Err(e) => {
-                // Unreachable for the all-`Option<String>` shape, but a
-                // serialisation failure must NEVER cause a privilege escalation
-                // (continuing without the kernel value would let the call
-                // proceed un-attested). Log and leave the key absent so the
-                // server defaults to its no-caller branch.
-                warn!(
-                    error = %e,
-                    "failed to serialise CallerContext; proceeding without _librefang_caller"
-                );
-            }
-        }
-    }
-    obj
-}
 
 /// Maximum JSON nesting depth the taint scanner will traverse. Anything
 /// deeper is rejected outright so a pathological payload can't blow the
@@ -1211,15 +1088,9 @@ impl McpConnection {
         // Expand environment variable references ($VAR, ${VAR}) in args so
         // templates can use e.g. "$HOME" without wrapping in `sh -c`.
         // Expansion is restricted to the allowlist above. (#3823)
-        // Then expand a leading tilde (`~` or `~/...`) to the user's home
-        // directory so user-edited args using shell-style paths work too.
-        // Tilde expansion runs after env-var expansion so it has the final
-        // word — e.g. an arg of `$UNSET/sub` is left as `$UNSET/sub` and is
-        // not silently treated as a tilde. (#4680)
         let args_owned: Vec<String> = args
             .iter()
             .map(|a| expand_env_vars(a, &expand_allowlist))
-            .map(|a| expand_leading_tilde(&a))
             .collect();
         let env_owned: Vec<String> = extra_env.to_vec();
 
@@ -1261,7 +1132,7 @@ impl McpConnection {
         )
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format_spawn_error(&resolved_command, &e))?;
+        .map_err(|e| format!("Failed to spawn MCP server '{resolved_command}': {e}"))?;
 
         // Drain the child's stderr in a background task, logging each line at
         // DEBUG level.  This prevents the pipe buffer from filling (which would
@@ -1831,35 +1702,12 @@ impl McpConnection {
         }
     }
 
-    /// SSRF guard for every MCP transport that opens an outbound HTTP
-    /// connection (SSE, Streamable HTTP, HTTP compatibility shim).
-    ///
-    /// Delegates to [`crate::mcp_oauth::is_ssrf_blocked_url_for_connect`].
-    /// The MCP backend URL is operator-configured (config.toml), not
-    /// influenced by a remote response, so a local MCP server on
-    /// `127.0.0.1` / `localhost` / a LAN address is a legitimate, common
-    /// setup and is allowed. The helper still:
-    ///
-    /// * parses the URL with the `url` crate (no substring matching),
-    /// * rejects non-`http(s)` schemes (`file://`, `ftp://`, …),
-    /// * rejects userinfo (`http://user:pw@host/`),
-    /// * blocks the cloud-metadata pivots that are never a legitimate
-    ///   backend: `0.0.0.0`, `169.254/16`, CGNAT `100.64.0.0/10`,
-    ///   Azure IMDS `192.0.0.192`, and IMDS hostnames
-    ///   (`metadata.google.internal`, `metadata.aws.internal`,
-    ///   `instance-data`),
-    /// * unwraps IPv4-mapped IPv6 and the NAT64 well-known prefix
-    ///   (`64:ff9b::/96`) before re-checking the embedded IPv4.
-    ///
-    /// The full loopback / RFC1918 / ULA block is retained on the OAuth
-    /// discovery / token-exchange path (`is_ssrf_blocked_url`), where the
-    /// host comes from a remote server response.
-    ///
-    /// `label` is woven into the error so the operator can tell which
-    /// transport rejected the URL.
     fn check_ssrf(url: &str, label: &str) -> Result<(), String> {
-        crate::mcp_oauth::is_ssrf_blocked_url_for_connect(url)
-            .map_err(|reason| format!("SSRF: {label} URL rejected — {reason}"))
+        let lower = url.to_lowercase();
+        if lower.contains("169.254.169.254") || lower.contains("metadata.google") {
+            return Err(format!("SSRF: {label} URL targets metadata endpoint"));
+        }
+        Ok(())
     }
 
     fn register_http_compat_tools(&mut self, tools: &[HttpCompatToolConfig]) {
@@ -2085,148 +1933,12 @@ fn inject_annotation_class(
     }
 }
 
-/// Basic argument guard for MCP tool calls.
-///
-/// The MCP runtime is the trust boundary between the LLM's tool-call
-/// output and the remote MCP server. Without any check, a malformed
-/// LLM tool-call (missing required field, wrong shape) reaches the
-/// server, which typically returns an implementation-specific error
-/// that the LLM cannot act on cleanly — and some servers crash outright
-/// on bad input.
-///
-/// This is intentionally a cheap guard, NOT a full JSON Schema
-/// validator: the workspace does not depend on `jsonschema` and adding
-/// it for this audit row is more weight than the finding earns. We
-/// reject the two gross failure modes the audit cites:
-///
-///   1. `arguments` is not a JSON object when the schema declares
-///      `type: "object"` (the only shape MCP currently uses).
-///   2. The schema's `required` array names fields absent from
-///      `arguments`.
-///
-/// Type-correctness of individual fields, pattern matching, enum
-/// constraints, `additionalProperties`, nested object validation, etc.
-/// remain delegated to the MCP server — same as before. Operators who
-/// need stricter validation can wrap their tools server-side. The
-/// trade-off is documented in the PR body for the originating audit
-/// row (`docs/issues/mcp-args-no-schema-check.md`).
-fn validate_args_against_schema(
-    tool_name: &str,
-    arguments: &serde_json::Value,
-    input_schema: &serde_json::Value,
-) -> Result<(), String> {
-    // Schema must be an object for any meaningful check; if the tool
-    // registered something weird (non-object schema) we skip — same
-    // forgiving stance the rest of the codebase takes toward malformed
-    // upstream metadata.
-    let Some(schema_obj) = input_schema.as_object() else {
-        return Ok(());
-    };
-
-    // If the schema declares `type: "object"` (the conventional MCP
-    // shape), arguments MUST be an object. The `arguments == null` and
-    // `arguments == {}` cases are both treated as empty-object by
-    // `call_tool` further down, so we accept them here too — only
-    // arrays / scalars are rejected.
-    let declares_object = schema_obj
-        .get("type")
-        .and_then(|v| v.as_str())
-        .map(|s| s == "object")
-        .unwrap_or(true); // absent `type` → assume object (MCP convention)
-
-    if declares_object && !arguments.is_null() && !arguments.is_object() {
-        return Err(format!(
-            "MCP tool '{}' argument validation failed: expected JSON object, got {}",
-            tool_name,
-            json_type_name(arguments)
-        ));
-    }
-
-    // Check `required` fields. Only meaningful when arguments is an
-    // object — if it's null we treat it as `{}` for the missing-fields
-    // check (any required field is missing).
-    let empty_obj = serde_json::Map::new();
-    let args_obj = arguments.as_object().unwrap_or(&empty_obj);
-
-    if let Some(required) = schema_obj.get("required").and_then(|v| v.as_array()) {
-        let missing: Vec<&str> = required
-            .iter()
-            .filter_map(|v| v.as_str())
-            .filter(|field| !args_obj.contains_key(*field))
-            .collect();
-
-        if !missing.is_empty() {
-            return Err(format!(
-                "MCP tool '{}' argument validation failed: missing required field(s): {}",
-                tool_name,
-                missing.join(", ")
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-/// Human-readable JSON value kind for error messages.
-fn json_type_name(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
-}
-
 impl McpConnection {
-    /// Call a tool on the MCP server with no kernel-attested caller context.
-    ///
-    /// Thin wrapper over [`call_tool_with_caller`] that passes `None`. Retained
-    /// for compatibility with call sites (tests, ad-hoc scripts) that don't
-    /// have a [`CallerContext`] on hand. Production dispatch always goes
-    /// through `call_tool_with_caller` so MCP servers receive the
-    /// kernel-attested identity (#5699).
+    /// Call a tool on the MCP server.
     pub async fn call_tool(
         &mut self,
         name: &str,
         arguments: &serde_json::Value,
-    ) -> Result<String, String> {
-        self.call_tool_with_caller(name, arguments, None).await
-    }
-
-    /// Call a tool on the MCP server, propagating the kernel-attested
-    /// [`CallerContext`] alongside the arguments (#5699).
-    ///
-    /// # Caller-context injection (strip-then-set)
-    ///
-    /// When `caller` is `Some`, the kernel-attested identity is shipped to the
-    /// MCP server so per-user routing can be enforced server-side:
-    ///
-    /// - **Rmcp / SSE** transports: a clone of `arguments` is materialised, any
-    ///   agent-supplied [`CALLER_CONTEXT_ARG_KEY`] entry is **removed**, and the
-    ///   kernel value is then inserted under the same key. This strip-then-set
-    ///   ordering is the security boundary: an agent that learns the field name
-    ///   and tries to spoof a caller cannot, because their value is dropped
-    ///   before the kernel value is inserted. See
-    ///   `tests::caller_context_overwrites_agent_supplied_value`.
-    /// - **HttpCompat** transport: the body is template-rendered against the
-    ///   backend's native API and has no general-purpose envelope to inject
-    ///   into. The context is shipped as the [`CALLER_CONTEXT_HEADER`] HTTP
-    ///   header instead.
-    ///
-    /// When `caller` is `None` the arguments are forwarded byte-for-byte
-    /// (preserving prompt-cache equivalence with the pre-#5699 wire shape).
-    ///
-    /// The taint scanner runs against the **original** agent-supplied
-    /// arguments — before any kernel mutation — so a malicious agent cannot
-    /// hide credential-shaped data behind a `_librefang_caller` key. The
-    /// injection happens only on the cloned payload that goes to the wire.
-    pub async fn call_tool_with_caller(
-        &mut self,
-        name: &str,
-        arguments: &serde_json::Value,
-        caller: Option<&CallerContext>,
     ) -> Result<String, String> {
         // Resolve raw (un-prefixed) tool name before taint check so we can
         // look it up in the per-tool policy.
@@ -2236,14 +1948,6 @@ impl McpConnection {
             .cloned()
             .or_else(|| strip_mcp_prefix(&self.config.name, name).map(|s| s.to_string()))
             .unwrap_or_else(|| name.to_string());
-
-        // Schema guard: reject obviously malformed arguments at the runtime
-        // boundary rather than forwarding them to the MCP server (which
-        // typically returns implementation-specific errors or crashes on
-        // bad input). See `validate_args_against_schema` doc for scope.
-        if let Some(tool_def) = self.tools.iter().find(|t| t.name == name) {
-            validate_args_against_schema(name, arguments, &tool_def.input_schema)?;
-        }
 
         // SECURITY: best-effort taint filter before shipping arguments
         // to an out-of-process MCP server. An LLM that has been pushed
@@ -2303,11 +2007,7 @@ impl McpConnection {
                 // Always send an object — MCP spec requires `arguments` to
                 // be an object, and some servers (e.g. filesystem) reject
                 // `undefined`/`null` even for zero-parameter tools.
-                //
-                // `inject_caller_into_arguments` strips any agent-supplied
-                // `_librefang_caller` entry and inserts the kernel-attested
-                // value (when `caller.is_some()`). See #5699.
-                params.arguments = Some(inject_caller_into_arguments(arguments, caller));
+                params.arguments = Some(arguments.as_object().cloned().unwrap_or_default());
 
                 let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
                 let result: rmcp::model::CallToolResult =
@@ -2349,15 +2049,9 @@ impl McpConnection {
             TransportKind::Sse => {
                 // `self.inner` is no longer borrowed here, so calling
                 // `self.sse_send_request` (which takes `&mut self`) is safe.
-                //
-                // `inject_caller_into_arguments` strips any agent-supplied
-                // `_librefang_caller` entry and inserts the kernel-attested
-                // value (when `caller.is_some()`). See #5699.
-                let wire_args =
-                    serde_json::Value::Object(inject_caller_into_arguments(arguments, caller));
                 let params = serde_json::json!({
                     "name": raw_name,
-                    "arguments": wire_args,
+                    "arguments": arguments,
                 });
 
                 let response = self.sse_send_request("tools/call", Some(params)).await?;
@@ -2398,25 +2092,14 @@ impl McpConnection {
                     tools,
                 } = &self.config.transport
                 {
-                    // Strip any agent-supplied `_librefang_caller` key from the
-                    // arguments object regardless of caller — the HttpCompat
-                    // transport ships the kernel-attested value via the
-                    // `X-Librefang-Caller` header instead, and we don't want a
-                    // smuggled key landing in the backend body / query string.
-                    // See #5699.
-                    let mut stripped_args = arguments.clone();
-                    if let Some(obj) = stripped_args.as_object_mut() {
-                        obj.remove(CALLER_CONTEXT_ARG_KEY);
-                    }
                     Self::call_http_compat_tool(
                         &client,
                         base_url,
                         headers,
                         tools,
                         raw_name.as_str(),
-                        &stripped_args,
+                        arguments,
                         self.config.timeout_secs,
-                        caller,
                     )
                     .await
                 } else {
@@ -2492,11 +2175,6 @@ impl McpConnection {
         Ok(())
     }
 
-    // Eight args (was seven before #5699 added `caller`). The arg list is
-    // dominated by `config.transport`-destructured fields plus the per-call
-    // arguments and caller context — bundling them into a temporary struct
-    // would push the noise into the call site without simplifying anything.
-    #[allow(clippy::too_many_arguments)]
     async fn call_http_compat_tool(
         client: &reqwest::Client,
         base_url: &str,
@@ -2505,7 +2183,6 @@ impl McpConnection {
         raw_name: &str,
         arguments: &serde_json::Value,
         timeout_secs: u64,
-        caller: Option<&CallerContext>,
     ) -> Result<String, String> {
         let tool = tools
             .iter()
@@ -2532,35 +2209,6 @@ impl McpConnection {
 
         request = request.timeout(std::time::Duration::from_secs(timeout_secs));
         request = Self::apply_http_compat_headers(request, headers)?;
-
-        // Ship the kernel-attested caller context as a header so the backend
-        // (when operated by the same party) can authorise per-caller. See
-        // #5699. Serialisation is infallible for the all-`Option<String>`
-        // shape; a header construction error is logged and the request
-        // proceeds without the header so we don't fail-open into the
-        // alternative (silently dropping the call would mask user-visible
-        // tool errors).
-        if let Some(c) = caller {
-            match c.to_header_value() {
-                Ok(value) => match HeaderValue::from_str(&value) {
-                    Ok(hv) => {
-                        request = request.header(CALLER_CONTEXT_HEADER, hv);
-                    }
-                    Err(e) => {
-                        warn!(
-                            error = %e,
-                            "failed to encode X-Librefang-Caller header value; sending request without caller context"
-                        );
-                    }
-                },
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "failed to serialise CallerContext for header; sending request without caller context"
-                    );
-                }
-            }
-        }
 
         match tool.request_mode {
             HttpCompatRequestMode::JsonBody => {
@@ -2870,122 +2518,6 @@ fn expand_env_vars(input: &str, allowed_vars: &std::collections::HashSet<String>
     result
 }
 
-/// Expand a leading tilde (`~` or `~/...` / `~\...`) to the user's home
-/// directory.
-///
-/// Embedded tildes (`foo~bar`), tilde-user (`~alice/...`), and strings whose
-/// first segment is already a literal path are left unchanged. Returns the
-/// input unchanged if neither `HOME` nor `USERPROFILE` is set, so the caller
-/// surfaces the original arg in the spawn error rather than silently
-/// substituting the wrong path. (#4680)
-fn expand_leading_tilde(input: &str) -> String {
-    if input == "~" {
-        return std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| input.to_string());
-    }
-    let rest = if let Some(r) = input.strip_prefix("~/") {
-        r
-    } else if let Some(r) = input.strip_prefix("~\\") {
-        r
-    } else {
-        return input.to_string();
-    };
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_default();
-    if home.is_empty() {
-        return input.to_string();
-    }
-    let trimmed = home.trim_end_matches(['/', '\\']);
-    format!("{trimmed}/{rest}")
-}
-
-/// Convert a child-process spawn failure into an actionable error string for
-/// MCP stdio-transport connections.
-///
-/// On a fresh server (e.g., GCP Free Tier image, plain Docker base, a systemd
-/// unit with the default minimal PATH), the dominant reason an MCP server
-/// won't start is that its declared runtime — typically `npx`, `node`,
-/// `python`, `uvx`, etc. — is not installed or not on the daemon's PATH.
-/// The bare `io::Error` ("No such file or directory (os error 2)") doesn't
-/// tell the operator what to do; users mistake it for a path bug in the
-/// MCP server config.
-///
-/// This helper recognises `ErrorKind::NotFound` and emits a hint pointing at
-/// the runtime that needs installing. `PermissionDenied` is surfaced as
-/// "exists but isn't executable". Anything else is passed through with the
-/// original message so unusual errors (e.g., resource exhaustion) are
-/// preserved verbatim. (#4836)
-fn format_spawn_error(resolved_command: &str, e: &std::io::Error) -> String {
-    use std::io::ErrorKind;
-    let basename = std::path::Path::new(resolved_command)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(resolved_command);
-    // Strip a trailing `.cmd` / `.bat` / `.exe` so the Windows resolved form
-    // (`npx.cmd`) classifies the same way as the bare command (`npx`).
-    // The Windows resolver at `connect_stdio` only ever appends `.cmd`, but
-    // `.bat` is accepted for operator-supplied configs that pre-resolve a
-    // batch wrapper, and `.exe` is covered defensively so a hand-written
-    // `python.exe` config still classifies as Python.
-    let runtime = match basename.rsplit_once('.') {
-        Some((stem, ext))
-            if ext.eq_ignore_ascii_case("cmd")
-                || ext.eq_ignore_ascii_case("bat")
-                || ext.eq_ignore_ascii_case("exe") =>
-        {
-            stem
-        }
-        _ => basename,
-    };
-    match e.kind() {
-        ErrorKind::NotFound => {
-            let hint = match runtime.to_ascii_lowercase().as_str() {
-                "npx" | "node" | "npm" => {
-                    "install Node.js (https://nodejs.org/) and ensure it is on the daemon's PATH"
-                }
-                "python" | "python3" | "pip" | "pip3" | "pipx" => {
-                    "install Python and ensure it is on the daemon's PATH"
-                }
-                "uv" | "uvx" => {
-                    "install uv (https://docs.astral.sh/uv/) and ensure it is on the daemon's PATH"
-                }
-                "deno" => "install Deno (https://deno.com/) and ensure it is on the daemon's PATH",
-                "bun" | "bunx" => {
-                    "install Bun (https://bun.sh/) and ensure it is on the daemon's PATH"
-                }
-                "ruby" | "gem" | "bundle" => {
-                    "install Ruby and ensure it is on the daemon's PATH"
-                }
-                "go" => "install Go (https://go.dev/) and ensure it is on the daemon's PATH",
-                "cargo" => {
-                    "install the Rust toolchain (https://rustup.rs/) and ensure 'cargo' is on the daemon's PATH"
-                }
-                "dotnet" => {
-                    "install the .NET SDK (https://dotnet.microsoft.com/) and ensure 'dotnet' is on the daemon's PATH"
-                }
-                "java" => {
-                    "install a JDK and ensure 'java' is on the daemon's PATH"
-                }
-                _ => "install the required runtime and ensure it is on the daemon's PATH",
-            };
-            format!(
-                "MCP server command '{resolved_command}' not found in PATH — {hint}. \
-                 Note: a daemon launched by systemd or Docker often runs with a stripped-down \
-                 PATH that excludes nvm/asdf/per-user installs; add 'Environment=PATH=...' to \
-                 the unit (or set PATH on the daemon's process) if the runtime is installed \
-                 under a non-default prefix."
-            )
-        }
-        ErrorKind::PermissionDenied => format!(
-            "MCP server command '{resolved_command}' is not executable — \
-             check file permissions (chmod +x) and that the path is not on a noexec mount"
-        ),
-        _ => format!("Failed to spawn MCP server '{resolved_command}': {e}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3048,129 +2580,6 @@ mod tests {
             "email": "john@example.com",
         });
         assert!(scan_mcp_arguments_for_taint(&args).is_some());
-    }
-
-    // ── MCP argument schema guard ────────────────────────────────────────
-
-    #[test]
-    fn test_validate_args_rejects_missing_required_field() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "required": ["name", "count"],
-            "properties": {
-                "name": { "type": "string" },
-                "count": { "type": "integer" },
-            },
-        });
-        let args = serde_json::json!({ "name": "alice" });
-        let err = validate_args_against_schema("mcp_x_thing", &args, &schema)
-            .expect_err("missing `count` must be rejected");
-        assert!(
-            err.contains("count"),
-            "error must name the missing field: {err}"
-        );
-        assert!(
-            err.contains("mcp_x_thing"),
-            "error must include tool name: {err}"
-        );
-    }
-
-    #[test]
-    fn test_validate_args_accepts_when_all_required_present() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "required": ["name"],
-            "properties": { "name": { "type": "string" } },
-        });
-        let args = serde_json::json!({ "name": "alice", "extra": 1 });
-        assert!(validate_args_against_schema("mcp_x_thing", &args, &schema).is_ok());
-    }
-
-    #[test]
-    fn test_validate_args_rejects_non_object_arguments_for_object_schema() {
-        let schema = serde_json::json!({ "type": "object" });
-        // LLM hallucinated a bare string instead of an object — exactly
-        // the "garbage from the model" case the audit row cites.
-        let args = serde_json::json!("not an object");
-        let err = validate_args_against_schema("mcp_x_thing", &args, &schema)
-            .expect_err("non-object args must be rejected");
-        assert!(err.contains("expected JSON object"), "{err}");
-        assert!(err.contains("string"), "error must name actual type: {err}");
-    }
-
-    #[test]
-    fn test_validate_args_accepts_null_as_empty_object_when_no_required() {
-        // `call_tool` treats null arguments as empty-object for transport.
-        // The guard should agree, NOT reject — otherwise zero-parameter
-        // tools break.
-        let schema = serde_json::json!({ "type": "object" });
-        assert!(
-            validate_args_against_schema("mcp_x_thing", &serde_json::Value::Null, &schema).is_ok()
-        );
-    }
-
-    #[test]
-    fn test_validate_args_skips_when_schema_not_object() {
-        // Some upstreams hand us a non-object schema (e.g. `true` for
-        // "any value accepted"). Don't crash, don't reject — just pass.
-        let schema = serde_json::json!(true);
-        let args = serde_json::json!({ "anything": 1 });
-        assert!(validate_args_against_schema("mcp_x_thing", &args, &schema).is_ok());
-    }
-
-    #[test]
-    fn test_call_tool_rejects_missing_required_field_before_transport() {
-        // End-to-end via `call_tool`: the validation must fire BEFORE
-        // any transport dispatch. We use an HttpCompat connection whose
-        // `base_url` points at a closed loopback port — if validation
-        // skipped, the test would hang or surface a connection error
-        // instead of the structured validation message.
-        let mut conn = McpConnection {
-            config: McpServerConfig {
-                name: "guard".to_string(),
-                transport: McpTransport::HttpCompat {
-                    base_url: "http://127.0.0.1:1".to_string(),
-                    headers: vec![],
-                    tools: vec![],
-                },
-                timeout_secs: 30,
-                env: vec![],
-                headers: vec![],
-                oauth_provider: None,
-                oauth_config: None,
-                taint_scanning: false,
-                taint_policy: None,
-                taint_rule_sets: empty_taint_rule_sets_handle(),
-                roots: vec![],
-            },
-            tools: vec![ToolDefinition {
-                name: "mcp_guard_create".to_string(),
-                description: "create something".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "required": ["name"],
-                }),
-            }],
-            original_names: {
-                let mut m = HashMap::new();
-                m.insert("mcp_guard_create".to_string(), "create".to_string());
-                m
-            },
-            inner: McpInner::HttpCompat {
-                client: librefang_http::proxied_client(),
-            },
-            auth_state: crate::mcp_oauth::McpAuthState::NotRequired,
-        };
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let err = rt
-            .block_on(conn.call_tool("mcp_guard_create", &serde_json::json!({})))
-            .expect_err("missing required field must be rejected pre-transport");
-        assert!(err.contains("missing required field"), "{err}");
-        assert!(err.contains("name"), "{err}");
     }
 
     #[test]
@@ -4357,77 +3766,11 @@ mod tests {
 
     #[test]
     fn test_ssrf_check() {
-        // Cloud metadata endpoints (literal IP and DNS forms)
         assert!(
             McpConnection::check_ssrf("http://169.254.169.254/latest/meta-data", "test").is_err()
         );
         assert!(McpConnection::check_ssrf("http://metadata.google.internal/v1/", "test").is_err());
-        assert!(McpConnection::check_ssrf("http://metadata.aws.internal/", "test").is_err());
-        // Azure IMDS alternative endpoint — public IANA-assigned IP but
-        // blocked unconditionally to stay aligned with web_fetch::check_ssrf.
-        assert!(McpConnection::check_ssrf("http://192.0.0.192/metadata/instance", "test").is_err());
-        // Same Azure IMDS alternative reached through the two IPv6-embedded
-        // IPv4 forms that route to 192.0.0.192 on the wire — the most
-        // regression-prone codepath (ipv6_embedded_ipv4 → blocked_v4).
-        // IPv4-mapped: ::ffff:192.0.0.192.
-        assert!(McpConnection::check_ssrf("http://[::ffff:192.0.0.192]/", "test").is_err());
-        // NAT64 well-known prefix: 64:ff9b::192.0.0.192 (== 64:ff9b::c000:c0).
-        assert!(McpConnection::check_ssrf("http://[64:ff9b::c000:c0]/", "test").is_err());
-
-        // CGNAT 100.64.0.0/10 — covers Alibaba Cloud IMDS 100.100.100.200;
-        // never a legitimate operator backend, blocked on the connect path.
-        assert!(McpConnection::check_ssrf("http://100.64.0.1/x", "test").is_err());
-        // 0.0.0.0 unspecified — resolves to loopback, footgun, blocked.
-        assert!(McpConnection::check_ssrf("http://0.0.0.0/x", "test").is_err());
-
-        // NAT64 well-known prefix smuggling IMDS (64:ff9b::169.254.169.254)
-        assert!(McpConnection::check_ssrf("http://[64:ff9b::a9fe:a9fe]/x", "test").is_err());
-
-        // Userinfo — pre-#3623 substring stub let credentials through
-        assert!(McpConnection::check_ssrf("http://alice:pw@example.com/", "test").is_err());
-
-        // Non-http(s) schemes — file:// must never reach reqwest
-        assert!(McpConnection::check_ssrf("file:///etc/passwd", "test").is_err());
-
-        // The MCP backend URL is operator-configured (config.toml), not
-        // attacker-influenced, so a local / LAN MCP server is a
-        // legitimate, common setup and must be allowed on the connect
-        // path. (#5156 over-blocked these and broke every localhost MCP
-        // HTTP backend — `test_http_compat_end_to_end` is the regression
-        // canary; the full block stays on the OAuth path, see
-        // `test_oauth_path_still_blocks_private`.)
-        assert!(McpConnection::check_ssrf("http://127.0.0.1:3000/mcp", "test").is_ok());
-        assert!(McpConnection::check_ssrf("http://localhost/x", "test").is_ok());
-        assert!(McpConnection::check_ssrf("http://[::1]/x", "test").is_ok());
-        assert!(McpConnection::check_ssrf("http://10.0.0.1/x", "test").is_ok());
-        assert!(McpConnection::check_ssrf("http://192.168.1.1/x", "test").is_ok());
-        assert!(McpConnection::check_ssrf("http://172.16.0.1/x", "test").is_ok());
-        // IPv4-mapped IPv6 loopback (::ffff:127.0.0.1) — private-tier,
-        // allowed on connect like its bare IPv4 form.
-        assert!(McpConnection::check_ssrf("http://[::ffff:7f00:1]/x", "test").is_ok());
-
-        // Sanity: a normal public MCP endpoint is allowed
         assert!(McpConnection::check_ssrf("https://api.example.com/mcp", "test").is_ok());
-    }
-
-    /// Pins the split introduced for #5156's localhost over-block: the
-    /// OAuth discovery / token-exchange path (host comes from a remote
-    /// response) keeps the full loopback / RFC1918 / ULA block even
-    /// though the operator-configured connect path now allows it.
-    #[test]
-    fn test_oauth_path_still_blocks_private() {
-        use crate::mcp_oauth::is_ssrf_blocked_url;
-        // Still blocked on the server-response-influenced path:
-        assert!(is_ssrf_blocked_url("http://127.0.0.1/x").is_err());
-        assert!(is_ssrf_blocked_url("http://localhost/x").is_err());
-        assert!(is_ssrf_blocked_url("http://10.0.0.1/x").is_err());
-        assert!(is_ssrf_blocked_url("http://192.168.1.1/x").is_err());
-        assert!(is_ssrf_blocked_url("http://[::1]/x").is_err());
-        // Metadata pivots blocked on both paths:
-        assert!(is_ssrf_blocked_url("http://169.254.169.254/x").is_err());
-        assert!(is_ssrf_blocked_url("http://192.0.0.192/x").is_err());
-        // Public host still allowed:
-        assert!(is_ssrf_blocked_url("https://api.example.com/mcp").is_ok());
     }
 
     #[test]
@@ -4643,200 +3986,6 @@ mod tests {
         assert_eq!(result, "$_TEST_UNSET_DECLARED/bin");
     }
 
-    // ── expand_leading_tilde tests (#4680) ────────────────────────────────
-
-    #[test]
-    fn test_expand_leading_tilde_alone() {
-        std::env::set_var("HOME", "/Users/alice");
-        assert_eq!(expand_leading_tilde("~"), "/Users/alice");
-    }
-
-    #[test]
-    fn test_expand_leading_tilde_with_subpath() {
-        std::env::set_var("HOME", "/Users/alice");
-        assert_eq!(
-            expand_leading_tilde("~/work/repo"),
-            "/Users/alice/work/repo"
-        );
-    }
-
-    #[test]
-    fn test_expand_leading_tilde_strips_trailing_separators_in_home() {
-        // Defends against double-slash if HOME ends with `/`.
-        std::env::set_var("HOME", "/Users/alice/");
-        assert_eq!(expand_leading_tilde("~/work"), "/Users/alice/work");
-    }
-
-    #[test]
-    fn test_expand_leading_tilde_does_not_expand_embedded() {
-        std::env::set_var("HOME", "/Users/alice");
-        assert_eq!(expand_leading_tilde("/tmp/~foo"), "/tmp/~foo");
-        assert_eq!(expand_leading_tilde("foo~"), "foo~");
-    }
-
-    #[test]
-    fn test_expand_leading_tilde_does_not_expand_tilde_user() {
-        // `~bob/...` is shell tilde-user expansion which we intentionally do
-        // not support — leave the literal alone so the spawn surfaces the
-        // real path in any downstream error.
-        std::env::set_var("HOME", "/Users/alice");
-        assert_eq!(expand_leading_tilde("~bob/work"), "~bob/work");
-    }
-
-    #[test]
-    fn test_expand_leading_tilde_plain_string_unchanged() {
-        std::env::set_var("HOME", "/Users/alice");
-        assert_eq!(expand_leading_tilde("/usr/local/bin"), "/usr/local/bin");
-        assert_eq!(
-            expand_leading_tilde("@scope/pkg@latest"),
-            "@scope/pkg@latest"
-        );
-    }
-
-    // ── format_spawn_error tests (#4836) ──────────────────────────────────
-
-    fn io_error(kind: std::io::ErrorKind) -> std::io::Error {
-        std::io::Error::new(kind, "synthetic")
-    }
-
-    #[test]
-    fn format_spawn_error_not_found_npx_mentions_node() {
-        let msg = format_spawn_error("npx", &io_error(std::io::ErrorKind::NotFound));
-        assert!(
-            msg.contains("'npx'") && msg.contains("not found in PATH"),
-            "must surface command + cause: {msg}"
-        );
-        assert!(
-            msg.contains("Node.js"),
-            "npx hint must point at Node.js: {msg}"
-        );
-    }
-
-    #[test]
-    fn format_spawn_error_not_found_strips_path_to_basename() {
-        // An absolute path to npx still classifies as a Node.js runtime.
-        let msg = format_spawn_error("/usr/bin/npx", &io_error(std::io::ErrorKind::NotFound));
-        assert!(
-            msg.contains("Node.js"),
-            "absolute-path npx must still get Node.js hint: {msg}"
-        );
-    }
-
-    #[test]
-    fn format_spawn_error_not_found_handles_windows_cmd_extension() {
-        // Windows resolves `npx` to `npx.cmd`; the hint must classify the same
-        // way as the bare command name.
-        let msg = format_spawn_error("npx.cmd", &io_error(std::io::ErrorKind::NotFound));
-        assert!(
-            msg.contains("Node.js"),
-            "npx.cmd must classify as Node.js runtime: {msg}"
-        );
-    }
-
-    #[test]
-    fn format_spawn_error_not_found_python_mentions_python() {
-        let msg = format_spawn_error("python3", &io_error(std::io::ErrorKind::NotFound));
-        assert!(
-            msg.contains("Python"),
-            "python3 hint must point at Python: {msg}"
-        );
-    }
-
-    #[test]
-    fn format_spawn_error_not_found_uvx_mentions_uv() {
-        let msg = format_spawn_error("uvx", &io_error(std::io::ErrorKind::NotFound));
-        assert!(msg.contains("uv"), "uvx hint must point at uv: {msg}");
-    }
-
-    #[test]
-    fn format_spawn_error_not_found_unknown_runtime_uses_generic_hint() {
-        let msg = format_spawn_error("custom-mcp-bin", &io_error(std::io::ErrorKind::NotFound));
-        assert!(
-            msg.contains("install the required runtime"),
-            "unknown runtime falls back to generic hint: {msg}"
-        );
-        // Must NOT misclassify under a specific runtime.
-        assert!(!msg.contains("Node.js"));
-        assert!(!msg.contains("Python"));
-    }
-
-    #[test]
-    fn format_spawn_error_not_found_mentions_systemd_path_pitfall() {
-        // The most common failure mode in the issue (#4836) is a stripped-down
-        // PATH on managed VMs / systemd units. The error must surface that
-        // pitfall so operators look in the right place.
-        let msg = format_spawn_error("npx", &io_error(std::io::ErrorKind::NotFound));
-        assert!(
-            msg.to_ascii_lowercase().contains("systemd")
-                || msg.to_ascii_lowercase().contains("path"),
-            "must hint at PATH/systemd pitfall: {msg}"
-        );
-    }
-
-    #[test]
-    fn format_spawn_error_permission_denied_distinct_from_not_found() {
-        let msg = format_spawn_error(
-            "/opt/bin/server",
-            &io_error(std::io::ErrorKind::PermissionDenied),
-        );
-        assert!(
-            msg.contains("not executable") || msg.contains("permissions"),
-            "permission-denied path must surface chmod hint: {msg}"
-        );
-        // PermissionDenied must NOT trigger the install-runtime hint — the
-        // file already exists.
-        assert!(!msg.contains("not found in PATH"));
-    }
-
-    #[test]
-    fn format_spawn_error_other_kind_passes_through_original_message() {
-        // Any kind we don't special-case must preserve the underlying io error
-        // verbatim, so unusual failures (e.g., resource exhaustion on tiny VMs)
-        // surface exactly what the OS reported instead of being rewritten.
-        let inner = std::io::Error::other("out of memory");
-        let msg = format_spawn_error("npx", &inner);
-        assert!(
-            msg.contains("out of memory"),
-            "non-NotFound errors must passthrough: {msg}"
-        );
-        assert!(msg.contains("Failed to spawn MCP server 'npx'"));
-    }
-
-    #[test]
-    fn format_spawn_error_not_found_ruby_mentions_ruby() {
-        // Sample of a runtime added after the initial review (#4867) — guards
-        // against a future refactor that drops it back to the generic hint.
-        let msg = format_spawn_error("ruby", &io_error(std::io::ErrorKind::NotFound));
-        assert!(msg.contains("Ruby"), "ruby hint must point at Ruby: {msg}");
-    }
-
-    /// End-to-end guard that the spawn site at `connect_stdio` actually
-    /// routes through `format_spawn_error`. The unit tests above only
-    /// exercise the helper in isolation; without this test, a regression
-    /// that reverts the call site to the bare `format!("Failed to spawn
-    /// MCP server '{}': {e}")` would not be caught. (#4836 / #4867 review)
-    #[tokio::test]
-    async fn connect_stdio_routes_not_found_through_format_spawn_error() {
-        // A command guaranteed not to exist on any reasonable host. The UUID
-        // suffix prevents collision with an exotic developer setup.
-        let bogus = "librefang-mcp-runtime-that-does-not-exist-1c9a186cf5d68d93";
-        let result = McpConnection::connect_stdio(bogus, &[], &[], Vec::new()).await;
-        // The Ok variant `(McpInner, Option<Vec<Tool>>)` doesn't implement
-        // Debug, so unwrap via `match` rather than `.expect_err`.
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("spawn must fail for a non-existent command"),
-        };
-        assert!(
-            err.contains("not found in PATH"),
-            "spawn site must use format_spawn_error's NotFound branch: {err}"
-        );
-        assert!(
-            err.contains(bogus),
-            "error must echo the command the operator configured: {err}"
-        );
-    }
-
     // ── read_response_bytes_capped tests (#3801) ──────────────────────────
 
     #[tokio::test]
@@ -4929,149 +4078,5 @@ mod tests {
             Some(ToolApprovalClass::Mutating),
             "producer string {class_str:?} must parse on the consumer side"
         );
-    }
-
-    // ── #5699 Caller-context propagation ───────────────────────────────
-
-    #[test]
-    fn caller_context_from_parts_returns_none_when_all_fields_missing() {
-        // No identity signals → no context to ship — the call falls back to
-        // the legacy un-attested wire shape, preserving prompt-cache
-        // equivalence for non-channel call sites (autonomous loops,
-        // direct-API).
-        assert!(CallerContext::from_parts(None, None, None, None).is_none());
-    }
-
-    #[test]
-    fn caller_context_from_parts_populates_when_any_field_present() {
-        let ctx = CallerContext::from_parts(Some("peer-1"), Some("telegram"), None, None)
-            .expect("at least one Some => Some(ctx)");
-        assert_eq!(ctx.peer_id.as_deref(), Some("peer-1"));
-        assert_eq!(ctx.channel.as_deref(), Some("telegram"));
-        assert!(ctx.chat_id.is_none());
-        assert!(ctx.session_id.is_none());
-    }
-
-    #[test]
-    fn caller_context_to_header_value_round_trips() {
-        let ctx = CallerContext {
-            peer_id: Some("user-7".to_string()),
-            channel: Some("telegram".to_string()),
-            chat_id: Some("chat-99".to_string()),
-            session_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
-        };
-        let header = ctx.to_header_value().expect("infallible for this shape");
-        let parsed: CallerContext =
-            serde_json::from_str(&header).expect("header value must be valid JSON");
-        assert_eq!(parsed, ctx);
-    }
-
-    #[test]
-    fn caller_context_header_value_is_a_valid_http_header() {
-        // The header value must survive `HeaderValue::from_str` without
-        // tripping the ASCII / control-char gate — otherwise we'd silently
-        // drop the context at the HttpCompat transport. JSON of pure ASCII
-        // string fields always passes this, but verify so a future change
-        // (e.g. tacking on a non-ASCII field) gets flagged.
-        let ctx = CallerContext {
-            peer_id: Some("user-1".to_string()),
-            channel: Some("telegram".to_string()),
-            chat_id: None,
-            session_id: None,
-        };
-        let header = ctx.to_header_value().unwrap();
-        assert!(HeaderValue::from_str(&header).is_ok());
-    }
-
-    #[test]
-    fn inject_caller_strips_agent_supplied_key_when_caller_none() {
-        // Even with no kernel context, an agent-supplied `_librefang_caller`
-        // must NEVER be forwarded — otherwise a context-blind legacy server
-        // would happily read it as if it were attested.
-        let agent_payload = serde_json::json!({
-            "user_id": "<user-A>",
-            CALLER_CONTEXT_ARG_KEY: { "peer_id": "<spoofed-peer-B>" },
-        });
-        let wire = inject_caller_into_arguments(&agent_payload, None);
-        assert!(
-            !wire.contains_key(CALLER_CONTEXT_ARG_KEY),
-            "agent-supplied caller key must be stripped even when caller is None"
-        );
-        assert_eq!(
-            wire.get("user_id").and_then(|v| v.as_str()),
-            Some("<user-A>")
-        );
-    }
-
-    #[test]
-    fn inject_caller_overwrites_agent_supplied_value() {
-        // Core #5699 security regression: a malicious agent that knows the
-        // private key name MUST NOT be able to spoof the kernel-attested
-        // identity. The kernel value wins.
-        let agent_payload = serde_json::json!({
-            "user_id": "<user-A>",
-            CALLER_CONTEXT_ARG_KEY: {
-                "peer_id": "<spoofed-peer-B>",
-                "channel": "<spoofed-channel>",
-            },
-        });
-        let kernel_caller = CallerContext {
-            peer_id: Some("attested-peer-A".to_string()),
-            channel: Some("telegram".to_string()),
-            chat_id: Some("chat-1".to_string()),
-            session_id: None,
-        };
-        let wire = inject_caller_into_arguments(&agent_payload, Some(&kernel_caller));
-        let injected = wire
-            .get(CALLER_CONTEXT_ARG_KEY)
-            .expect("kernel caller must be present on the wire");
-        // Round-trip through CallerContext to assert the value is the
-        // kernel-attested one, not the agent's spoof attempt.
-        let parsed: CallerContext = serde_json::from_value(injected.clone())
-            .expect("injected value must deserialize as CallerContext");
-        assert_eq!(parsed, kernel_caller);
-        assert_eq!(parsed.peer_id.as_deref(), Some("attested-peer-A"));
-        // The agent's spoofed values must NOT survive.
-        assert_ne!(parsed.peer_id.as_deref(), Some("<spoofed-peer-B>"));
-        assert_ne!(parsed.channel.as_deref(), Some("<spoofed-channel>"));
-        // Other agent-supplied fields are forwarded byte-for-byte —
-        // the strip-then-set logic must NOT touch them.
-        assert_eq!(
-            wire.get("user_id").and_then(|v| v.as_str()),
-            Some("<user-A>")
-        );
-    }
-
-    #[test]
-    fn inject_caller_coerces_non_object_arguments_to_empty_object() {
-        // MCP spec requires `arguments` to be an object — a malformed
-        // non-object input (e.g. a stray array or string) must still
-        // produce an object on the wire, and the caller context must
-        // still be present.
-        let kernel_caller = CallerContext {
-            peer_id: Some("p".to_string()),
-            ..Default::default()
-        };
-        let wire = inject_caller_into_arguments(
-            &serde_json::Value::String("garbage".into()),
-            Some(&kernel_caller),
-        );
-        assert_eq!(wire.len(), 1);
-        assert!(wire.contains_key(CALLER_CONTEXT_ARG_KEY));
-    }
-
-    #[test]
-    fn inject_caller_with_none_and_no_agent_key_is_byte_identical() {
-        // Prompt-cache equivalence: legacy call sites that don't carry any
-        // caller context must produce the exact same `arguments` object as
-        // before #5699 — otherwise we'd silently bust the provider prompt
-        // cache for every existing deployment on upgrade.
-        let agent_payload = serde_json::json!({
-            "city": "Paris",
-            "units": "metric",
-        });
-        let wire = inject_caller_into_arguments(&agent_payload, None);
-        let wire_value = serde_json::Value::Object(wire);
-        assert_eq!(wire_value, agent_payload);
     }
 }

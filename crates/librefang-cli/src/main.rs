@@ -3,18 +3,10 @@
 //! When a daemon is running (`librefang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
 
-// The in-process agent loop's deeply-nested async future chain — now
-// carrying the per-task held-agent-lock `scope` layer (#5125/#5126) —
-// exceeds the default type-recursion limit when this binary crate is
-// monomorphised. Matches the `librefang-kernel` / `librefang-api` crate
-// roots.
-#![recursion_limit = "256"]
-
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-mod acp;
 mod desktop_install;
 pub mod doctor;
 mod http_client;
@@ -32,7 +24,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use librefang_api::server::read_daemon_info;
 use librefang_extensions::dotenv;
-use librefang_kernel::{config::load_config, AgentSubsystemApi, LibreFangKernel, LlmSubsystemApi};
+use librefang_kernel::{config::load_config, LibreFangKernel};
 use librefang_types::agent::{AgentId, AgentManifest};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
@@ -241,10 +233,10 @@ enum Commands {
         long_about = "Manage agent skills: install from FangHub, list, search, test, and publish.\n\nSkills extend agent capabilities with tools, integrations, and custom logic.\n\nExamples:\n  librefang skill install web-search   # Install from FangHub\n  librefang skill list                 # List installed skills\n  librefang skill search \"code review\" # Search FangHub\n  librefang skill test ./my-skill      # Validate a local skill\n  librefang skill create               # Scaffold a new skill\n  librefang skill publish              # Publish to FangHub"
     )]
     Skill(SkillCommands),
-    /// Manage messaging channels (list, setup, reload, rm) [*].
+    /// Manage channel integrations (setup, test, enable, disable) [*].
     #[command(
         subcommand,
-        long_about = "Manage out-of-process messaging channel sidecars (Telegram, Discord, Slack, …).\n\nEvery channel runs as a sidecar adapter; this subcommand drives the\nsurviving daemon endpoints: `GET /api/channels` for the list, `GET\n/api/channels/registry` + `POST /api/channels/sidecar/{name}/configure`\nfor setup, `POST /api/channels/reload` to apply changes without a\ndaemon restart.\n\nThe pre-migration `librefang channel test / enable / disable` arms\nare not restored — sidecars surface their own health via stdout logs\n(no in-band /test endpoint), and presence of the `[[sidecar_channels]]`\nblock in `config.toml` is the only on/off signal (use `rm` to remove).\n\nExamples:\n  librefang channel list                 # Show configured channels\n  librefang channel setup                # Interactive picker over unconfigured rows\n  librefang channel setup telegram       # Schema-driven configure for one adapter\n  librefang channel reload               # Hot-reload after manual config.toml edits\n  librefang channel rm telegram          # Delete the [[sidecar_channels]] entry + reload"
+        long_about = "Manage messaging channel integrations (Telegram, Discord, Slack, etc.).\n\nChannels connect your agents to external messaging platforms.\n\nExamples:\n  librefang channel list              # Show configured channels\n  librefang channel setup telegram    # Interactive Telegram setup\n  librefang channel setup             # Interactive channel picker\n  librefang channel test telegram     # Send a test message\n  librefang channel enable telegram   # Enable a channel\n  librefang channel disable telegram  # Disable without removing config"
     )]
     Channel(ChannelCommands),
     /// Manage hands (list, activate, status, pause, info) [*].
@@ -318,20 +310,6 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         command: Option<McpCommands>,
-    },
-    /// Run the Agent Client Protocol (ACP) server over stdio (#3313).
-    ///
-    /// Launches an in-process kernel and serves an ACP `Agent` on
-    /// stdin/stdout. Editors like Zed, VS Code (Claude Code), and
-    /// JetBrains spawn this as a child process per workspace and
-    /// drive prompts / approvals / streaming through it.
-    #[command(
-        long_about = "Run the Agent Client Protocol (ACP) server over stdio (#3313).\n\nExposes a LibreFang agent to ACP-compatible editors (Zed, VS Code, JetBrains).\nThe editor spawns `librefang acp` as a child process per workspace; this\ncommand runs an in-process kernel and serves the JSON-RPC protocol on\nstdin/stdout until the editor disconnects.\n\nExamples:\n  librefang acp                    # Use the default agent (\"assistant\")\n  librefang acp --agent reviewer   # Use a named agent\n  librefang acp --agent <uuid>     # Use an agent by UUID"
-    )]
-    Acp {
-        /// Agent name or UUID to embed. Defaults to "assistant".
-        #[arg(long)]
-        agent: Option<String>,
     },
     /// Authenticate with a provider (chatgpt) [*].
     #[command(
@@ -478,7 +456,7 @@ enum Commands {
     Configure,
     /// Send a one-shot message to an agent.
     #[command(
-        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json\n  librefang message coder \"Draft this email\" --incognito"
+        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json"
     )]
     Message {
         /// Agent name or ID.
@@ -488,10 +466,6 @@ enum Commands {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
-        /// Run in incognito mode: session messages and memory writes are
-        /// suppressed while memory reads remain fully operational.
-        #[arg(long)]
-        incognito: bool,
     },
     /// System info and version [*].
     #[command(
@@ -600,56 +574,6 @@ enum AuthCommands {
         #[arg(long)]
         device_auth: bool,
     },
-    /// Manage credential pools for multi-key per-provider rotation (#4965) [*].
-    #[command(
-        subcommand,
-        long_about = "Inspect and manage credential pools — multi-key API key rotation per provider.\n\nPools are configured in config.toml as `[[credential_pools]]` blocks. The CLI\ntalks to the running daemon if one is up; otherwise it reads the config file\ndirectly. Mutating subcommands (`add`, `remove`, `strategy`) rewrite\nconfig.toml and require a daemon restart or hot-reload to take effect.\n\nExamples:\n  librefang auth pool list                              # Show all pools and key telemetry\n  librefang auth pool list --json                       # Machine-readable output\n  librefang auth pool add openai OPENAI_API_KEY_2 --label Backup --priority 5\n  librefang auth pool strategy openai round_robin\n  librefang auth pool remove openai OPENAI_API_KEY_2"
-    )]
-    Pool(AuthPoolCommands),
-}
-
-#[derive(Subcommand)]
-enum AuthPoolCommands {
-    /// List configured credential pools with per-key telemetry.
-    List {
-        /// Output as JSON for scripting.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Add a new key entry to a provider's pool.
-    ///
-    /// Creates the pool if it does not yet exist. The pool's strategy defaults
-    /// to `fill_first` (highest priority first) on first creation; change it
-    /// later with `librefang auth pool strategy`.
-    Add {
-        /// Provider name (e.g. `openai`, `anthropic`, `groq`).
-        provider: String,
-        /// Name of the environment variable holding the API key.
-        env_var: String,
-        /// Human-readable label for the key (e.g. `Primary`, `Backup`).
-        #[arg(long, default_value = "Key")]
-        label: String,
-        /// Priority — higher value picked first under `fill_first` / `round_robin`.
-        #[arg(long, default_value_t = 0)]
-        priority: u32,
-    },
-    /// Remove a key entry from a provider's pool.
-    ///
-    /// Removes the pool itself when the last key entry is removed. The
-    /// `env_var` argument must match the entry's `api_key_env` field exactly.
-    Remove {
-        /// Provider name.
-        provider: String,
-        /// Env-var name of the key to remove.
-        env_var: String,
-    },
-    /// Change a pool's selection strategy.
-    Strategy {
-        /// Provider name.
-        provider: String,
-        /// Strategy: `fill_first`, `round_robin`, `random`, `least_used`.
-        strategy: String,
-    },
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -742,36 +666,6 @@ enum MigrateSourceArg {
 }
 
 #[derive(Subcommand)]
-enum ChannelCommands {
-    /// List configured + discoverable channels via `GET /api/channels`.
-    #[command(
-        long_about = "List configured + discoverable channels via `GET /api/channels`.\n\nColumns: NAME, KIND, CONFIGURED, TOKEN (does every required secret env\nvar have a value), 24H MSGS.\n\nRequires a running daemon — falls through with an error if the daemon\nis not reachable. To inspect raw config without a daemon, read\n`~/.librefang/config.toml` directly.\n\nExamples:\n  librefang channel list"
-    )]
-    List,
-    /// Trigger `POST /api/channels/reload` so the daemon re-reads\n    /// `[[sidecar_channels]]` from disk without restarting.
-    #[command(
-        long_about = "Trigger `POST /api/channels/reload` so the daemon re-reads\n`[[sidecar_channels]]` from `~/.librefang/config.toml` (plus any\n`include`-d files) without restarting. Use after a manual edit, or\nafter `librefang channel rm`.\n\nExamples:\n  librefang channel reload"
-    )]
-    Reload,
-    /// Interactive schema-driven sidecar configure.
-    #[command(
-        long_about = "Interactive schema-driven sidecar configure.\n\nWith no argument: shows a picker over the currently-unconfigured\nadapters (via `GET /api/channels`). With an argument: jumps straight\nto the configure prompts for that adapter.\n\nPrompts for each field the sidecar's `--describe` schema lists\n(secret fields are masked + flagged as `(set — leave blank to keep)`\nwhen they already have a value). On submit, POSTs to\n`/api/channels/sidecar/{name}/configure`, which splits values across\n`~/.librefang/secrets.env` (secret-typed fields) and `[[sidecar_channels]]`\nin `config.toml` (everything else), then hot-reloads.\n\nExamples:\n  librefang channel setup            # Interactive picker\n  librefang channel setup telegram   # Schema-driven configure for one adapter"
-    )]
-    Setup {
-        /// Sidecar adapter name (`telegram`, `ntfy`, …). Picker if omitted.
-        name: Option<String>,
-    },
-    /// Remove a `[[sidecar_channels]]` entry from config.toml + reload.
-    #[command(
-        long_about = "Remove the `[[sidecar_channels]]` entry whose `name` matches\n`<NAME>` from `~/.librefang/config.toml`, then hot-reload so the\nrunning sidecar shuts down.\n\nPresence of the `[[sidecar_channels]]` block is the only on/off\nsignal post-migration (`enable` / `disable` are retired), so `rm`\nis how you turn an adapter off.\n\nExamples:\n  librefang channel rm telegram"
-    )]
-    Rm {
-        /// Sidecar entry `name` field to remove.
-        name: String,
-    },
-}
-
-#[derive(Subcommand)]
 enum SkillCommands {
     /// Install a skill from FangHub or a local directory.
     #[command(
@@ -857,39 +751,6 @@ enum SkillCommands {
         long_about = "Manually invoke the skill evolution pipeline that agents use internally.\n\nOperates on the globally-installed skill directory (~/.librefang/skills).\nAll mutations go through the same validation, security scan, file locking,\nand version-history bookkeeping as the agent tools.\n\nExamples:\n  librefang skill evolve create --name my-skill --description ... --context-file prompt.md\n  librefang skill evolve update my-skill prompt.md --changelog \"tightened wording\"\n  librefang skill evolve patch my-skill --old-file a.txt --new-file b.txt --changelog \"fix typo\"\n  librefang skill evolve rollback my-skill\n  librefang skill evolve history my-skill"
     )]
     Evolve(EvolveCommands),
-    /// Skill workshop (#3328) — review pending candidates captured from
-    /// agent conversations.
-    #[command(
-        subcommand,
-        long_about = "Review candidates produced by the skill workshop after-turn capture.\n\nA candidate is a draft skill the workshop extracted from a conversation\nturn (e.g. `from now on always run cargo fmt`). Candidates land in\n`~/.librefang/skills/pending/<agent_id>/<uuid>.toml` and are NOT loaded\ninto the active registry until you approve them. Approval routes\nthrough the same evolution::create_skill path used for marketplace\ninstalls, so name validation and prompt-injection scans run a second\ntime before anything reaches `~/.librefang/skills/`.\n\nExamples:\n  librefang skill pending list\n  librefang skill pending show <id>\n  librefang skill pending approve <id>\n  librefang skill pending reject <id>"
-    )]
-    Pending(PendingCommands),
-}
-
-#[derive(Subcommand)]
-enum PendingCommands {
-    /// List pending candidates (oldest captured first — same order the
-    /// dashboard's pending review section renders).
-    List {
-        /// Show only candidates from the given agent UUID.
-        #[arg(long)]
-        agent: Option<String>,
-    },
-    /// Print a candidate's full TOML and provenance.
-    Show {
-        /// Candidate UUID (shown by `pending list`).
-        id: String,
-    },
-    /// Promote a candidate into the active skill registry.
-    Approve {
-        /// Candidate UUID.
-        id: String,
-    },
-    /// Drop a candidate without promoting.
-    Reject {
-        /// Candidate UUID.
-        id: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -993,6 +854,54 @@ enum EvolveCommands {
         /// Target a specific hand's workspace instead of the global skills dir.
         #[arg(long)]
         hand: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChannelCommands {
+    /// List configured channels and their status.
+    #[command(
+        long_about = "List all configured channels and show their current status (enabled/disabled).\n\nExamples:\n  librefang channel list"
+    )]
+    List,
+    /// Interactive setup wizard for a channel.
+    #[command(
+        long_about = "Run the interactive setup wizard for a messaging channel.\n\nIf no channel name is given, shows an interactive picker.\n\nExamples:\n  librefang channel setup            # Interactive picker\n  librefang channel setup telegram   # Set up Telegram\n  librefang channel setup discord    # Set up Discord"
+    )]
+    Setup {
+        /// Channel name (telegram, discord, slack, whatsapp, etc.). Shows picker if omitted.
+        channel: Option<String>,
+    },
+    /// Test a channel by sending a test message.
+    #[command(
+        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test telegram\n  librefang channel test telegram --chat-id 123456789\n  librefang channel test discord --channel 123456789\n  librefang channel test slack --channel C1234567890"
+    )]
+    Test {
+        /// Channel name.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Target channel ID for Discord or Slack live message tests.
+        #[arg(long = "channel", conflicts_with = "chat_id")]
+        channel_id: Option<String>,
+        /// Target chat ID for Telegram live message tests.
+        #[arg(long, conflicts_with = "channel_id")]
+        chat_id: Option<String>,
+    },
+    /// Enable a channel.
+    #[command(
+        long_about = "Enable a previously configured channel.\n\nExamples:\n  librefang channel enable telegram"
+    )]
+    Enable {
+        /// Channel name.
+        channel: String,
+    },
+    /// Disable a channel without removing its configuration.
+    #[command(
+        long_about = "Disable a channel without removing its configuration.\n\nThe channel can be re-enabled later without reconfiguring.\n\nExamples:\n  librefang channel disable telegram"
+    )]
+    Disable {
+        /// Channel name.
+        channel: String,
     },
 }
 
@@ -1213,44 +1122,11 @@ enum AgentCommands {
     },
     /// Kill an agent.
     #[command(
-        long_about = "Terminate a running agent by its UUID.\n\nThis is a destructive operation: the agent's canonical UUID binding is\npurged, orphaning any prior sessions / memories under the old UUID. The\nnext spawn under the same name lands on a fresh UUID. Use\n`librefang agent delete <name> --yes` for the explicit-by-name variant\n(refs #4614).\n\nExamples:\n  librefang agent kill 550e8400-e29b-41d4-a716-446655440000"
+        long_about = "Terminate a running agent by its UUID.\n\nExamples:\n  librefang agent kill 550e8400-e29b-41d4-a716-446655440000"
     )]
     Kill {
         /// Agent ID (UUID).
         agent_id: String,
-    },
-    /// Delete an agent by name with a confirmation prompt (refs #4614).
-    #[command(
-        long_about = "Permanently delete an agent and purge its canonical UUID binding.\n\nResolves <name> to its canonical UUID via the agent_identities registry,\nprompts for confirmation (or `--yes` to bypass), and issues\n`DELETE /api/agents/{id}?confirm=true`. The next spawn under the same\nname will land on a fresh UUID; prior sessions / memories are orphaned.\n\nExamples:\n  librefang agent delete coder\n  librefang agent delete coder --yes"
-    )]
-    Delete {
-        /// Agent name (looked up in agent_identities.toml).
-        name: String,
-        /// Skip the confirmation prompt.
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Reset an agent's canonical UUID without killing it (refs #4614).
-    #[command(
-        long_about = "Drop the canonical UUID binding for <name> from the\nagent_identities registry without killing the agent. The next spawn\nwill re-derive a fresh UUID. Prior sessions / memories tied to the\nold UUID are orphaned. Prompts for confirmation; pass `--yes` to skip.\n\nExamples:\n  librefang agent reset-uuid coder\n  librefang agent reset-uuid coder --yes"
-    )]
-    ResetUuid {
-        /// Agent name.
-        name: String,
-        /// Skip the confirmation prompt.
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Reassign sessions / memories from an old UUID to the canonical one (refs #4614, deferred).
-    #[command(
-        long_about = "Migrate orphaned data from <old-uuid> to the canonical UUID for <name>.\n\nNOT YET IMPLEMENTED — this command is reserved by issue #4614 but the\nactual cross-table reassignment requires deep memory-substrate surgery\n(sessions, events, kv_store, memories, entities, relations,\nusage_events, canonical_sessions, prompt_experiments, audit_entries,\napproval_audit, plus the proactive memory store) under a single\ntransaction with rollback semantics. Tracked as a follow-up.\n\nFor now this command prints a friendly message pointing to the issue.\n\nExamples:\n  librefang agent merge-history coder --from 0123abcd-...-..."
-    )]
-    MergeHistory {
-        /// Agent name (canonical UUID destination).
-        name: String,
-        /// Old UUID whose sessions / memories should be reassigned.
-        #[arg(long)]
-        from: String,
     },
     /// Set an agent property (e.g., model).
     #[command(
@@ -1637,8 +1513,7 @@ enum MemoryCommands {
     },
     /// Set a KV value.
     #[command(
-        alias = "store",
-        long_about = "Store a key-value pair in an agent's memory.\n\nExamples:\n  librefang memory set coder my-key \"hello world\"\n  librefang memory store coder my-key \"hello world\"  # alias for set"
+        long_about = "Store a key-value pair in an agent's memory.\n\nExamples:\n  librefang memory set coder my-key \"hello world\""
     )]
     Set {
         /// Agent name or ID.
@@ -1952,10 +1827,7 @@ struct DaemonConfigContext {
 }
 
 fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContext {
-    let config = load_config(config).unwrap_or_else(|e| {
-        eprintln!("warning: {e}; using default config values for this command");
-        librefang_types::config::KernelConfig::default()
-    });
+    let config = load_config(config);
     let api_key = {
         let trimmed = config.api_key.trim();
         if trimmed.is_empty() {
@@ -2194,9 +2066,6 @@ fn main() {
             AgentCommands::List { json } => cmd_agent_list(cli.config, json),
             AgentCommands::Chat { agent_id } => cmd_agent_chat(cli.config, &agent_id),
             AgentCommands::Kill { agent_id } => cmd_agent_kill(cli.config, &agent_id),
-            AgentCommands::Delete { name, yes } => cmd_agent_delete(cli.config, &name, yes),
-            AgentCommands::ResetUuid { name, yes } => cmd_agent_reset_uuid(cli.config, &name, yes),
-            AgentCommands::MergeHistory { name, from } => cmd_agent_merge_history(&name, &from),
             AgentCommands::Set {
                 agent_id,
                 field,
@@ -2273,13 +2142,17 @@ fn main() {
             } => cmd_skill_publish(path, repo, tag, output, dry_run),
             SkillCommands::Create => cmd_skill_create(),
             SkillCommands::Evolve(sub) => cmd_skill_evolve(sub),
-            SkillCommands::Pending(sub) => cmd_skill_pending(sub),
         },
         Some(Commands::Channel(sub)) => match sub {
             ChannelCommands::List => cmd_channel_list(),
-            ChannelCommands::Reload => cmd_channel_reload(),
-            ChannelCommands::Setup { name } => cmd_channel_setup(name.as_deref()),
-            ChannelCommands::Rm { name } => cmd_channel_rm(&name),
+            ChannelCommands::Setup { channel } => cmd_channel_setup(channel.as_deref()),
+            ChannelCommands::Test {
+                name,
+                channel_id,
+                chat_id,
+            } => cmd_channel_test(&name, channel_id.as_deref(), chat_id.as_deref()),
+            ChannelCommands::Enable { channel } => cmd_channel_toggle(&channel, true),
+            ChannelCommands::Disable { channel } => cmd_channel_toggle(&channel, false),
         },
         Some(Commands::Hand(sub)) => match sub {
             HandCommands::List => cmd_hand_list(),
@@ -2325,24 +2198,8 @@ fn main() {
             Some(McpCommands::Add { name, key }) => cmd_mcp_add(&name, key.as_deref()),
             Some(McpCommands::Remove { name }) => cmd_mcp_remove(&name),
         },
-        Some(Commands::Acp { agent }) => acp::run_acp_server(cli.config, agent),
         Some(Commands::Auth(sub)) => match sub {
             AuthCommands::Chatgpt { device_auth } => cmd_auth_chatgpt(device_auth),
-            AuthCommands::Pool(sub) => match sub {
-                AuthPoolCommands::List { json } => cmd_auth_pool_list(cli.config, json),
-                AuthPoolCommands::Add {
-                    provider,
-                    env_var,
-                    label,
-                    priority,
-                } => cmd_auth_pool_add(cli.config, &provider, &env_var, &label, priority),
-                AuthPoolCommands::Remove { provider, env_var } => {
-                    cmd_auth_pool_remove(cli.config, &provider, &env_var)
-                }
-                AuthPoolCommands::Strategy { provider, strategy } => {
-                    cmd_auth_pool_strategy(cli.config, &provider, &strategy)
-                }
-            },
         },
         Some(Commands::Vault(sub)) => match sub {
             VaultCommands::Init => cmd_vault_init(),
@@ -2425,12 +2282,7 @@ fn main() {
             }
         }
         Some(Commands::Configure) => cmd_init(false),
-        Some(Commands::Message {
-            agent,
-            text,
-            json,
-            incognito,
-        }) => cmd_message(&agent, &text, json, incognito),
+        Some(Commands::Message { agent, text, json }) => cmd_message(&agent, &text, json),
         Some(Commands::System(sub)) => match sub {
             SystemCommands::Info { json } => cmd_system_info(json),
             SystemCommands::Version { json } => cmd_system_version(json),
@@ -2688,39 +2540,31 @@ fn cmd_init_upgrade() {
     ui::blank();
     ui::section("Upgrading LibreFang installation");
 
-    // Four upgrade steps: backup, registry sync, vault/git, config merge.
-    let mut p = progress::auto("Upgrading", Some(4));
-
     // 2. Backup existing config under backups/ (keep last 3)
-    p.set_message("Backing up config");
     let backups_dir = librefang_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        p.finish_with_failure(&format!("Failed to create backups dir: {e}"));
+        ui::error(&format!("Failed to create backups dir: {e}"));
         std::process::exit(1);
     }
     let backup_name = format!("config-{}.toml", format_local_timestamp());
     let backup_path = backups_dir.join(&backup_name);
     if let Err(e) = std::fs::copy(&config_path, &backup_path) {
-        p.finish_with_failure(&format!("Failed to backup config: {e}"));
+        ui::error(&format!("Failed to backup config: {e}"));
         std::process::exit(1);
     }
     restrict_file_permissions(&backup_path);
     prune_old_config_backups(&backups_dir, 3);
-    p.tick(1);
     ui::success(&format!("Backed up config to backups/{backup_name}"));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
-    p.set_message("Syncing registry");
+    ui::hint("Syncing registry...");
     if librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0, "") {
-        p.tick(1);
         ui::success("Registry synced");
     } else {
-        p.tick(1);
         ui::hint("Registry sync failed (network issue?) — continuing with cached content");
     }
 
     // 4. Ensure data dir, vault, and git exist
-    p.set_message("Initialising vault/git");
     let data_dir = librefang_dir.join("data");
     if !data_dir.exists() {
         let _ = std::fs::create_dir_all(&data_dir);
@@ -2737,14 +2581,12 @@ fn cmd_init_upgrade() {
             }
         }
     }
-    p.tick(1);
 
     // 5. Merge new default config fields
-    p.set_message("Merging config fields");
     let existing_raw = match std::fs::read_to_string(&config_path) {
         Ok(s) => s,
         Err(e) => {
-            p.finish_with_failure(&format!("Upgrade aborted: failed to read config.toml: {e}"));
+            ui::error(&format!("Failed to read config.toml: {e}"));
             std::process::exit(1);
         }
     };
@@ -2752,9 +2594,7 @@ fn cmd_init_upgrade() {
     let existing: toml::Value = match toml::from_str(&existing_raw) {
         Ok(v) => v,
         Err(e) => {
-            p.finish_with_failure(&format!(
-                "Upgrade aborted: failed to parse config.toml: {e}"
-            ));
+            ui::error(&format!("Failed to parse config.toml: {e}"));
             ui::hint(&format!(
                 "Your original config was saved to backups/{backup_name}"
             ));
@@ -2767,9 +2607,7 @@ fn cmd_init_upgrade() {
     let defaults: toml::Value = match toml::from_str(&default_config_str) {
         Ok(v) => v,
         Err(e) => {
-            p.finish_with_failure(&format!(
-                "Upgrade aborted: failed to parse default config template: {e}"
-            ));
+            ui::error(&format!("Failed to parse default config template: {e}"));
             std::process::exit(1);
         }
     };
@@ -2830,7 +2668,7 @@ fn cmd_init_upgrade() {
         }
 
         if let Err(e) = std::fs::write(&config_path, &content) {
-            p.finish_with_failure(&format!("Upgrade aborted: failed to write config: {e}"));
+            ui::error(&format!("Failed to write config: {e}"));
             ui::hint(&format!(
                 "Your original config was saved to backups/{backup_name}"
             ));
@@ -2842,8 +2680,6 @@ fn cmd_init_upgrade() {
             ui::kv("  +", key);
         }
     }
-    p.tick(1);
-    p.finish("Upgrade steps complete");
 
     // 6. Check for legacy ~/.openclaw installation
     if let Some(home) = dirs::home_dir() {
@@ -2918,9 +2754,90 @@ fn prune_old_config_backups(backups_dir: &std::path::Path, keep: usize) {
     }
 }
 
-/// Generate a local timestamp string in YYYYMMDD-HHMMSS format.
+/// Generate a local timestamp string in YYYYMMDD-HHMMSS format without external deps.
 fn format_local_timestamp() -> String {
-    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+    // Use libc to get local time on unix; fallback to UTC seconds on other platforms.
+    #[cfg(unix)]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        // SAFETY: localtime_r is thread-safe and writes into our stack buffer.
+        unsafe { libc::localtime_r(&secs, &mut tm) };
+        format!(
+            "{:04}{:02}{:02}-{:02}{:02}{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        // Fallback: use UTC (acceptable on Windows where libc tm isn't available)
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Simple UTC breakdown
+        let days = secs / 86400;
+        let day_secs = secs % 86400;
+        let hour = day_secs / 3600;
+        let min = (day_secs % 3600) / 60;
+        let sec = day_secs % 60;
+        // Days since 1970-01-01
+        let (year, month, day) = days_to_ymd(days);
+        format!("{year:04}{month:02}{day:02}-{hour:02}{min:02}{sec:02}")
+    }
+}
+
+/// Convert days since Unix epoch to (year, month, day). Used only on non-Unix platforms.
+#[cfg(not(unix))]
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut year = 1970u64;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap(year);
+    let month_days: [u64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u64;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+#[cfg(not(unix))]
+fn is_leap(y: u64) -> bool {
+    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
 }
 
 /// Find top-level keys in `defaults` that are missing from `existing`.
@@ -3552,21 +3469,6 @@ fn ensure_initialized(config: &Option<PathBuf>) {
 fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: bool) {
     ensure_initialized(&config);
 
-    // Issue #5186 follow-up: `cmd_start` boots a real daemon, so a bad
-    // `config.toml` must abort here BEFORE `daemon_config_context` swallows
-    // the load error and substitutes `KernelConfig::default()`. The
-    // tolerant default would silently change `home_dir` (used a few lines
-    // below to detect an already-running daemon) and the spawned child
-    // would only fail-closed during its own boot — losing the field-name
-    // diagnostic from the parent's stderr in the process.
-    //
-    // `load_config` already prints the underlying error to stderr (so
-    // operators see the field name even before the tracing subscriber is
-    // wired up); we only need to short-circuit with a non-zero exit.
-    if load_config(config.as_deref()).is_err() {
-        std::process::exit(1);
-    }
-
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
@@ -3650,23 +3552,6 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
         }
     }
 
-    // Load `<home>/secrets.env` into the current process environment BEFORE
-    // building the tokio runtime or booting the kernel. Without this, a
-    // dashboard-saved provider key (`POST /api/providers/{p}/key` writes to
-    // `secrets.env`) is dropped on every daemon restart because the systemd
-    // unit's `EnvironmentFile=` references a different file and nothing in
-    // the boot path re-reads `secrets.env`. Synchronous on the main thread —
-    // `std::env::set_var` is unsound under concurrent reads, but no tokio
-    // runtime exists yet so this is the safe window. See #4701.
-    match librefang_api::secrets_env::load_into_process_blocking(&daemon.home_dir) {
-        Ok(0) => {}
-        Ok(n) => tracing::debug!("Loaded {n} entries from secrets.env"),
-        Err(e) => tracing::warn!(
-            "Failed to read secrets.env from {}: {e}",
-            daemon.home_dir.display()
-        ),
-    }
-
     ui::banner();
     ui::blank();
     println!("  {}", i18n::t("daemon-starting"));
@@ -3715,8 +3600,12 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
         let daemon_info_path = kernel.home_dir().join("daemon.json");
         let provider = cfg.default_model.provider.clone();
         let model = cfg.default_model.model.clone();
-        let agent_count = kernel.agent_registry_ref().count();
-        let model_count = kernel.model_catalog_swap().load().list_models().len();
+        let agent_count = kernel.agent_registry().count();
+        let model_count = kernel
+            .model_catalog_ref()
+            .read()
+            .map(|c| c.list_models().len())
+            .unwrap_or(0);
 
         ui::success(&i18n::t_args(
             "kernel-booted",
@@ -3789,48 +3678,6 @@ fn cmd_stop(config: Option<PathBuf>) {
                     }
                     ui::success(&i18n::t("daemon-stopped-forced"));
                 }
-                Ok(r) if r.status().as_u16() == 401 => {
-                    // Issue #4693 — the new CLI cannot authenticate against
-                    // the running daemon. Typical trigger: `curl install.sh
-                    // | sh` upgraded the binary without restarting the
-                    // daemon, so the running daemon was started with an
-                    // api_key the new CLI no longer reads (locked vault,
-                    // rotated key, freshly-enabled dashboard credentials).
-                    // Surface the cause and fall back to PID-based stop so
-                    // the user is not stuck on a half-restarted machine.
-                    ui::error(&i18n::t("shutdown-401-detected"));
-                    ui::hint(&i18n::t("shutdown-401-explainer"));
-                    if let Some(info) = read_daemon_info(&daemon.home_dir) {
-                        let pid = info.pid;
-                        ui::hint(&i18n::t_args(
-                            "shutdown-401-fallback-attempt",
-                            &[("pid", &pid.to_string())],
-                        ));
-                        force_kill_pid(pid);
-                        for _ in 0..10 {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            if find_daemon_in_home(&daemon.home_dir).is_none() {
-                                let _ = std::fs::remove_file(daemon.home_dir.join("daemon.json"));
-                                ui::success(&i18n::t_args(
-                                    "shutdown-401-fallback-success",
-                                    &[("pid", &pid.to_string())],
-                                ));
-                                return;
-                            }
-                        }
-                        ui::error(&i18n::t("shutdown-401-fallback-fail"));
-                        ui::hint(&i18n::t_args(
-                            "shutdown-401-fallback-fix",
-                            &[("pid", &pid.to_string())],
-                        ));
-                    } else {
-                        let info_path = daemon.home_dir.join("daemon.json");
-                        ui::hint(&i18n::t_args(
-                            "shutdown-401-no-pid-fix",
-                            &[("path", &info_path.display().to_string())],
-                        ));
-                    }
-                }
                 Ok(r) => {
                     ui::error(&i18n::t_args(
                         "shutdown-request-fail",
@@ -3855,15 +3702,6 @@ fn cmd_stop(config: Option<PathBuf>) {
 }
 
 fn cmd_restart(config: Option<PathBuf>, tail: bool, foreground: bool) {
-    // Same fail-closed rule as `cmd_start` (#5186 follow-up): a bad config
-    // must abort before we read `home_dir` to look up a running daemon, or
-    // we'd `find_daemon_in_home` on `~/.librefang` (the default) and either
-    // miss a real daemon at a user-configured `home_dir` or "stop" the
-    // wrong one. `load_config` already eprintln!s the underlying error.
-    if load_config(config.as_deref()).is_err() {
-        std::process::exit(1);
-    }
-
     let daemon = daemon_config_context(config.as_deref());
     if find_daemon_in_home(&daemon.home_dir).is_some() {
         ui::hint(&i18n::t("daemon-restarting"));
@@ -4197,7 +4035,7 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
         }
     } else {
         let kernel = boot_kernel(config);
-        let agents = kernel.agent_registry_ref().list();
+        let agents = kernel.agent_registry().list();
 
         if json {
             let list: Vec<serde_json::Value> = agents
@@ -4248,14 +4086,9 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
     if let Some(base) = find_daemon() {
         let agent_id = resolve_agent_id(&base, agent_id_str);
         let client = daemon_client();
-        // Refs #4614: explicit `librefang agent kill <id>` IS the user's
-        // confirmation. The API requires `?confirm=true` on DELETE so the
-        // canonical UUID is purged on the kill (matching the issue's
-        // "explicit delete" semantics). Internal lifecycle resets call
-        // `kernel.kill_agent` directly and skip this path.
         let body = daemon_json(
             client
-                .delete(format!("{base}/api/agents/{agent_id}?confirm=true"))
+                .delete(format!("{base}/api/agents/{agent_id}"))
                 .send(),
         );
         if body.get("status").is_some() {
@@ -4279,9 +4112,7 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
             std::process::exit(1);
         });
         let kernel = boot_kernel(config);
-        // Direct-kernel path (no daemon): mirror the API's confirmed-delete
-        // semantics so behavior matches whether the daemon is running or not.
-        match kernel.kill_agent_with_purge(agent_id, true) {
+        match kernel.kill_agent(agent_id) {
             Ok(()) => println!(
                 "{}",
                 i18n::t_args("agent-killed", &[("id", &agent_id.to_string())])
@@ -4295,192 +4126,6 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
             }
         }
     }
-}
-
-/// Refs #4614 — `librefang agent delete <name>` with confirmation prompt.
-///
-/// Looks up the canonical UUID for `name` via `GET /api/agents/identities`
-/// (or directly from the kernel registry when no daemon is running),
-/// prints the destructive-action warning, and either prompts `[y/N]` or
-/// proceeds immediately when `--yes` is set. Then issues the confirmed
-/// DELETE. This is the long-form companion to `librefang agent kill <id>`
-/// — useful when the operator only knows the agent's name.
-fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
-    eprintln!("WARNING: Deleting agent \"{name}\" will permanently remove its canonical UUID");
-    eprintln!("    and all associated memories and sessions.");
-    eprintln!("    This action cannot be undone.");
-    if !yes && !prompt_yes_no("Confirm?", false) {
-        eprintln!("Aborted.");
-        std::process::exit(1);
-    }
-
-    if let Some(base) = find_daemon() {
-        let client = daemon_client();
-        // Resolve name → UUID via the identity registry endpoint.
-        let canonical_uuid = match lookup_canonical_uuid(&base, name) {
-            Some(id) => id,
-            None => {
-                eprintln!(
-                    "No canonical UUID recorded for agent name '{name}' — nothing to delete."
-                );
-                std::process::exit(1);
-            }
-        };
-        let body = daemon_json(
-            client
-                .delete(format!("{base}/api/agents/{canonical_uuid}?confirm=true"))
-                .send(),
-        );
-        if body.get("status").is_some() {
-            println!("Agent \"{name}\" deleted (canonical UUID purged).");
-        } else {
-            eprintln!(
-                "Failed to delete agent: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
-            );
-            std::process::exit(1);
-        }
-    } else {
-        let kernel = boot_kernel(config);
-        let canonical_uuid = match kernel.identities_ref().get(name) {
-            Some(id) => id,
-            None => {
-                eprintln!(
-                    "No canonical UUID recorded for agent name '{name}' — nothing to delete."
-                );
-                std::process::exit(1);
-            }
-        };
-        match kernel.kill_agent_with_purge(canonical_uuid, true) {
-            Ok(()) => println!("Agent \"{name}\" deleted (canonical UUID purged)."),
-            Err(e) => {
-                eprintln!("Failed to delete agent: {e}");
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
-/// Refs #4614 — `librefang agent reset-uuid <name>` with confirmation.
-///
-/// Drops the canonical UUID binding without killing a running agent. The
-/// next spawn under `name` re-derives a fresh UUID and registers it as
-/// the new canonical binding; prior sessions / memories tied to the old
-/// UUID are orphaned. `--yes` skips the prompt.
-fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: bool) {
-    eprintln!("WARNING: Resetting the canonical UUID for \"{name}\" will orphan all sessions");
-    eprintln!("    and memories tied to its current UUID. The next spawn under this");
-    eprintln!("    name will start with a fresh UUID. This action cannot be undone.");
-    if !yes && !prompt_yes_no("Confirm?", false) {
-        eprintln!("Aborted.");
-        std::process::exit(1);
-    }
-
-    if let Some(base) = find_daemon() {
-        let client = daemon_client();
-        let body = daemon_json(
-            client
-                .post(format!(
-                    "{base}/api/agents/identities/{}/reset",
-                    percent_encode_path_segment(name)
-                ))
-                .query(&[("confirm", "true")])
-                .send(),
-        );
-        if body.get("status").is_some() {
-            println!(
-                "Canonical UUID for \"{name}\" reset (was {}).",
-                body["previous_canonical_uuid"]
-                    .as_str()
-                    .unwrap_or("<unknown>")
-            );
-        } else {
-            eprintln!(
-                "Failed to reset canonical UUID: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
-            );
-            std::process::exit(1);
-        }
-    } else {
-        let kernel = boot_kernel(config);
-        match kernel.identities_ref().purge(name) {
-            Some(prev) => println!("Canonical UUID for \"{name}\" reset (was {prev})."),
-            None => {
-                eprintln!("No canonical UUID recorded for agent name '{name}'.");
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
-/// Refs #4614 — `librefang agent merge-history` placeholder.
-///
-/// The cross-table reassignment is not yet implemented — see the
-/// long_about on `AgentCommands::MergeHistory` for the rationale (deep
-/// memory-substrate surgery across 10+ tables under one transaction).
-fn cmd_agent_merge_history(name: &str, from: &str) {
-    eprintln!("merge-history is not yet implemented (refs #4614 follow-up).");
-    eprintln!("Reassignment of sessions / memories from {from} to the canonical UUID");
-    eprintln!("for agent \"{name}\" requires cross-table SQL surgery in the memory");
-    eprintln!("substrate that is being tracked separately.");
-    std::process::exit(2);
-}
-
-/// Look up the canonical UUID for `name` via the identity-registry
-/// endpoint. Returns `None` if no entry exists (or on any HTTP error —
-/// the caller surfaces a friendly message).
-fn lookup_canonical_uuid(base: &str, name: &str) -> Option<String> {
-    let client = daemon_client();
-    let resp = client
-        .get(format!("{base}/api/agents/identities"))
-        .send()
-        .ok()?;
-    let entries: serde_json::Value = resp.json().ok()?;
-    let arr = entries.as_array()?;
-    for entry in arr {
-        if entry["name"].as_str() == Some(name) {
-            return entry["canonical_uuid"].as_str().map(String::from);
-        }
-    }
-    None
-}
-
-/// Minimal percent-encoder for a single URL path segment. Encodes
-/// everything outside the `unreserved` set (RFC 3986 §2.3) plus `/` so
-/// the segment can't escape into a parent path. Avoids pulling a new
-/// dependency for the one-off use here.
-fn percent_encode_path_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.as_bytes() {
-        let b = *byte;
-        let unreserved =
-            b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~';
-        if unreserved {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
-/// Minimal `[y/N]` prompt for destructive operations. Reads a single
-/// line from stdin; treats anything other than `y` / `Y` / `yes` /
-/// `YES` as "no" (per the issue's `[y/N]` default).
-fn prompt_yes_no(prompt: &str, default_yes: bool) -> bool {
-    use std::io::Write as _;
-    let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
-    eprint!("{prompt} {suffix} ");
-    let _ = std::io::stderr().flush();
-    let mut buf = String::new();
-    if std::io::stdin().read_line(&mut buf).is_err() {
-        return false;
-    }
-    let trimmed = buf.trim().to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return default_yes;
-    }
-    matches!(trimmed.as_str(), "y" | "yes")
 }
 
 fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
@@ -4702,10 +4347,7 @@ fn render_status_daemon(
         .api_key
         .as_deref()
         .and_then(|k| fetch_status_detail(base, k));
-    let cfg = load_config(config).unwrap_or_else(|e| {
-        eprintln!("warning: {e}; using default config values for status display");
-        librefang_types::config::KernelConfig::default()
-    });
+    let cfg = load_config(config);
 
     let exit_code = classify_exit(health.as_ref());
     let is_public_bind = info
@@ -5224,10 +4866,7 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     // workflow templates just to print "daemon down". Pull what we can from
     // the config file alone.
     if quiet {
-        let cfg = load_config(config.as_deref()).unwrap_or_else(|e| {
-            eprintln!("warning: {e}; using default config values for status display");
-            librefang_types::config::KernelConfig::default()
-        });
+        let cfg = load_config(config.as_deref());
         println!(
             "librefang down home={} default={}/{}",
             cfg.home_dir.display(),
@@ -5238,7 +4877,7 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     }
 
     let kernel = boot_kernel(config);
-    let agent_count = kernel.agent_registry_ref().count();
+    let agent_count = kernel.agent_registry().count();
     let cfg = kernel.config_ref();
 
     if json {
@@ -5287,7 +4926,7 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     if agent_count > 0 {
         ui::blank();
         ui::section(&i18n::t("section-persisted-agents"));
-        for entry in kernel.agent_registry_ref().list() {
+        for entry in kernel.agent_registry().list() {
             println!("    {} ({}) -- {:?}", entry.name, entry.id, entry.state);
         }
     }
@@ -6676,16 +6315,17 @@ fn cmd_workflow_list() {
     match body.as_array() {
         Some(workflows) if workflows.is_empty() => println!("No workflows registered."),
         Some(workflows) => {
-            let mut t = crate::table::Table::new(&["ID", "NAME", "STEPS", "CREATED"]);
+            println!("{:<38} {:<20} {:<6} CREATED", "ID", "NAME", "STEPS");
+            println!("{}", "-".repeat(80));
             for w in workflows {
-                t.add_row(&[
+                println!(
+                    "{:<38} {:<20} {:<6} {}",
                     w["id"].as_str().unwrap_or("?"),
                     w["name"].as_str().unwrap_or("?"),
-                    &w["steps"].as_u64().unwrap_or(0).to_string(),
+                    w["steps"].as_u64().unwrap_or(0),
                     w["created_at"].as_str().unwrap_or("?"),
-                ]);
+                );
             }
-            t.print();
         }
         None => println!("No workflows registered."),
     }
@@ -6767,23 +6407,21 @@ fn cmd_trigger_list(agent_id: Option<&str>) {
     match arr {
         Some(triggers) if triggers.is_empty() => println!("No triggers registered."),
         Some(triggers) => {
-            let mut tbl = crate::table::Table::new(&[
-                "TRIGGER ID",
-                "AGENT ID",
-                "ENABLED",
-                "FIRES",
-                "PATTERN",
-            ]);
+            println!(
+                "{:<38} {:<38} {:<8} {:<6} PATTERN",
+                "TRIGGER ID", "AGENT ID", "ENABLED", "FIRES"
+            );
+            println!("{}", "-".repeat(110));
             for t in triggers {
-                tbl.add_row(&[
+                println!(
+                    "{:<38} {:<38} {:<8} {:<6} {}",
                     t["id"].as_str().unwrap_or("?"),
                     t["agent_id"].as_str().unwrap_or("?"),
-                    &t["enabled"].as_bool().unwrap_or(false).to_string(),
-                    &t["fire_count"].as_u64().unwrap_or(0).to_string(),
-                    t["pattern"].as_str().unwrap_or("?"),
-                ]);
+                    t["enabled"].as_bool().unwrap_or(false),
+                    t["fire_count"].as_u64().unwrap_or(0),
+                    t["pattern"],
+                );
             }
-            tbl.print();
         }
         None => println!("No triggers registered."),
     }
@@ -7047,10 +6685,10 @@ fn boot_kernel(config: Option<PathBuf>) -> LibreFangKernel {
 
 fn cmd_migrate(args: MigrateArgs) {
     let source = match args.from {
-        MigrateSourceArg::Openclaw => librefang_import::MigrateSource::OpenClaw,
-        MigrateSourceArg::Langchain => librefang_import::MigrateSource::LangChain,
-        MigrateSourceArg::Autogpt => librefang_import::MigrateSource::AutoGpt,
-        MigrateSourceArg::Openfang => librefang_import::MigrateSource::OpenFang,
+        MigrateSourceArg::Openclaw => librefang_migrate::MigrateSource::OpenClaw,
+        MigrateSourceArg::Langchain => librefang_migrate::MigrateSource::LangChain,
+        MigrateSourceArg::Autogpt => librefang_migrate::MigrateSource::AutoGpt,
+        MigrateSourceArg::Openfang => librefang_migrate::MigrateSource::OpenFang,
     };
 
     let source_dir = args.source_dir.unwrap_or_else(|| {
@@ -7059,10 +6697,10 @@ fn cmd_migrate(args: MigrateArgs) {
             std::process::exit(1);
         });
         match source {
-            librefang_import::MigrateSource::OpenClaw => home.join(".openclaw"),
-            librefang_import::MigrateSource::LangChain => home.join(".langchain"),
-            librefang_import::MigrateSource::AutoGpt => home.join("Auto-GPT"),
-            librefang_import::MigrateSource::OpenFang => home.join(".openfang"),
+            librefang_migrate::MigrateSource::OpenClaw => home.join(".openclaw"),
+            librefang_migrate::MigrateSource::LangChain => home.join(".langchain"),
+            librefang_migrate::MigrateSource::AutoGpt => home.join("Auto-GPT"),
+            librefang_migrate::MigrateSource::OpenFang => home.join(".openfang"),
         }
     });
 
@@ -7073,17 +6711,15 @@ fn cmd_migrate(args: MigrateArgs) {
         println!("  (dry run — no changes will be made)\n");
     }
 
-    let options = librefang_import::MigrateOptions {
+    let options = librefang_migrate::MigrateOptions {
         source,
         source_dir,
         target_dir,
         dry_run: args.dry_run,
     };
 
-    let mut sp = progress::auto("Running migration", None);
-    match librefang_import::run_migration(&options) {
+    match librefang_migrate::run_migration(&options) {
         Ok(report) => {
-            sp.finish("Migration complete");
             report.print_summary();
 
             // Save migration report
@@ -7097,7 +6733,7 @@ fn cmd_migrate(args: MigrateArgs) {
             }
         }
         Err(e) => {
-            sp.finish_with_failure(&format!("Migration failed: {e}"));
+            eprintln!("Migration failed: {e}");
             std::process::exit(1);
         }
     }
@@ -7195,8 +6831,7 @@ fn cmd_skill_install(source: &str, hand: Option<&str>) {
         }
     } else {
         // Remote install from FangHub
-        let mut sp = progress::auto(&format!("Installing {source}"), None);
-        sp.tick(1);
+        println!("Installing {source} from FangHub...");
         let rt = tokio::runtime::Runtime::new().unwrap();
         let client = librefang_skills::marketplace::MarketplaceClient::new(
             librefang_skills::marketplace::MarketplaceConfig::default(),
@@ -7204,13 +6839,13 @@ fn cmd_skill_install(source: &str, hand: Option<&str>) {
         match rt.block_on(client.install(source, &skills_dir)) {
             Ok(version) => {
                 if let Some(h) = hand {
-                    sp.finish(&format!("Installed {source} {version} to hand '{h}'"));
+                    println!("Installed {source} {version} to hand '{h}'");
                 } else {
-                    sp.finish(&format!("Installed {source} {version}"));
+                    println!("Installed {source} {version}");
                 }
             }
             Err(e) => {
-                sp.finish_with_failure(&format!("Failed to install skill: {e}"));
+                eprintln!("Failed to install skill: {e}");
                 std::process::exit(1);
             }
         }
@@ -7235,16 +6870,20 @@ fn cmd_skill_list(hand: Option<&str>) {
             } else {
                 println!("{count} skill(s) installed:\n");
             }
-            let mut t = crate::table::Table::new(&["NAME", "VERSION", "TOOLS", "DESCRIPTION"]);
+            println!(
+                "{:<20} {:<10} {:<8} DESCRIPTION",
+                "NAME", "VERSION", "TOOLS"
+            );
+            println!("{}", "-".repeat(70));
             for skill in registry.list() {
-                t.add_row(&[
-                    &skill.manifest.skill.name,
-                    &skill.manifest.skill.version,
-                    &skill.manifest.tools.provided.len().to_string(),
-                    &skill.manifest.skill.description,
-                ]);
+                println!(
+                    "{:<20} {:<10} {:<8} {}",
+                    skill.manifest.skill.name,
+                    skill.manifest.skill.version,
+                    skill.manifest.tools.provided.len(),
+                    skill.manifest.skill.description,
+                );
             }
-            t.print();
         }
         Err(e) => {
             eprintln!("Error loading skills: {e}");
@@ -7452,11 +7091,6 @@ fn cmd_skill_publish(
         packaged.manifest.skill.name, packaged.manifest.skill.version
     );
 
-    let mut sp = progress::auto(
-        &format!("Publishing {}@{tag}", packaged.manifest.skill.name),
-        None,
-    );
-    sp.tick(1);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let client = librefang_skills::marketplace::MarketplaceClient::new(
         librefang_skills::marketplace::MarketplaceConfig::default(),
@@ -7473,14 +7107,14 @@ fn cmd_skill_publish(
             }),
         )
         .unwrap_or_else(|e| {
-            sp.finish_with_failure(&format!("Publish failed: {e}"));
+            eprintln!("Publish failed: {e}");
             std::process::exit(1);
         });
 
-    sp.finish(&format!(
+    println!(
         "Published {} to {}@{}",
         published.asset_name, published.repo, published.tag
-    ));
+    );
     if !published.html_url.is_empty() {
         println!("Release: {}", published.html_url);
     }
@@ -7838,114 +7472,10 @@ fn cmd_skill_evolve(sub: EvolveCommands) {
                 println!("\nNo version history recorded.");
                 return;
             }
-            println!();
-            let mut t = crate::table::Table::new(&["VERSION", "TIMESTAMP", "CHANGELOG"]);
+            println!("\n{:<10} {:<25} CHANGELOG", "VERSION", "TIMESTAMP");
+            println!("{}", "-".repeat(70));
             for v in meta.versions.iter().rev() {
-                t.add_row(&[&v.version, &v.timestamp, &v.changelog]);
-            }
-            t.print();
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Skill workshop pending review (#3328)
-// ---------------------------------------------------------------------------
-
-fn cmd_skill_pending(sub: PendingCommands) {
-    let skills_root = librefang_home().join("skills");
-    match sub {
-        PendingCommands::List { agent } => {
-            let candidates = match &agent {
-                Some(a) => librefang_kernel::skill_workshop::storage::list_pending(&skills_root, a),
-                None => librefang_kernel::skill_workshop::storage::list_pending_all(&skills_root),
-            };
-            let candidates = match candidates {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("Failed to read pending directory: {e}");
-                    std::process::exit(1);
-                }
-            };
-            if candidates.is_empty() {
-                println!(
-                    "No pending skill candidates.{}",
-                    match &agent {
-                        Some(a) => format!(" (filter: agent {a})"),
-                        None => String::new(),
-                    }
-                );
-                return;
-            }
-            println!("{:<38}  {:<18}  {:<22}  NAME", "ID", "SOURCE", "CAPTURED");
-            for c in candidates {
-                let source_label = match &c.source {
-                    librefang_kernel::skill_workshop::CaptureSource::ExplicitInstruction {
-                        ..
-                    } => "explicit_instr",
-                    librefang_kernel::skill_workshop::CaptureSource::UserCorrection { .. } => {
-                        "user_correction"
-                    }
-                    librefang_kernel::skill_workshop::CaptureSource::RepeatedToolPattern {
-                        ..
-                    } => "tool_pattern",
-                };
-                println!(
-                    "{:<38}  {:<18}  {:<22}  {}",
-                    c.id,
-                    source_label,
-                    c.captured_at.format("%Y-%m-%d %H:%M:%S UTC"),
-                    c.name
-                );
-            }
-        }
-        PendingCommands::Show { id } => {
-            let candidate = match librefang_kernel::skill_workshop::storage::load_candidate(
-                &skills_root,
-                &id,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Failed to load candidate: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let toml_str = match toml::to_string_pretty(&candidate) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Failed to render candidate as TOML: {e}");
-                    std::process::exit(1);
-                }
-            };
-            print!("{toml_str}");
-        }
-        PendingCommands::Approve { id } => {
-            match librefang_kernel::skill_workshop::storage::approve_candidate(
-                &skills_root,
-                &skills_root,
-                &id,
-            ) {
-                Ok(result) => {
-                    println!(
-                        "Approved candidate {} → installed skill '{}' (v{}).",
-                        id,
-                        result.skill_name,
-                        result.version.unwrap_or_else(|| "?".to_string())
-                    );
-                }
-                Err(e) => {
-                    eprintln!("Approve failed: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        PendingCommands::Reject { id } => {
-            match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id) {
-                Ok(()) => println!("Rejected and removed candidate {id}."),
-                Err(e) => {
-                    eprintln!("Reject failed: {e}");
-                    std::process::exit(1);
-                }
+                println!("{:<10} {:<25} {}", v.version, v.timestamp, v.changelog);
             }
         }
     }
@@ -7955,10 +7485,434 @@ fn cmd_skill_pending(sub: PendingCommands) {
 // Channel commands
 // ---------------------------------------------------------------------------
 
-// maybe_write_channel_config / notify_daemon_restart removed — they
-// supported the interactive in-process channel onboarding flow whose
-// callers were dropped when channels moved to sidecars, leaving both
-// helpers orphaned.
+fn cmd_channel_list() {
+    let home = librefang_home();
+    let config_path = home.join("config.toml");
+
+    if !config_path.exists() {
+        println!("No configuration found. Run `librefang init` first.");
+        return;
+    }
+
+    let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    println!("Channel Integrations:\n");
+    println!("{:<12} {:<10} STATUS", "CHANNEL", "ENV VAR");
+    println!("{}", "-".repeat(50));
+
+    let channels: Vec<(&str, &str)> = vec![
+        ("webchat", ""),
+        ("telegram", "TELEGRAM_BOT_TOKEN"),
+        ("discord", "DISCORD_BOT_TOKEN"),
+        ("slack", "SLACK_BOT_TOKEN"),
+        ("whatsapp", "WA_ACCESS_TOKEN"),
+        ("signal", ""),
+        ("matrix", "MATRIX_TOKEN"),
+        ("email", "EMAIL_PASSWORD"),
+    ];
+
+    for (name, env_var) in channels {
+        let configured = config_str.contains(&format!("[channels.{name}]"));
+        let env_set = if env_var.is_empty() {
+            true
+        } else {
+            std::env::var(env_var).is_ok()
+        };
+
+        let status = match (configured, env_set) {
+            (true, true) => "Ready",
+            (true, false) => "Missing env",
+            (false, _) => "Not configured",
+        };
+
+        println!(
+            "{:<12} {:<10} {}",
+            name,
+            if env_var.is_empty() { "—" } else { env_var },
+            status,
+        );
+    }
+
+    println!("\nUse `librefang channel setup <channel>` to configure a channel.");
+}
+
+fn cmd_channel_setup(channel: Option<&str>) {
+    let channel = match channel {
+        Some(c) => c.to_string(),
+        None => {
+            // Interactive channel picker
+            ui::section(&i18n::t("section-channel-setup"));
+            ui::blank();
+            let channel_list = [
+                ("telegram", "Telegram bot (BotFather)"),
+                ("discord", "Discord bot"),
+                ("slack", "Slack app (Socket Mode)"),
+                ("whatsapp", "WhatsApp Cloud API"),
+                ("email", "Email (IMAP/SMTP)"),
+                ("signal", "Signal (signal-cli)"),
+                ("matrix", "Matrix homeserver"),
+            ];
+
+            for (i, (name, desc)) in channel_list.iter().enumerate() {
+                println!("    {:>2}. {:<12} {}", i + 1, name, desc.dimmed());
+            }
+            ui::blank();
+
+            let choice = prompt_input("  Choose channel [1]: ");
+            let idx = if choice.is_empty() {
+                0
+            } else {
+                choice
+                    .parse::<usize>()
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+                    .min(channel_list.len() - 1)
+            };
+            channel_list[idx].0.to_string()
+        }
+    };
+
+    match channel.as_str() {
+        "telegram" => {
+            ui::section(&i18n::t("section-setup-telegram"));
+            ui::blank();
+            println!("  1. Open Telegram and message @BotFather");
+            println!("  2. Send /newbot and follow the prompts");
+            println!("  3. Copy the bot token");
+            ui::blank();
+
+            let token = prompt_input("  Paste your bot token: ");
+            if token.is_empty() {
+                ui::error(&i18n::t("channel-no-token"));
+                return;
+            }
+
+            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
+            maybe_write_channel_config("telegram", config_block);
+
+            // Save token to .env
+            match dotenv::save_env_key("TELEGRAM_BOT_TOKEN", &token) {
+                Ok(()) => ui::success(&i18n::t("channel-token-saved")),
+                Err(_) => println!("    export TELEGRAM_BOT_TOKEN={token}"),
+            }
+
+            ui::blank();
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Telegram")]));
+            notify_daemon_restart();
+        }
+        "discord" => {
+            ui::section(&i18n::t("section-setup-discord"));
+            ui::blank();
+            println!("  1. Go to https://discord.com/developers/applications");
+            println!("  2. Create a New Application");
+            println!("  3. Go to Bot section and click 'Add Bot'");
+            println!("  4. Copy the bot token");
+            println!("  5. Under Privileged Gateway Intents, enable:");
+            println!("     - Message Content Intent");
+            println!("  6. Use OAuth2 URL Generator to invite bot to your server");
+            ui::blank();
+
+            let token = prompt_input("  Paste your bot token: ");
+            if token.is_empty() {
+                ui::error(&i18n::t("channel-no-token"));
+                return;
+            }
+
+            let config_block = "\n[channels.discord]\nbot_token_env = \"DISCORD_BOT_TOKEN\"\ndefault_agent = \"coder\"\n";
+            maybe_write_channel_config("discord", config_block);
+
+            match dotenv::save_env_key("DISCORD_BOT_TOKEN", &token) {
+                Ok(()) => ui::success(&i18n::t("channel-token-saved")),
+                Err(_) => println!("    export DISCORD_BOT_TOKEN={token}"),
+            }
+
+            ui::blank();
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Discord")]));
+            notify_daemon_restart();
+        }
+        "slack" => {
+            ui::section(&i18n::t("section-setup-slack"));
+            ui::blank();
+            println!("  1. Go to https://api.slack.com/apps");
+            println!("  2. Create New App -> From Scratch");
+            println!("  3. Enable Socket Mode (Settings -> Socket Mode)");
+            println!("  4. Copy the App-Level Token (xapp-...)");
+            println!("  5. Go to OAuth & Permissions, add scopes:");
+            println!("     - chat:write, app_mentions:read, im:history");
+            println!("  6. Install to workspace and copy Bot Token (xoxb-...)");
+            ui::blank();
+
+            let app_token = prompt_input("  Paste your App Token (xapp-...): ");
+            let bot_token = prompt_input("  Paste your Bot Token (xoxb-...): ");
+
+            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
+            maybe_write_channel_config("slack", config_block);
+
+            if !app_token.is_empty() {
+                match dotenv::save_env_key("SLACK_APP_TOKEN", &app_token) {
+                    Ok(()) => ui::success(&i18n::t("channel-app-token-saved")),
+                    Err(_) => println!("    export SLACK_APP_TOKEN={app_token}"),
+                }
+            }
+            if !bot_token.is_empty() {
+                match dotenv::save_env_key("SLACK_BOT_TOKEN", &bot_token) {
+                    Ok(()) => ui::success(&i18n::t("channel-bot-token-saved")),
+                    Err(_) => println!("    export SLACK_BOT_TOKEN={bot_token}"),
+                }
+            }
+
+            ui::blank();
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Slack")]));
+            notify_daemon_restart();
+        }
+        "whatsapp" => {
+            ui::section(&i18n::t("section-setup-whatsapp"));
+            ui::blank();
+            println!("  WhatsApp Cloud API (recommended for production):");
+            println!("  1. Go to https://developers.facebook.com");
+            println!("  2. Create a Business App");
+            println!("  3. Add WhatsApp product");
+            println!("  4. Set up a test phone number");
+            println!("  5. Copy Phone Number ID and Access Token");
+            ui::blank();
+
+            let phone_id = prompt_input("  Phone Number ID: ");
+            let access_token = prompt_input("  Access Token: ");
+            let verify_token = prompt_input("  Verify Token: ");
+
+            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"assistant\"\n";
+            maybe_write_channel_config("whatsapp", config_block);
+
+            for (key, val) in [
+                ("WA_PHONE_ID", &phone_id),
+                ("WA_ACCESS_TOKEN", &access_token),
+                ("WA_VERIFY_TOKEN", &verify_token),
+            ] {
+                if !val.is_empty() {
+                    match dotenv::save_env_key(key, val) {
+                        Ok(()) => ui::success(&i18n::t_args("channel-key-saved", &[("key", key)])),
+                        Err(_) => println!("    export {key}={val}"),
+                    }
+                }
+            }
+
+            ui::blank();
+            ui::success(&i18n::t_args("channel-configured", &[("name", "WhatsApp")]));
+            notify_daemon_restart();
+        }
+        "email" => {
+            ui::section(&i18n::t("section-setup-email"));
+            ui::blank();
+            println!("  For Gmail, use an App Password:");
+            println!("  https://myaccount.google.com/apppasswords");
+            ui::blank();
+
+            let username = prompt_input("  Email address: ");
+            if username.is_empty() {
+                ui::error(&i18n::t("channel-no-email"));
+                return;
+            }
+
+            let password = prompt_input("  App password (or Enter to set later): ");
+
+            let config_block = format!(
+                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"assistant\"\n"
+            );
+            maybe_write_channel_config("email", &config_block);
+
+            if !password.is_empty() {
+                match dotenv::save_env_key("EMAIL_PASSWORD", &password) {
+                    Ok(()) => ui::success(&i18n::t("channel-password-saved")),
+                    Err(_) => println!("    export EMAIL_PASSWORD=your_app_password"),
+                }
+            } else {
+                ui::hint(&i18n::t("hint-set-key-provider"));
+            }
+
+            ui::blank();
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Email")]));
+            notify_daemon_restart();
+        }
+        "signal" => {
+            ui::section(&i18n::t("section-setup-signal"));
+            ui::blank();
+            println!("  Signal requires signal-cli (https://github.com/AsamK/signal-cli).");
+            ui::blank();
+            println!("  1. Install signal-cli:");
+            println!("     - macOS: brew install signal-cli");
+            println!("     - Linux: download from GitHub releases");
+            println!("     - Or use the Docker image");
+            println!("  2. Register or link a phone number:");
+            println!("     signal-cli -u +1YOURPHONE register");
+            println!("     signal-cli -u +1YOURPHONE verify CODE");
+            println!("  3. Start signal-cli in JSON-RPC mode:");
+            println!("     signal-cli -u +1YOURPHONE jsonRpc --socket /tmp/signal-cli.sock");
+            ui::blank();
+
+            let phone = prompt_input("  Your phone number (+1XXXX, or Enter to skip): ");
+
+            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"assistant\"\n";
+            maybe_write_channel_config("signal", config_block);
+
+            if !phone.is_empty() {
+                match dotenv::save_env_key("SIGNAL_PHONE", &phone) {
+                    Ok(()) => ui::success(&i18n::t("channel-phone-saved")),
+                    Err(_) => println!("    export SIGNAL_PHONE={phone}"),
+                }
+            }
+
+            ui::blank();
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Signal")]));
+            notify_daemon_restart();
+        }
+        "matrix" => {
+            ui::section(&i18n::t("section-setup-matrix"));
+            ui::blank();
+            println!("  1. Create a bot account on your Matrix homeserver");
+            println!("     (e.g., register @librefang-bot:matrix.org)");
+            println!("  2. Obtain an access token:");
+            println!("     curl -X POST https://matrix.org/_matrix/client/r0/login \\");
+            println!("       -d '{{\"type\":\"m.login.password\",\"user\":\"librefang-bot\",\"password\":\"...\"}}'");
+            println!("     Copy the access_token from the response.");
+            println!("  3. Invite the bot to rooms you want it to monitor.");
+            ui::blank();
+
+            let homeserver = prompt_input("  Homeserver URL [https://matrix.org]: ");
+            let homeserver = if homeserver.is_empty() {
+                "https://matrix.org".to_string()
+            } else {
+                homeserver
+            };
+            let token = prompt_input("  Access token: ");
+
+            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"assistant\"\n";
+            maybe_write_channel_config("matrix", config_block);
+
+            let _ = dotenv::save_env_key("MATRIX_HOMESERVER", &homeserver);
+            if !token.is_empty() {
+                match dotenv::save_env_key("MATRIX_ACCESS_TOKEN", &token) {
+                    Ok(()) => ui::success(&i18n::t("channel-token-saved")),
+                    Err(_) => println!("    export MATRIX_ACCESS_TOKEN={token}"),
+                }
+            }
+
+            ui::blank();
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Matrix")]));
+            notify_daemon_restart();
+        }
+        other => {
+            ui::error_with_fix(
+                &i18n::t_args("channel-unknown", &[("name", other)]),
+                &i18n::t("channel-unknown-fix"),
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Offer to append a channel config block to config.toml if it doesn't already exist.
+fn maybe_write_channel_config(channel: &str, config_block: &str) {
+    let home = librefang_home();
+    let config_path = home.join("config.toml");
+
+    if !config_path.exists() {
+        ui::hint(&i18n::t("hint-run-init"));
+        return;
+    }
+
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let section_header = format!("[channels.{channel}]");
+    if existing.contains(&section_header) {
+        ui::check_ok(&format!("{section_header} already in config.toml"));
+        return;
+    }
+
+    let answer = prompt_input("  Write to config.toml? [Y/n] ");
+    if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
+        let mut content = existing;
+        content.push_str(config_block);
+        if std::fs::write(&config_path, &content).is_ok() {
+            restrict_file_permissions(&config_path);
+            ui::check_ok(&format!("Added {section_header} to config.toml"));
+        } else {
+            ui::check_fail("Failed to write config.toml");
+        }
+    }
+}
+
+/// After channel config changes, warn user if daemon is running.
+fn notify_daemon_restart() {
+    if find_daemon().is_some() {
+        ui::check_warn("Restart the daemon to activate this channel");
+    } else {
+        ui::hint(&i18n::t("hint-start-daemon-cmd"));
+    }
+}
+
+fn channel_test_request_body(
+    channel_id: Option<&str>,
+    chat_id: Option<&str>,
+) -> Option<serde_json::Value> {
+    channel_id
+        .map(|id| serde_json::json!({ "channel_id": id }))
+        .or_else(|| chat_id.map(|id| serde_json::json!({ "chat_id": id })))
+}
+
+fn cmd_channel_test(channel: &str, channel_id: Option<&str>, chat_id: Option<&str>) {
+    if let Some(base) = find_daemon() {
+        let client = daemon_client();
+        let request = client.post(format!("{base}/api/channels/{channel}/test"));
+        let body = if let Some(payload) = channel_test_request_body(channel_id, chat_id) {
+            daemon_json(request.json(&payload).send())
+        } else {
+            daemon_json(request.send())
+        };
+        if body["status"].as_str() == Some("ok") {
+            println!(
+                "{}",
+                body["message"]
+                    .as_str()
+                    .unwrap_or("Channel test completed successfully.")
+            );
+        } else {
+            eprintln!(
+                "Failed: {}",
+                body["message"]
+                    .as_str()
+                    .or_else(|| body["error"].as_str())
+                    .unwrap_or("Unknown error")
+            );
+            std::process::exit(1);
+        }
+    } else {
+        eprintln!("Channel test requires a running daemon. Start with: librefang start");
+        std::process::exit(1);
+    }
+}
+
+fn cmd_channel_toggle(channel: &str, enable: bool) {
+    let action = if enable { "enabled" } else { "disabled" };
+    if let Some(base) = find_daemon() {
+        let client = daemon_client();
+        let endpoint = if enable { "enable" } else { "disable" };
+        let body = daemon_json(
+            client
+                .post(format!("{base}/api/channels/{channel}/{endpoint}"))
+                .send(),
+        );
+        if body.get("status").is_some() {
+            println!("Channel {channel} {action}.");
+        } else {
+            eprintln!(
+                "Failed: {}",
+                body["error"].as_str().unwrap_or("Unknown error")
+            );
+        }
+    } else {
+        println!("Note: Channel {channel} will be {action} when the daemon starts.");
+        println!("Edit ~/.librefang/config.toml to persist this change.");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Hand commands
@@ -8013,338 +7967,6 @@ fn cmd_hand_install(path: &str) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Channel commands (sidecar-aware). Replace the pre-#5463 in-process
-// wizards: every channel now runs out-of-process, configuration goes
-// through the surviving daemon endpoints (GET /api/channels for the
-// list, GET /api/channels/registry + POST /api/channels/sidecar/{name}/
-// configure for setup, POST /api/channels/reload to apply, plus a local
-// `rm` that strips a [[sidecar_channels]] entry from config.toml).
-// ---------------------------------------------------------------------------
-
-fn cmd_channel_list() {
-    let base = require_daemon("channel list");
-    let client = daemon_client();
-    let body = daemon_json(client.get(format!("{base}/api/channels")).send());
-    let items = body
-        .get("items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if items.is_empty() {
-        println!("No channels configured.");
-        println!("Use `librefang channel setup` to add one.");
-        return;
-    }
-    let mut t = crate::table::Table::new(&["NAME", "KIND", "CONFIGURED", "TOKEN", "24H MSGS"]);
-    for ch in &items {
-        let name = ch.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-        let kind = ch.get("category").and_then(|v| v.as_str()).unwrap_or("?");
-        let configured = ch
-            .get("configured")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let has_token = ch
-            .get("has_token")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let msgs = ch.get("msgs_24h").and_then(|v| v.as_u64()).unwrap_or(0);
-        t.add_row(&[
-            name,
-            kind,
-            if configured { "yes" } else { "no" },
-            if has_token { "yes" } else { "no" },
-            &msgs.to_string(),
-        ]);
-    }
-    t.print();
-}
-
-fn cmd_channel_reload() {
-    let base = require_daemon("channel reload");
-    let client = daemon_client();
-    let body = daemon_json(
-        client
-            .post(format!("{base}/api/channels/reload"))
-            .json(&serde_json::json!({}))
-            .send(),
-    );
-    let started = body
-        .get("started")
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    println!("Channels reloaded ({started} sidecar(s) started).");
-}
-
-fn cmd_channel_setup(name: Option<&str>) {
-    let base = require_daemon("channel setup");
-    let client = daemon_client();
-    // `GET /api/channels` carries the full sidecar describe schema for
-    // every discoverable adapter on `fields[]`, so we don't need a
-    // separate /registry call for the picker — same list does both
-    // jobs.
-    let body = daemon_json(client.get(format!("{base}/api/channels")).send());
-    let all: Vec<serde_json::Value> = body
-        .get("items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    // Resolve the target row: explicit `<NAME>` argument, or interactive
-    // picker over unconfigured rows.
-    let target = match name {
-        Some(n) => all
-            .iter()
-            .find(|c| c.get("name").and_then(|v| v.as_str()) == Some(n))
-            .cloned(),
-        None => {
-            // Distinguish the two empty-picker cases so the operator
-            // knows which is which:
-            //  - `all.is_empty()`: daemon's `GET /api/channels` returned
-            //    nothing at all — both `sidecar_channel_rows` and
-            //    `sidecar_discovery_rows` are empty. That means there
-            //    are no `[[sidecar_channels]]` entries AND nothing in
-            //    the SIDECAR_CATALOG (the latter is normally only
-            //    empty if the SDK wasn't installed alongside the
-            //    daemon — fix is `pip install librefang-sdk`).
-            //  - all non-empty but `candidates.is_empty()`: the
-            //    operator has configured every adapter the catalog
-            //    knows about. Use `librefang channel list` to see /
-            //    `librefang channel rm <name>` to drop one.
-            if all.is_empty() {
-                println!("Daemon's channel registry is empty.");
-                println!("Install the sidecar SDK so adapters appear in the catalog:");
-                println!("  pip install librefang-sdk");
-                println!("Then re-run `librefang channel setup`.");
-                return;
-            }
-            let candidates: Vec<&serde_json::Value> = all
-                .iter()
-                .filter(|c| c.get("configured").and_then(|v| v.as_bool()) != Some(true))
-                .collect();
-            if candidates.is_empty() {
-                println!("Every available channel is already configured.");
-                println!("Use `librefang channel list` to see them, or");
-                println!("`librefang channel rm <name>` to remove an entry first.");
-                return;
-            }
-            println!("Pick a channel to set up:");
-            for (i, ch) in candidates.iter().enumerate() {
-                let n = ch.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                let d = ch.get("display_name").and_then(|v| v.as_str()).unwrap_or(n);
-                println!("  {:>2}. {:<14} {}", i + 1, n, d);
-            }
-            let choice = prompt_input("Choice [1]: ");
-            let idx = if choice.trim().is_empty() {
-                0
-            } else {
-                choice
-                    .trim()
-                    .parse::<usize>()
-                    .unwrap_or(1)
-                    .saturating_sub(1)
-                    .min(candidates.len() - 1)
-            };
-            Some(candidates[idx].clone())
-        }
-    };
-    let target = match target {
-        Some(t) => t,
-        None => {
-            ui::error_with_fix(
-                &format!("Unknown channel: {}", name.unwrap_or("?")),
-                "Run `librefang channel list` to see the available adapters.",
-            );
-            std::process::exit(1);
-        }
-    };
-    let chan_name = target
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let fields: Vec<serde_json::Value> = target
-        .get("fields")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if fields.is_empty() {
-        println!("`{chan_name}` exposes no configurable fields — nothing to prompt for.");
-        println!("(Hot-reload anyway with `librefang channel reload` if you've already edited config.toml by hand.)");
-        return;
-    }
-
-    let mut values = serde_json::Map::new();
-    for f in &fields {
-        let key = f.get("key").and_then(|v| v.as_str()).unwrap_or_default();
-        if key.is_empty() {
-            continue;
-        }
-        let label = f.get("label").and_then(|v| v.as_str()).unwrap_or(key);
-        let required = f.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
-        let ftype = f.get("type").and_then(|v| v.as_str()).unwrap_or("text");
-        let has_value = f
-            .get("has_value")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let current = f.get("value").and_then(|v| v.as_str()).unwrap_or("");
-
-        // Secret-typed + has_value=true: blank means "keep existing".
-        // Non-secret + has current value: show as default-in-brackets.
-        let prompt = if ftype == "secret" && has_value {
-            format!("  {label} ({key}) [set — leave blank to keep]: ")
-        } else if !current.is_empty() {
-            format!("  {label} ({key}) [{current}]: ")
-        } else if required {
-            format!("  {label} ({key}) *: ")
-        } else {
-            format!("  {label} ({key}): ")
-        };
-        let entered = prompt_input(&prompt);
-        let val = entered.trim();
-        if val.is_empty() {
-            continue;
-        }
-        values.insert(key.to_string(), serde_json::Value::String(val.to_string()));
-    }
-
-    // Sidecar names come from `SIDECAR_CATALOG` keys — short
-    // alphanumeric (`telegram`, `ntfy`, …), URL-safe as-is. No need
-    // for percent-encoding.
-    let url = format!("{base}/api/channels/sidecar/{chan_name}/configure");
-    let payload = serde_json::json!({ "values": values });
-    let body = daemon_json(client.post(&url).json(&payload).send());
-    // `daemon_json` only logs 5xx; 4xx silently returns the error body.
-    // Surface those by checking for the SidecarSaveResult shape. The
-    // `ApiErrorResponse` envelope (see librefang-api types.rs:114-164)
-    // serializes the human-readable message at both `error.message`
-    // (nested, #3639 preferred shape) and `message` (top-level flat
-    // alias kept for legacy callers); prefer the nested one, fall
-    // through to the flat alias for older deployments.
-    if body.get("status").and_then(|v| v.as_str()) != Some("saved") {
-        let err = body
-            .pointer("/error/message")
-            .and_then(|v| v.as_str())
-            .or_else(|| body.get("message").and_then(|v| v.as_str()))
-            .unwrap_or("save failed (no error body)");
-        ui::error_with_fix(
-            &format!("Save for `{chan_name}` rejected: {err}"),
-            "Re-run with corrected values, or check the daemon log for details.",
-        );
-        std::process::exit(1);
-    }
-    let restart_required = body
-        .get("restart_required")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let shadowed = body
-        .get("shadowed_secrets")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if restart_required {
-        println!("✓ Saved `{chan_name}` — restart the daemon for changes to apply.");
-    } else {
-        println!("✓ Saved `{chan_name}` — hot-reload applied.");
-    }
-    if !shadowed.is_empty() {
-        let keys: Vec<String> = shadowed
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-        eprintln!(
-            "Warning: shell environment variables shadow these tokens — unset them and restart for the new value to take effect: {}",
-            keys.join(", "),
-        );
-    }
-}
-
-fn cmd_channel_rm(name: &str) {
-    // Strip the matching `[[sidecar_channels]]` entry from
-    // ~/.librefang/config.toml in-place, then trigger a daemon reload
-    // (best-effort: if no daemon is running, the file edit is enough
-    // — the next daemon start will pick up the changed config).
-    let home = cli_librefang_home();
-    let path = home.join("config.toml");
-    let original = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            ui::error_with_fix(
-                &format!("Cannot read {}: {e}", path.display()),
-                "Run `librefang init` to create the config file.",
-            );
-            std::process::exit(1);
-        }
-    };
-    let mut doc: toml_edit::DocumentMut = match original.parse() {
-        Ok(d) => d,
-        Err(e) => {
-            ui::error_with_fix(
-                &format!("Cannot parse {}: {e}", path.display()),
-                "Fix the TOML syntax and retry.",
-            );
-            std::process::exit(1);
-        }
-    };
-    let arr = match doc
-        .get_mut("sidecar_channels")
-        .and_then(|v| v.as_array_of_tables_mut())
-    {
-        Some(a) => a,
-        None => {
-            println!("No [[sidecar_channels]] entries in config.toml — nothing to remove.");
-            return;
-        }
-    };
-    // `toml_edit::ArrayOfTables` has no `retain`; collect matching indices
-    // then remove in reverse so earlier indices stay stable.
-    let to_remove: Vec<usize> = arr
-        .iter()
-        .enumerate()
-        .filter_map(|(i, t)| match t.get("name").and_then(|v| v.as_str()) {
-            Some(n) if n == name => Some(i),
-            _ => None,
-        })
-        .collect();
-    let removed = to_remove.len();
-    for &i in to_remove.iter().rev() {
-        arr.remove(i);
-    }
-    if removed == 0 {
-        println!("No [[sidecar_channels]] entry with name=\"{name}\".");
-        return;
-    }
-    if let Err(e) = std::fs::write(&path, doc.to_string()) {
-        ui::error_with_fix(
-            &format!("Failed to write {}: {e}", path.display()),
-            "Check filesystem permissions.",
-        );
-        std::process::exit(1);
-    }
-    println!("✓ Removed {removed} [[sidecar_channels]] entry/entries named `{name}`.");
-    match find_daemon() {
-        Some(base) => {
-            let client = daemon_client();
-            match client
-                .post(format!("{base}/api/channels/reload"))
-                .json(&serde_json::json!({}))
-                .send()
-            {
-                Ok(r) if r.status().is_success() => println!("  Hot-reloaded daemon."),
-                Ok(r) => eprintln!(
-                    "  Reload returned {}: change will apply on next daemon restart.",
-                    r.status()
-                ),
-                Err(e) => eprintln!(
-                    "  Could not contact daemon for reload ({e}); change will apply on next start."
-                ),
-            }
-        }
-        None => println!("  Daemon not running; change will apply on next start."),
-    }
-}
-
 fn cmd_hand_list() {
     let base = require_daemon("hand list");
     let client = daemon_client();
@@ -8367,21 +7989,22 @@ fn cmd_hand_list() {
             println!("No hands available.");
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "NAME", "CATEGORY", "DESCRIPTION"]);
+        println!("{:<14} {:<20} {:<10} DESCRIPTION", "ID", "NAME", "CATEGORY");
+        println!("{}", "-".repeat(72));
         for h in arr {
-            t.add_row(&[
+            println!(
+                "{:<14} {:<20} {:<10} {}",
                 h["id"].as_str().unwrap_or("?"),
                 h["name"].as_str().unwrap_or("?"),
                 h["category"].as_str().unwrap_or("?"),
-                &h["description"]
+                h["description"]
                     .as_str()
                     .unwrap_or("")
                     .chars()
                     .take(40)
                     .collect::<String>(),
-            ]);
+            );
         }
-        t.print();
         println!("\nUse `librefang hand activate <id>` to activate a hand.");
     }
 }
@@ -8394,16 +8017,17 @@ fn cmd_hand_active() {
         println!("No active hands.");
         return;
     }
-    let mut t = crate::table::Table::new(&["INSTANCE", "HAND", "STATUS", "AGENT"]);
+    println!("{:<38} {:<14} {:<10} AGENT", "INSTANCE", "HAND", "STATUS");
+    println!("{}", "-".repeat(72));
     for i in &arr {
-        t.add_row(&[
+        println!(
+            "{:<38} {:<14} {:<10} {}",
             i["instance_id"].as_str().unwrap_or("?"),
             i["hand_id"].as_str().unwrap_or("?"),
             i["status"].as_str().unwrap_or("?"),
             i["agent_name"].as_str().unwrap_or("?"),
-        ]);
+        );
     }
-    t.print();
 }
 
 fn cmd_hand_status(id: Option<&str>) {
@@ -9496,8 +9120,8 @@ fn cmd_mcp_add(name: &str, key: Option<&str>) {
     }
 
     match &result.status {
-        librefang_types::mcp::McpStatus::Ready => ui::success(&result.message),
-        librefang_types::mcp::McpStatus::Setup => {
+        librefang_extensions::McpStatus::Ready => ui::success(&result.message),
+        librefang_extensions::McpStatus::Setup => {
             println!("{}", result.message.yellow());
             println!("\nTo add credentials:");
             for env in &template.required_env {
@@ -9611,7 +9235,7 @@ fn cmd_mcp_catalog(query: Option<&str>) {
     // Group by category
     let mut by_category: std::collections::BTreeMap<
         String,
-        Vec<&librefang_types::mcp::McpCatalogEntry>,
+        Vec<&librefang_extensions::McpCatalogEntry>,
     > = std::collections::BTreeMap::new();
     for entry in &entries {
         by_category
@@ -9973,475 +9597,6 @@ fn cmd_auth_chatgpt(device_auth: bool) {
     }
 }
 
-// ─── Credential pool commands (#4965) ───────────────────────────────────────
-
-/// Resolve the active config.toml path. `--config <path>` overrides; else
-/// `$LIBREFANG_HOME/config.toml` (or `~/.librefang/config.toml`).
-fn pool_config_path(config_override: Option<PathBuf>) -> PathBuf {
-    config_override.unwrap_or_else(|| librefang_home().join("config.toml"))
-}
-
-/// Parse config.toml into a `toml_edit::DocumentMut` so comments, blank
-/// lines, key ordering, and unrelated sections are preserved through any
-/// mutation. Exits with a friendly message on missing-file / parse errors.
-/// Shared by all three mutating pool commands so the same diagnostic appears
-/// for each entry point.
-fn pool_load_doc_or_exit(path: &std::path::Path) -> toml_edit::DocumentMut {
-    if !path.exists() {
-        ui::error_with_fix(&i18n::t("config-no-file"), &i18n::t("config-no-file-fix"));
-        std::process::exit(1);
-    }
-    let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        ui::error(&i18n::t_args(
-            "config-read-failed",
-            &[("error", &e.to_string())],
-        ));
-        std::process::exit(1);
-    });
-    if content.trim().is_empty() {
-        return toml_edit::DocumentMut::new();
-    }
-    content
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap_or_else(|e| {
-            ui::error_with_fix(
-                &i18n::t_args("config-parse-error", &[("error", &e.to_string())]),
-                &i18n::t("config-parse-fix-alt"),
-            );
-            std::process::exit(1);
-        })
-}
-
-fn pool_write_doc_or_exit(path: &std::path::Path, doc: &toml_edit::DocumentMut) {
-    std::fs::write(path, doc.to_string()).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to write {}: {e}", path.display()));
-        std::process::exit(1);
-    });
-}
-
-fn pool_strategy_canon(input: &str) -> Option<&'static str> {
-    match input.to_ascii_lowercase().replace('-', "_").as_str() {
-        "fill_first" | "fillfirst" => Some("fill_first"),
-        "round_robin" | "roundrobin" => Some("round_robin"),
-        "random" => Some("random"),
-        "least_used" | "leastused" => Some("least_used"),
-        _ => None,
-    }
-}
-
-/// Locate the `[[credential_pools]]` entry whose `provider` matches
-/// `provider_name`, creating the surrounding `ArrayOfTables` if it does not
-/// exist yet. Returns `(array, Some(idx))` on hit and `(array, None)` on miss
-/// so the caller can decide whether to append or report an error.
-fn pool_lookup_doc_mut<'d>(
-    doc: &'d mut toml_edit::DocumentMut,
-    provider_name: &str,
-) -> (&'d mut toml_edit::ArrayOfTables, Option<usize>) {
-    // Insert an empty `[[credential_pools]]` if missing. We use
-    // `or_insert(Item::ArrayOfTables(...))` so the rendered output retains
-    // the canonical TOML form even when the section was absent in the
-    // original file.
-    let item = doc
-        .entry("credential_pools")
-        .or_insert(toml_edit::Item::ArrayOfTables(
-            toml_edit::ArrayOfTables::new(),
-        ));
-    let arr = match item.as_array_of_tables_mut() {
-        Some(a) => a,
-        None => {
-            ui::error("config.toml `credential_pools` exists but is not an array of tables");
-            std::process::exit(1);
-        }
-    };
-    let idx = arr.iter().position(|t| {
-        t.get("provider")
-            .and_then(|v| v.as_str())
-            .map(|n| n.eq_ignore_ascii_case(provider_name))
-            .unwrap_or(false)
-    });
-    (arr, idx)
-}
-
-fn cmd_auth_pool_list(config: Option<PathBuf>, json: bool) {
-    // Prefer the running daemon — its snapshot includes live request_count
-    // and cooldown telemetry that config.toml alone cannot provide.
-    if let Some(base_url) = find_daemon() {
-        let client = daemon_client();
-        let url = format!("{base_url}/api/credential-pools");
-        let resp = client.get(&url).send();
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                let body: serde_json::Value = r.json().unwrap_or_default();
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&body).unwrap_or_default()
-                    );
-                    return;
-                }
-                print_pool_summary_human(&body);
-                return;
-            }
-            Ok(r) => {
-                ui::check_warn(&format!(
-                    "Daemon returned HTTP {} — falling back to config.toml view",
-                    r.status()
-                ));
-            }
-            Err(e) => {
-                ui::check_warn(&format!(
-                    "Failed to query daemon at {url}: {e} — falling back to config.toml view"
-                ));
-            }
-        }
-    }
-
-    // Offline path: render the static config view (no live telemetry).
-    let path = pool_config_path(config);
-    if !path.exists() {
-        if json {
-            println!("[]");
-        } else {
-            ui::check_warn(&format!(
-                "No config at {} and daemon is not running.",
-                path.display()
-            ));
-        }
-        return;
-    }
-    let cfg = load_config(Some(&path)).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to load config: {e}"));
-        std::process::exit(1);
-    });
-    let mut pools: Vec<serde_json::Value> = cfg
-        .credential_pools
-        .iter()
-        .map(|p| {
-            let strategy = match p.strategy {
-                librefang_types::config::CredentialPoolStrategy::FillFirst => "fill_first",
-                librefang_types::config::CredentialPoolStrategy::RoundRobin => "round_robin",
-                librefang_types::config::CredentialPoolStrategy::Random => "random",
-                librefang_types::config::CredentialPoolStrategy::LeastUsed => "least_used",
-            };
-            let mut keys: Vec<&librefang_types::config::CredentialPoolKeyConfig> =
-                p.keys.iter().collect();
-            keys.sort_by_key(|k| std::cmp::Reverse(k.priority));
-            let creds: Vec<serde_json::Value> = keys
-                .iter()
-                .map(|k| {
-                    let resolved = std::env::var(&k.api_key_env).is_ok();
-                    serde_json::json!({
-                        "label": k.label,
-                        "env_var": k.api_key_env,
-                        "priority": k.priority,
-                        "env_resolved": resolved,
-                    })
-                })
-                .collect();
-            serde_json::json!({
-                "provider": p.provider,
-                "strategy": strategy,
-                "total_count": p.keys.len(),
-                "credentials": creds,
-            })
-        })
-        .collect();
-    // Deterministic alphabetical ordering (matches the HTTP endpoint).
-    pools.sort_by(|a, b| {
-        a["provider"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["provider"].as_str().unwrap_or(""))
-    });
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&pools).unwrap_or_default()
-        );
-    } else {
-        print_pool_summary_human(&serde_json::Value::Array(pools));
-    }
-}
-
-fn print_pool_summary_human(body: &serde_json::Value) {
-    let pools = match body.as_array() {
-        Some(a) if !a.is_empty() => a,
-        _ => {
-            println!("{}", "No credential pools configured.".to_string().dimmed());
-            println!();
-            println!("Add one with:");
-            println!(
-                "  librefang auth pool add openai OPENAI_API_KEY_1 --label Primary --priority 10"
-            );
-            return;
-        }
-    };
-    for pool in pools {
-        let provider = pool["provider"].as_str().unwrap_or("");
-        let strategy = pool["strategy"].as_str().unwrap_or("");
-        let total = pool["total_count"].as_u64().unwrap_or(0);
-        let available = pool["available_count"].as_u64().unwrap_or(total);
-        let header = format!("{provider}  ({strategy})");
-        println!("{}", header.bold());
-        println!(
-            "  keys: {}/{} available",
-            available.to_string().bold(),
-            total
-        );
-        if let Some(creds) = pool["credentials"].as_array() {
-            for c in creds {
-                let label = c["label"].as_str().unwrap_or("");
-                let hint = c["key_hint"].as_str().unwrap_or("");
-                let env_var = c["env_var"].as_str().unwrap_or("");
-                let key_display = if hint.is_empty() { env_var } else { hint };
-                let pri = c["priority"].as_u64().unwrap_or(0);
-                let reqs = c["request_count"].as_u64();
-                let exhausted = c["is_exhausted"].as_bool().unwrap_or(false);
-                let env_resolved = c["env_resolved"].as_bool();
-                let cooldown = c.get("cooldown_remaining_secs");
-
-                let status: String = if exhausted {
-                    if let Some(serde_json::Value::String(s)) = cooldown {
-                        if s == "permanent" {
-                            "invalid".red().to_string()
-                        } else {
-                            "exhausted".yellow().to_string()
-                        }
-                    } else if let Some(serde_json::Value::Number(n)) = cooldown {
-                        format!(
-                            "{} {}",
-                            "cooldown".yellow(),
-                            format!("({}s left)", n).dimmed()
-                        )
-                    } else {
-                        "exhausted".yellow().to_string()
-                    }
-                } else if env_resolved == Some(false) {
-                    "env-missing".red().to_string()
-                } else {
-                    "healthy".green().to_string()
-                };
-
-                let reqs_str = reqs.map(|r| format!(" requests={r}")).unwrap_or_default();
-                println!(
-                    "    - [{label}] {key_display}  priority={pri}{reqs_str}  status={status}"
-                );
-            }
-        }
-        println!();
-    }
-}
-
-/// Best-effort env-var name sanity check used by `auth pool add`. POSIX
-/// env-var names are `[A-Z_][A-Z0-9_]*`; reject obvious nonsense (spaces,
-/// punctuation, leading digit) at config-time so the operator finds out
-/// here instead of seeing "pool has no resolvable keys" from the daemon
-/// on next boot.
-fn is_valid_env_var_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first.is_ascii_uppercase() || first == '_') {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-}
-
-fn cmd_auth_pool_add(
-    config: Option<PathBuf>,
-    provider: &str,
-    env_var: &str,
-    label: &str,
-    priority: u32,
-) {
-    if !is_valid_env_var_name(env_var) {
-        ui::error(&format!(
-            "`{env_var}` is not a valid env var name. Expected uppercase letters, digits, and underscores (e.g. OPENAI_API_KEY_2)."
-        ));
-        std::process::exit(1);
-    }
-    // Validate the env var is actually set at add time. Without this the
-    // operator can stage a typo into config.toml and only find out at the
-    // next daemon boot via a "Credential pool key env var not set — skipping"
-    // warning that may go unnoticed. Treat empty/whitespace as unset too —
-    // an env var set to "" cannot drive a real provider call.
-    match std::env::var(env_var) {
-        Ok(v) if !v.trim().is_empty() => {}
-        Ok(_) => {
-            ui::error_with_fix(
-                &format!("env var `{env_var}` is set but empty."),
-                &format!("Set it to your API key before adding the pool entry, e.g.\n  export {env_var}=sk-…\nThen retry."),
-            );
-            std::process::exit(1);
-        }
-        Err(_) => {
-            ui::error_with_fix(
-                &format!("env var `{env_var}` is not set in the current shell."),
-                &format!("Export it before adding the pool entry, e.g.\n  export {env_var}=sk-…\nThen retry. (The daemon will read it from its own environment at boot time — make sure it's exported there too.)"),
-            );
-            std::process::exit(1);
-        }
-    }
-
-    let path = pool_config_path(config);
-    let mut doc = pool_load_doc_or_exit(&path);
-
-    {
-        let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
-
-        match idx {
-            Some(i) => {
-                // Append to existing pool's keys array-of-tables.
-                let pool_tbl = arr.get_mut(i).expect("idx within bounds");
-                let keys_item = pool_tbl
-                    .entry("keys")
-                    .or_insert(toml_edit::Item::ArrayOfTables(
-                        toml_edit::ArrayOfTables::new(),
-                    ));
-                let keys_arr = match keys_item.as_array_of_tables_mut() {
-                    Some(a) => a,
-                    None => {
-                        ui::error(&format!(
-                            "Pool for `{provider}` has a `keys` field that is not an array of tables."
-                        ));
-                        std::process::exit(1);
-                    }
-                };
-                // Duplicate guard: same env_var on the same provider is an error.
-                let dup = keys_arr.iter().any(|k| {
-                    k.get("api_key_env")
-                        .and_then(|v| v.as_str())
-                        .map(|e| e == env_var)
-                        .unwrap_or(false)
-                });
-                if dup {
-                    ui::error(&format!(
-                        "Key with env_var `{env_var}` already exists in pool for provider `{provider}`."
-                    ));
-                    std::process::exit(1);
-                }
-                let mut new_key_tbl = toml_edit::Table::new();
-                new_key_tbl["api_key_env"] = toml_edit::value(env_var);
-                new_key_tbl["label"] = toml_edit::value(label);
-                new_key_tbl["priority"] = toml_edit::value(priority as i64);
-                keys_arr.push(new_key_tbl);
-            }
-            None => {
-                // Create the pool with default strategy = fill_first.
-                let mut pool_tbl = toml_edit::Table::new();
-                pool_tbl["provider"] = toml_edit::value(provider);
-                pool_tbl["strategy"] = toml_edit::value("fill_first");
-                let mut keys_arr = toml_edit::ArrayOfTables::new();
-                let mut new_key_tbl = toml_edit::Table::new();
-                new_key_tbl["api_key_env"] = toml_edit::value(env_var);
-                new_key_tbl["label"] = toml_edit::value(label);
-                new_key_tbl["priority"] = toml_edit::value(priority as i64);
-                keys_arr.push(new_key_tbl);
-                pool_tbl.insert("keys", toml_edit::Item::ArrayOfTables(keys_arr));
-                arr.push(pool_tbl);
-            }
-        }
-    }
-
-    pool_write_doc_or_exit(&path, &doc);
-    ui::success(&format!(
-        "Added key `{label}` (env={env_var}, priority={priority}) to pool for `{provider}`. Restart the daemon or hot-reload config to apply."
-    ));
-}
-
-fn cmd_auth_pool_remove(config: Option<PathBuf>, provider: &str, env_var: &str) {
-    let path = pool_config_path(config);
-    let mut doc = pool_load_doc_or_exit(&path);
-
-    let mut empty_pool_removed = false;
-    {
-        let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
-        let Some(i) = idx else {
-            ui::error(&format!(
-                "No credential pool configured for provider `{provider}`."
-            ));
-            std::process::exit(1);
-        };
-
-        let pool_tbl = arr.get_mut(i).expect("idx within bounds");
-        let Some(keys_item) = pool_tbl.get_mut("keys") else {
-            ui::error(&format!("Pool for `{provider}` has no keys array."));
-            std::process::exit(1);
-        };
-        let Some(keys_arr) = keys_item.as_array_of_tables_mut() else {
-            ui::error(&format!(
-                "Pool for `{provider}` has a `keys` field that is not an array of tables."
-            ));
-            std::process::exit(1);
-        };
-        let before = keys_arr.len();
-        // ArrayOfTables has no `retain` — walk indices backwards and remove
-        // matching entries one by one so index shifts don't skip neighbors.
-        for j in (0..keys_arr.len()).rev() {
-            let matches = keys_arr
-                .get(j)
-                .and_then(|t| t.get("api_key_env"))
-                .and_then(|v| v.as_str())
-                .map(|e| e == env_var)
-                .unwrap_or(false);
-            if matches {
-                keys_arr.remove(j);
-            }
-        }
-        if keys_arr.len() == before {
-            ui::error(&format!(
-                "No key with env_var `{env_var}` found in pool for `{provider}`."
-            ));
-            std::process::exit(1);
-        }
-        if keys_arr.is_empty() {
-            arr.remove(i);
-            empty_pool_removed = true;
-        }
-    }
-
-    pool_write_doc_or_exit(&path, &doc);
-    if empty_pool_removed {
-        ui::success(&format!(
-            "Removed key `{env_var}` from pool for `{provider}`. Pool is now empty and has been removed entirely. Restart the daemon or hot-reload config to apply."
-        ));
-    } else {
-        ui::success(&format!(
-            "Removed key `{env_var}` from pool for `{provider}`. Restart the daemon or hot-reload config to apply."
-        ));
-    }
-}
-
-fn cmd_auth_pool_strategy(config: Option<PathBuf>, provider: &str, strategy: &str) {
-    let Some(canon) = pool_strategy_canon(strategy) else {
-        ui::error(&format!(
-            "Unknown strategy `{strategy}`. Valid: fill_first, round_robin, random, least_used."
-        ));
-        std::process::exit(1);
-    };
-
-    let path = pool_config_path(config);
-    let mut doc = pool_load_doc_or_exit(&path);
-
-    {
-        let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
-        let Some(i) = idx else {
-            ui::error(&format!(
-                "No credential pool configured for provider `{provider}`."
-            ));
-            std::process::exit(1);
-        };
-        let pool_tbl = arr.get_mut(i).expect("idx within bounds");
-        pool_tbl["strategy"] = toml_edit::value(canon);
-    }
-
-    pool_write_doc_or_exit(&path, &doc);
-    ui::success(&format!(
-        "Set pool strategy for `{provider}` to `{canon}`. Restart the daemon or hot-reload config to apply."
-    ));
-}
-
 // ---------------------------------------------------------------------------
 // Vault commands (librefang vault init/set/list/remove)
 // ---------------------------------------------------------------------------
@@ -10787,16 +9942,17 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
                 println!("No models found.");
                 return;
             }
-            let mut t = crate::table::Table::new(&["MODEL", "PROVIDER", "TIER", "CONTEXT"]);
+            println!("{:<40} {:<16} {:<8} CONTEXT", "MODEL", "PROVIDER", "TIER");
+            println!("{}", "-".repeat(80));
             for m in arr {
-                t.add_row(&[
+                println!(
+                    "{:<40} {:<16} {:<8} {}",
                     m["id"].as_str().unwrap_or("?"),
                     m["provider"].as_str().unwrap_or("?"),
                     m["tier"].as_str().unwrap_or("?"),
-                    &m["context_window"].as_u64().unwrap_or(0).to_string(),
-                ]);
+                    m["context_window"].as_u64().unwrap_or(0),
+                );
             }
-            t.print();
         } else {
             println!(
                 "{}",
@@ -10827,21 +9983,22 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
             println!("No models in catalog.");
             return;
         }
-        let mut t = crate::table::Table::new(&["MODEL", "PROVIDER", "TIER", "CONTEXT"]);
+        println!("{:<40} {:<16} {:<8} CONTEXT", "MODEL", "PROVIDER", "TIER");
+        println!("{}", "-".repeat(80));
         for m in models {
             if let Some(p) = provider_filter {
                 if m.provider != p {
                     continue;
                 }
             }
-            t.add_row(&[
-                &m.id,
-                &m.provider,
-                &format!("{:?}", m.tier),
-                &m.context_window.to_string(),
-            ]);
+            println!(
+                "{:<40} {:<16} {:<8} {}",
+                m.id,
+                m.provider,
+                format!("{:?}", m.tier),
+                m.context_window,
+            );
         }
-        t.print();
     }
 }
 
@@ -10857,21 +10014,22 @@ fn cmd_models_aliases(json: bool) {
             return;
         }
         if let Some(arr) = body.get("aliases").and_then(|v| v.as_array()) {
-            let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
+            println!("{:<30} RESOLVES TO", "ALIAS");
+            println!("{}", "-".repeat(60));
             for entry in arr {
-                t.add_row(&[
+                println!(
+                    "{:<30} {}",
                     entry["alias"].as_str().unwrap_or("?"),
                     entry["model_id"].as_str().unwrap_or("?"),
-                ]);
+                );
             }
-            t.print();
         } else if let Some(obj) = body.as_object() {
             // Fallback for plain {alias: model_id} format
-            let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
+            println!("{:<30} RESOLVES TO", "ALIAS");
+            println!("{}", "-".repeat(60));
             for (alias, target) in obj {
-                t.add_row(&[alias.as_str(), target.as_str().unwrap_or("?")]);
+                println!("{:<30} {}", alias, target.as_str().unwrap_or("?"));
             }
-            t.print();
         } else {
             println!(
                 "{}",
@@ -10889,11 +10047,11 @@ fn cmd_models_aliases(json: bool) {
             println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
             return;
         }
-        let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
+        println!("{:<30} RESOLVES TO", "ALIAS");
+        println!("{}", "-".repeat(60));
         for (alias, target) in aliases {
-            t.add_row(&[alias, target]);
+            println!("{:<30} {}", alias, target);
         }
-        t.print();
     }
 }
 
@@ -10913,16 +10071,20 @@ fn cmd_models_providers(json: bool) {
             .and_then(|v| v.as_array())
             .or_else(|| body.as_array())
         {
-            let mut t = crate::table::Table::new(&["PROVIDER", "AUTH", "MODELS", "BASE URL"]);
+            println!(
+                "{:<20} {:<12} {:<10} BASE URL",
+                "PROVIDER", "AUTH", "MODELS"
+            );
+            println!("{}", "-".repeat(70));
             for p in arr {
-                t.add_row(&[
+                println!(
+                    "{:<20} {:<12} {:<10} {}",
                     p["id"].as_str().unwrap_or("?"),
                     p["auth_status"].as_str().unwrap_or("?"),
-                    &p["model_count"].as_u64().unwrap_or(0).to_string(),
+                    p["model_count"].as_u64().unwrap_or(0),
                     p["base_url"].as_str().unwrap_or(""),
-                ]);
+                );
             }
-            t.print();
         } else {
             println!(
                 "{}",
@@ -10947,16 +10109,20 @@ fn cmd_models_providers(json: bool) {
             println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
             return;
         }
-        let mut t = crate::table::Table::new(&["PROVIDER", "AUTH", "MODELS", "BASE URL"]);
+        println!(
+            "{:<20} {:<12} {:<10} BASE URL",
+            "PROVIDER", "AUTH", "MODELS"
+        );
+        println!("{}", "-".repeat(70));
         for p in providers {
-            t.add_row(&[
-                &p.id,
-                &format!("{:?}", p.auth_status),
-                &p.model_count.to_string(),
-                &p.base_url,
-            ]);
+            println!(
+                "{:<20} {:<12} {:<10} {}",
+                p.id,
+                format!("{:?}", p.auth_status),
+                p.model_count,
+                p.base_url,
+            );
         }
-        t.print();
     }
 }
 
@@ -11067,16 +10233,17 @@ fn cmd_approvals_list(json: bool) {
             println!("No pending approvals.");
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "AGENT", "TYPE", "REQUEST"]);
+        println!("{:<38} {:<16} {:<12} REQUEST", "ID", "AGENT", "TYPE");
+        println!("{}", "-".repeat(80));
         for a in arr {
-            t.add_row(&[
+            println!(
+                "{:<38} {:<16} {:<12} {}",
                 a["id"].as_str().unwrap_or("?"),
                 a["agent_name"].as_str().unwrap_or("?"),
                 a["approval_type"].as_str().unwrap_or("?"),
                 a["description"].as_str().unwrap_or(""),
-            ]);
+            );
         }
-        t.print();
     } else {
         println!(
             "{}",
@@ -11130,9 +10297,14 @@ fn cmd_cron_list(json: bool) {
             println!("No scheduled jobs.");
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "AGENT", "SCHEDULE", "ENABLED", "PROMPT"]);
+        println!(
+            "{:<38} {:<16} {:<20} {:<8} PROMPT",
+            "ID", "AGENT", "SCHEDULE", "ENABLED"
+        );
+        println!("{}", "-".repeat(100));
         for j in arr {
-            t.add_row(&[
+            println!(
+                "{:<38} {:<16} {:<20} {:<8} {}",
                 j["id"].as_str().unwrap_or("?"),
                 j["agent_id"].as_str().unwrap_or("?"),
                 j["schedule"]["expr"]
@@ -11144,16 +10316,15 @@ fn cmd_cron_list(json: bool) {
                 } else {
                     "no"
                 },
-                &j["action"]["message"]
+                j["action"]["message"]
                     .as_str()
                     .or_else(|| j["prompt"].as_str())
                     .unwrap_or("")
                     .chars()
                     .take(40)
                     .collect::<String>(),
-            ]);
+            );
         }
-        t.print();
     } else {
         println!(
             "{}",
@@ -11350,32 +10521,31 @@ fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
             }
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "AGENT", "MSGS", "STATE", "LAST ACTIVE"]);
+        println!(
+            "{:<38} {:<16} {:<8} {:<8} LAST ACTIVE",
+            "ID", "AGENT", "MSGS", "STATE"
+        );
+        println!("{}", "-".repeat(90));
         for s in filtered {
             let state = if is_running(s) { "running" } else { "idle" };
-            let agent_id = s["agent_id"].as_str().unwrap_or("");
-            let agent_col = if agent_id.len() > 16 {
-                &agent_id[..16]
-            } else if agent_id.is_empty() {
-                s["agent_name"].as_str().unwrap_or("?")
-            } else {
-                agent_id
-            };
-            t.add_row(&[
+            println!(
+                "{:<38} {:<16} {:<8} {:<8} {}",
                 s["session_id"]
                     .as_str()
                     .or_else(|| s["id"].as_str())
                     .unwrap_or("?"),
-                agent_col,
-                &s["message_count"].as_u64().unwrap_or(0).to_string(),
+                s["agent_id"]
+                    .as_str()
+                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
+                    .unwrap_or(s["agent_name"].as_str().unwrap_or("?")),
+                s["message_count"].as_u64().unwrap_or(0),
                 state,
                 s["created_at"]
                     .as_str()
                     .or_else(|| s["last_active"].as_str())
                     .unwrap_or("?"),
-            ]);
+            );
         }
-        t.print();
     } else {
         println!(
             "{}",
@@ -11557,19 +10727,16 @@ fn cmd_security_audit(limit: usize, json: bool) {
             println!("No audit entries.");
             return;
         }
-        let mut t = crate::table::Table::new(&["TIMESTAMP", "AGENT", "TYPE", "EVENT"]);
+        println!("{:<24} {:<16} {:<12} EVENT", "TIMESTAMP", "AGENT", "TYPE");
+        println!("{}", "-".repeat(80));
         for entry in arr {
-            let agent_id = entry["agent_id"].as_str().unwrap_or("");
-            let agent_col = if agent_id.len() > 16 {
-                &agent_id[..16]
-            } else if agent_id.is_empty() {
-                entry["agent_name"].as_str().unwrap_or("?")
-            } else {
-                agent_id
-            };
-            t.add_row(&[
+            println!(
+                "{:<24} {:<16} {:<12} {}",
                 entry["timestamp"].as_str().unwrap_or("?"),
-                agent_col,
+                entry["agent_id"]
+                    .as_str()
+                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
+                    .unwrap_or(entry["agent_name"].as_str().unwrap_or("?")),
                 entry["action"]
                     .as_str()
                     .or_else(|| entry["event_type"].as_str())
@@ -11578,9 +10745,8 @@ fn cmd_security_audit(limit: usize, json: bool) {
                     .as_str()
                     .or_else(|| entry["description"].as_str())
                     .unwrap_or(""),
-            ]);
+            );
         }
-        t.print();
     } else {
         println!(
             "{}",
@@ -11612,12 +10778,7 @@ fn cmd_security_verify() {
 /// `--confirm`.
 fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     let daemon = daemon_config_context(config.as_deref());
-    // `load_config` already eprintln!s the underlying parse / deserialize
-    // error (see #5186); printing it again here would double the message.
-    let kernel_config = match load_config(config.as_deref()) {
-        Ok(cfg) => cfg,
-        Err(_) => std::process::exit(1),
-    };
+    let kernel_config = load_config(config.as_deref());
 
     let db_path = kernel_config
         .memory
@@ -11736,19 +10897,20 @@ fn cmd_memory_list(agent: &str, json: bool) {
             println!("No memory entries for agent '{agent}'.");
             return;
         }
-        let mut t = crate::table::Table::new(&["KEY", "VALUE"]);
+        println!("{:<30} VALUE", "KEY");
+        println!("{}", "-".repeat(60));
         for kv in arr {
-            t.add_row(&[
+            println!(
+                "{:<30} {}",
                 kv["key"].as_str().unwrap_or("?"),
-                &kv["value"]
+                kv["value"]
                     .as_str()
                     .unwrap_or("")
                     .chars()
                     .take(50)
                     .collect::<String>(),
-            ]);
+            );
         }
-        t.print();
     } else {
         println!(
             "{}",
@@ -11844,15 +11006,16 @@ fn cmd_devices_list(json: bool) {
             println!("No paired devices.");
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "NAME", "LAST SEEN"]);
+        println!("{:<38} {:<20} LAST SEEN", "ID", "NAME");
+        println!("{}", "-".repeat(70));
         for d in arr {
-            t.add_row(&[
+            println!(
+                "{:<38} {:<20} {}",
                 d["id"].as_str().unwrap_or("?"),
                 d["name"].as_str().unwrap_or("?"),
                 d["last_seen"].as_str().unwrap_or("?"),
-            ]);
+            );
         }
-        t.print();
     } else {
         println!(
             "{}",
@@ -11925,9 +11088,11 @@ fn cmd_webhooks_list(json: bool) {
             println!("No webhooks configured.");
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "NAME", "ENABLED", "URL"]);
+        println!("{:<38} {:<20} {:<10} URL", "ID", "NAME", "ENABLED");
+        println!("{}", "-".repeat(90));
         for w in arr {
-            t.add_row(&[
+            println!(
+                "{:<38} {:<20} {:<10} {}",
                 w["id"].as_str().unwrap_or("?"),
                 w["name"].as_str().unwrap_or("?"),
                 if w["enabled"].as_bool().unwrap_or(false) {
@@ -11936,9 +11101,8 @@ fn cmd_webhooks_list(json: bool) {
                     "no"
                 },
                 w["url"].as_str().unwrap_or(""),
-            ]);
+            );
         }
-        t.print();
     } else {
         println!(
             "{}",
@@ -12027,14 +11191,14 @@ fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
     name_or_id.to_string()
 }
 
-fn cmd_message(agent: &str, text: &str, json: bool, incognito: bool) {
+fn cmd_message(agent: &str, text: &str, json: bool) {
     let base = require_daemon("message");
     let agent_id = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
             .post(format!("{base}/api/agents/{agent_id}/message"))
-            .json(&serde_json::json!({"message": text, "incognito": incognito}))
+            .json(&serde_json::json!({"message": text}))
             .send(),
     );
     if json {
@@ -12214,7 +11378,6 @@ fn service_install_linux(binary: &std::path::Path, librefang_home: &std::path::P
          RestartSec=5\n\
          WorkingDirectory={home}\n\
          EnvironmentFile=-{home}/env\n\
-         EnvironmentFile=-{home}/secrets.env\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
@@ -13402,11 +12565,11 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_release_tag, daemon_log_path_for_config, daemon_log_path_for_home,
-        detached_daemon_args, find_daemon_with_probe, is_valid_env_var_name, normalize_daemon_addr,
-        normalize_release_tag, parse_toml_integer, parse_version_core, pool_strategy_canon,
+        channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
+        daemon_log_path_for_home, detached_daemon_args, find_daemon_with_probe,
+        normalize_daemon_addr, normalize_release_tag, parse_toml_integer, parse_version_core,
         resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
-        Commands, DeviceAuthNextStep, GatewayCommands, MemoryCommands, ReleaseComparison,
+        Commands, DeviceAuthNextStep, GatewayCommands, ReleaseComparison,
     };
     use clap::Parser;
     use serde_json::json;
@@ -13550,6 +12713,90 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_channel_test_accepts_target_channel_flag() {
+        let cli = Cli::parse_from([
+            "librefang",
+            "channel",
+            "test",
+            "discord",
+            "--channel",
+            "123456789",
+        ]);
+        match cli.command {
+            Some(Commands::Channel(ChannelCommands::Test {
+                name,
+                channel_id,
+                chat_id,
+            })) => {
+                assert_eq!(name, "discord");
+                assert_eq!(channel_id.as_deref(), Some("123456789"));
+                assert!(chat_id.is_none());
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_channel_test_accepts_chat_id_flag() {
+        let cli = Cli::parse_from([
+            "librefang",
+            "channel",
+            "test",
+            "telegram",
+            "--chat-id",
+            "999",
+        ]);
+        match cli.command {
+            Some(Commands::Channel(ChannelCommands::Test {
+                name,
+                channel_id,
+                chat_id,
+            })) => {
+                assert_eq!(name, "telegram");
+                assert!(channel_id.is_none());
+                assert_eq!(chat_id.as_deref(), Some("999"));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_channel_test_rejects_both_target_flags() {
+        let cli = Cli::try_parse_from([
+            "librefang",
+            "channel",
+            "test",
+            "discord",
+            "--channel",
+            "123",
+            "--chat-id",
+            "456",
+        ]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn test_channel_test_request_body_prefers_channel_id() {
+        assert_eq!(
+            channel_test_request_body(Some("C123"), None),
+            Some(json!({ "channel_id": "C123" }))
+        );
+    }
+
+    #[test]
+    fn test_channel_test_request_body_supports_chat_id() {
+        assert_eq!(
+            channel_test_request_body(None, Some("42")),
+            Some(json!({ "chat_id": "42" }))
+        );
+    }
+
+    #[test]
+    fn test_channel_test_request_body_empty_when_no_target() {
+        assert_eq!(channel_test_request_body(None, None), None);
     }
 
     #[test]
@@ -13942,51 +13189,6 @@ input_schema = { type = "object" }
     }
 
     #[test]
-    fn test_channel_list_parses() {
-        let cli = Cli::parse_from(["librefang", "channel", "list"]);
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Channel(ChannelCommands::List))
-        ));
-    }
-
-    #[test]
-    fn test_channel_setup_with_name_parses() {
-        let cli = Cli::parse_from(["librefang", "channel", "setup", "telegram"]);
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Channel(ChannelCommands::Setup { name: Some(ref n) })) if n == "telegram"
-        ));
-    }
-
-    #[test]
-    fn test_channel_setup_picker_parses() {
-        let cli = Cli::parse_from(["librefang", "channel", "setup"]);
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Channel(ChannelCommands::Setup { name: None }))
-        ));
-    }
-
-    #[test]
-    fn test_channel_reload_parses() {
-        let cli = Cli::parse_from(["librefang", "channel", "reload"]);
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Channel(ChannelCommands::Reload))
-        ));
-    }
-
-    #[test]
-    fn test_channel_rm_parses() {
-        let cli = Cli::parse_from(["librefang", "channel", "rm", "telegram"]);
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Channel(ChannelCommands::Rm { ref name })) if name == "telegram"
-        ));
-    }
-
-    #[test]
     fn test_normalize_release_tag_strips_v_prefix() {
         assert_eq!(normalize_release_tag("v0.3.56"), "0.3.56");
         assert_eq!(normalize_release_tag("0.3.56"), "0.3.56");
@@ -14155,81 +13357,6 @@ input_schema = { type = "object" }
         assert_eq!(hex, "0123456789abcdef0123456789abcdef");
     }
 
-    /// Pins the daemon's compact-format behavior: when an event fires inside
-    /// a span carrying `agent.id` / `session.id` fields, the rendered line
-    /// MUST include both as inline span suffix tokens (the format
-    /// `tracing-subscriber`'s `Compact` formatter emits is
-    /// `<level> <span_name>: <message> <field>=<value> ...`). Daemon log
-    /// search relies on this to correlate any line back to the originating
-    /// agent + session — see also the `#[instrument]` on `run_agent_loop`
-    /// in `librefang-runtime/src/agent_loop.rs`.
-    #[test]
-    fn with_trace_id_compact_format_carries_agent_and_session_ids_from_span() {
-        use super::WithTraceId;
-        use std::sync::{Arc, Mutex};
-        use tracing::{info_span, warn};
-        use tracing_subscriber::fmt::MakeWriter;
-        use tracing_subscriber::layer::SubscriberExt;
-
-        #[derive(Clone)]
-        struct VecWriter(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for VecWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for VecWriter {
-            type Writer = VecWriter;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let writer = VecWriter(buf.clone());
-        let inner = tracing_subscriber::fmt::format()
-            .without_time()
-            .with_target(false)
-            .compact();
-        let layer = tracing_subscriber::fmt::layer()
-            .with_writer(writer)
-            .with_ansi(false)
-            .event_format(WithTraceId(inner));
-        let subscriber = tracing_subscriber::registry().with(layer);
-
-        tracing::subscriber::with_default(subscriber, || {
-            let span = info_span!(
-                "run_agent_loop",
-                agent.id = "agent-uuid-aaaa",
-                session.id = "session-uuid-bbbb",
-            );
-            let _entered = span.enter();
-            warn!("shell exec full mode");
-        });
-
-        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
-        assert!(
-            captured.contains("agent.id=\"agent-uuid-aaaa\""),
-            "expected agent.id span field in line, got: {captured:?}"
-        );
-        assert!(
-            captured.contains("session.id=\"session-uuid-bbbb\""),
-            "expected session.id span field in line, got: {captured:?}"
-        );
-        assert!(
-            captured.contains("run_agent_loop"),
-            "expected span name prefix, got: {captured:?}"
-        );
-        assert!(
-            captured.contains("shell exec full mode"),
-            "expected original message preserved, got: {captured:?}"
-        );
-    }
-
     // --- Daemon detection / launcher port logic (#3582) ---
     //
     // These exercise the `find_daemon_with_probe` core, which was extracted
@@ -14344,149 +13471,5 @@ input_schema = { type = "object" }
         write_daemon_json(tmp.path(), "127.0.0.1:4545");
         let got = find_daemon_with_probe(tmp.path(), |_url| false);
         assert!(got.is_none());
-    }
-
-    // Regression guard for #4923: `memory store` must parse identically to
-    // `memory set` so the alias added in this PR is wired up correctly.
-    #[test]
-    fn memory_store_alias_parses_identically_to_memory_set() {
-        let via_set =
-            Cli::try_parse_from(["librefang", "memory", "set", "coder", "my-key", "my-value"])
-                .expect("memory set must parse");
-        let via_store = Cli::try_parse_from([
-            "librefang",
-            "memory",
-            "store",
-            "coder",
-            "my-key",
-            "my-value",
-        ])
-        .expect("memory store alias must parse");
-
-        let (set_agent, set_key, set_val) = match via_set.command.unwrap() {
-            Commands::Memory(MemoryCommands::Set { agent, key, value }) => (agent, key, value),
-            _ => panic!("unexpected variant from 'memory set'"),
-        };
-        let (store_agent, store_key, store_val) = match via_store.command.unwrap() {
-            Commands::Memory(MemoryCommands::Set { agent, key, value }) => (agent, key, value),
-            _ => panic!("unexpected variant from 'memory store'"),
-        };
-
-        assert_eq!(set_agent, store_agent);
-        assert_eq!(set_key, store_key);
-        assert_eq!(set_val, store_val);
-    }
-
-    // ── Credential pool CLI helpers (#4965) ───────────────────────────────────
-
-    #[test]
-    fn is_valid_env_var_name_accepts_standard_shapes() {
-        assert!(is_valid_env_var_name("OPENAI_API_KEY"));
-        assert!(is_valid_env_var_name("OPENAI_API_KEY_2"));
-        assert!(is_valid_env_var_name("_PRIVATE"));
-        assert!(is_valid_env_var_name("A"));
-        assert!(is_valid_env_var_name("X1"));
-    }
-
-    #[test]
-    fn is_valid_env_var_name_rejects_garbage() {
-        // Leading digit, lowercase, spaces, punctuation, empty — all rejected.
-        assert!(!is_valid_env_var_name(""));
-        assert!(!is_valid_env_var_name("1FOO"));
-        assert!(!is_valid_env_var_name("foo"));
-        assert!(!is_valid_env_var_name("FOO BAR"));
-        assert!(!is_valid_env_var_name("FOO-BAR"));
-        assert!(!is_valid_env_var_name("FOO.BAR"));
-        assert!(!is_valid_env_var_name("FOO$"));
-        assert!(!is_valid_env_var_name(" FOO"));
-    }
-
-    #[test]
-    fn pool_strategy_canon_accepts_known_strategies() {
-        assert_eq!(pool_strategy_canon("fill_first"), Some("fill_first"));
-        assert_eq!(pool_strategy_canon("Fill-First"), Some("fill_first"));
-        assert_eq!(pool_strategy_canon("FILLFIRST"), Some("fill_first"));
-        assert_eq!(pool_strategy_canon("round_robin"), Some("round_robin"));
-        assert_eq!(pool_strategy_canon("RoundRobin"), Some("round_robin"));
-        assert_eq!(pool_strategy_canon("random"), Some("random"));
-        assert_eq!(pool_strategy_canon("least_used"), Some("least_used"));
-        assert_eq!(pool_strategy_canon("LEASTUSED"), Some("least_used"));
-    }
-
-    #[test]
-    fn pool_strategy_canon_rejects_unknown() {
-        assert_eq!(pool_strategy_canon(""), None);
-        assert_eq!(pool_strategy_canon("foo"), None);
-        assert_eq!(pool_strategy_canon("priority"), None);
-        assert_eq!(pool_strategy_canon("rand"), None);
-    }
-
-    /// Round-trip a config.toml fragment containing comments and an unrelated
-    /// section through `toml_edit::DocumentMut`. Proves the parser preserves
-    /// the bits the mutating pool commands rely on: comments survive,
-    /// unrelated tables stay intact, and a freshly inserted
-    /// `[[credential_pools]]` lands at the bottom without rewriting the
-    /// rest of the file. (The actual cmd_auth_pool_* functions are private
-    /// CLI orchestrators that exit the process on error and call `ui::*`
-    /// helpers, so we test the underlying mutation primitive directly.)
-    #[test]
-    fn toml_edit_roundtrip_preserves_comments_and_unrelated_sections() {
-        let original = r#"# top-of-file comment
-api_listen = "127.0.0.1:4545"
-
-[default_model]
-# inline comment in default_model
-provider = "anthropic"
-model = "claude-3-5-sonnet"
-api_key_env = "ANTHROPIC_API_KEY"
-
-# trailing comment before our edit
-"#;
-        let mut doc: toml_edit::DocumentMut = original.parse().expect("fragment must parse");
-        // Insert a credential_pools entry the same way the CLI's add-on-no-pool
-        // path does — building an ArrayOfTables and pushing one table into it.
-        let item = doc
-            .entry("credential_pools")
-            .or_insert(toml_edit::Item::ArrayOfTables(
-                toml_edit::ArrayOfTables::new(),
-            ));
-        let arr = item
-            .as_array_of_tables_mut()
-            .expect("just inserted as array of tables");
-        let mut pool_tbl = toml_edit::Table::new();
-        pool_tbl["provider"] = toml_edit::value("anthropic");
-        pool_tbl["strategy"] = toml_edit::value("fill_first");
-        let mut keys_arr = toml_edit::ArrayOfTables::new();
-        let mut key_tbl = toml_edit::Table::new();
-        key_tbl["api_key_env"] = toml_edit::value("ANTHROPIC_API_KEY_2");
-        key_tbl["label"] = toml_edit::value("Backup");
-        key_tbl["priority"] = toml_edit::value(5_i64);
-        keys_arr.push(key_tbl);
-        pool_tbl.insert("keys", toml_edit::Item::ArrayOfTables(keys_arr));
-        arr.push(pool_tbl);
-
-        let rendered = doc.to_string();
-        // All three comments survive verbatim.
-        assert!(
-            rendered.contains("# top-of-file comment"),
-            "top comment missing: {rendered}"
-        );
-        assert!(
-            rendered.contains("# inline comment in default_model"),
-            "inline comment missing: {rendered}"
-        );
-        assert!(
-            rendered.contains("# trailing comment before our edit"),
-            "trailing comment missing: {rendered}"
-        );
-        // Unrelated section intact.
-        assert!(rendered.contains("[default_model]"));
-        assert!(rendered.contains("provider = \"anthropic\""));
-        // New section present with the expected canonical shape.
-        assert!(rendered.contains("[[credential_pools]]"));
-        assert!(rendered.contains("[[credential_pools.keys]]"));
-        assert!(rendered.contains("api_key_env = \"ANTHROPIC_API_KEY_2\""));
-        assert!(rendered.contains("label = \"Backup\""));
-        assert!(rendered.contains("priority = 5"));
     }
 }

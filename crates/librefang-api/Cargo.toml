@@ -10,11 +10,7 @@ readme = "README.md"
 librefang-types = { path = "../librefang-types" }
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 librefang-kernel = { path = "../librefang-kernel" }
-librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
-agent-client-protocol = { workspace = true }
-tokio-util = { workspace = true }
-librefang-kernel-handle = { path = "../librefang-kernel-handle" }
-librefang-llm-driver = { path = "../librefang-llm-driver" }
+librefang-runtime = { path = "../librefang-runtime" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-channels = { path = "../librefang-channels", default-features = false }
@@ -22,11 +18,10 @@ librefang-wire = { path = "../librefang-wire" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
-librefang-import = { path = "../librefang-import" }
+librefang-migrate = { path = "../librefang-migrate" }
 librefang-telemetry = { path = "../librefang-telemetry" }
 librefang-http = { path = "../librefang-http" }
 anyhow = { workspace = true }
-arc-swap = { workspace = true }
 dashmap = { workspace = true }
 portable-pty = { workspace = true }
 tokio = { workspace = true }
@@ -52,7 +47,6 @@ reqwest = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 url = { workspace = true }
-psl = { workspace = true }
 zip = { workspace = true }
 walkdir = { workspace = true }
 dirs = { workspace = true }
@@ -75,11 +69,12 @@ metrics = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 
 [features]
-# Default = telemetry only. Channel adapters all run as out-of-process
-# sidecars (`librefang.sidecar.adapters.*` in the SDK) — the historical
-# `core-channels` / `all-channels` / `channel-*` features that gated
-# in-process adapters are gone.
-default = ["telemetry"]
+# Default = a small "core-channels" set + telemetry. Heavy / unmaintained
+# adapters (matrix, email/imap, google-chat, bluesky, mqtt, …) stay opt-in
+# via `--features all-channels` so plain `cargo build` and downstream
+# library users don't pay the compile-time cost. Release / packaging
+# pipelines opt in to `all-channels` explicitly. See #3655 / #3688.
+default = ["core-channels", "telemetry"]
 
 # OpenTelemetry tracing export + Prometheus metrics
 telemetry = [
@@ -91,52 +86,114 @@ telemetry = [
     "dep:metrics-exporter-prometheus",
 ]
 
-# `channel-*` / `core-channels` / `all-channels` /
-# `all-channels-no-email` / `mini` removed — every channel adapter
-# runs as a sidecar (see `SIDECAR_CATALOG` in `src/routes/channels.rs`
-# + the `librefang.sidecar.adapters.*` SDK at `sdk/python/`). The
-# `librefang-cli` default-feature reference to `core-channels` and
-# the `librefang-desktop` aliases were cleared in the same change;
-# `mobile-smoke.yml` no longer passes `-f mobile-no-email`.
+# Individual channel features — forwarded to librefang-channels
+channel-telegram = ["librefang-channels/channel-telegram"]
+channel-discord = ["librefang-channels/channel-discord"]
+channel-slack = ["librefang-channels/channel-slack"]
+channel-matrix = ["librefang-channels/channel-matrix"]
+channel-email = ["librefang-channels/channel-email"]
+channel-voice = ["librefang-channels/channel-voice"]
+channel-webhook = ["librefang-channels/channel-webhook"]
+channel-whatsapp = ["librefang-channels/channel-whatsapp"]
+channel-signal = ["librefang-channels/channel-signal"]
+channel-teams = ["librefang-channels/channel-teams"]
+channel-mattermost = ["librefang-channels/channel-mattermost"]
+channel-irc = ["librefang-channels/channel-irc"]
+channel-google-chat = ["librefang-channels/channel-google-chat"]
+channel-twitch = ["librefang-channels/channel-twitch"]
+channel-rocketchat = ["librefang-channels/channel-rocketchat"]
+channel-zulip = ["librefang-channels/channel-zulip"]
+channel-xmpp = ["librefang-channels/channel-xmpp"]
+channel-bluesky = ["librefang-channels/channel-bluesky"]
+channel-feishu = ["librefang-channels/channel-feishu"]
+channel-line = ["librefang-channels/channel-line"]
+channel-mastodon = ["librefang-channels/channel-mastodon"]
+channel-messenger = ["librefang-channels/channel-messenger"]
+channel-reddit = ["librefang-channels/channel-reddit"]
+channel-revolt = ["librefang-channels/channel-revolt"]
+channel-viber = ["librefang-channels/channel-viber"]
+channel-flock = ["librefang-channels/channel-flock"]
+channel-guilded = ["librefang-channels/channel-guilded"]
+channel-keybase = ["librefang-channels/channel-keybase"]
+channel-nextcloud = ["librefang-channels/channel-nextcloud"]
+channel-nostr = ["librefang-channels/channel-nostr"]
+channel-pumble = ["librefang-channels/channel-pumble"]
+channel-threema = ["librefang-channels/channel-threema"]
+channel-twist = ["librefang-channels/channel-twist"]
+channel-webex = ["librefang-channels/channel-webex"]
+channel-dingtalk = ["librefang-channels/channel-dingtalk"]
+channel-discourse = ["librefang-channels/channel-discourse"]
+channel-gitter = ["librefang-channels/channel-gitter"]
+channel-gotify = ["librefang-channels/channel-gotify"]
+channel-linkedin = ["librefang-channels/channel-linkedin"]
+channel-mumble = ["librefang-channels/channel-mumble"]
+channel-ntfy = ["librefang-channels/channel-ntfy"]
+channel-qq = ["librefang-channels/channel-qq"]
+channel-wechat = ["librefang-channels/channel-wechat"]
+channel-wecom = ["librefang-channels/channel-wecom"]
+
+# Small curated default set: 5 light adapters covering the most common
+# integration points. Each member only uses the workspace HTTP stack
+# (`reqwest` + `rustls`) — no heavy/unmaintained transitive deps at the
+# time of writing. If you add a member, double-check its dep tree before
+# growing this set. Used by `librefang-api`'s `default` and forwarded by
+# `librefang-cli`'s `default`. Anything bigger should opt in via
+# `all-channels` (or pick individual channels).
+core-channels = [
+    "channel-telegram",
+    "channel-discord",
+    "channel-slack",
+    "channel-webhook",
+    "channel-ntfy",
+]
+
+all-channels = [
+    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
+    "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
+    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
+    "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
+    "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
+    "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
+    "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
+    "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
+    "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
+]
+
+# All channels except email — used for Android targets where rustls-connector's
+# rustls-platform-verifier dependency doesn't implement new_with_extra_roots on Android.
+all-channels-no-email = [
+    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
+    "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
+    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
+    "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
+    "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
+    "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
+    "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
+    "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
+    "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
+]
+
+# Mini: 12 core channels
+mini = [
+    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
+]
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["process"] }
 libc = "0.2"
-
-# Windows-only: SDDL → SECURITY_DESCRIPTOR for the ACP named-pipe
-# listener (#3313). Restricts the pipe DACL to the daemon's owner SID
-# so other local users can't connect. The features list is the minimum
-# needed for `ConvertStringSecurityDescriptorToSecurityDescriptorW` +
-# `SECURITY_ATTRIBUTES` + `LocalFree`. windows-sys is already in the
-# dependency tree transitively (tokio uses it on Windows), so adding
-# it as a direct dep is essentially free.
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-] }
-
-[build-dependencies]
-# `build.rs` uses `chrono::Utc::now()` to stamp `BUILD_DATE` instead of
-# shelling out to `date`, and `which::which("git")` to resolve git on
-# PATH instead of invoking it by bare name (refs #5667).
-chrono = { workspace = true }
-which = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 uuid = { workspace = true }
 http-body-util = "0.1"
 librefang-testing = { path = "../librefang-testing" }
-# tool-exec backend integration test (#3332)
-librefang-runtime = { path = "../librefang-runtime" }
 totp-rs = { workspace = true }
-# OIDC `sub` claim enforcement integration test (#5128): generates RSA
-# keypairs in-process, signs JWTs with `jsonwebtoken`, and serves the
-# resulting JWKS over a local axum listener so `validate_jwt_cached` can
-# be driven end-to-end without a live identity provider.
-rsa = { workspace = true }
 
 [lints]
 workspace = true

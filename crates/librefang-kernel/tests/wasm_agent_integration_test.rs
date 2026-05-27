@@ -5,13 +5,6 @@
 //!
 //! These tests use real WASM execution — no mocks.
 
-// `send_message_full` now nests its body inside `held_agent_locks::scope`
-// (#5125/#5126), deepening the monomorphized future-type layout. Match the
-// crate-root limit (`librefang-kernel/src/lib.rs:3`) and the other heavy
-// integration-test binaries (`audit_retention_test`, `workflow_integration_test`).
-#![recursion_limit = "256"]
-
-use librefang_kernel::AgentSubsystemApi;
 use librefang_testing::MockKernelBuilder;
 use librefang_types::agent::AgentManifest;
 
@@ -319,7 +312,7 @@ async fn test_multiple_wasm_agents() {
     assert!(echo_result.response.contains("test data"));
 
     // Verify agent list shows both + default assistant
-    let agents = kernel.agent_registry_ref().list();
+    let agents = kernel.agent_registry().list();
     assert_eq!(agents.len(), 3);
 
     kernel.shutdown();
@@ -358,7 +351,7 @@ memory_write = ["self.*"]
     let llm_id = kernel.spawn_agent(llm_manifest).unwrap();
 
     // Verify both agents exist + default assistant
-    let agents = kernel.agent_registry_ref().list();
+    let agents = kernel.agent_registry().list();
     assert_eq!(agents.len(), 3);
 
     // WASM agent should work
@@ -366,11 +359,11 @@ memory_write = ["self.*"]
     assert_eq!(result.response, "hello from wasm");
 
     // LLM agent exists but we won't send it a message (no real LLM)
-    assert!(kernel.agent_registry_ref().get(llm_id).is_some());
+    assert!(kernel.agent_registry().get(llm_id).is_some());
 
     // Kill WASM agent
     kernel.kill_agent(wasm_id).unwrap();
-    assert_eq!(kernel.agent_registry_ref().list().len(), 2);
+    assert_eq!(kernel.agent_registry().list().len(), 2);
 
     kernel.shutdown();
 }

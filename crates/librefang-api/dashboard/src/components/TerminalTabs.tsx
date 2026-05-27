@@ -16,7 +16,6 @@ import {
   useDeleteTerminalWindow,
 } from "../lib/mutations/terminal";
 import { ApiError, type TerminalWindow } from "../lib/http/client";
-import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 
@@ -39,7 +38,7 @@ interface TerminalTabsProps {
   tmuxAvailable: boolean;
   maxWindows: number;
   displayedActiveWindowId: string | null;
-  onSwitchWindow: (windowId: string | null) => void;
+  onSwitchWindow: (windowId: string) => void;
   terminalRef: RefObject<Terminal | null>;
   fitAddonRef: RefObject<FitAddon | null>;
 }
@@ -49,24 +48,11 @@ const WINDOW_NAME_RE = /^[^|\x00-\x1f\x7f]{1,64}$/u;
 
 const ORDER_KEY = "terminal.tabOrder";
 
-// Go through `safeStorage*` so the existing #5140 try/catch guards (Safari
-// private mode SecurityError, QuotaExceededError, SSR / non-browser
-// contexts without window.localStorage) cover this site too. Raw
-// localStorage calls in module init or render bypass that net and crash
-// the whole React tree on first paint when storage is unavailable.
 function loadOrder(): string[] {
-  const raw = safeStorageGet(ORDER_KEY);
-  if (raw === null) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
-  } catch (e) {
-    console.warn("Failed to parse tab order from localStorage:", e);
-    return [];
-  }
+  try { return JSON.parse(localStorage.getItem(ORDER_KEY) ?? "[]"); } catch { return []; }
 }
 function saveOrder(ids: string[]) {
-  safeStorageSet(ORDER_KEY, JSON.stringify(ids));
+  localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
 }
 
 export function TerminalTabs({
@@ -107,8 +93,7 @@ export function TerminalTabs({
     setTabOrder(prev => {
       const existing = new Set(windows.map(w => w.id));
       const filtered = prev.filter(id => existing.has(id));
-      const filteredSet = new Set(filtered);
-      const newIds = windows.map(w => w.id).filter(id => !filteredSet.has(id));
+      const newIds = windows.map(w => w.id).filter(id => !filtered.includes(id));
       const next = [...filtered, ...newIds];
       saveOrder(next);
       return next;
@@ -225,7 +210,7 @@ export function TerminalTabs({
             }
             onSwitchWindow(next.id);
           } else {
-            onSwitchWindow(null);
+            onSwitchWindow("");
           }
         }
       } catch {
@@ -306,20 +291,14 @@ export function TerminalTabs({
             <ChevronRight className="h-3 w-3 text-gray-500" />
           </div>
         )}
-      <div ref={tabScrollRef} role="tablist" className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
+      <div ref={tabScrollRef} className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
       {sortedWindows.map((w) => {
         const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
         return (
           <div
             key={w.id}
-            role="tab"
-            tabIndex={0}
-            aria-selected={isActive}
             onClick={() => handleTabClick(w.id)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleTabClick(w.id); }
-            }}
             onDoubleClick={(e) => {
               e.stopPropagation();
               startRename(w);

@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Trans, useTranslation } from "react-i18next";
+import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import { Smartphone, RefreshCw, CheckCircle, Clock, Trash2, AlertCircle } from "lucide-react";
 import { usePairingRequest, usePairedDevices, useRemovePairedDevice } from "../lib/queries/pairing";
-import { ApiError } from "../lib/http/errors";
 import { pairingKeys } from "../lib/queries/keys";
 
 function QRCanvas({ uri }: { uri: string }) {
-  const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     if (canvasRef.current) {
@@ -19,14 +17,7 @@ function QRCanvas({ uri }: { uri: string }) {
       });
     }
   }, [uri]);
-  return (
-    <canvas
-      ref={canvasRef}
-      role="img"
-      aria-label={t("mobile_pairing.qr_aria_label")}
-      className="rounded-xl"
-    />
-  );
+  return <canvas ref={canvasRef} className="rounded-xl" />;
 }
 
 function CountdownBadge({ expiresAt }: { expiresAt: string }) {
@@ -59,6 +50,15 @@ export function MobilePairingPage() {
   const removeDevice = useRemovePairedDevice();
 
   const expired = req ? new Date(req.expires_at).getTime() < Date.now() : false;
+  // Translator-supplied markup only (`<strong>`); no user input is interpolated
+  // into these strings, so dangerouslySetInnerHTML is safe here.
+  const subtitleHtml = { __html: t("mobile_pairing.subtitle") };
+  const disabledBodyHtml = {
+    __html: t("mobile_pairing.error_disabled_body").replace(
+      "<link>",
+      '<a href="/dashboard/config/security" class="text-brand underline">',
+    ).replace("</link>", "</a>"),
+  };
 
   const refresh = () => {
     qc.removeQueries({ queryKey: pairingKeys.request() });
@@ -66,7 +66,7 @@ export function MobilePairingPage() {
   };
 
   if (error) {
-    const isDisabled = error instanceof ApiError && error.status === 404;
+    const isDisabled = (error as { status?: number })?.status === 404;
     return (
       <div className="max-w-xl mx-auto px-4 py-12 text-center space-y-3">
         <Smartphone className="w-10 h-10 mx-auto text-text-dim" />
@@ -76,22 +76,7 @@ export function MobilePairingPage() {
             : t("mobile_pairing.error_generic_title")}
         </p>
         {isDisabled ? (
-          <p className="text-sm text-text-dim">
-            {/*
-              Translator strings may contain only the tags listed in
-              `components`. i18next maps <link>…</link> → <a>, <code>…</code>
-              → <code>; any other tag in a translation is rendered as text,
-              so a malicious translator cannot inject <script> or new
-              attributes.
-            */}
-            <Trans
-              i18nKey="mobile_pairing.error_disabled_body"
-              components={{
-                a: <a href="/dashboard/config/security" className="text-brand underline" />,
-                code: <code />,
-              }}
-            />
-          </p>
+          <p className="text-sm text-text-dim" dangerouslySetInnerHTML={disabledBodyHtml} />
         ) : (
           <button
             onClick={refresh}
@@ -112,12 +97,7 @@ export function MobilePairingPage() {
           <Smartphone className="w-6 h-6 text-brand" />
           {t("mobile_pairing.title")}
         </h1>
-        <p className="text-sm text-text-dim">
-          <Trans
-            i18nKey="mobile_pairing.subtitle"
-            components={{ strong: <strong /> }}
-          />
-        </p>
+        <p className="text-sm text-text-dim" dangerouslySetInnerHTML={subtitleHtml} />
       </div>
 
       {/* QR Card */}

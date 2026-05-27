@@ -1,7 +1,7 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
-import { Modal } from "./Modal";
+import { DrawerPanel } from "./DrawerPanel";
 
 type ScheduleType = "interval_min" | "interval_hour" | "daily" | "weekday" | "weekly" | "monthly" | "custom";
 
@@ -58,7 +58,7 @@ function parseCronType(cron: string): { type: ScheduleType; min?: number; hour?:
   if (m.startsWith("*/") && h === "*") return { type: "interval_min", interval: parseInt(m.slice(2)) || 5 };
   if (m === "0" && h.startsWith("*/")) return { type: "interval_hour", interval: parseInt(h.slice(2)) || 1 };
   if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && RE_DIGITS.test(dom) && dow === "*") return { type: "monthly", hour: +h, min: +m, day: +dom };
-  if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return { type: "weekly", hour: +h, min: +m, weekday: +dow === 0 ? 7 : +dow };
+  if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return { type: "weekly", hour: +h, min: +m, weekday: +dow };
   if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "1-5") return { type: "weekday", hour: +h, min: +m };
   if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "*") return { type: "daily", hour: +h, min: +m };
   return { type: "custom" };
@@ -89,7 +89,7 @@ function buildCronFrom(
     case "interval_hour": return `0 */${intervalHour} * * *`;
     case "daily": return `${minute} ${hour} * * *`;
     case "weekday": return `${minute} ${hour} * * 1-5`;
-    case "weekly": return `${minute} ${hour} * * ${weekday === 7 ? 0 : weekday}`;
+    case "weekly": return `${minute} ${hour} * * ${weekday}`;
     case "monthly": return `${minute} ${hour} ${monthDay} * *`;
     case "custom": return customCron;
   }
@@ -116,26 +116,6 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
   const [monthDay, setMonthDay] = useState(parsed.day ?? 1);
   const [customCron, setCustomCron] = useState(initialCron || "0 9 * * *");
 
-  const prevInitialCron = useRef(initialCron);
-  useEffect(() => {
-    if (prevInitialCron.current !== initialCron) {
-      prevInitialCron.current = initialCron;
-      const p = parseCronType(initialCron || "0 9 * * *");
-      setScheduleType(p.type);
-      setIntervalMin(p.type === "interval_min" ? (p.interval ?? 5) : 5);
-      setIntervalHour(p.type === "interval_hour" ? (p.interval ?? 1) : 1);
-      setHour(p.hour ?? 9);
-      setMinute(p.min ?? 0);
-      setWeekday(p.weekday ?? 1);
-      setMonthDay(p.day ?? 1);
-      setCustomCron(initialCron || "0 9 * * *");
-    }
-  }, [initialCron]);
-
-  useEffect(() => {
-    setTimezone(initialTz || detectBrowserTimezone());
-  }, [initialTz]);
-
   const validateCron = (cron: string): boolean => {
     const parts = cron.trim().split(/\s+/);
     if (parts.length !== 5) return false;
@@ -156,7 +136,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
     if (m.startsWith("*/") && h === "*") return t("scheduler.cron_every_n_min", { n: m.slice(2) });
     if (m === "0" && h.startsWith("*/")) return t("scheduler.cron_every_n_hour", { n: h.slice(2) });
     if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && RE_DIGITS.test(dom) && dow === "*") return t("scheduler.cron_monthly", { dom, time });
-    if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return t("scheduler.cron_weekly", { day: weekdays[+dow === 7 ? 0 : +dow], time });
+    if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return t("scheduler.cron_weekly", { day: weekdays[+dow], time });
     if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "1-5") return t("scheduler.cron_weekdays", { time });
     if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "*") return t("scheduler.cron_daily", { time });
     return cron;
@@ -212,32 +192,10 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
     [t],
   );
 
-  // Use Modal (fixed overlay) rather than DrawerPanel (global push-slot)
-  // so the picker can safely appear over another DrawerPanel without
-  // competing for the single shared slot. The cron picker is opened
-  // from inside other drawers — SchedulerPage's create-schedule form,
-  // HandsPage's hand-detail panel, WorkflowsPage's per-row Schedule
-  // button — and a nested DrawerPanel inside another DrawerPanel's
-  // body cannot survive: as soon as the inner DrawerPanel pushes its
-  // body into the slot, PushDrawer stops rendering the outer body,
-  // which unmounts the inner DrawerPanel and tears the slot back down.
-  // Fixed-overlay Modal sidesteps that entirely. Bug fix: #5247.
-  //
-  // `variant="panel-right"` reproduces the right-docked, dim-backdrop
-  // shape the picker had as a DrawerPanel ("xl" size). The header is
-  // still rendered inline so the optional subtitle can sit beneath the
-  // title — Modal's built-in title bar only takes a string.
-  //
-  // zIndex=70 is needed because on <lg viewports PushDrawer renders the
-  // hosting drawer as a `fixed inset-0 z-[55]` mobile overlay, and
-  // Modal's default z-index of 50 would put this picker BEHIND that
-  // drawer overlay — invisible to phone users. 70 sits above the
-  // mobile drawer (55) and the OfflineBanner (60), and below the
-  // notification dropdowns (z-[90]/z-[100]) and ConfirmDialog (z-[150])
-  // so global dismissal flows still win. On lg+ the host drawer is a
-  // flex `<aside>` (no fixed positioning), so any z-index ≥ 50 works.
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="3xl" hideCloseButton variant="panel-right" zIndex={70}>
+    <DrawerPanel isOpen={isOpen} onClose={onClose} size="xl" hideCloseButton>
+      {/* Header — kept inline so the optional subtitle line renders below
+          the title; Modal's built-in title bar only takes a string. */}
       <div className="p-5 pb-3 border-b border-border-subtle">
         <h3 id="schedule-modal-title" className="text-base font-black">{title}</h3>
           {subtitle && <p className="text-[11px] text-text-dim mt-0.5 truncate">{subtitle}</p>}
@@ -265,7 +223,6 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-dim">{t("scheduler.every")}</span>
               <input type="number" min={1} max={59} value={intervalMin}
-                aria-label={`${t("scheduler.every")} ${t("scheduler.minutes")}`}
                 onChange={e => setIntervalMin(Math.max(1, Math.min(59, +e.target.value)))} className={num} />
               <span className="text-text-dim">{t("scheduler.minutes")}</span>
             </div>
@@ -274,7 +231,6 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-dim">{t("scheduler.every")}</span>
               <input type="number" min={1} max={23} value={intervalHour}
-                aria-label={`${t("scheduler.every")} ${t("scheduler.hours")}`}
                 onChange={e => setIntervalHour(Math.max(1, Math.min(23, +e.target.value)))} className={num} />
               <span className="text-text-dim">{t("scheduler.hours")}</span>
             </div>
@@ -305,7 +261,6 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-dim">{t("scheduler.every_month_on")}</span>
               <input type="number" min={1} max={28} value={monthDay}
-                aria-label={t("scheduler.every_month_on")}
                 onChange={e => setMonthDay(Math.max(1, Math.min(28, +e.target.value)))} className={num} />
               <span className="text-text-dim">{t("scheduler.day_suffix")}</span>
               {timeSelect}
@@ -358,6 +313,6 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
           <Button variant="primary" className="flex-1" onClick={() => onSave(previewCron, timezone)} disabled={!cronValid}>{t("common.save")}</Button>
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
         </div>
-    </Modal>
+    </DrawerPanel>
   );
 }

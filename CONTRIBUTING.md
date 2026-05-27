@@ -277,42 +277,6 @@ After building, verify your local setup:
 cargo run -- doctor
 ```
 
-### Test Sharding & Build-Timings Tracking (#3311)
-
-CI splits the full-workspace test run into **4 nextest shards** that run in
-parallel. Each shard runs `cargo nextest run --workspace --partition
-hash:N/4`, which deterministically buckets every test into exactly one shard
-by the hash of its name. Adding or removing tests does not reshuffle existing
-buckets, so cache hit rates stay stable across runs. The matrix is
-`fail-fast: false` so a failure in one shard does not mask failures in the
-others.
-
-Sharding only kicks in for the **full-run** lane (push to `main`, or a PR
-that touches the workspace `Cargo.toml` / `Cargo.lock`). The selective lane
-(typical PR touching a few crates) keeps running on a single runner — shard
-fan-out has no benefit when the affected crate set is small, and adds startup
-overhead.
-
-A weekly job (`.github/workflows/build-timings.yml`, Mondays 07:00 UTC) tracks
-compile hotspots:
-
-```bash
-# Local: collect a per-crate compile-time snapshot for the current HEAD.
-cargo xtask build-timings
-# Writes bench-results/build-timings/<git-sha>.json by parsing
-# target/cargo-timings/cargo-timing*.html (the embedded UNIT_DATA array).
-
-# Local: compare the latest snapshot against bench-results/build-timings/baseline.json.
-cargo xtask compare-build-timings
-# Exits non-zero (annotated, not blocking) when any crate regressed by
-# more than 10%.
-```
-
-The baseline file is seeded by committing the first weekly run's snapshot.
-After that, weekly snapshots are uploaded as workflow artifacts (90-day
-retention) for trend tracking — they are not auto-committed back into the
-repo.
-
 ### Local Check Mode (low-spec hosts)
 
 `cargo xtask ci`, `cargo xtask pre-commit`, and `cargo xtask coverage`
@@ -435,7 +399,7 @@ LibreFang is organized as a Cargo workspace with 14 crates:
 | `librefang-channels` | 40 channel adapters (Telegram, Discord, Slack, WhatsApp, and 36 more), formatter, rate limiter |
 | `librefang-wire` | OFP (LibreFang Protocol): TCP P2P networking with HMAC-SHA256 mutual authentication |
 | `librefang-cli` | Clap CLI with daemon auto-detect (HTTP mode vs. in-process fallback), MCP server |
-| `librefang-import` | Import engine for migrating from OpenClaw (and future frameworks) |
+| `librefang-migrate` | Migration engine for importing from OpenClaw (and future frameworks) |
 | `librefang-skills` | Skill system: 60 bundled skills, FangHub marketplace, OpenClaw compatibility, prompt injection scanning |
 | `librefang-desktop` | Tauri 2.0 native desktop app (WebView + system tray + single-instance + notifications) |
 | `xtask` | Build automation tasks |
@@ -443,7 +407,7 @@ LibreFang is organized as a Cargo workspace with 14 crates:
 ### Key Architectural Patterns
 
 - **`KernelHandle` trait**: Defined in `librefang-runtime`, implemented on `LibreFangKernel` in `librefang-kernel`. This avoids circular crate dependencies while enabling inter-agent tools.
-- **Per-agent memory**: Each agent has its own isolated memory namespace via the `agent_id` parameter on `MemoryAccess`. The legacy shared namespace (`00000000-…-0001`) is kept for internal kernel subsystems and backward compatibility.
+- **Shared memory**: A fixed UUID (`AgentId(Uuid::from_bytes([0..0, 0x01]))`) provides a cross-agent KV namespace.
 - **Daemon detection**: The CLI checks `~/.librefang/daemon.json` and pings the health endpoint. If a daemon is running, commands use HTTP; otherwise, they boot an in-process kernel.
 - **Capability-based security**: Every agent operation is checked against the agent's granted capabilities before execution.
 
@@ -586,76 +550,57 @@ Summarize the following email thread in 3 bullet points:
 
 ## How to Add a New Channel Adapter
 
-**Channels are sidecar-first.** A new channel adapter is an
-out-of-process subprocess (Python or any language) that speaks
-newline-delimited JSON-RPC over stdin/stdout. New *in-process* Rust
-adapters are rejected by a policy gate (see the maintainers-only note
-below). See `docs/architecture/sidecar-channels.md` for the full
-model.
+Channel adapters live in `crates/librefang-channels/src/`. Each adapter implements the `ChannelAdapter` trait.
 
-### Add a sidecar channel adapter
+### Steps
 
-1. Install the SDK: `pip install librefang-sdk` (source:
-   `sdk/python/`).
+1. Create a new file: `crates/librefang-channels/src/myplatform.rs`
 
-2. Subclass `SidecarAdapter`. Implement `on_send` (deliver to the
-   platform) and, for platforms you poll, `produce` (push inbound
-   messages via `emit`). Declare the rich features you support in
-   `capabilities` — anything you don't declare degrades to plain text
-   automatically.
+2. Implement the `ChannelAdapter` trait (defined in `types.rs`):
 
-   ```python
-   from librefang.sidecar import Content, SidecarAdapter, protocol, run_stdio
+```rust
+use crate::types::{ChannelAdapter, ChannelMessage, ChannelType};
+use async_trait::async_trait;
 
-   class MyAdapter(SidecarAdapter):
-       capabilities = ["typing"]
+pub struct MyPlatformAdapter {
+    // token, client, config fields
+}
 
-       async def on_send(self, cmd):
-           ...  # deliver cmd.text / cmd.content to the platform
+#[async_trait]
+impl ChannelAdapter for MyPlatformAdapter {
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Custom("myplatform".to_string())
+    }
 
-       async def produce(self, emit):
-           async for m in my_platform_stream():
-               emit(protocol.message(m.user_id, m.user_name,
-                                     content=Content.text(m.text)))
+    async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Start polling/listening for messages
+        Ok(())
+    }
 
-   if __name__ == "__main__":
-       run_stdio(MyAdapter())
-   ```
+    async fn send(&self, channel_id: &str, content: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Send a message back to the platform
+        Ok(())
+    }
 
-   Start from `sdk/python/librefang/sidecar/template/` and read
-   `sdk/python/librefang/sidecar/adapters/ntfy.py` — the canonical
-   migration (a real SSE-in / HTTP-out adapter, stdlib-only).
+    async fn stop(&mut self) {
+        // Clean shutdown
+    }
+}
+```
 
-3. Register it in `~/.librefang/config.toml`:
+3. Register the module in `crates/librefang-channels/src/lib.rs`:
 
-   ```toml
-   [[sidecar_channels]]
-   name = "myplatform"
-   command = "python3"
-   args = ["adapters/my_adapter.py"]
-   # restart / backoff / ready_timeout / message_buffer / overflow …
-   # are all optional — see librefang.toml.example for defaults.
-   ```
+```rust
+pub mod myplatform;
+```
 
-4. **stdout is the protocol channel** — never `print()` to it. Log via
-   `from librefang.sidecar import logging`. The daemon supervises the
-   process (crash → backoff restart → circuit-break); your job is
-   platform reconnection (`with_backoff`) and being crash-safe.
+4. Wire it up in the channel bridge (`crates/librefang-api/src/channel_bridge.rs`) so the daemon starts it alongside other adapters.
 
-5. Add tests (the `librefang.sidecar` SDK is unit-test-friendly with
-   injectable I/O — see `sdk/python/tests/`) and submit a PR.
+5. Add configuration support in `librefang-types` config structs (add a `[channels.myplatform]` section).
 
-### In-process Rust adapter — maintainers only
+6. Add CLI setup wizard instructions in `crates/librefang-cli/src/main.rs` under `cmd_channel_setup`.
 
-The ~46 pre-existing in-process adapters under
-`crates/librefang-channels/src/` are grandfathered in
-`channels-allowlist.txt`. `scripts/hooks/pre-commit` and
-`cargo xtask channel-policy` (run in CI) **reject any new** file that
-`impl`s `ChannelAdapter` and is not on that allowlist. Adding a new
-in-process adapter requires an explicit maintainer decision and an
-allowlist entry in a separate reviewed commit — it is not the normal
-path. Such adapters still owe a `tests/<channel>_wiremock.rs`
-send-path test (see `crates/librefang-channels/CLAUDE.md`).
+7. Write tests and submit a PR.
 
 ---
 

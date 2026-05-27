@@ -9,6 +9,7 @@ use librefang_types::agent::{PromptExperiment, PromptVersion};
 use sha2::{Digest, Sha256};
 
 use super::AppState;
+use librefang_kernel::kernel_handle::prelude::*;
 use std::sync::Arc;
 
 use crate::types::ApiErrorResponse;
@@ -72,10 +73,9 @@ async fn list_prompt_versions(
             })
             .into_response()
         }
-        // #3541: PromptStore returns typed `KernelOpError`; route through
-        // the central status-code map so a `NotFound { kind: "prompt_version" }`
-        // surfaces as 404 instead of being flattened to 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response(),
     };
     // #3511: tag response so request_logging middleware can emit `agent_id`.
     crate::extensions::with_agent_id(agent_id, body)
@@ -94,43 +94,18 @@ async fn create_prompt_version(
                 .into_response()
         }
     };
-    // Audit: `docs/issues/prompt-version-system-prompt-no-cap.md`.
-    // Reject oversize `system_prompt` BEFORE any write. Once a version is
-    // activated, its `system_prompt` rides every LLM call — an uncapped
-    // field is a direct token-cost amplification vector. Cheked against
-    // both a byte cap (memory) and a character cap (token / billing).
-    if let Err(e) = crate::validation::check_system_prompt_size(&version.system_prompt) {
-        return e.into_response();
-    }
     version.agent_id = agent_id;
     version.id = uuid::Uuid::new_v4();
     version.created_at = chrono::Utc::now();
-    // Audit: ignore client-supplied `is_active`. The create endpoint MUST
-    // NOT side-channel activation: the only legitimate path to flip a
-    // version active is `POST /prompts/versions/{id}/activate`, which
-    // additionally invariant-checks against the existing active version.
-    version.is_active = false;
-    // Audit: ignore client-supplied `version`. Versions are monotonic
-    // per agent and the server is the single source of truth — a client
-    // picking `version = 999` would break monotonicity assumptions
-    // downstream (active-version selection, list ordering, audit log).
-    // Compute `prev_max + 1` from the existing rows for this agent.
-    let next_version = match state.kernel.list_prompt_versions(agent_id) {
-        Ok(existing) => existing.iter().map(|v| v.version).max().unwrap_or(0) + 1,
-        Err(e) => return ApiErrorResponse::from(e).into_response(),
-    };
-    version.version = next_version;
     // Compute content hash from system_prompt
     let mut hasher = Sha256::new();
     hasher.update(version.system_prompt.as_bytes());
     version.content_hash = format!("{:x}", hasher.finalize());
     let body = match state.kernel.create_prompt_version(&version) {
-        // Issue #3832: POST /versions creates a new resource — 201 Created.
-        Ok(_) => (StatusCode::CREATED, Json(version)).into_response(),
-        // #3541: PromptStore returns typed `KernelOpError`; route through
-        // the central status-code map so a `NotFound { kind: "prompt_version" }`
-        // surfaces as 404 instead of being flattened to 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Ok(_) => Json(version).into_response(),
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response(),
     };
     // #3511: tag response so request_logging middleware can emit `agent_id`.
     crate::extensions::with_agent_id(agent_id, body)
@@ -142,10 +117,9 @@ async fn get_prompt_version(
 ) -> impl IntoResponse {
     match state.kernel.get_prompt_version(&id) {
         Ok(version) => Json(version).into_response(),
-        // #3541: PromptStore returns typed `KernelOpError`; route through
-        // the central status-code map so a `NotFound { kind: "prompt_version" }`
-        // surfaces as 404 instead of being flattened to 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -155,10 +129,9 @@ async fn delete_prompt_version(
 ) -> impl IntoResponse {
     match state.kernel.delete_prompt_version(&id) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        // #3541: PromptStore returns typed `KernelOpError`; route through
-        // the central status-code map so a `NotFound { kind: "prompt_version" }`
-        // surfaces as 404 instead of being flattened to 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -176,8 +149,9 @@ async fn activate_prompt_version(
         }
     };
     if let Err(e) = state.kernel.set_active_prompt_version(&id, agent_id) {
-        // #3541: typed KernelOpError → status-code via From impl.
-        return ApiErrorResponse::from(e).into_response();
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
     }
     // Read back the activated version so the caller can patch caches in place
     // without an extra round-trip. If the version vanished between write and
@@ -214,10 +188,9 @@ async fn list_experiments(
             })
             .into_response()
         }
-        // #3541: PromptStore returns typed `KernelOpError`; route through
-        // the central status-code map so a `NotFound { kind: "prompt_version" }`
-        // surfaces as 404 instead of being flattened to 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response(),
     };
     // #3511: tag response so request_logging middleware can emit `agent_id`.
     crate::extensions::with_agent_id(agent_id, body)
@@ -239,26 +212,15 @@ async fn create_experiment(
     experiment.agent_id = agent_id;
     experiment.id = uuid::Uuid::new_v4();
     experiment.created_at = chrono::Utc::now();
-    // Audit: `docs/issues/prompt-version-system-prompt-no-cap.md` (same
-    // defensive pattern applied to experiments). The state machine —
-    // `status`, `started_at`, `ended_at` — is server-owned and can only
-    // advance through `/start`, `/pause`, `/complete`. Ignore any
-    // client-supplied values on create so an experiment cannot be
-    // posted as already-Running with backdated `started_at`.
-    experiment.status = librefang_types::agent::ExperimentStatus::default();
-    experiment.started_at = None;
-    experiment.ended_at = None;
     // Assign IDs to variants
     for variant in &mut experiment.variants {
         variant.id = uuid::Uuid::new_v4();
     }
     let body = match state.kernel.create_experiment(&experiment) {
-        // Issue #3832: POST /experiments creates a new resource — 201 Created.
-        Ok(_) => (StatusCode::CREATED, Json(experiment)).into_response(),
-        // #3541: PromptStore returns typed `KernelOpError`; route through
-        // the central status-code map so a `NotFound { kind: "prompt_version" }`
-        // surfaces as 404 instead of being flattened to 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Ok(_) => Json(experiment).into_response(),
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response(),
     };
     // #3511: tag response so request_logging middleware can emit `agent_id`.
     crate::extensions::with_agent_id(agent_id, body)
@@ -270,10 +232,9 @@ async fn get_experiment(
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
         Ok(experiment) => Json(experiment).into_response(),
-        // #3541: PromptStore returns typed `KernelOpError`; route through
-        // the central status-code map so a `NotFound { kind: "prompt_version" }`
-        // surfaces as 404 instead of being flattened to 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -289,16 +250,16 @@ async fn transition_experiment(
     status: librefang_types::agent::ExperimentStatus,
 ) -> axum::response::Response {
     if let Err(e) = state.kernel.update_experiment_status(id, status) {
-        // #3541: typed KernelOpError → status-code via From impl.
-        return ApiErrorResponse::from(e).into_response();
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
     }
     match state.kernel.get_experiment(id) {
         Ok(Some(experiment)) => Json(experiment).into_response(),
         Ok(None) => Json(serde_json::json!({"success": true})).into_response(),
-        // #3541: PromptStore returns typed `KernelOpError`; route through
-        // the central status-code map so a `NotFound { kind: "prompt_version" }`
-        // surfaces as 404 instead of being flattened to 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -344,9 +305,8 @@ async fn get_experiment_metrics(
 ) -> impl IntoResponse {
     match state.kernel.get_experiment_metrics(&id) {
         Ok(metrics) => Json(metrics).into_response(),
-        // #3541: PromptStore returns typed `KernelOpError`; route through
-        // the central status-code map so a `NotFound { kind: "prompt_version" }`
-        // surfaces as 404 instead of being flattened to 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }

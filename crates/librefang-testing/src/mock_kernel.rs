@@ -5,65 +5,9 @@
 //! to construct a real kernel instance.
 
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::model_catalog::ModelCatalog;
 use librefang_types::config::KernelConfig;
-use librefang_types::model_catalog::{
-    AuthStatus, Modality, ModelCatalogEntry, ModelTier, ProviderInfo,
-};
 use std::sync::{Arc, Once};
 use tempfile::TempDir;
-
-/// Catalog seed pair: `(providers, models)` in the same order
-/// `ModelCatalog::from_entries` accepts.
-pub type CatalogSeed = (Vec<ProviderInfo>, Vec<ModelCatalogEntry>);
-
-/// A minimal, deterministic catalog covering ids referenced by the
-/// `librefang-api` integration test suite (`gpt-4o-mini` under `openai`).
-///
-/// Use this when a test asserts on a specific model id and you need a
-/// stable baseline regardless of network conditions. `MockKernelBuilder`
-/// boots through the real `LibreFangKernel::boot_with_config`, which
-/// calls `librefang_runtime::registry_sync::sync_registry` — that talks
-/// to `github.com/librefang-registry`, and CI runners that flake or
-/// rate-limit produce an empty (or partially populated) catalog. Tests
-/// referencing specific ids then panic with 404 in one shard while
-/// passing in another. Seeding via the builder bypasses the network
-/// dependency.
-///
-/// Add entries here as other tests grow demands — keep the list small
-/// and intentional.
-pub fn test_catalog_baseline() -> CatalogSeed {
-    let providers = vec![ProviderInfo {
-        id: "openai".to_string(),
-        display_name: "OpenAI".to_string(),
-        api_key_env: "OPENAI_API_KEY".to_string(),
-        base_url: "https://api.openai.com/v1".to_string(),
-        key_required: true,
-        auth_status: AuthStatus::default(),
-        model_count: 1,
-        ..ProviderInfo::default()
-    }];
-    let models = vec![ModelCatalogEntry {
-        id: "gpt-4o-mini".to_string(),
-        display_name: "GPT-4o mini (test fixture)".to_string(),
-        provider: "openai".to_string(),
-        tier: ModelTier::Custom,
-        modality: Modality::default(),
-        context_window: 128_000,
-        max_output_tokens: 16_384,
-        input_cost_per_m: 0.15,
-        output_cost_per_m: 0.6,
-        image_input_cost_per_m: None,
-        image_output_cost_per_m: None,
-        supports_tools: true,
-        supports_vision: true,
-        supports_streaming: true,
-        supports_thinking: false,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        aliases: Vec::new(),
-    }];
-    (providers, models)
-}
 
 /// Pin a deterministic vault master key for the test process the first
 /// time a mock kernel is built. Without this, parallel integration tests
@@ -90,31 +34,6 @@ fn ensure_test_vault_key() {
     });
 }
 
-/// Mirror of [`ensure_test_vault_key`] for the OAuth `state` HMAC secret.
-/// `LibreFangKernel::boot_with_config` refuses to boot when
-/// `external_auth.enabled = true` and `LIBREFANG_STATE_SECRET` is unset or
-/// not a base64-encoded 32-byte value (boot.rs gate, audit:
-/// state-secret-default-random). Tests that enable external_auth boot
-/// through this builder, so seed a stable, well-shaped secret once per
-/// process — same Once-guarded, set-before-any-boot safety argument as the
-/// vault key above.
-///
-/// 32 zero bytes, base64-encoded — value is irrelevant, only shape and
-/// stability matter.
-static STATE_SECRET_INIT: Once = Once::new();
-const TEST_STATE_SECRET_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-
-fn ensure_test_state_secret() {
-    STATE_SECRET_INIT.call_once(|| {
-        if std::env::var_os("LIBREFANG_STATE_SECRET").is_none() {
-            // SAFETY: see `ensure_test_vault_key` — runs once, before any
-            // kernel boots in this process; all boot paths go through the
-            // builder.
-            std::env::set_var("LIBREFANG_STATE_SECRET", TEST_STATE_SECRET_B64);
-        }
-    });
-}
-
 /// Test kernel builder.
 ///
 /// Configures the kernel via the builder pattern, then call `.build()` to produce
@@ -135,11 +54,6 @@ pub struct MockKernelBuilder {
     config: KernelConfig,
     /// Custom config modification function.
     config_fn: Option<ConfigFn>,
-    /// Optional model-catalog seed applied after boot. When `Some`, replaces
-    /// whatever catalog `boot_with_config` produced (including any partial
-    /// state left behind by `sync_registry`'s network fetch) with a
-    /// deterministic baseline.
-    catalog_seed: Option<CatalogSeed>,
 }
 
 impl MockKernelBuilder {
@@ -148,7 +62,6 @@ impl MockKernelBuilder {
         Self {
             config: KernelConfig::default(),
             config_fn: None,
-            catalog_seed: None,
         }
     }
 
@@ -169,23 +82,6 @@ impl MockKernelBuilder {
         self
     }
 
-    /// Seed the model catalog with the given providers and models, replacing
-    /// whatever `LibreFangKernel::boot_with_config` produced.
-    ///
-    /// Use this when tests assert on specific model ids. Without seeding,
-    /// the catalog is whatever `librefang_runtime::registry_sync::sync_registry`
-    /// fetched from `github.com/librefang-registry` — flaky on CI when the
-    /// runner is rate-limited or the network is partitioned, and entirely
-    /// undefined when no network is available at all.
-    ///
-    /// Pass [`test_catalog_baseline()`] for a sane minimum that covers the
-    /// `librefang-api` integration test suite, or build your own pair when
-    /// you need provider/model shapes the baseline doesn't include.
-    pub fn with_catalog_seed(mut self, seed: CatalogSeed) -> Self {
-        self.catalog_seed = Some(seed);
-        self
-    }
-
     /// Builds the kernel instance.
     ///
     /// Returns `(Arc<LibreFangKernel>, TempDir)` — the caller must hold onto
@@ -196,7 +92,6 @@ impl MockKernelBuilder {
     /// same way they do in production (#3652).
     pub fn build(mut self) -> (Arc<LibreFangKernel>, TempDir) {
         ensure_test_vault_key();
-        ensure_test_state_secret();
         let tmp = tempfile::tempdir().expect("failed to create temp directory");
         let home_dir = tmp.path().to_path_buf();
         let data_dir = home_dir.join("data");
@@ -227,12 +122,6 @@ impl MockKernelBuilder {
             LibreFangKernel::boot_with_config(self.config).expect("failed to boot test kernel"),
         );
         kernel.set_self_handle();
-
-        if let Some((providers, models)) = self.catalog_seed.take() {
-            kernel.model_catalog_update(|cat| {
-                *cat = ModelCatalog::from_entries(models.clone(), providers.clone());
-            });
-        }
 
         (kernel, tmp)
     }

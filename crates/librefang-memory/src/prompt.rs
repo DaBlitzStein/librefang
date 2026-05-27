@@ -8,10 +8,9 @@ use librefang_types::agent::{
     PromptVersion,
 };
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OptionalExtension, Row};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 fn row_to_prompt_version(row: &Row) -> rusqlite::Result<PromptVersion> {
@@ -96,52 +95,37 @@ fn load_variants_for_experiment(
 
 #[derive(Clone)]
 pub struct PromptStore {
-    pool: Pool<SqliteConnectionManager>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl PromptStore {
-    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { pool }
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
     }
 
-    /// Create a new PromptStore with its own dedicated connection pool.
+    /// Create a new PromptStore with its own dedicated connection.
     /// This avoids sharing a connection with UsageStore, preventing potential
     /// conflicts during concurrent writes.
-    ///
-    /// `pool_size` mirrors `config.toml: [memory] pool_size`; values of 0 are
-    /// clamped up to 1 (r2d2 panics on `max_size = 0`).
-    pub fn new_with_path<P: AsRef<std::path::Path>>(
-        db_path: P,
-        pool_size: u32,
-    ) -> LibreFangResult<Self> {
-        // Audit: prompt-store-second-pool-no-fk. The previous PRAGMA
-        // set on this second-pool path was missing
-        // `foreign_keys=ON` and `synchronous=NORMAL`, so writes
-        // through PromptStore's connections silently bypassed every
-        // FK declared by `migrate_v13` on `prompt_experiments` /
-        // `experiment_variants` / `experiment_metrics`. SQLite's
-        // `foreign_keys` is per-connection, not per-database — the
-        // substrate pool's `foreign_keys=ON` does NOT cover this
-        // second pool. Reusing the shared canonical const fixes
-        // both the immediate FK-bypass bug and any future drift
-        // between the two pools' connection settings.
-        let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path.as_ref())
-            .with_init(|c| c.execute_batch(crate::substrate::DEFAULT_CONNECTION_PRAGMAS));
-        let pool = r2d2::Pool::builder()
-            .max_size(pool_size.max(1))
-            .build(manager)
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        // Audit: sqlite-file-permissions — same rationale as in
-        // `librefang_memory::substrate::open_with_pool_size`. The
-        // PromptStore DB persists agent system prompts which can
-        // contain credentials/secrets baked into instructions; it
-        // must not be world-readable.
-        crate::substrate::restrict_db_file_permissions(db_path.as_ref());
-        Ok(Self { pool })
+    pub fn new_with_path<P: AsRef<std::path::Path>>(db_path: P) -> LibreFangResult<Self> {
+        let conn =
+            Connection::open(db_path).map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA busy_timeout=5000; \
+             PRAGMA cache_size=-2000; \
+             PRAGMA mmap_size=0;",
+        )
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     pub fn create_version(&self, version: PromptVersion) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         conn.execute(
             "INSERT INTO prompt_versions (id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -164,7 +148,10 @@ impl PromptStore {
     }
 
     pub fn list_versions(&self, agent_id: AgentId) -> LibreFangResult<Vec<PromptVersion>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description
                       FROM prompt_versions WHERE agent_id = ?1 ORDER BY version DESC")
@@ -182,7 +169,10 @@ impl PromptStore {
     }
 
     pub fn get_version(&self, id: Uuid) -> LibreFangResult<Option<PromptVersion>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description
                       FROM prompt_versions WHERE id = ?1")
@@ -197,7 +187,10 @@ impl PromptStore {
     }
 
     pub fn get_active_version(&self, agent_id: AgentId) -> LibreFangResult<Option<PromptVersion>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description
                       FROM prompt_versions WHERE agent_id = ?1 AND is_active = 1 LIMIT 1")
@@ -212,7 +205,10 @@ impl PromptStore {
     }
 
     pub fn set_active_version(&self, id: Uuid, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let tx = conn
             .unchecked_transaction()
@@ -237,7 +233,10 @@ impl PromptStore {
     }
 
     pub fn delete_version(&self, id: Uuid) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         conn.execute(
             "DELETE FROM prompt_versions WHERE id = ?1",
             [id.to_string()],
@@ -248,7 +247,10 @@ impl PromptStore {
 
     /// Delete oldest inactive versions if the agent exceeds the max count.
     pub fn prune_old_versions(&self, agent_id: AgentId, max_versions: u32) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         // Get total count for this agent
         let count: u32 = conn
             .query_row(
@@ -319,7 +321,10 @@ impl PromptStore {
     }
 
     pub fn get_latest_version_number(&self, agent_id: AgentId) -> LibreFangResult<u32> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT MAX(version) FROM prompt_versions WHERE agent_id = ?1")
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
@@ -333,7 +338,10 @@ impl PromptStore {
     }
 
     pub fn create_experiment(&self, experiment: PromptExperiment) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         conn.execute(
             "INSERT INTO prompt_experiments (id, name, agent_id, status, traffic_split, success_criteria, started_at, ended_at, created_at)
@@ -383,7 +391,10 @@ impl PromptStore {
     }
 
     pub fn list_experiments(&self, agent_id: AgentId) -> LibreFangResult<Vec<PromptExperiment>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, name, agent_id, status, traffic_split, success_criteria, started_at, ended_at, created_at
                       FROM prompt_experiments WHERE agent_id = ?1 ORDER BY created_at DESC")
@@ -403,7 +414,10 @@ impl PromptStore {
     }
 
     pub fn get_experiment(&self, id: Uuid) -> LibreFangResult<Option<PromptExperiment>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, name, agent_id, status, traffic_split, success_criteria, started_at, ended_at, created_at
                       FROM prompt_experiments WHERE id = ?1")
@@ -426,7 +440,10 @@ impl PromptStore {
         id: Uuid,
         status: ExperimentStatus,
     ) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let now = Utc::now().to_rfc3339();
         let (started_at, ended_at) = match status {
@@ -458,7 +475,10 @@ impl PromptStore {
         &self,
         agent_id: AgentId,
     ) -> LibreFangResult<Option<PromptExperiment>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let status_running = serde_json::to_string(&ExperimentStatus::Running).unwrap_or_default();
 
         let mut stmt = conn
@@ -489,7 +509,10 @@ impl PromptStore {
         cost_usd: f64,
         success: bool,
     ) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         conn.execute(
             "UPDATE experiment_metrics SET 
@@ -519,7 +542,10 @@ impl PromptStore {
         &self,
         variant_id: Uuid,
     ) -> LibreFangResult<Option<ExperimentVariantMetrics>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut stmt = conn
             .prepare("SELECT em.variant_id, ev.name, em.total_requests, em.successful_requests, em.failed_requests, em.total_latency_ms, em.total_cost_usd
@@ -576,7 +602,10 @@ impl PromptStore {
         &self,
         experiment_id: Uuid,
     ) -> LibreFangResult<Vec<ExperimentVariantMetrics>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut stmt = conn
             .prepare(
@@ -639,12 +668,9 @@ mod tests {
     use librefang_types::agent::{ExperimentStatus, ExperimentVariant, SuccessCriteria};
 
     fn create_test_store() -> PromptStore {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
-        pool.get()
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS prompt_versions (
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS prompt_versions (
                 id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
                 version INTEGER NOT NULL,
@@ -686,9 +712,9 @@ mod tests {
                 total_cost_usd REAL NOT NULL DEFAULT 0,
                 last_updated TEXT NOT NULL
             );",
-            )
-            .unwrap();
-        PromptStore::new(pool)
+        )
+        .unwrap();
+        PromptStore::new(Arc::new(Mutex::new(conn)))
     }
 
     #[test]
@@ -835,56 +861,5 @@ mod tests {
         let running = store.get_running_experiment(agent_id).unwrap();
         assert!(running.is_some());
         assert_eq!(running.unwrap().name, "Running Experiment");
-    }
-
-    /// Audit: prompt-store-second-pool-no-fk. SQLite's `foreign_keys`
-    /// is per-connection, not per-database. Without `PRAGMA
-    /// foreign_keys=ON` set on the PromptStore pool's connections,
-    /// writes through this pool used to silently bypass every FK
-    /// declared by the migrations (`prompt_experiments` →
-    /// `experiments`, etc.). This test asserts the contract directly:
-    /// query `PRAGMA foreign_keys` on a pooled connection and require
-    /// `1`. A regression that swaps the shared
-    /// `DEFAULT_CONNECTION_PRAGMAS` for a custom pragma string
-    /// missing `foreign_keys=ON` would flip this from 1 → 0 and
-    /// fail.
-    #[test]
-    fn pool_connections_have_foreign_keys_pragma_on() {
-        use tempfile::tempdir;
-        let tmp = tempdir().unwrap();
-        let db_path = tmp.path().join("prompt.db");
-        let store = PromptStore::new_with_path(&db_path, 2).expect("open prompt store");
-        let conn = store.pool.get().expect("checkout pooled connection");
-        let fk: i64 = conn
-            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
-            .expect("query foreign_keys pragma");
-        assert_eq!(
-            fk, 1,
-            "PromptStore pool connections must enable foreign_keys to honour \
-             the FKs declared by migrate_v13 (prompt_experiments, \
-             experiment_variants, experiment_metrics); got {fk}"
-        );
-    }
-
-    /// Companion: assert WAL journal mode is also active so the
-    /// second pool inherits the same multi-reader concurrency model
-    /// as the main substrate pool. Drift here would surface as
-    /// unexpected writer-blocks-reader behaviour under load.
-    #[test]
-    fn pool_connections_use_wal_journal_mode() {
-        use tempfile::tempdir;
-        let tmp = tempdir().unwrap();
-        let db_path = tmp.path().join("prompt.db");
-        let store = PromptStore::new_with_path(&db_path, 2).expect("open prompt store");
-        let conn = store.pool.get().expect("checkout pooled connection");
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            .expect("query journal_mode pragma");
-        assert_eq!(
-            mode.to_lowercase(),
-            "wal",
-            "PromptStore pool connections must use WAL journal mode for \
-             multi-reader concurrency; got {mode}"
-        );
     }
 }

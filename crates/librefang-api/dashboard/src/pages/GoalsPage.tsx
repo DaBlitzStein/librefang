@@ -26,9 +26,9 @@ export function GoalsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
-  const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, parent_id: "", agent_id: "" });
+  const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as string, progress: 0, parent_id: "", agent_id: "" });
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0 });
+  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as string, progress: 0 });
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const goalsQuery = useGoals();
@@ -43,13 +43,12 @@ export function GoalsPage() {
 
   const runBatch = async <T,>(items: readonly T[], action: (item: T) => Promise<unknown>) => {
     let succeeded = 0;
-    const errors: unknown[] = [];
     for (const item of items) {
       try {
         await action(item);
         succeeded += 1;
-      } catch (err) {
-        errors.push(err);
+      } catch {
+        // Continue so batch actions report aggregate success/failure totals.
       }
     }
 
@@ -57,7 +56,6 @@ export function GoalsPage() {
       total: items.length,
       succeeded,
       failed: items.length - succeeded,
-      errors,
     };
   };
 
@@ -99,10 +97,7 @@ export function GoalsPage() {
     setEditDraft({
       title: goal.title || "",
       description: goal.description || "",
-      status:
-        goal.status === "in_progress" || goal.status === "completed"
-          ? goal.status
-          : "pending",
+      status: goal.status || "pending",
       progress: goal.progress || 0
     });
   };
@@ -137,9 +132,7 @@ export function GoalsPage() {
   const handleStatusChange = async (id: string, current: string) => {
     const status = nextStatus(current);
     try {
-      const goal = goals.find(g => g.id === id);
-      const progress = status === "completed" ? 100 : status === "in_progress" ? Math.max(goal?.progress ?? 0, 50) : 0;
-      await updateMutation.mutateAsync({ id, data: { status, progress } });
+      await updateMutation.mutateAsync({ id, data: { status, progress: status === "completed" ? 100 : status === "in_progress" ? 50 : 0 } });
     } catch (err) {
       addToast(toastErr(err, t("common.error")), "error");
     }
@@ -304,7 +297,7 @@ export function GoalsPage() {
               />
             </div>
             <div className="flex items-center justify-between mt-2 text-[10px] text-text-dim">
-              <span>{stats.completed} / {stats.total} {t("goals.completed").toLocaleLowerCase()}</span>
+              <span>{stats.completed} / {stats.total} {t("goals.completed").toLowerCase()}</span>
               <div className="flex items-center gap-2">
                 {showClearConfirm ? (
                   <>
@@ -327,10 +320,8 @@ export function GoalsPage() {
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("goals.create_goal")}</h2>
               </div>
               <form className="flex flex-col gap-4" onSubmit={handleCreate}>
-                <label htmlFor="goal-create-title" className="sr-only">{t("goals.goal_title_placeholder")}</label>
-                <input id="goal-create-title" value={createDraft.title} onChange={e => setCreateDraft({...createDraft, title: e.target.value})} placeholder={t("goals.goal_title_placeholder")} className={inputClass} />
-                <label htmlFor="goal-create-description" className="sr-only">{t("goals.goal_desc_placeholder")}</label>
-                <textarea id="goal-create-description" value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
+                <input value={createDraft.title} onChange={e => setCreateDraft({...createDraft, title: e.target.value})} placeholder={t("goals.goal_title_placeholder")} className={inputClass} />
+                <textarea value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
                 <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2">
                   {createMutation.isPending ? t("common.loading") : t("goals.create_goal")}
                 </Button>
@@ -354,19 +345,15 @@ export function GoalsPage() {
                     <div key={r.goal.id} className="rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-colors" style={{ marginLeft: `${r.depth * 16}px` }}>
                       {editingId === r.goal.id ? (
                         <div className="p-3 sm:p-4 flex flex-col gap-2">
-                          <label htmlFor="goal-edit-title" className="sr-only">{t("goals.title_label")}</label>
-                          <input id="goal-edit-title" value={editDraft.title} onChange={e => setEditDraft({...editDraft, title: e.target.value})} className={inputClass} placeholder={t("goals.title_label")} />
-                          <label htmlFor="goal-edit-description" className="sr-only">{t("goals.desc_label")}</label>
-                          <textarea id="goal-edit-description" value={editDraft.description} onChange={e => setEditDraft({...editDraft, description: e.target.value})} className={`${inputClass} resize-none`} rows={2} placeholder={t("goals.desc_label")} />
+                          <input value={editDraft.title} onChange={e => setEditDraft({...editDraft, title: e.target.value})} className={inputClass} placeholder={t("goals.title_label")} />
+                          <textarea value={editDraft.description} onChange={e => setEditDraft({...editDraft, description: e.target.value})} className={`${inputClass} resize-none`} rows={2} placeholder={t("goals.desc_label")} />
                           <div className="flex flex-wrap gap-2">
-                            <label htmlFor="goal-edit-status" className="sr-only">{t("goals.status")}</label>
-                            <select id="goal-edit-status" value={editDraft.status} onChange={e => setEditDraft({...editDraft, status: e.target.value as "pending" | "in_progress" | "completed"})} className={`${inputClass} flex-1 min-w-[120px]`}>
+                            <select value={editDraft.status} onChange={e => setEditDraft({...editDraft, status: e.target.value})} className={`${inputClass} flex-1 min-w-[120px]`}>
                               <option value="pending">{t("goals.pending")}</option>
                               <option value="in_progress">{t("goals.in_progress")}</option>
                               <option value="completed">{t("goals.completed")}</option>
                             </select>
-                            <label htmlFor="goal-edit-progress" className="sr-only">{t("goals.progress")}</label>
-                            <input id="goal-edit-progress" type="number" value={editDraft.progress} onChange={e => setEditDraft({...editDraft, progress: Number(e.target.value)})} className={inputClass} min={0} max={100} style={{ width: "80px" }} />
+                            <input type="number" value={editDraft.progress} onChange={e => setEditDraft({...editDraft, progress: Number(e.target.value)})} className={inputClass} min={0} max={100} style={{ width: "80px" }} />
                             <Button variant="primary" size="sm" onClick={handleSaveEdit}>{t("common.save")}</Button>
                             <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>{t("common.cancel")}</Button>
                           </div>

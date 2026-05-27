@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd crates/librefang-api/dashboard && npx tsc --noEmit --excludeDirectories '**/node_modules' 2>&1 | grep -v '\\\\.test\\\\.' | grep 'error TS' | head -30\",\"timeout\":60000,\"description\":\"Check ...",
+  "error": "Exit code 1\n(eval):cd:1: no existe el fichero o el directorio: crates/librefang-api/dashboard",
+  "timestamp": "2026-05-13T16:13:51.628Z",
+  "retry_count": 1
+}

@@ -34,12 +34,6 @@ pub struct OpenAIDriver {
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
-    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
-    /// headers on outbound requests. Mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
-    /// trace headers are emitted regardless of whether `CompletionRequest`'s
-    /// caller-id fields are populated.
-    emit_caller_trace_headers: bool,
 }
 
 impl OpenAIDriver {
@@ -80,7 +74,6 @@ impl OpenAIDriver {
             url_query: None,
             moonshot_file_cache: Default::default(),
             request_timeout_secs,
-            emit_caller_trace_headers: true,
         }
     }
 
@@ -125,7 +118,6 @@ impl OpenAIDriver {
             url_query: Some(format!("api-version={}", api_version)),
             moonshot_file_cache: Default::default(),
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         }
     }
 
@@ -223,15 +215,9 @@ impl OpenAIDriver {
             .ok_or_else(|| LlmError::Http(format!("Moonshot file upload: missing 'id' in {body}")))
     }
 
-    /// Pre-process a CompletionRequest for Moonshot: upload non-image files and
-    /// replace eligible ContentBlock::Image/ImageFile with a text marker that
+    /// Pre-process a CompletionRequest for Moonshot: upload images/files and
+    /// replace ContentBlock::Image/ImageFile with a text marker that
     /// `build_request()` converts to `OaiContentPart::File`.
-    ///
-    /// Blocks whose `media_type` starts with `"image/"` are skipped entirely —
-    /// `build_request` serialises them as `OaiContentPart::ImageUrl` (data: URL
-    /// base64) and Moonshot's vision-capable chat-completions endpoint handles
-    /// the visual content directly. Non-image MIME types (PDF, DOCX, text/*)
-    /// still go through the file-upload OCR path.
     async fn preprocess_moonshot_files(
         &self,
         request: &mut CompletionRequest,
@@ -255,31 +241,6 @@ impl OpenAIDriver {
             let mut i = 0;
             while i < blocks.len() {
                 let (bytes, mime, filename) = match &blocks[i] {
-                    // Image / ImageFile blocks whose mime starts with
-                    // "image/" are visual content (photos, screenshots).
-                    // Moonshot's file-upload API does OCR / text extraction
-                    // and rejects raw photos with
-                    // `text extract error: 没有解析出内容`. Skip the upload
-                    // path entirely; `build_request` serialises these as
-                    // `OaiContentPart::ImageUrl` (data: URL base64) and
-                    // Moonshot's vision-capable chat-completions endpoint
-                    // handles them directly. Non-image MIMEs (PDF, text/*)
-                    // that landed in an Image block via a misclassified
-                    // upload still fall through to the file API.
-                    ContentBlock::Image { media_type, data }
-                        if media_type.starts_with("image/") =>
-                    {
-                        let _ = data;
-                        i += 1;
-                        continue;
-                    }
-                    ContentBlock::ImageFile { media_type, path }
-                        if media_type.starts_with("image/") =>
-                    {
-                        let _ = path;
-                        i += 1;
-                        continue;
-                    }
                     ContentBlock::Image { media_type, data } => {
                         let decoded = base64::engine::general_purpose::STANDARD
                             .decode(data)
@@ -343,6 +304,18 @@ impl OpenAIDriver {
         Ok(())
     }
 
+    /// True if this driver instance is pointed at an Ollama-compatible endpoint.
+    ///
+    /// Ollama's OpenAI-compatible `/v1/chat/completions` endpoint accepts a
+    /// top-level `think` boolean (as an extra body param) that controls whether
+    /// reasoning models (qwen3, gpt-oss, deepseek-r1, …) run their chain-of-thought
+    /// phase before answering. Detecting by base_url keeps the mapping local
+    /// without requiring kernel plumbing.
+    fn is_ollama_like(&self) -> bool {
+        let u = self.base_url.to_ascii_lowercase();
+        u.contains("ollama") || u.contains("11434")
+    }
+
     /// True if this model is DeepSeek-reasoner (R1).
     ///
     /// DeepSeek-reasoner returns `reasoning_content` in assistant responses, but
@@ -354,104 +327,11 @@ impl OpenAIDriver {
         m.contains("deepseek-reasoner") || m.contains("deepseek-r1")
     }
 
-    /// Resolve the [`ReasoningEchoPolicy`] for a request. Catalog metadata
-    /// on the request takes precedence; if it is the default
-    /// ([`ReasoningEchoPolicy::None`]) the driver falls back to substring
-    /// detection on the model name. The fallback exists so unknown / user-
-    /// defined / pre-policy-registry models keep working — see
-    /// librefang/librefang#4842 for the migration plan.
-    ///
-    /// **Limitation during the bridge stage**: an explicit `None` from the
-    /// catalog is indistinguishable from "field absent" and still triggers
-    /// the substring fallback. A registry author cannot currently say
-    /// "this kimi-named model genuinely has no special handling" — they
-    /// will get [`ReasoningEchoPolicy::EmptyString`] from the fallback.
-    /// This goes away once every `CompletionRequest` construction site
-    /// reads from the catalog and the fallback path is removed.
-    fn effective_reasoning_echo_policy(
-        &self,
-        request: &CompletionRequest,
-    ) -> librefang_types::model_catalog::ReasoningEchoPolicy {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        match request.reasoning_echo_policy {
-            ReasoningEchoPolicy::None => self.fallback_reasoning_echo_policy(&request.model),
-            policy => policy,
-        }
-    }
-
-    /// Substring-based fallback for [`Self::effective_reasoning_echo_policy`].
-    /// Used when the request didn't carry an explicit policy (catalog miss
-    /// or pre-policy-registry build). Will be removed once every
-    /// `CompletionRequest` construction site reads from the catalog.
-    fn fallback_reasoning_echo_policy(
-        &self,
-        model: &str,
-    ) -> librefang_types::model_catalog::ReasoningEchoPolicy {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        if self.is_deepseek_reasoner(model) {
-            ReasoningEchoPolicy::Strip
-        } else if self.is_deepseek_v4_thinking_with_tools(model) {
-            ReasoningEchoPolicy::Echo
-        } else if self.kimi_needs_reasoning_content(model) {
-            ReasoningEchoPolicy::EmptyString
-        } else {
-            ReasoningEchoPolicy::None
-        }
-    }
-
-    /// True if this DeepSeek model has thinking mode on by default and the
-    /// API **requires** `reasoning_content` to be echoed back on historical
-    /// assistant messages that contain `tool_calls`. Currently matches
-    /// DeepSeek V4 Flash.
-    ///
-    /// Per the DeepSeek thinking-mode docs:
-    /// > For turns that do perform tool calls, the `reasoning_content` must
-    /// > be fully passed back to the API in all subsequent requests. If your
-    /// > code does not correctly pass back `reasoning_content`, the API will
-    /// > return a 400 error.
-    ///
-    /// This is the **opposite** of [`Self::is_deepseek_reasoner`] (R1), which
-    /// must strip `reasoning_content` from historical messages, and distinct
-    /// from Kimi which sends an empty string. V4 Flash needs the original
-    /// thinking text round-tripped intact (#4842).
-    fn is_deepseek_v4_thinking_with_tools(&self, model: &str) -> bool {
-        let m = model.to_lowercase();
-        m.contains("deepseek-v4-flash")
-    }
-
     /// Create a driver with additional HTTP headers (e.g. for Copilot IDE auth).
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
         self
     }
-
-    /// Override the trace-header emission flag (mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
-    /// which preserves the OpenAI driver's behaviour from PR #4548 onward;
-    /// operators with strict zero-egress policies can flip the toml-side flag
-    /// to `false` and the kernel passes that through here at driver-creation
-    /// time. When `false`, the three `x-librefang-{agent,session,step}-id`
-    /// headers are skipped wire-side regardless of whether the per-request
-    /// caller-id fields on `CompletionRequest` are populated. Other
-    /// (non-trace) `extra_headers` are unaffected by this flag.
-    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
-        self.emit_caller_trace_headers = emit;
-        self
-    }
-}
-
-/// Build the merged custom-header map for an outbound OpenAI-driver request.
-///
-/// Thin wrapper around [`super::trace_headers::build_trace_header_map`] kept
-/// here so the call sites below read naturally in context. See the shared
-/// module for the full doc-comment covering naming conventions, proxy
-/// behaviour notes, precedence rules, and validation rationale.
-fn build_custom_header_map(
-    extra_headers: &[(String, String)],
-    request: &CompletionRequest,
-    emit_caller_trace_headers: bool,
-) -> reqwest::header::HeaderMap {
-    super::trace_headers::build_trace_header_map(extra_headers, request, emit_caller_trace_headers)
 }
 
 /// Map a MIME type to a file extension for Moonshot file uploads.
@@ -502,37 +382,6 @@ struct OaiRequest {
     /// standard field with the same name.
     #[serde(skip_serializing)]
     extra_body: Option<HashMap<String, serde_json::Value>>,
-}
-
-/// Merge `extra_body` provider-extension params into a serialized request
-/// body so they override any standard field with the same name.
-///
-/// Prompt-cache determinism (#3298, #5143): the body is sent on every LLM
-/// request, so its byte layout is part of the Anthropic/OpenAI prompt-cache
-/// key. `extra_body` is a `HashMap`, whose iteration order varies across
-/// processes. Today the merged result is still byte-stable *only* because
-/// the workspace `Cargo.toml` does not enable `serde_json`'s
-/// `preserve_order` feature, so `serde_json::Map` is a `BTreeMap` and
-/// re-sorts on insert. That is an implicit, fragile invariant — enabling
-/// `preserve_order` (e.g. for nicer dashboard JSON dumps) would silently
-/// re-introduce HashMap-order leakage into every request body with ≥2
-/// `extra_body` keys and invalidate the prompt cache.
-///
-/// This helper makes the invariant explicit and `preserve_order`-proof:
-/// the keys are collected and sorted before insertion, so the merge order
-/// is deterministic regardless of which `serde_json::Map` backend is
-/// active. See `tests::extra_body_merge_is_byte_identical_across_insertion_orders`.
-fn merge_extra_body(
-    extra: &Option<HashMap<String, serde_json::Value>>,
-    body: &mut serde_json::Value,
-) {
-    if let (Some(extra), Some(obj)) = (extra, body.as_object_mut()) {
-        let mut keys: Vec<&String> = extra.keys().collect();
-        keys.sort();
-        for k in keys {
-            obj.insert(k.clone(), extra[k].clone());
-        }
-    }
 }
 
 /// Convert a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
@@ -789,8 +638,6 @@ impl OpenAIDriver {
     /// Shared between `complete()` and `stream()`.  The caller sets
     /// `stream` / `stream_options` on the returned struct before sending.
     fn build_request(&self, request: &CompletionRequest) -> Result<OaiRequest, LlmError> {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        let echo_policy = self.effective_reasoning_echo_policy(request);
         let mut oai_messages: Vec<OaiMessage> = Vec::new();
 
         // Add system message if present
@@ -896,7 +743,7 @@ impl OpenAIDriver {
                                 });
                             }
                             ContentBlock::ImageFile { media_type, path } => {
-                                match tokio::task::block_in_place(|| std::fs::read(path)) {
+                                match std::fs::read(path) {
                                     Ok(bytes) => {
                                         use base64::Engine;
                                         let data = base64::engine::general_purpose::STANDARD
@@ -946,7 +793,6 @@ impl OpenAIDriver {
                 (Role::Assistant, MessageContent::Blocks(blocks)) => {
                     let mut text_parts = Vec::new();
                     let mut tool_calls = Vec::new();
-                    let mut thinking_parts: Vec<String> = Vec::new();
                     for block in blocks {
                         match block {
                             ContentBlock::Text { text, .. } => text_parts.push(text.clone()),
@@ -962,25 +808,22 @@ impl OpenAIDriver {
                                     },
                                 });
                             }
-                            ContentBlock::Thinking { thinking, .. } => {
-                                thinking_parts.push(thinking.clone());
-                            }
+                            ContentBlock::Thinking { .. } => {}
                             _ => {}
                         }
                     }
                     let has_tool_calls = !tool_calls.is_empty();
-                    let force_nonnull_content = echo_policy == ReasoningEchoPolicy::Strip;
+                    let is_deepseek_r = self.is_deepseek_reasoner(&request.model);
                     oai_messages.push(OaiMessage {
                         role: "assistant".to_string(),
                         // ZHIPU (GLM) rejects assistant messages where content is
                         // null or omitted when tool_calls are present (error 1214).
-                        // DeepSeek-reasoner (Strip policy) also requires a
-                        // non-null content field on all assistant messages in
-                        // multi-turn conversations. Send an empty string for
-                        // these so every OpenAI-compat endpoint gets a valid
-                        // payload.
+                        // DeepSeek-reasoner also requires a non-null content field
+                        // on all assistant messages in multi-turn conversations.
+                        // Always send an empty string for these providers so every
+                        // OpenAI-compat endpoint gets a valid payload.
                         content: if text_parts.is_empty() {
-                            if has_tool_calls || force_nonnull_content {
+                            if has_tool_calls || is_deepseek_r {
                                 Some(OaiMessageContent::Text(String::new()))
                             } else {
                                 None
@@ -994,31 +837,21 @@ impl OpenAIDriver {
                             Some(tool_calls)
                         },
                         tool_call_id: None,
-                        // Provider-specific reasoning_content rules on
-                        // historical assistant turns are dispatched by the
-                        // [`ReasoningEchoPolicy`] resolved at request build
-                        // time (catalog metadata, with substring fallback):
-                        //   * Strip       — omit (DeepSeek R1 rejects it).
-                        //   * Echo        — echo the original thinking text on
-                        //                   tool_calls turns (DeepSeek V4
-                        //                   Flash; #4842).
-                        //   * EmptyString — empty string on tool_calls turns
-                        //                   (Moonshot / Kimi K2; thinking is
-                        //                   also disabled wire-side below).
-                        //   * None        — omit (most providers).
-                        reasoning_content: match echo_policy {
-                            ReasoningEchoPolicy::Strip | ReasoningEchoPolicy::None => None,
-                            ReasoningEchoPolicy::Echo if has_tool_calls => {
-                                // Empty Thinking blocks (or no Thinking block
-                                // at all) still need reasoning_content present
-                                // — V4 Flash rejects the field being missing on
-                                // a tool_calls turn, but accepts empty string.
-                                Some(thinking_parts.join(""))
-                            }
-                            ReasoningEchoPolicy::EmptyString if has_tool_calls => {
-                                Some(String::new())
-                            }
-                            _ => None,
+                        // DeepSeek-reasoner: MUST omit reasoning_content on
+                        // all previous assistant messages — the API rejects it.
+                        // Kimi: requires an empty-string reasoning_content when
+                        // tool_calls are present (thinking is disabled for
+                        // multi-turn compatibility).
+                        reasoning_content: if is_deepseek_r {
+                            // Always None — DeepSeek rejects reasoning_content
+                            // on historical assistant turns.
+                            None
+                        } else if has_tool_calls
+                            && self.kimi_needs_reasoning_content(&request.model)
+                        {
+                            Some(String::new())
+                        } else {
+                            None
                         },
                     });
                 }
@@ -1069,16 +902,30 @@ impl OpenAIDriver {
             (Some(request.max_tokens), None)
         };
 
-        let extra_body = request.extra_body.clone();
+        // Ollama-compatible endpoints read a top-level `think: bool` field on the
+        // OpenAI-compat chat completions call. Drive it from the per-call
+        // `thinking` config so the chat UI deep-thinking toggle works end-to-end.
+        // Leave existing caller-supplied `think` values alone.
+        let extra_body = if self.is_ollama_like() {
+            let mut merged = request.extra_body.clone().unwrap_or_default();
+            if !merged.contains_key("think") {
+                merged.insert(
+                    "think".to_string(),
+                    serde_json::Value::Bool(request.thinking.is_some()),
+                );
+            }
+            Some(merged)
+        } else {
+            request.extra_body.clone()
+        };
 
         Ok(OaiRequest {
             model: request.model.clone(),
             messages: oai_messages,
             max_tokens: mt,
             max_completion_tokens: mct,
-            temperature: if echo_policy == ReasoningEchoPolicy::EmptyString {
-                // Kimi (EmptyString policy) with thinking disabled uses fixed
-                // 0.6 for multi-turn compatibility.
+            temperature: if self.kimi_needs_reasoning_content(&request.model) {
+                // Kimi with thinking disabled uses fixed 0.6 for multi-turn compatibility.
                 Some(0.6)
             } else if temperature_must_be_one(&request.model) {
                 Some(1.0)
@@ -1091,9 +938,7 @@ impl OpenAIDriver {
             tool_choice,
             stream: false,
             stream_options: None,
-            // EmptyString policy disables thinking wire-side so multi-turn
-            // tool_calls don't require carrying back full reasoning_content.
-            thinking: if echo_policy == ReasoningEchoPolicy::EmptyString {
+            thinking: if self.kimi_needs_reasoning_content(&request.model) {
                 Some(serde_json::json!({"type": "disabled"}))
             } else {
                 None
@@ -1142,7 +987,11 @@ impl LlmDriver for OpenAIDriver {
             // override any standard field with the same name.
             let mut body =
                 serde_json::to_value(&oai_request).map_err(|e| LlmError::Http(e.to_string()))?;
-            merge_extra_body(&oai_request.extra_body, &mut body);
+            if let (Some(extra), Some(obj)) = (&oai_request.extra_body, body.as_object_mut()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
 
             let mut req_builder = self
                 .client
@@ -1158,17 +1007,9 @@ impl LlmDriver for OpenAIDriver {
                         .header("authorization", format!("Bearer {}", self.api_key.as_str()));
                 }
             }
-            // Merge driver-level extra_headers with per-request caller-identity
-            // (`x-librefang-*`) trace headers into a single HeaderMap. The
-            // helper enforces validation (\r/\n/NUL → warn+skip) and gives
-            // trace headers `insert` precedence so they replace any
-            // same-named entries from `extra_headers` instead of duplicating
-            // on the wire. See `build_custom_header_map` doc-comment.
-            req_builder = req_builder.headers(build_custom_header_map(
-                &self.extra_headers,
-                &request,
-                self.emit_caller_trace_headers,
-            ));
+            for (k, v) in &self.extra_headers {
+                req_builder = req_builder.header(k, v);
+            }
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request
@@ -1511,7 +1352,6 @@ impl LlmDriver for OpenAIDriver {
                 stop_reason,
                 tool_calls,
                 usage,
-                actual_provider: None,
             });
         }
 
@@ -1562,7 +1402,11 @@ impl LlmDriver for OpenAIDriver {
             // override any standard field with the same name.
             let mut body =
                 serde_json::to_value(&oai_request).map_err(|e| LlmError::Http(e.to_string()))?;
-            merge_extra_body(&oai_request.extra_body, &mut body);
+            if let (Some(extra), Some(obj)) = (&oai_request.extra_body, body.as_object_mut()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
 
             let mut req_builder = self
                 .client
@@ -1578,15 +1422,9 @@ impl LlmDriver for OpenAIDriver {
                         .header("authorization", format!("Bearer {}", self.api_key.as_str()));
                 }
             }
-            // Merge driver-level extra_headers with per-request caller-identity
-            // (`x-librefang-*`) trace headers into a single HeaderMap. Mirror
-            // of the non-streaming path; see `build_custom_header_map` for
-            // validation and precedence semantics.
-            req_builder = req_builder.headers(build_custom_header_map(
-                &self.extra_headers,
-                &request,
-                self.emit_caller_trace_headers,
-            ));
+            for (k, v) in &self.extra_headers {
+                req_builder = req_builder.header(k, v);
+            }
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request
@@ -2184,7 +2022,6 @@ impl LlmDriver for OpenAIDriver {
                 stop_reason,
                 tool_calls,
                 usage,
-                actual_provider: None,
             });
         }
 
@@ -2379,7 +2216,6 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
                     output_tokens: 0,
                     ..Default::default()
                 },
-                actual_provider: None,
             });
         }
         return None;
@@ -2394,7 +2230,6 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
             output_tokens: 0,
             ..Default::default()
         },
-        actual_provider: None,
     })
 }
 
@@ -2408,7 +2243,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
 /// - A JSON string that parses as an object → use the parsed object
 /// - Any other type (string, number, array, bool) → `{"raw_input": <value>}`
 ///   so the original value is preserved for debugging rather than silently lost.
-pub(crate) fn ensure_object(v: serde_json::Value) -> serde_json::Value {
+fn ensure_object(v: serde_json::Value) -> serde_json::Value {
     match v {
         serde_json::Value::Object(_) => v,
         serde_json::Value::Null => serde_json::json!({}),
@@ -2543,6 +2378,108 @@ mod tests {
         assert_eq!(driver.base_url, "http://localhost:11434/v1");
         let multi = OpenAIDriver::new("k".to_string(), "http://localhost:11434/v1///".to_string());
         assert_eq!(multi.base_url, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn test_is_ollama_like_detects_default_port() {
+        let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
+        assert!(driver.is_ollama_like());
+    }
+
+    #[test]
+    fn test_is_ollama_like_detects_hostname() {
+        let driver = OpenAIDriver::new("".to_string(), "http://ollama.local/v1".to_string());
+        assert!(driver.is_ollama_like());
+    }
+
+    #[test]
+    fn test_is_ollama_like_rejects_openai() {
+        let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
+        assert!(!driver.is_ollama_like());
+    }
+
+    #[test]
+    fn test_build_request_sets_think_true_for_ollama_when_thinking_enabled() {
+        let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
+        let request = CompletionRequest {
+            model: "qwen3:8b".to_string(),
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text("hi".to_string()),
+                pinned: false,
+                timestamp: None,
+            }]),
+            tools: std::sync::Arc::new(vec![]),
+            max_tokens: 256,
+            temperature: 0.7,
+            system: None,
+            thinking: Some(librefang_types::config::ThinkingConfig::default()),
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let oai = driver.build_request(&request).expect("build request");
+        let extra = oai.extra_body.as_ref().expect("extra_body present");
+        assert_eq!(extra.get("think"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_build_request_sets_think_false_for_ollama_when_thinking_disabled() {
+        let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
+        let request = CompletionRequest {
+            model: "qwen3:8b".to_string(),
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text("hi".to_string()),
+                pinned: false,
+                timestamp: None,
+            }]),
+            tools: std::sync::Arc::new(vec![]),
+            max_tokens: 256,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let oai = driver.build_request(&request).expect("build request");
+        let extra = oai.extra_body.as_ref().expect("extra_body present");
+        assert_eq!(extra.get("think"), Some(&serde_json::Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_build_request_omits_think_for_non_ollama() {
+        let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
+        let request = CompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text("hi".to_string()),
+                pinned: false,
+                timestamp: None,
+            }]),
+            tools: std::sync::Arc::new(vec![]),
+            max_tokens: 256,
+            temperature: 0.7,
+            system: None,
+            thinking: Some(librefang_types::config::ThinkingConfig::default()),
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let oai = driver.build_request(&request).expect("build request");
+        // Non-ollama: extra_body should mirror the (None) request.extra_body.
+        assert!(oai.extra_body.is_none());
     }
 
     #[test]
@@ -2804,590 +2741,6 @@ mod tests {
         );
     }
 
-    // ----- is_deepseek_v4_thinking_with_tools tests (#4842) -----
-
-    #[test]
-    fn test_is_deepseek_v4_thinking_with_tools_matches_v4_flash() {
-        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
-        assert!(driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-flash"));
-        assert!(driver.is_deepseek_v4_thinking_with_tools("DeepSeek-V4-Flash"));
-        // Hypothetical pinned variants — substring match keeps us forward-
-        // compatible with date-stamped releases like deepseek-v4-flash-0501.
-        assert!(driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-flash-0501"));
-    }
-
-    #[test]
-    fn test_is_deepseek_v4_thinking_with_tools_does_not_match_others() {
-        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
-        // V4 Pro is reported as working out-of-the-box (#4842 workaround
-        // section) — must not be lumped in with V4 Flash.
-        assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-pro"));
-        assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-chat"));
-        assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-reasoner"));
-        assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-r1"));
-        assert!(!driver.is_deepseek_v4_thinking_with_tools("gpt-4o"));
-        assert!(!driver.is_deepseek_v4_thinking_with_tools("kimi-k2"));
-    }
-
-    /// #4842: V4 Flash assistant turns that contain `tool_calls` MUST round-trip
-    /// the original `reasoning_content` (the thinking text) on subsequent
-    /// requests, otherwise the DeepSeek API returns 400.
-    #[test]
-    fn test_deepseek_v4_flash_round_trips_reasoning_content_on_tool_calls() {
-        use librefang_llm_driver::CompletionRequest;
-        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
-
-        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
-        let assistant = Message {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(vec![
-                ContentBlock::Thinking {
-                    thinking: "Let me check the user's memory store first.".to_string(),
-                    provider_metadata: None,
-                },
-                ContentBlock::ToolUse {
-                    id: "call_abc".to_string(),
-                    name: "memory_search".to_string(),
-                    input: serde_json::json!({"query": "preferences"}),
-                    provider_metadata: None,
-                },
-            ]),
-            pinned: false,
-            timestamp: None,
-        };
-        let req = CompletionRequest {
-            model: "deepseek-v4-flash".to_string(),
-            messages: std::sync::Arc::new(vec![assistant]),
-            tools: std::sync::Arc::new(Vec::new()),
-            max_tokens: 128,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        };
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert_eq!(
-            assistant_msg.reasoning_content.as_deref(),
-            Some("Let me check the user's memory store first."),
-            "V4 Flash MUST echo back reasoning_content on tool_calls turns"
-        );
-    }
-
-    /// #4842: V4 Flash with a tool_calls turn that has no Thinking block must
-    /// still emit `reasoning_content` (empty string). The API rejects requests
-    /// where the field is missing on a tool_calls turn even when the model
-    /// produced no thinking that turn.
-    #[test]
-    fn test_deepseek_v4_flash_emits_empty_reasoning_when_no_thinking_block() {
-        use librefang_llm_driver::CompletionRequest;
-        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
-
-        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
-        let assistant = Message {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                id: "call_xyz".to_string(),
-                name: "shell_exec".to_string(),
-                input: serde_json::json!({"command": "ls"}),
-                provider_metadata: None,
-            }]),
-            pinned: false,
-            timestamp: None,
-        };
-        let req = CompletionRequest {
-            model: "deepseek-v4-flash".to_string(),
-            messages: std::sync::Arc::new(vec![assistant]),
-            tools: std::sync::Arc::new(Vec::new()),
-            max_tokens: 128,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        };
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert_eq!(
-            assistant_msg.reasoning_content.as_deref(),
-            Some(""),
-            "V4 Flash tool_calls turn without thinking still needs the field present"
-        );
-    }
-
-    /// #4842: V4 Flash assistant turns *without* tool_calls (text-only response)
-    /// don't need reasoning_content — the constraint is specifically on
-    /// tool_calls turns.
-    #[test]
-    fn test_deepseek_v4_flash_omits_reasoning_on_text_only_turn() {
-        use librefang_llm_driver::CompletionRequest;
-        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
-
-        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
-        let assistant = Message {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(vec![
-                ContentBlock::Thinking {
-                    thinking: "thinking out loud".to_string(),
-                    provider_metadata: None,
-                },
-                ContentBlock::Text {
-                    text: "Hello!".to_string(),
-                    provider_metadata: None,
-                },
-            ]),
-            pinned: false,
-            timestamp: None,
-        };
-        let req = CompletionRequest {
-            model: "deepseek-v4-flash".to_string(),
-            messages: std::sync::Arc::new(vec![assistant]),
-            tools: std::sync::Arc::new(Vec::new()),
-            max_tokens: 128,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        };
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert!(
-            assistant_msg.reasoning_content.is_none(),
-            "text-only V4 Flash assistant turn doesn't need reasoning_content round-trip"
-        );
-    }
-
-    /// Models other than V4 Flash / Kimi must NOT emit reasoning_content on
-    /// historical turns — most providers reject the unknown field, and
-    /// deepseek-reasoner explicitly rejects it.
-    #[test]
-    fn test_other_models_omit_reasoning_content_even_with_thinking_blocks() {
-        use librefang_llm_driver::CompletionRequest;
-        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
-
-        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
-        let assistant = Message {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(vec![
-                ContentBlock::Thinking {
-                    thinking: "private reasoning".to_string(),
-                    provider_metadata: None,
-                },
-                ContentBlock::ToolUse {
-                    id: "call_1".to_string(),
-                    name: "noop".to_string(),
-                    input: serde_json::json!({}),
-                    provider_metadata: None,
-                },
-            ]),
-            pinned: false,
-            timestamp: None,
-        };
-        for model in ["deepseek-chat", "deepseek-reasoner", "gpt-4o"] {
-            let req = CompletionRequest {
-                model: model.to_string(),
-                messages: std::sync::Arc::new(vec![assistant.clone()]),
-                tools: std::sync::Arc::new(Vec::new()),
-                max_tokens: 128,
-                temperature: 0.7,
-                system: None,
-                thinking: None,
-                prompt_caching: false,
-                cache_ttl: None,
-                prompt_cache_strategy: None,
-                response_format: None,
-                timeout_secs: None,
-                extra_body: None,
-                agent_id: None,
-                session_id: None,
-                step_id: None,
-                reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(
-                ),
-            };
-            let oai = driver.build_request(&req).expect("build_request");
-            let assistant_msg = oai
-                .messages
-                .iter()
-                .find(|m| m.role == "assistant")
-                .expect("assistant message");
-            assert!(
-                assistant_msg.reasoning_content.is_none(),
-                "{model}: must not echo reasoning_content on historical assistant turns"
-            );
-        }
-    }
-
-    // ----- Catalog ReasoningEchoPolicy override tests (#4842) -----
-    //
-    // These verify that an explicit policy on the request (sourced from the
-    // catalog metadata) overrides the model-name substring fallback. Each
-    // test uses a model name that the substring fallback would NOT match
-    // (`mystery-*`), so the only way the driver can produce the expected
-    // behaviour is by reading `request.reasoning_echo_policy`.
-
-    fn build_catalog_policy_test_request(
-        model: &str,
-        policy: librefang_types::model_catalog::ReasoningEchoPolicy,
-    ) -> librefang_llm_driver::CompletionRequest {
-        use librefang_llm_driver::CompletionRequest;
-        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
-        let assistant = Message {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(vec![
-                ContentBlock::Thinking {
-                    thinking: "deliberation".to_string(),
-                    provider_metadata: None,
-                },
-                ContentBlock::ToolUse {
-                    id: "call_1".to_string(),
-                    name: "noop".to_string(),
-                    input: serde_json::json!({}),
-                    provider_metadata: None,
-                },
-            ]),
-            pinned: false,
-            timestamp: None,
-        };
-        CompletionRequest {
-            model: model.to_string(),
-            messages: std::sync::Arc::new(vec![assistant]),
-            tools: std::sync::Arc::new(Vec::new()),
-            max_tokens: 128,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: policy,
-        }
-    }
-
-    /// Catalog `Echo` policy on a model the substring fallback would NOT
-    /// recognize must still produce the V4 Flash wire shape (echo thinking
-    /// text on tool_calls turns).
-    #[test]
-    fn test_catalog_echo_policy_overrides_unmatched_substring() {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
-        let req =
-            build_catalog_policy_test_request("mystery-thinking-model", ReasoningEchoPolicy::Echo);
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert_eq!(
-            assistant_msg.reasoning_content.as_deref(),
-            Some("deliberation"),
-            "catalog Echo policy must echo thinking text on tool_calls turn \
-             even when model name doesn't match any substring rule"
-        );
-    }
-
-    /// Catalog `Strip` policy on a model the substring fallback would NOT
-    /// recognize must produce the R1 wire shape (omit reasoning_content,
-    /// force non-null content).
-    #[test]
-    fn test_catalog_strip_policy_overrides_unmatched_substring() {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
-        let req = build_catalog_policy_test_request("mystery-reasoner", ReasoningEchoPolicy::Strip);
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert!(
-            assistant_msg.reasoning_content.is_none(),
-            "catalog Strip policy must omit reasoning_content"
-        );
-    }
-
-    /// Strip policy's *second* contract: force non-null `content` on
-    /// historical assistant turns even when the turn carries no tool_calls
-    /// and no text — DeepSeek-R1 rejects multi-turn requests where any
-    /// historical assistant message has a null `content`. The shared
-    /// [`build_catalog_policy_test_request`] helper produces a turn with
-    /// tool_calls, which would route through the `has_tool_calls` branch
-    /// and mask the Strip-specific forcing. This test uses a thinking-only
-    /// assistant message followed by a user message (so the assistant
-    /// turn isn't trailing and survives `strip_trailing_empty_assistant`),
-    /// so the only path that can produce `content: Some("")` on the
-    /// historical assistant is `force_nonnull_content`.
-    #[test]
-    fn test_catalog_strip_policy_forces_nonnull_content_without_tool_calls() {
-        use librefang_llm_driver::CompletionRequest;
-        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-
-        let assistant = Message {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(vec![ContentBlock::Thinking {
-                thinking: "deliberation".to_string(),
-                provider_metadata: None,
-            }]),
-            pinned: false,
-            timestamp: None,
-        };
-        let user_followup = Message {
-            role: Role::User,
-            content: MessageContent::Blocks(vec![ContentBlock::Text {
-                text: "follow-up".to_string(),
-                provider_metadata: None,
-            }]),
-            pinned: false,
-            timestamp: None,
-        };
-        let make_req = |policy: ReasoningEchoPolicy| CompletionRequest {
-            model: "mystery-reasoner".to_string(),
-            messages: std::sync::Arc::new(vec![assistant.clone(), user_followup.clone()]),
-            tools: std::sync::Arc::new(Vec::new()),
-            max_tokens: 128,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: policy,
-        };
-        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
-
-        // Baseline: default `None` policy on the same fixture must leave
-        // `content` null on the historical assistant. Without this
-        // assertion the Strip branch below could pass coincidentally if
-        // some unrelated branch were forcing non-null content for everyone.
-        let baseline = driver
-            .build_request(&make_req(ReasoningEchoPolicy::None))
-            .expect("build_request");
-        let baseline_assistant = baseline
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert!(
-            baseline_assistant.content.is_none(),
-            "default policy on a thinking-only historical assistant turn must \
-             produce null content; got {:?}",
-            baseline_assistant.content
-        );
-        assert!(
-            baseline_assistant
-                .tool_calls
-                .as_ref()
-                .is_none_or(|t| t.is_empty()),
-            "fixture must not carry tool_calls — otherwise the has_tool_calls branch \
-             would mask the Strip-specific content forcing"
-        );
-
-        // Strip policy on the same fixture must force `content: Some("")`
-        // on the historical assistant turn.
-        let strip = driver
-            .build_request(&make_req(ReasoningEchoPolicy::Strip))
-            .expect("build_request");
-        let strip_assistant = strip
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert!(
-            matches!(
-                strip_assistant.content,
-                Some(OaiMessageContent::Text(ref s)) if s.is_empty()
-            ),
-            "Strip policy must force non-null empty content on a historical \
-             assistant turn even when text_parts is empty and there are no \
-             tool_calls; got {:?}",
-            strip_assistant.content
-        );
-    }
-
-    /// Catalog `EmptyString` policy on a model the substring fallback would
-    /// NOT recognize must produce the Kimi wire shape: empty-string
-    /// reasoning_content on tool_calls turns + thinking disabled wire-side
-    /// + temperature pinned to 0.6.
-    ///
-    /// The model name and base URL are deliberately picked to miss every
-    /// substring rule (no `kimi`, no `moonshot`, no `deepseek-r1` /
-    /// `-reasoner` / `-v4`), so the only path that can produce the Kimi
-    /// wire shape is `request.reasoning_echo_policy` — proving the catalog
-    /// override actually wins over the fallback rather than coincidentally
-    /// agreeing with it.
-    #[test]
-    fn test_catalog_empty_string_policy_overrides_unmatched_substring() {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
-        let req = build_catalog_policy_test_request(
-            "mystery-multi-turn-clone",
-            ReasoningEchoPolicy::EmptyString,
-        );
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert_eq!(
-            assistant_msg.reasoning_content.as_deref(),
-            Some(""),
-            "catalog EmptyString policy must send empty reasoning_content"
-        );
-        assert_eq!(
-            oai.temperature,
-            Some(0.6),
-            "EmptyString policy must pin temperature to 0.6 for multi-turn compatibility"
-        );
-        assert_eq!(
-            oai.thinking,
-            Some(serde_json::json!({"type": "disabled"})),
-            "EmptyString policy must disable thinking wire-side"
-        );
-    }
-
-    /// Catalog `None` (the default) on a deepseek-v4-flash model name must
-    /// fall back to substring detection and still produce the Echo wire
-    /// shape — proves the fallback path is wired correctly.
-    #[test]
-    fn test_catalog_none_falls_back_to_substring_for_v4_flash() {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
-        let req = build_catalog_policy_test_request("deepseek-v4-flash", ReasoningEchoPolicy::None);
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert_eq!(
-            assistant_msg.reasoning_content.as_deref(),
-            Some("deliberation"),
-            "default policy must fall back to substring; v4-flash → Echo"
-        );
-    }
-
-    /// Catalog `None` on a `deepseek-reasoner` model name must fall back to
-    /// substring detection and produce the R1 wire shape: omitted
-    /// `reasoning_content`. Companion to the v4-flash fallback test;
-    /// covers the Strip path of the substring fallback.
-    #[test]
-    fn test_catalog_none_falls_back_to_substring_for_deepseek_reasoner() {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
-        let req = build_catalog_policy_test_request("deepseek-reasoner", ReasoningEchoPolicy::None);
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert!(
-            assistant_msg.reasoning_content.is_none(),
-            "default policy must fall back to substring; deepseek-reasoner → Strip (omit)"
-        );
-    }
-
-    /// Catalog `None` on a `kimi`-named model must fall back to substring
-    /// detection and produce the Kimi wire shape: empty-string
-    /// `reasoning_content` on tool_calls turns + temperature 0.6 +
-    /// thinking disabled. Covers the EmptyString path of the substring
-    /// fallback via the model-name branch (`model.contains("kimi")`).
-    #[test]
-    fn test_catalog_none_falls_back_to_substring_for_kimi_name() {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
-        let req = build_catalog_policy_test_request("kimi-k2-instruct", ReasoningEchoPolicy::None);
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert_eq!(
-            assistant_msg.reasoning_content.as_deref(),
-            Some(""),
-            "default policy must fall back to substring; kimi-name → EmptyString"
-        );
-        assert_eq!(oai.temperature, Some(0.6));
-        assert_eq!(oai.thinking, Some(serde_json::json!({"type": "disabled"})));
-    }
-
-    /// Catalog `None` on a non-kimi model name routed through a Moonshot
-    /// base URL must fall back to substring detection via the host-based
-    /// branch (`is_moonshot()`) and produce the Kimi wire shape — proves
-    /// the fallback's host-aware branch still triggers post-refactor.
-    #[test]
-    fn test_catalog_none_falls_back_to_substring_for_moonshot_host() {
-        use librefang_types::model_catalog::ReasoningEchoPolicy;
-        let driver = OpenAIDriver::new(String::new(), "https://api.moonshot.cn/v1".to_string());
-        let req = build_catalog_policy_test_request("mystery-model", ReasoningEchoPolicy::None);
-        let oai = driver.build_request(&req).expect("build_request");
-        let assistant_msg = oai
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message");
-        assert_eq!(
-            assistant_msg.reasoning_content.as_deref(),
-            Some(""),
-            "default policy must fall back to substring via is_moonshot() host check"
-        );
-        assert_eq!(oai.temperature, Some(0.6));
-        assert_eq!(oai.thinking, Some(serde_json::json!({"type": "disabled"})));
-    }
-
     /// Verify that deepseek-reasoner assistant messages always get a non-null
     /// content field, even when text_parts is empty (thinking-only response).
     #[test]
@@ -3503,9 +2856,13 @@ mod tests {
             extra_body: Some(extra),
         };
 
-        // Use the exact merge logic used in complete() / stream().
+        // Simulate the merge logic used in complete() / stream()
         let mut body = serde_json::to_value(&req).unwrap();
-        merge_extra_body(&req.extra_body, &mut body);
+        if let (Some(extra), Some(obj)) = (&req.extra_body, body.as_object_mut()) {
+            for (k, v) in extra {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
 
         // extra_body values should override standard fields
         assert_eq!(body.get("temperature").unwrap(), &serde_json::json!(1.0));
@@ -3516,71 +2873,6 @@ mod tests {
             raw.matches("temperature").count(),
             1,
             "There should be exactly ONE temperature key after merge. Raw: {raw}"
-        );
-    }
-
-    // Issue #5143 — `extra_body` is a HashMap merged into the wire request
-    // body, which is part of the provider prompt-cache key. The merge MUST
-    // produce a byte-identical body regardless of HashMap insertion order,
-    // and MUST stay deterministic even if `serde_json/preserve_order` is
-    // ever enabled workspace-wide. `merge_extra_body` sorts keys before
-    // insertion to enforce this. This pins byte equality across two
-    // different insertion orders, mirroring
-    // `mcp_summary_is_byte_identical_across_input_orders`.
-    #[test]
-    fn extra_body_merge_is_byte_identical_across_insertion_orders() {
-        fn build(order: &[(&str, serde_json::Value)]) -> String {
-            let mut extra = HashMap::new();
-            for (k, v) in order {
-                extra.insert((*k).to_string(), v.clone());
-            }
-            let req = OaiRequest {
-                model: "qwen3.6".to_string(),
-                messages: vec![OaiMessage {
-                    role: "user".to_string(),
-                    content: Some(OaiMessageContent::Text("hello".to_string())),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                }],
-                max_tokens: Some(4096),
-                max_completion_tokens: None,
-                temperature: Some(0.7),
-                tools: vec![],
-                tool_choice: None,
-                stream: false,
-                stream_options: None,
-                thinking: None,
-                response_format: None,
-                extra_body: Some(extra),
-            };
-            let mut body = serde_json::to_value(&req).unwrap();
-            merge_extra_body(&req.extra_body, &mut body);
-            serde_json::to_string(&body).unwrap()
-        }
-
-        // Same three keys, two different HashMap insertion orders.
-        let a = build(&[
-            ("aaa_param", serde_json::json!(1)),
-            ("mmm_param", serde_json::json!("two")),
-            ("zzz_param", serde_json::json!([3, 4])),
-        ]);
-        let b = build(&[
-            ("zzz_param", serde_json::json!([3, 4])),
-            ("aaa_param", serde_json::json!(1)),
-            ("mmm_param", serde_json::json!("two")),
-        ]);
-        assert_eq!(
-            a, b,
-            "extra_body merge must yield a byte-identical request body across insertion orders (#5143)"
-        );
-        // And the merged keys must appear in sorted order in the body.
-        let ai = a.find("aaa_param").unwrap();
-        let mi = a.find("mmm_param").unwrap();
-        let zi = a.find("zzz_param").unwrap();
-        assert!(
-            ai < mi && mi < zi,
-            "merged extra_body keys must be in sorted order: {a}"
         );
     }
 
@@ -3805,246 +3097,6 @@ mod tests {
         assert_eq!(
             map_oai_finish_reason(choice.finish_reason.as_deref(), false),
             StopReason::ContentFiltered
-        );
-    }
-
-    /// Regression: `ContentBlock::ImageFile` paths must be read via
-    /// `tokio::task::block_in_place` so a multi-MB image read does not
-    /// stall the tokio worker pool. The base64-encoded bytes embedded
-    /// in the resulting `OaiContentPart::ImageUrl` data URL must match
-    /// the bytes on disk.
-    ///
-    /// Wrap with `flavor = "multi_thread"` so `block_in_place` does not
-    /// panic on a single-threaded runtime.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn build_request_imagefile_reads_bytes_without_blocking_worker() {
-        use base64::Engine;
-        use librefang_types::message::Message;
-        use std::io::Write;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("img.png");
-        let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 11, 22, 33];
-        std::fs::File::create(&path)
-            .and_then(|mut f| f.write_all(&bytes))
-            .expect("write png");
-
-        let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
-        let request = CompletionRequest {
-            model: "gpt-4o-mini".to_string(),
-            messages: std::sync::Arc::new(vec![Message {
-                role: Role::User,
-                content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
-                    media_type: "image/png".to_string(),
-                    path: path.to_string_lossy().into_owned(),
-                }]),
-                pinned: false,
-                timestamp: None,
-            }]),
-            tools: std::sync::Arc::new(Vec::new()),
-            max_tokens: 256,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        };
-        let wire = driver.build_request(&request).expect("build");
-        let user = wire
-            .messages
-            .iter()
-            .find(|m| m.role == "user")
-            .expect("user message");
-        let parts = match user.content.as_ref().expect("content present") {
-            OaiMessageContent::Parts(p) => p,
-            OaiMessageContent::Text(_) => panic!("expected Parts content"),
-        };
-        let url = parts
-            .iter()
-            .find_map(|p| match p {
-                OaiContentPart::ImageUrl { image_url } => Some(image_url.url.clone()),
-                _ => None,
-            })
-            .expect("OaiContentPart::ImageUrl present");
-        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let want = format!("data:image/png;base64,{expected}");
-        assert_eq!(url, want, "encoded bytes must round-trip");
-    }
-
-    /// Regression: `preprocess_moonshot_files` must leave `ContentBlock::Image`
-    /// blocks with `media_type` starting with `"image/"` completely untouched
-    /// (no network call, no `<<moonshot_file:…>>` marker). Non-image MIME types
-    /// (e.g. `"application/pdf"`) must still go through the file-upload OCR
-    /// path and carry the marker.
-    ///
-    /// The test also pins the current case-sensitive guard: `"image/JPEG"`
-    /// (upper-case MIME) does NOT match `starts_with("image/")` for the
-    /// upper-case variant check — wait, "image/JPEG".starts_with("image/") IS
-    /// true. The guard is `starts_with("image/")` which is case-sensitive on
-    /// the part *after* the slash. Per the review the interesting case is that
-    /// `"IMAGE/jpeg"` (upper-case scheme) would NOT be skipped. We pin that
-    /// here to document the existing behaviour as a regression guard.
-    ///
-    /// Networking is avoided entirely: the `image/png` path hits `continue`
-    /// before any I/O; the `application/pdf` path tries `tokio::fs::read` on
-    /// a non-existent path, which returns an `Err`, and `preprocess` surfaces
-    /// it — we assert the specific error to confirm the upload arm was reached.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn preprocess_moonshot_files_skips_image_mime_keeps_non_image() {
-        use base64::Engine;
-        use librefang_types::message::Message;
-
-        // A trivial 1×1 red PNG pixel encoded as base64.
-        let png_b64 =
-            base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nfake-png-bytes");
-
-        // Build a Moonshot driver (base_url contains "moonshot" so is_moonshot()
-        // returns true, but we call preprocess directly so it doesn't matter).
-        let driver = OpenAIDriver::new(
-            "fake-key".to_string(),
-            "https://api.moonshot.cn/v1".to_string(),
-        );
-
-        // ── Case 1: image/png block — must be left untouched ─────────────────
-        let mut req_image = CompletionRequest {
-            model: "moonshot-v1-8k".to_string(),
-            messages: std::sync::Arc::new(vec![Message {
-                role: Role::User,
-                content: MessageContent::Blocks(vec![ContentBlock::Image {
-                    media_type: "image/png".to_string(),
-                    data: png_b64.clone(),
-                }]),
-                pinned: false,
-                timestamp: None,
-            }]),
-            tools: std::sync::Arc::new(vec![]),
-            max_tokens: 256,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        };
-
-        // preprocess should succeed and leave the image block unchanged.
-        driver
-            .preprocess_moonshot_files(&mut req_image)
-            .await
-            .expect("image/png block must not trigger any I/O or error");
-
-        let blocks = match &req_image.messages[0].content {
-            MessageContent::Blocks(b) => b,
-            _ => panic!("expected Blocks"),
-        };
-        assert_eq!(blocks.len(), 1, "block count must be unchanged");
-        match &blocks[0] {
-            ContentBlock::Image { media_type, data } => {
-                assert_eq!(media_type, "image/png", "media_type must be unchanged");
-                assert_eq!(data, &png_b64, "base64 data must be unchanged");
-            }
-            other => panic!("image/png block must remain ContentBlock::Image, got {other:?}"),
-        }
-
-        // ── Case 2: application/pdf ImageFile block — must reach upload path ─
-        // We pass a non-existent file path so the upload arm tries
-        // `tokio::fs::read` and fails immediately. We verify the error
-        // message confirms the read was attempted (upload arm reached).
-        let mut req_pdf = CompletionRequest {
-            model: "moonshot-v1-8k".to_string(),
-            messages: std::sync::Arc::new(vec![Message {
-                role: Role::User,
-                content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
-                    media_type: "application/pdf".to_string(),
-                    path: "/nonexistent/path/document.pdf".to_string(),
-                }]),
-                pinned: false,
-                timestamp: None,
-            }]),
-            tools: std::sync::Arc::new(vec![]),
-            max_tokens: 256,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        };
-
-        let err = driver
-            .preprocess_moonshot_files(&mut req_pdf)
-            .await
-            .expect_err("application/pdf must attempt file read and fail on missing path");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("/nonexistent/path/document.pdf"),
-            "error must mention the file path (upload arm was reached); got: {msg}"
-        );
-
-        // ── Case 3: IMAGE/jpeg (upper-case scheme) — pins case-sensitive guard ─
-        // "IMAGE/jpeg".starts_with("image/") is false, so this block is NOT
-        // skipped and still falls through to the upload arm. Confirm it reaches
-        // the I/O path the same way as the pdf case above.
-        let jpeg_b64 = base64::engine::general_purpose::STANDARD.encode(b"fake-jpeg");
-        let mut req_upper = CompletionRequest {
-            model: "moonshot-v1-8k".to_string(),
-            messages: std::sync::Arc::new(vec![Message {
-                role: Role::User,
-                content: MessageContent::Blocks(vec![ContentBlock::Image {
-                    media_type: "IMAGE/jpeg".to_string(),
-                    data: jpeg_b64,
-                }]),
-                pinned: false,
-                timestamp: None,
-            }]),
-            tools: std::sync::Arc::new(vec![]),
-            max_tokens: 256,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            prompt_cache_strategy: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        };
-
-        // IMAGE/jpeg does NOT start with "image/" so the guard is NOT triggered.
-        // The upload arm runs: base64-decode succeeds, then upload_file_to_moonshot
-        // makes an HTTP request to a real URL — which fails with a network error.
-        // Any LlmError is acceptable here; the key assertion is that it IS an error
-        // (upload path was entered, not skipped).
-        let result_upper = driver.preprocess_moonshot_files(&mut req_upper).await;
-        assert!(
-            result_upper.is_err(),
-            "IMAGE/jpeg (upper-case) must NOT be skipped — upload arm must be entered and fail with no real server"
         );
     }
 }

@@ -9,15 +9,12 @@ pub mod theme;
 pub mod widgets;
 
 use event::{AppEvent, BackendRef, StreamCancelToken};
-use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
-use librefang_kernel::LlmSubsystemApi;
-use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use screens::{
-    agents, audit, chat, comms, dashboard, extensions, hands, logs, memory, peers, security,
-    sessions, settings, skills, templates, triggers, usage, welcome, wizard, workflows,
+    agents, audit, channels, chat, comms, dashboard, extensions, hands, logs, memory, peers,
+    security, sessions, settings, skills, templates, triggers, usage, welcome, wizard, workflows,
 };
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -51,6 +48,7 @@ enum Tab {
     Workflows,
     Triggers,
     Memory,
+    Channels,
     Skills,
     Hands,
     Extensions,
@@ -72,6 +70,7 @@ const TABS: &[Tab] = &[
     Tab::Workflows,
     Tab::Triggers,
     Tab::Memory,
+    Tab::Channels,
     Tab::Skills,
     Tab::Hands,
     Tab::Extensions,
@@ -95,6 +94,7 @@ impl Tab {
             Tab::Workflows => "\u{25b7} Flows",
             Tab::Triggers => "\u{25c9} Triggers",
             Tab::Memory => "\u{25a1} Memory",
+            Tab::Channels => "\u{25c8} Channels",
             Tab::Skills => "\u{2605} Skills",
             Tab::Hands => "\u{270b} Hands",
             Tab::Extensions => "\u{29c9} Ext",
@@ -171,6 +171,7 @@ struct App {
     agents: agents::AgentSelectState,
     chat: chat::ChatState,
     dashboard: dashboard::DashboardState,
+    channels: channels::ChannelState,
     workflows: workflows::WorkflowState,
     triggers: triggers::TriggerState,
     sessions: sessions::SessionsState,
@@ -210,6 +211,7 @@ impl App {
             agents: agents::AgentSelectState::new(),
             chat: chat::ChatState::new(),
             dashboard: dashboard::DashboardState::new(),
+            channels: channels::ChannelState::new(),
             workflows: workflows::WorkflowState::new(),
             triggers: triggers::TriggerState::new(),
             sessions: sessions::SessionsState::new(),
@@ -276,6 +278,16 @@ impl App {
             AppEvent::DreamsLoaded { enabled, rows } => {
                 self.dashboard.dreams_enabled = enabled;
                 self.dashboard.dreams = rows;
+            }
+            AppEvent::ChannelListLoaded(list) => {
+                if !list.is_empty() {
+                    self.channels.channels = list;
+                    self.channels.list_state.select(Some(0));
+                }
+                self.channels.loading = false;
+            }
+            AppEvent::ChannelTestResult { success, message } => {
+                self.channels.test_result = Some((success, message));
             }
             AppEvent::WorkflowListLoaded(list) => {
                 self.workflows.workflows = list;
@@ -363,6 +375,7 @@ impl App {
                 match self.active_tab {
                     Tab::Workflows => self.workflows.status_msg = err,
                     Tab::Triggers => self.triggers.status_msg = err,
+                    Tab::Channels => self.channels.status_msg = err,
                     Tab::Sessions => self.sessions.status_msg = err,
                     Tab::Memory => self.memory.status_msg = err,
                     Tab::Skills => self.skills.status_msg = err,
@@ -725,9 +738,10 @@ impl App {
                     self.switch_tab(Tab::Memory);
                     return;
                 }
-                // F(8) was the `Channels` tab shortcut; the tab is
-                // retired, so the key now falls through to the
-                // default arm rather than being swallowed.
+                KeyCode::F(8) => {
+                    self.switch_tab(Tab::Channels);
+                    return;
+                }
                 KeyCode::F(9) => {
                     self.switch_tab(Tab::Skills);
                     return;
@@ -814,9 +828,10 @@ impl App {
                         self.switch_tab(Tab::Memory);
                         return;
                     }
-                    // Char('8') was the Alt-8 `Channels` tab shortcut;
-                    // the tab is retired, so the key falls through to
-                    // the default arm rather than being swallowed.
+                    KeyCode::Char('8') => {
+                        self.switch_tab(Tab::Channels);
+                        return;
+                    }
                     KeyCode::Char('9') => {
                         self.switch_tab(Tab::Skills);
                         return;
@@ -865,6 +880,10 @@ impl App {
                 Tab::Chat => {
                     let action = self.chat.handle_key(key);
                     self.handle_chat_action(action);
+                }
+                Tab::Channels => {
+                    let action = self.channels.handle_key(key);
+                    self.handle_channel_action(action);
                 }
                 Tab::Workflows => {
                     let action = self.workflows.handle_key(key);
@@ -939,6 +958,7 @@ impl App {
         self.welcome.tick();
         self.chat.tick();
         self.dashboard.tick();
+        self.channels.tick();
         self.workflows.tick();
         self.triggers.tick();
         self.sessions.tick();
@@ -996,6 +1016,7 @@ impl App {
         match tab {
             Tab::Dashboard => self.refresh_dashboard(),
             Tab::Agents => self.refresh_agents(),
+            Tab::Channels => self.refresh_channels(),
             Tab::Workflows => self.refresh_workflows(),
             Tab::Triggers => self.refresh_triggers(),
             Tab::Sessions => self.refresh_sessions(),
@@ -1022,6 +1043,7 @@ impl App {
         // Load initial data for visible tabs
         self.refresh_agents();
         self.refresh_dashboard();
+        self.refresh_channels();
     }
 
     // ─── Data refresh helpers ────────────────────────────────────────────────
@@ -1045,7 +1067,16 @@ impl App {
         }
     }
 
-    // `refresh_channels` retired with the Channels tab.
+    fn refresh_channels(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.channels.loading = true;
+            event::spawn_fetch_channels(backend, self.event_tx.clone());
+        }
+        // Also build defaults from env detection
+        if self.channels.channels.is_empty() {
+            self.channels.build_default_channels();
+        }
+    }
 
     fn refresh_workflows(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
@@ -1418,9 +1449,60 @@ impl App {
         }
     }
 
-    // `handle_channel_action` retired with the Channels tab — its
-    // SaveChannel / TestChannel arms hit the deleted
-    // `POST /api/channels/{name}/configure` and `.../test` endpoints.
+    fn handle_channel_action(&mut self, action: channels::ChannelAction) {
+        match action {
+            channels::ChannelAction::Continue => {}
+            channels::ChannelAction::Refresh => self.refresh_channels(),
+            channels::ChannelAction::TestChannel(name) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_test_channel(backend, name, self.event_tx.clone());
+                }
+            }
+            channels::ChannelAction::ToggleChannel(_name, _enabled) => {
+                // Toggle is handled locally in the state; daemon toggle
+                // could be spawned here if the API supports it.
+            }
+            channels::ChannelAction::SaveChannel(name, values) => {
+                // Save channel credentials via daemon API
+                if let Some(backend) = self.backend.to_ref() {
+                    let tx = self.event_tx.clone();
+                    std::thread::spawn(move || {
+                        if let event::BackendRef::Daemon { base_url, api_key } = backend {
+                            let client = {
+                                let mut builder = crate::http_client::client_builder()
+                                    .timeout(std::time::Duration::from_secs(10));
+                                if let Some(ref key) = api_key {
+                                    let mut headers = reqwest::header::HeaderMap::new();
+                                    if let Ok(val) = reqwest::header::HeaderValue::from_str(
+                                        &format!("Bearer {key}"),
+                                    ) {
+                                        headers.insert(reqwest::header::AUTHORIZATION, val);
+                                    }
+                                    builder = builder.default_headers(headers);
+                                }
+                                builder.build().ok()
+                            };
+                            if let Some(client) = client {
+                                let mut fields = serde_json::Map::new();
+                                for (k, v) in &values {
+                                    fields.insert(k.clone(), serde_json::Value::String(v.clone()));
+                                }
+                                let body = serde_json::json!({ "fields": fields });
+                                let _ = client
+                                    .post(format!("{base_url}/api/channels/{name}/configure"))
+                                    .json(&body)
+                                    .send();
+                            }
+                        }
+                        // Signal tick so the UI refreshes next cycle
+                        let _ = tx.send(event::AppEvent::Tick);
+                    });
+                }
+                // Immediately trigger a refresh of the channel list
+                self.refresh_channels();
+            }
+        }
+    }
 
     fn handle_workflow_action(&mut self, action: workflows::WorkflowAction) {
         match action {
@@ -1776,7 +1858,7 @@ impl App {
         self.chat.mode_label = "in-process".to_string();
 
         if let Backend::InProcess { ref kernel } = self.backend {
-            if let Some(entry) = kernel.agent_registry_ref().get(id) {
+            if let Some(entry) = kernel.agent_registry().get(id) {
                 self.chat.model_label = format!(
                     "{}/{}",
                     entry.manifest.model.provider, entry.manifest.model.model
@@ -1892,7 +1974,10 @@ impl App {
             }
             Backend::InProcess { kernel } => {
                 let models = {
-                    let catalog = kernel.model_catalog_swap().load();
+                    let catalog = kernel
+                        .model_catalog_ref()
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner());
                     catalog
                         .available_models()
                         .into_iter()
@@ -1964,26 +2049,27 @@ impl App {
             (Backend::InProcess { kernel }, Some(target)) => {
                 if let Some(id) = target.agent_id_inprocess {
                     let provider = kernel
-                        .model_catalog_swap()
-                        .load()
+                        .model_catalog_ref()
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner())
                         .find_model(model_id)
                         .map(|e| e.provider.clone());
                     let result = if let Some(ref prov) = provider {
-                        kernel.agent_registry_ref().update_model_and_provider(
+                        kernel.agent_registry().update_model_and_provider(
                             id,
                             model_id.to_string(),
                             prov.clone(),
                         )
                     } else {
                         kernel
-                            .agent_registry_ref()
+                            .agent_registry()
                             .update_model(id, model_id.to_string())
                     };
                     match result {
                         Ok(()) => {
                             let prov_label = provider.unwrap_or_else(|| {
                                 kernel
-                                    .agent_registry_ref()
+                                    .agent_registry()
                                     .get(id)
                                     .map(|e| e.manifest.model.provider.clone())
                                     .unwrap_or_else(|| "?".to_string())
@@ -2041,7 +2127,7 @@ impl App {
                     }
                     Backend::InProcess { kernel } => {
                         s.push("Mode: in-process".to_string());
-                        s.push(format!("Agents: {}", kernel.agent_registry_ref().count()));
+                        s.push(format!("Agents: {}", kernel.agent_registry().count()));
                         if let Some(ref t) = self.chat_target {
                             s.push(format!("Agent: {}", t.agent_name));
                         }
@@ -2063,7 +2149,7 @@ impl App {
                     }
                     Backend::InProcess { kernel } => {
                         let lines: Vec<String> = kernel
-                            .agent_registry_ref()
+                            .agent_registry()
                             .list()
                             .into_iter()
                             .map(|e| {
@@ -2161,12 +2247,12 @@ impl App {
             }
             "/hands" => match &self.backend {
                 Backend::InProcess { kernel } => {
-                    let defs = kernel.hand_registry_ref().list_definitions();
-                    let instances = kernel.hand_registry_ref().list_instances();
+                    let defs = kernel.hands().list_definitions();
+                    let instances = kernel.hands().list_instances();
                     let mut msg = format!("Available hands ({}):\n", defs.len());
                     for d in &defs {
                         let reqs_met = kernel
-                            .hand_registry_ref()
+                            .hands()
                             .check_requirements(&d.id)
                             .map(|r| r.iter().all(|(_, ok)| *ok))
                             .unwrap_or(false);
@@ -2242,6 +2328,7 @@ impl App {
                     Tab::Dashboard => dashboard::draw(frame, chunks[1], &mut self.dashboard),
                     Tab::Agents => agents::draw(frame, chunks[1], &mut self.agents),
                     Tab::Chat => chat::draw(frame, chunks[1], &mut self.chat),
+                    Tab::Channels => channels::draw(frame, chunks[1], &mut self.channels),
                     Tab::Workflows => workflows::draw(frame, chunks[1], &mut self.workflows),
                     Tab::Triggers => triggers::draw(frame, chunks[1], &mut self.triggers),
                     Tab::Sessions => sessions::draw(frame, chunks[1], &mut self.sessions),

@@ -43,10 +43,6 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/providers/{name}/key",
             axum::routing::post(set_provider_key).delete(delete_provider_key),
         )
-        .route(
-            "/providers/{name}/enable",
-            axum::routing::post(enable_provider),
-        )
         .route("/providers/{name}/test", axum::routing::post(test_provider))
         .route(
             "/providers/{name}/url",
@@ -56,12 +52,6 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route(
             "/providers/{name}/default",
             axum::routing::post(set_default_provider),
-        )
-        // Credential pools (#4965) — list per-provider key-rotation pool
-        // status, with redacted snapshots and cooldown/usage telemetry.
-        .route(
-            "/credential-pools",
-            axum::routing::get(list_credential_pools),
         )
 }
 
@@ -90,7 +80,11 @@ pub async fn list_models(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let catalog = state.kernel.model_catalog_ref().load();
+    let catalog = state
+        .kernel
+        .model_catalog_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let provider_filter = params.get("provider").map(|s| s.to_lowercase());
     let tier_filter = params.get("tier").map(|s| s.to_lowercase());
     let available_only = params
@@ -123,7 +117,7 @@ pub async fn list_models(
     let live_models_per_provider: std::collections::HashMap<String, HashSet<String>> = catalog
         .list_providers()
         .iter()
-        .filter(|p| librefang_kernel::provider_health::is_local_provider(&p.id))
+        .filter(|p| librefang_runtime::provider_health::is_local_provider(&p.id))
         .filter_map(|p| {
             let probe = state.provider_probe_cache.get(&p.id)?;
             if !probe.reachable || probe.discovered_models.is_empty() {
@@ -179,8 +173,6 @@ pub async fn list_models(
                 .get_provider(&m.provider)
                 .map(|p| p.auth_status.is_available())
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
-            // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
-            let eff = catalog.effective_capabilities(m);
             serde_json::json!({
                 "id": m.id,
                 "display_name": m.display_name,
@@ -193,16 +185,10 @@ pub async fn list_models(
                 "output_cost_per_m": m.output_cost_per_m,
                 "image_input_cost_per_m": m.image_input_cost_per_m,
                 "image_output_cost_per_m": m.image_output_cost_per_m,
-                "supports_tools": eff.supports_tools,
-                "supports_vision": eff.supports_vision,
-                "supports_streaming": eff.supports_streaming,
-                "supports_thinking": eff.supports_thinking,
-                "capabilities_catalog": {
-                    "supports_tools": m.supports_tools,
-                    "supports_vision": m.supports_vision,
-                    "supports_streaming": m.supports_streaming,
-                    "supports_thinking": m.supports_thinking,
-                },
+                "supports_tools": m.supports_tools,
+                "supports_vision": m.supports_vision,
+                "supports_streaming": m.supports_streaming,
+                "supports_thinking": m.supports_thinking,
                 "aliases": m.aliases,
                 "available": available,
             })
@@ -227,7 +213,8 @@ pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let aliases = state
         .kernel
         .model_catalog_ref()
-        .load()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
         .list_aliases()
         .clone();
     let entries: Vec<serde_json::Value> = aliases
@@ -275,11 +262,13 @@ pub async fn create_alias(
         return ApiErrorResponse::bad_request("Missing required field: model_id").into_json_tuple();
     }
 
-    let mut added = false;
-    state.kernel.model_catalog_update(&mut |catalog| {
-        added = catalog.add_alias(&alias, &model_id);
-    });
-    if !added {
+    let mut catalog = state
+        .kernel
+        .model_catalog_ref()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+
+    if !catalog.add_alias(&alias, &model_id) {
         return ApiErrorResponse::conflict(format!("Alias '{}' already exists", alias))
             .into_json_tuple();
     }
@@ -300,11 +289,13 @@ pub async fn delete_alias(
     State(state): State<Arc<AppState>>,
     Path(alias): Path<String>,
 ) -> impl IntoResponse {
-    let mut removed = false;
-    state.kernel.model_catalog_update(&mut |catalog| {
-        removed = catalog.remove_alias(&alias);
-    });
-    if !removed {
+    let mut catalog = state
+        .kernel
+        .model_catalog_ref()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+
+    if !catalog.remove_alias(&alias) {
         return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias))
             .into_json_tuple();
     }
@@ -317,7 +308,11 @@ pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let catalog = state.kernel.model_catalog_ref().load();
+    let catalog = state
+        .kernel
+        .model_catalog_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     match catalog.find_model(&id) {
         Some(m) => {
             let available = catalog
@@ -326,8 +321,6 @@ pub async fn get_model(
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
             let override_key = format!("{}:{}", m.provider, m.id);
             let overrides = catalog.get_overrides(&override_key);
-            // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
-            let eff = catalog.effective_capabilities(m);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -342,16 +335,9 @@ pub async fn get_model(
                     "output_cost_per_m": m.output_cost_per_m,
                     "image_input_cost_per_m": m.image_input_cost_per_m,
                     "image_output_cost_per_m": m.image_output_cost_per_m,
-                    "supports_tools": eff.supports_tools,
-                    "supports_vision": eff.supports_vision,
-                    "supports_streaming": eff.supports_streaming,
-                    "supports_thinking": eff.supports_thinking,
-                    "capabilities_catalog": {
-                        "supports_tools": m.supports_tools,
-                        "supports_vision": m.supports_vision,
-                        "supports_streaming": m.supports_streaming,
-                        "supports_thinking": m.supports_thinking,
-                    },
+                    "supports_tools": m.supports_tools,
+                    "supports_vision": m.supports_vision,
+                    "supports_streaming": m.supports_streaming,
                     "aliases": m.aliases,
                     "available": available,
                     "overrides": overrides,
@@ -369,7 +355,11 @@ pub async fn get_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let catalog = state.kernel.model_catalog_ref().load();
+    let catalog = state
+        .kernel
+        .model_catalog_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     match catalog.get_overrides(&id) {
         Some(o) => (StatusCode::OK, Json(serde_json::to_value(o).unwrap())),
         None => (StatusCode::OK, Json(serde_json::json!({}))),
@@ -387,40 +377,28 @@ pub async fn set_model_overrides(
         .home_dir()
         .join("data")
         .join("model_overrides.json");
-    // RCU: capture previous + apply override. The closure may retry on CAS,
-    // so we clone `body` per attempt; final returned `previous` matches the
-    // attempt that won the CAS.
-    let id_for_closure = id.clone();
-    let body_for_closure = body.clone();
-    let mut previous = None;
-    state.kernel.model_catalog_update(&mut |catalog| {
-        previous = catalog.get_overrides(&id_for_closure).cloned();
-        catalog.set_overrides(id_for_closure.clone(), body_for_closure.clone());
-    });
-    // Persist outside the RCU loop (disk IO must happen exactly once).
-    let snapshot = state.kernel.model_catalog_load();
-    if let Err(e) = snapshot.save_overrides(&overrides_path) {
-        drop(snapshot);
+    let mut catalog = state
+        .kernel
+        .model_catalog_ref()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    let previous = catalog.get_overrides(&id).cloned();
+    catalog.set_overrides(id.clone(), body);
+    if let Err(e) = catalog.save_overrides(&overrides_path) {
         tracing::warn!("Failed to persist model overrides: {e}");
-        // Best-effort rollback. Race window: a concurrent set on the same id
-        // between the apply rcu and this rollback would be clobbered. Disk
-        // IO failures are rare enough that the simpler model is acceptable.
-        let id_for_rollback = id.clone();
-        state
-            .kernel
-            .model_catalog_update(&mut move |catalog| match &previous {
-                Some(prev) => {
-                    catalog.set_overrides(id_for_rollback.clone(), prev.clone());
-                }
-                None => {
-                    catalog.remove_overrides(&id_for_rollback);
-                }
-            });
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        // Roll back in-memory change so catalog stays consistent with disk.
+        match previous {
+            Some(prev) => catalog.set_overrides(id, prev),
+            None => {
+                catalog.remove_overrides(&id);
+            }
+        }
+        return ApiErrorResponse::internal(format!("Failed to persist overrides: {e}"))
+            .into_json_tuple();
     }
     // Return the persisted overrides entity so callers can `setQueryData`
     // without a follow-up GET. (Refs #3832.)
-    let persisted = snapshot.get_overrides(&id).cloned().unwrap_or_default();
+    let persisted = catalog.get_overrides(&id).cloned().unwrap_or_default();
     (
         StatusCode::OK,
         Json(serde_json::to_value(persisted).unwrap_or_else(|_| serde_json::json!({}))),
@@ -437,15 +415,13 @@ pub async fn delete_model_overrides(
         .home_dir()
         .join("data")
         .join("model_overrides.json");
-    let id_for_closure = id.clone();
-    state.kernel.model_catalog_update(&mut |catalog| {
-        let _ = catalog.remove_overrides(&id_for_closure);
-    });
-    if let Err(e) = state
+    let mut catalog = state
         .kernel
-        .model_catalog_load()
-        .save_overrides(&overrides_path)
-    {
+        .model_catalog_ref()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    catalog.remove_overrides(&id);
+    if let Err(e) = catalog.save_overrides(&overrides_path) {
         tracing::warn!("Failed to persist model overrides: {e}");
     }
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
@@ -455,24 +431,22 @@ pub async fn delete_model_overrides(
 /// discovered models into the catalog.
 fn attach_probe_result(
     entry: &mut serde_json::Value,
-    probe: &librefang_kernel::provider_health::ProbeResult,
+    probe: &librefang_runtime::provider_health::ProbeResult,
     provider_id: &str,
-    kernel: &dyn librefang_kernel::KernelApi,
+    catalog: &std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog>,
 ) {
     entry["is_local"] = serde_json::json!(true);
     entry["reachable"] = serde_json::json!(probe.reachable);
     entry["latency_ms"] = serde_json::json!(probe.latency_ms);
     if !probe.discovered_models.is_empty() {
         entry["discovered_models"] = serde_json::json!(&probe.discovered_models);
-        // Pre-compute the merged info outside the RCU closure: the closure
-        // may re-run on CAS retry (#3384) so all allocation happens here once.
-        let info: Vec<librefang_kernel::provider_health::DiscoveredModelInfo> =
-            if probe.discovered_model_info.is_empty() {
+        if let Ok(mut cat) = catalog.write() {
+            let info: Vec<_> = if probe.discovered_model_info.is_empty() {
                 probe
                     .discovered_models
                     .iter()
                     .map(
-                        |name| librefang_kernel::provider_health::DiscoveredModelInfo {
+                        |name| librefang_runtime::provider_health::DiscoveredModelInfo {
                             name: name.clone(),
                             parameter_size: None,
                             quantization_level: None,
@@ -486,9 +460,8 @@ fn attach_probe_result(
             } else {
                 probe.discovered_model_info.clone()
             };
-        kernel.model_catalog_update(&mut |cat| {
             cat.merge_discovered_models(provider_id, &info);
-        });
+        }
     }
     if !probe.discovered_model_info.is_empty() {
         entry["discovered_model_info"] = serde_json::json!(&probe.discovered_model_info);
@@ -516,23 +489,13 @@ fn attach_probe_result(
     )
 )]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Snapshot both the provider list and the matching suppression flags
-    // from the same catalog load — racing a `delete_provider_key` /
-    // `enable_provider` mid-iteration would otherwise let the JSON show a
-    // provider with `auth_status: "missing"` AND `suppressed: false` (or
-    // vice versa), giving the dashboard inconsistent state to render.
-    let (provider_list, suppressed_ids): (
-        Vec<librefang_types::model_catalog::ProviderInfo>,
-        std::collections::HashSet<String>,
-    ) = {
-        let catalog = state.kernel.model_catalog_ref().load();
-        let providers = catalog.list_providers().to_vec();
-        let suppressed: std::collections::HashSet<String> = providers
-            .iter()
-            .filter(|p| catalog.is_suppressed(&p.id))
-            .map(|p| p.id.clone())
-            .collect();
-        (providers, suppressed)
+    let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog.list_providers().to_vec()
     };
 
     // Collect local providers that need probing
@@ -540,7 +503,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            librefang_kernel::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
+            librefang_runtime::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
         })
         .map(|(i, p)| {
             // Resolve the provider's api_key env var (catalog field, falling
@@ -566,7 +529,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     let probe_futures: Vec<_> = local_providers
         .iter()
         .map(|(_, id, url, api_key)| {
-            librefang_kernel::provider_health::probe_provider_cached(
+            librefang_runtime::provider_health::probe_provider_cached(
                 id,
                 url,
                 api_key.as_deref(),
@@ -577,7 +540,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     let probe_results = futures::future::join_all(probe_futures).await;
 
     // Index probe results by provider list position for O(1) lookup
-    let mut probe_map: HashMap<usize, librefang_kernel::provider_health::ProbeResult> =
+    let mut probe_map: HashMap<usize, librefang_runtime::provider_health::ProbeResult> =
         HashMap::with_capacity(local_providers.len());
     for ((idx, _, _, _), result) in local_providers.iter().zip(probe_results) {
         probe_map.insert(*idx, result);
@@ -597,7 +560,6 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "proxy_url": p.proxy_url,
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
-            "suppressed": suppressed_ids.contains(&p.id),
         });
 
         // Attach region map so the dashboard can show available regions
@@ -627,11 +589,11 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         // auth_status when the service is not reachable so the dashboard
         // shows "needs setup" instead of "configured".
         if let Some(probe) = probe_map.remove(&i) {
-            attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
+            attach_probe_result(&mut entry, &probe, &p.id, state.kernel.model_catalog_ref());
             if !probe.reachable {
                 entry["auth_status"] = serde_json::json!("missing");
             }
-        } else if librefang_kernel::provider_health::is_local_provider(&p.id) {
+        } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
             // Local HTTP provider with no probe result yet — still label it local.
             entry["is_local"] = serde_json::json!(true);
         }
@@ -664,27 +626,20 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// Returns providers list for the dashboard snapshot endpoint.
 pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json::Value> {
-    // Same single-load suppression snapshot as `list_providers` — see the
-    // comment there for the rationale.
-    let (provider_list, suppressed_ids): (
-        Vec<librefang_types::model_catalog::ProviderInfo>,
-        std::collections::HashSet<String>,
-    ) = {
-        let catalog = state.kernel.model_catalog_ref().load();
-        let providers = catalog.list_providers().to_vec();
-        let suppressed: std::collections::HashSet<String> = providers
-            .iter()
-            .filter(|p| catalog.is_suppressed(&p.id))
-            .map(|p| p.id.clone())
-            .collect();
-        (providers, suppressed)
+    let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog.list_providers().to_vec()
     };
 
     let local_providers: Vec<(usize, String, String, Option<String>)> = provider_list
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            librefang_kernel::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
+            librefang_runtime::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
         })
         .map(|(i, p)| {
             // See sibling site above — same env-var resolution so Open WebUI
@@ -705,7 +660,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
     let probe_futures: Vec<_> = local_providers
         .iter()
         .map(|(_, id, url, api_key)| {
-            librefang_kernel::provider_health::probe_provider_cached(
+            librefang_runtime::provider_health::probe_provider_cached(
                 id,
                 url,
                 api_key.as_deref(),
@@ -715,7 +670,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
         .collect();
     let probe_results = futures::future::join_all(probe_futures).await;
 
-    let mut probe_map: HashMap<usize, librefang_kernel::provider_health::ProbeResult> =
+    let mut probe_map: HashMap<usize, librefang_runtime::provider_health::ProbeResult> =
         HashMap::with_capacity(local_providers.len());
     for ((idx, _, _, _), result) in local_providers.iter().zip(probe_results) {
         probe_map.insert(*idx, result);
@@ -734,14 +689,13 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "proxy_url": p.proxy_url,
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
-            "suppressed": suppressed_ids.contains(&p.id),
         });
         if let Some(probe) = probe_map.remove(&i) {
-            attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
+            attach_probe_result(&mut entry, &probe, &p.id, state.kernel.model_catalog_ref());
             if !probe.reachable {
                 entry["auth_status"] = serde_json::json!("missing");
             }
-        } else if librefang_kernel::provider_health::is_local_provider(&p.id) {
+        } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
             entry["is_local"] = serde_json::json!(true);
         }
         providers.push(entry);
@@ -766,15 +720,17 @@ pub async fn get_provider(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let (provider, models) = {
-        let catalog = state.kernel.model_catalog_ref().load();
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
             Some(p) => {
                 let models: Vec<serde_json::Value> = catalog
                     .models_by_provider(&name)
                     .iter()
                     .map(|m| {
-                        // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
-                        let eff = catalog.effective_capabilities(m);
                         serde_json::json!({
                             "id": m.id,
                             "display_name": m.display_name,
@@ -786,16 +742,9 @@ pub async fn get_provider(
                             "output_cost_per_m": m.output_cost_per_m,
                             "image_input_cost_per_m": m.image_input_cost_per_m,
                             "image_output_cost_per_m": m.image_output_cost_per_m,
-                            "supports_tools": eff.supports_tools,
-                            "supports_vision": eff.supports_vision,
-                            "supports_streaming": eff.supports_streaming,
-                            "supports_thinking": eff.supports_thinking,
-                            "capabilities_catalog": {
-                                "supports_tools": m.supports_tools,
-                                "supports_vision": m.supports_vision,
-                                "supports_streaming": m.supports_streaming,
-                                "supports_thinking": m.supports_thinking,
-                            },
+                            "supports_tools": m.supports_tools,
+                            "supports_vision": m.supports_vision,
+                            "supports_streaming": m.supports_streaming,
                         })
                     })
                     .collect();
@@ -821,7 +770,7 @@ pub async fn get_provider(
     });
 
     // For local providers, run a probe and attach the result
-    if librefang_kernel::provider_health::is_local_provider(&provider.id)
+    if librefang_runtime::provider_health::is_local_provider(&provider.id)
         && !provider.base_url.is_empty()
     {
         let cache = &state.provider_probe_cache;
@@ -835,7 +784,7 @@ pub async fn get_provider(
         let api_key = std::env::var(&env_var)
             .ok()
             .filter(|v| !v.trim().is_empty());
-        let probe = librefang_kernel::provider_health::probe_provider_cached(
+        let probe = librefang_runtime::provider_health::probe_provider_cached(
             &provider.id,
             &provider.base_url,
             api_key.as_deref(),
@@ -843,11 +792,16 @@ pub async fn get_provider(
         )
         .await;
 
-        attach_probe_result(&mut entry, &probe, &provider.id, &*state.kernel);
+        attach_probe_result(
+            &mut entry,
+            &probe,
+            &provider.id,
+            state.kernel.model_catalog_ref(),
+        );
         if !probe.reachable {
             entry["auth_status"] = serde_json::json!("missing");
         }
-    } else if librefang_kernel::provider_health::is_local_provider(&provider.id) {
+    } else if librefang_runtime::provider_health::is_local_provider(&provider.id) {
         entry["is_local"] = serde_json::json!(true);
     }
 
@@ -935,7 +889,6 @@ pub async fn add_custom_model(
             .get("supports_thinking")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         aliases: vec![],
     };
 
@@ -947,12 +900,13 @@ pub async fn add_custom_model(
         return ApiErrorResponse::bad_request(e).into_json_tuple();
     }
 
-    let entry_for_closure = entry.clone();
-    let mut added = false;
-    state.kernel.model_catalog_update(&mut |catalog| {
-        added = catalog.add_custom_model(entry_for_closure.clone());
-    });
-    if !added {
+    let mut catalog = state
+        .kernel
+        .model_catalog_ref()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+
+    if !catalog.add_custom_model(entry) {
         return ApiErrorResponse::conflict(format!(
             "Model '{}' already exists for provider '{}'",
             id, provider
@@ -968,17 +922,11 @@ pub async fn add_custom_model(
         .home_dir()
         .join("data")
         .join("custom_models.json");
-    if let Err(e) = state
-        .kernel
-        .model_catalog_load()
-        .save_custom_models(&custom_path)
-    {
+    if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
-        let id_for_rollback = id.clone();
-        state.kernel.model_catalog_update(&mut move |catalog| {
-            catalog.remove_custom_model(&id_for_rollback);
-        });
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        catalog.remove_custom_model(&id);
+        return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
+            .into_json_tuple();
     }
 
     (
@@ -997,17 +945,17 @@ pub async fn remove_custom_model(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    let mut catalog = state
+        .kernel
+        .model_catalog_ref()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+
     // Snapshot the entry before removing so we can restore it if the
     // subsequent persist fails — keeps the in-memory catalog consistent
     // with disk across failure paths.
-    let model_id_for_closure = model_id.clone();
-    let mut snapshot = None;
-    let mut removed = false;
-    state.kernel.model_catalog_update(&mut |catalog| {
-        snapshot = catalog.find_model(&model_id_for_closure).cloned();
-        removed = catalog.remove_custom_model(&model_id_for_closure);
-    });
-    if !removed {
+    let snapshot = catalog.find_model(&model_id).cloned();
+    if !catalog.remove_custom_model(&model_id) {
         return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id))
             .into_json_tuple();
     }
@@ -1017,18 +965,13 @@ pub async fn remove_custom_model(
         .home_dir()
         .join("data")
         .join("custom_models.json");
-    if let Err(e) = state
-        .kernel
-        .model_catalog_load()
-        .save_custom_models(&custom_path)
-    {
+    if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
         if let Some(entry) = snapshot {
-            state.kernel.model_catalog_update(&mut move |catalog| {
-                catalog.add_custom_model(entry.clone());
-            });
+            catalog.add_custom_model(entry);
         }
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
+            .into_json_tuple();
     }
 
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
@@ -1036,28 +979,12 @@ pub async fn remove_custom_model(
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
 
-#[utoipa::path(
-    post,
-    path = "/api/providers/{name}/key",
-    tag = "models",
-    params(("name" = String, Path, description = "Provider name")),
-    request_body = crate::types::JsonObject,
-    responses(
-        (status = 200, description = "API key set", body = crate::types::JsonObject),
-        (status = 207, description = "API key saved and default provider switched, but one or more agents could not be migrated; response includes `sync_failures`", body = crate::types::JsonObject),
-    )
-)]
+#[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = crate::types::JsonObject, responses((status = 200, description = "API key set", body = crate::types::JsonObject)))]
 pub async fn set_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Shape-check the path-supplied provider name BEFORE we derive an env
-    // var from it. See `docs/issues/set-provider-key-arbitrary-names.md`.
-    if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
-        return ApiErrorResponse::bad_request(msg).into_json_tuple();
-    }
-
     let key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
@@ -1066,56 +993,59 @@ pub async fn set_provider_key(
     };
 
     // Look up env var from catalog; for unknown/custom providers derive one.
-    // The catalog hit is the trust path (operator-curated `api_key_env`);
-    // the derive path crosses a second gate (`check_derived_env_var`) so
-    // path-supplied names can only land env vars that match the
-    // `^[A-Z][A-Z0-9_]{0,63}_API_KEY$` shape — see
-    // `docs/issues/set-provider-key-arbitrary-names.md`.
     let env_var = {
-        let catalog = state.kernel.model_catalog_ref().load();
-        let from_catalog = catalog
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
-            .filter(|env| !env.trim().is_empty());
-        match from_catalog {
-            Some(env) => env,
-            None => {
-                // Custom provider — derive env var: MY_PROVIDER → MY_PROVIDER_API_KEY.
-                let derived = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
-                if let Err(msg) = crate::validation::check_derived_env_var(&derived) {
-                    return ApiErrorResponse::bad_request(msg).into_json_tuple();
-                }
-                derived
-            }
-        }
+            .filter(|env| !env.trim().is_empty())
+            .unwrap_or_else(|| {
+                // Custom provider — derive env var: MY_PROVIDER → MY_PROVIDER_API_KEY
+                format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
+            })
     };
 
     // Write to secrets.env file
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to write secrets.env: {e}"))
+            .into_json_tuple();
     }
 
-    // Set env var in current process so detect_auth picks it up. Serialized
-    // through the process-global env write guard (#5142) — `spawn_blocking`
-    // does NOT serialize concurrent env mutations, it fans out across the
-    // blocking pool.
-    crate::secrets_env::set_env_var_guarded(env_var.clone(), key.clone()).await;
+    // Set env var in current process so detect_auth picks it up.
+    // `std::env::set_var` is not thread-safe in an async context; delegate to
+    // a blocking thread to avoid undefined behaviour in the tokio runtime.
+    {
+        let env_var_clone = env_var.clone();
+        let key_clone = key.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: single mutation on a dedicated blocking thread.
+            unsafe { std::env::set_var(&env_var_clone, &key_clone) };
+        })
+        .await;
+    }
 
     // Re-enable fallback detection (user is adding a key, undo any prior suppress)
     // and refresh auth status.
     {
-        let suppressed_path = state
+        let mut catalog = state
             .kernel
-            .home_dir()
-            .join("data")
-            .join("suppressed_providers.json");
-        let name_for_closure = name.clone();
-        state.kernel.model_catalog_update(&mut move |catalog| {
-            catalog.unsuppress_provider(&name_for_closure);
-            catalog.save_suppressed(&suppressed_path);
-            catalog.detect_auth();
-        });
+            .model_catalog_ref()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog.unsuppress_provider(&name);
+        catalog.save_suppressed(
+            &state
+                .kernel
+                .home_dir()
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
+        catalog.detect_auth();
     }
 
     // Kick off a background probe to validate the new key immediately so the
@@ -1154,7 +1084,11 @@ pub async fn set_provider_key(
     let switched = if !current_has_key && current_provider != name {
         // Find a default model for the newly-keyed provider
         let default_model = {
-            let catalog = state.kernel.model_catalog_ref().load();
+            let catalog = state
+                .kernel
+                .model_catalog_ref()
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             catalog.default_model_for_provider(&name)
         };
         if let Some(model_id) = default_model {
@@ -1241,25 +1175,9 @@ pub async fn set_provider_key(
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
         };
-        let sync_failures = state
+        state
             .kernel
             .sync_default_model_agents(&current_provider, &new_dm);
-        if !sync_failures.is_empty() {
-            let mut resp = serde_json::json!({"status": "saved", "provider": name});
-            resp["switched_default"] = serde_json::json!(true);
-            resp["sync_failures"] = serde_json::json!(sync_failures
-                .iter()
-                .map(|(agent, err)| serde_json::json!({"agent": agent, "error": err}))
-                .collect::<Vec<_>>());
-            resp["message"] = serde_json::json!(format!(
-                "API key saved and default provider switched to '{name}', but {} agent(s) \
-                 could not be migrated and remain pinned to the old provider on disk.",
-                sync_failures.len()
-            ));
-            // Mixed outcome: the key was saved but the fan-out half-applied.
-            // 207 surfaces the partial failure instead of a lying 200.
-            return (StatusCode::MULTI_STATUS, Json(resp));
-        }
     }
 
     let mut resp = serde_json::json!({"status": "saved", "provider": name});
@@ -1280,31 +1198,20 @@ pub async fn delete_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    // Shape-check the path-supplied provider name BEFORE we derive an env
-    // var from it. Mirrors `set_provider_key`; without this gate an admin
-    // could ask the daemon to `remove_var("STRIPE_API_KEY")` (etc.) on the
-    // live process. See `docs/issues/set-provider-key-arbitrary-names.md`.
-    if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
-        return ApiErrorResponse::bad_request(msg).into_json_tuple();
-    }
-
     let env_var = {
-        let catalog = state.kernel.model_catalog_ref().load();
-        let from_catalog = catalog
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
-            .filter(|env| !env.trim().is_empty());
-        match from_catalog {
-            Some(env) => env,
-            None => {
-                // Custom/unknown provider — derive env var from convention.
-                let derived = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
-                if let Err(msg) = crate::validation::check_derived_env_var(&derived) {
-                    return ApiErrorResponse::bad_request(msg).into_json_tuple();
-                }
-                derived
-            }
-        }
+            .filter(|env| !env.trim().is_empty())
+            .unwrap_or_else(|| {
+                // Custom/unknown provider — derive env var from convention
+                format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
+            })
     };
 
     if env_var.is_empty() {
@@ -1315,91 +1222,32 @@ pub async fn delete_provider_key(
     // Remove from secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to update secrets.env: {e}"))
+            .into_json_tuple();
     }
 
-    // Remove from process environment. `std::env::remove_var` carries the
-    // same writer/reader UB contract as `set_var`; serialize it through the
-    // SAME process-global env write guard (#5142) so a remove can never race
-    // a concurrent guarded `set_var`. `spawn_blocking` does NOT serialize.
-    crate::secrets_env::remove_env_var_guarded(env_var.clone()).await;
+    // Remove from process environment
+    std::env::remove_var(&env_var);
 
     // Suppress fallback/CLI detection for this provider and refresh auth
     {
-        let suppressed_path = state
+        let mut catalog = state
             .kernel
-            .home_dir()
-            .join("data")
-            .join("suppressed_providers.json");
-        let name_for_closure = name.clone();
-        state.kernel.model_catalog_update(&mut move |catalog| {
-            catalog.suppress_provider(&name_for_closure);
-            catalog.save_suppressed(&suppressed_path);
-            catalog.detect_auth();
-        });
+            .model_catalog_ref()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog.suppress_provider(&name);
+        catalog.save_suppressed(
+            &state
+                .kernel
+                .home_dir()
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
+        catalog.detect_auth();
     }
 
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
-}
-
-/// POST /api/providers/{name}/enable — Re-enable a previously suppressed
-/// provider.
-///
-/// Pairs with DELETE /api/providers/{name}/key, which writes the provider
-/// id into `suppressed_providers.json` so `detect_auth` stops promoting
-/// the row back to `Configured` / `NotRequired` / `AutoDetected` via
-/// CLI binary probes, local HTTP probes, or alias env vars. For
-/// CLI-shape providers (`claude-code`, `codex-cli`, `gemini-cli`,
-/// `qwen-code`) the existing `set_provider_key` / `set_provider_url`
-/// un-suppress side-effects don't apply — there's no key or URL to
-/// set — so without this endpoint a user who clicked "remove key" on a
-/// CLI provider had no UI to revert. This endpoint is the explicit
-/// re-enable signal and works uniformly for every provider shape.
-///
-/// Idempotent: calling on a non-suppressed provider is a no-op aside
-/// from the `detect_auth` refresh.
-#[utoipa::path(
-    post,
-    path = "/api/providers/{name}/enable",
-    tag = "models",
-    params(("name" = String, Path, description = "Provider name")),
-    responses(
-        (status = 200, description = "Provider re-enabled", body = crate::types::JsonObject),
-    ),
-)]
-pub async fn enable_provider(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
-    let suppressed_path = state
-        .kernel
-        .home_dir()
-        .join("data")
-        .join("suppressed_providers.json");
-    let name_for_closure = name.clone();
-    state.kernel.model_catalog_update(&mut move |catalog| {
-        // Skip the disk write when nothing is suppressed — `save_suppressed`
-        // unlinks the file when the set is empty, so an unconditional save
-        // would touch the FS on every idempotent call.
-        if catalog.is_suppressed(&name_for_closure) {
-            catalog.unsuppress_provider(&name_for_closure);
-            catalog.save_suppressed(&suppressed_path);
-        }
-        catalog.detect_auth();
-    });
-
-    // Kick off a background probe so any key still present in the
-    // environment is re-validated and reflected as `ValidatedKey`
-    // without waiting for the user's next dashboard refresh.
-    state.kernel.clone().spawn_key_validation();
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "enabled",
-            "provider": name,
-        })),
-    )
 }
 
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
@@ -1409,7 +1257,11 @@ pub async fn test_provider(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let (env_var, base_url, key_required) = {
-        let catalog = state.kernel.model_catalog_ref().load();
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
             Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
             None => {
@@ -1425,7 +1277,7 @@ pub async fn test_provider(
     // base_url are API providers missing configuration (e.g. OpenRouter proxied).
     if base_url.is_empty() && !key_required {
         let cli_start = Instant::now();
-        let cli_ok = librefang_kernel::drivers::cli_provider_available(name.as_str());
+        let cli_ok = librefang_runtime::drivers::cli_provider_available(name.as_str());
         let cli_latency = cli_start.elapsed().as_millis();
         state.provider_test_cache.insert(
             name.clone(),
@@ -1457,10 +1309,9 @@ pub async fn test_provider(
     // LocalOffline on failure). Before this, the endpoint only refreshed an
     // in-memory cache — users could start Ollama after LibreFang booted and
     // the dashboard would stay stuck on `local_offline` forever.
-    if librefang_kernel::provider_health::is_local_provider(&name) {
+    if librefang_runtime::provider_health::is_local_provider(&name) {
         let result = state
             .kernel
-            .clone()
             .probe_local_provider(
                 &name, &base_url, false, // user-triggered test — don't escalate to warn!
             )
@@ -1520,7 +1371,7 @@ pub async fn test_provider(
     // a single `byteplus_coding 230 ms` round-trip surfaced on the
     // dashboard as `~500 ms` purely from the rebuilt client. Sharing the
     // pool also lets the second click reuse the warm TLS session.
-    let client = librefang_kernel::provider_health::probe_client();
+    let client = librefang_runtime::provider_health::probe_client();
     let start = std::time::Instant::now();
 
     // ── Bedrock: AWS Signature auth — can't test with simple HTTP ──
@@ -1551,19 +1402,8 @@ pub async fn test_provider(
         api_format,
         Some(librefang_llm_drivers::drivers::ApiFormat::Anthropic)
     );
-    // Native-Ollama providers expose model discovery at `/api/tags`, not
-    // `/v1/models`. The registry reports `ApiFormat::Ollama` after #4810
-    // so probing routes off api_format rather than the provider name —
-    // any future Ollama-protocol server (e.g. Lemonade) auto-inherits
-    // the right probe URL.
-    let is_ollama_shape = matches!(
-        api_format,
-        Some(librefang_llm_drivers::drivers::ApiFormat::Ollama)
-    );
     let test_url_str = if is_anthropic_shape {
         format!("{}/v1/models", base_url.trim_end_matches('/'))
-    } else if is_ollama_shape {
-        format!("{}/api/tags", base_url.trim_end_matches('/'))
     } else {
         match name.as_str() {
             "gemini" | "google" => format!(
@@ -1583,13 +1423,6 @@ pub async fn test_provider(
         req = req
             .header("x-api-key", &api_key_val)
             .header("anthropic-version", "2023-06-01");
-    } else if is_ollama_shape {
-        // Local Ollama doesn't require auth; tunnelled / hosted Ollama
-        // accepts a Bearer token (via `OLLAMA_API_KEY`). Send it only
-        // when present so the localhost happy path stays unchanged.
-        if !api_key_val.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", api_key_val));
-        }
     } else {
         match name.as_str() {
             "gemini" | "google" => {
@@ -1696,27 +1529,14 @@ pub async fn set_provider_url(
             .into_json_tuple();
     }
 
-    // Normalize for the common vLLM / LM Studio mistake: users paste
-    // `http://host:port` (no path) and the OpenAI driver then hits
+    // Normalize for the common Ollama / vLLM / LM Studio mistake: users
+    // paste `http://host:port` (no path) and the OpenAI driver then hits
     // `/chat/completions` instead of `/v1/chat/completions`, getting a 404.
     // If the user gave us a host-only URL (path is empty or just "/"),
     // append `/v1` so OpenAI-compatible endpoints work out of the box.
     // Custom paths (`/api/openai`, `/openai/v1`, etc.) are left alone.
     // Issue #3138.
-    //
-    // Native-Ollama providers (#4810) speak `/api/chat` — appending `/v1`
-    // would produce `/v1/api/chat` and break the deployment. Skip the
-    // append when the provider is registered as Ollama-shape so paste
-    // flows like `http://192.168.1.10:11434` keep working.
-    let is_ollama_shape = matches!(
-        librefang_llm_drivers::drivers::provider_api_format(&name),
-        Some(librefang_llm_drivers::drivers::ApiFormat::Ollama)
-    );
-    let base_url = if is_ollama_shape {
-        base_url_raw.trim_end_matches('/').to_string()
-    } else {
-        normalize_base_url(&base_url_raw)
-    };
+    let base_url = normalize_base_url(&base_url_raw);
 
     // Optional proxy_url in same request
     let proxy_url = body["proxy_url"].as_str().map(|s| s.trim().to_string());
@@ -1734,41 +1554,23 @@ pub async fn set_provider_url(
         }
     }
 
-    // Update catalog in memory. Reconfiguring the URL is an explicit signal
-    // that the user wants this provider active, so undo any suppression set
-    // by a prior `delete_provider_key` (#4803) and refresh auth status —
-    // otherwise a suppressed local provider stays Missing even after the
-    // user re-points it at a reachable host.
+    // Update catalog in memory
     {
-        let name_for_closure = name.clone();
-        let base_url_for_closure = base_url.clone();
-        let proxy_url_for_closure = proxy_url.clone();
-        let suppressed_path = state
+        let mut catalog = state
             .kernel
-            .home_dir()
-            .join("data")
-            .join("suppressed_providers.json");
-        state.kernel.model_catalog_update(&mut move |catalog| {
-            catalog.set_provider_url(&name_for_closure, &base_url_for_closure);
-            if let Some(ref pu) = proxy_url_for_closure {
-                catalog.set_provider_proxy_url(&name_for_closure, pu);
-            }
-            // Skip the unsuppress + disk write when nothing is suppressed —
-            // otherwise every URL edit (including those on already-active
-            // providers) issues a no-op `remove_file` on
-            // `suppressed_providers.json`.
-            if catalog.is_suppressed(&name_for_closure) {
-                catalog.unsuppress_provider(&name_for_closure);
-                catalog.save_suppressed(&suppressed_path);
-            }
-            catalog.detect_auth();
-        });
+            .model_catalog_ref()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog.set_provider_url(&name, &base_url);
+        if let Some(ref pu) = proxy_url {
+            catalog.set_provider_proxy_url(&name, pu);
+        }
     }
 
     // Persist to config.toml [provider_urls] section
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to save config: {e}")).into_json_tuple();
     }
     if let Some(ref pu) = proxy_url {
         if let Err(e) = upsert_provider_proxy_url(&config_path, &name, pu) {
@@ -1781,7 +1583,11 @@ pub async fn set_provider_url(
     // the listing request — without this, they return 401 even when the
     // backing model server is healthy.
     let probe_env_var = {
-        let catalog = state.kernel.model_catalog_ref().load();
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1791,7 +1597,7 @@ pub async fn set_provider_url(
     let probe_api_key = std::env::var(&probe_env_var)
         .ok()
         .filter(|v| !v.trim().is_empty());
-    let probe = librefang_kernel::provider_health::probe_provider(
+    let probe = librefang_runtime::provider_health::probe_provider(
         &name,
         &base_url,
         probe_api_key.as_deref(),
@@ -1800,28 +1606,28 @@ pub async fn set_provider_url(
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
-        // Pre-compute info outside the RCU closure (closure may retry on CAS).
-        let info: Vec<librefang_kernel::provider_health::DiscoveredModelInfo> =
-            if probe.discovered_model_info.is_empty() {
+        if let Ok(mut catalog) = state.kernel.model_catalog_ref().write() {
+            let info: Vec<_> = if probe.discovered_model_info.is_empty() {
                 probe
                     .discovered_models
                     .iter()
-                    .map(|n| librefang_kernel::provider_health::DiscoveredModelInfo {
-                        name: n.clone(),
-                        parameter_size: None,
-                        quantization_level: None,
-                        family: None,
-                        families: None,
-                        size: None,
-                        capabilities: vec![],
-                    })
+                    .map(
+                        |n| librefang_runtime::provider_health::DiscoveredModelInfo {
+                            name: n.clone(),
+                            parameter_size: None,
+                            quantization_level: None,
+                            family: None,
+                            families: None,
+                            size: None,
+                            capabilities: vec![],
+                        },
+                    )
                     .collect()
             } else {
                 probe.discovered_model_info.clone()
             };
-        state.kernel.model_catalog_update(&mut |catalog| {
             catalog.merge_discovered_models(&name, &info);
-        });
+        }
     }
 
     let mut resp = serde_json::json!({
@@ -1850,10 +1656,8 @@ pub async fn set_provider_url(
     path = "/api/providers/{name}/default",
     tag = "models",
     params(("name" = String, Path, description = "Provider identifier")),
-    request_body(content = Option<crate::types::JsonObject>, content_type = "application/json", description = "Optional `{ \"model\": \"model-id\" }` to override the auto-selected default"),
     responses(
         (status = 200, description = "Default provider updated", body = crate::types::JsonObject),
-        (status = 207, description = "Default provider updated, but one or more agents could not be migrated; response includes `sync_failures`", body = crate::types::JsonObject),
         (status = 400, description = "No model found for provider"),
         (status = 404, description = "Provider not found")
     )
@@ -1875,7 +1679,11 @@ pub async fn set_default_provider(
 
     // Verify the provider exists in the catalog
     let (default_model, env_var) = {
-        let catalog = state.kernel.model_catalog_ref().load();
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let provider = match catalog.get_provider(&name) {
             Some(p) => p.clone(),
             None => {
@@ -1939,41 +1747,24 @@ pub async fn set_default_provider(
     }
 
     // Update registry entries for agents that were tracking the old default
-    let sync_failures = state
+    state
         .kernel
         .sync_default_model_agents(&old_provider, &new_dm);
 
-    let mut body = serde_json::json!({
-        "status": "updated",
-        "provider": name,
-        "model": model_id,
-        "api_key_env": env_var,
-        "persisted": persisted,
-    });
-    if sync_failures.is_empty() {
-        (StatusCode::OK, Json(body))
-    } else {
-        body["sync_failures"] = serde_json::json!(sync_failures
-            .iter()
-            .map(|(agent, err)| serde_json::json!({"agent": agent, "error": err}))
-            .collect::<Vec<_>>());
-        // Some agents stayed pinned to the old provider on disk — surface
-        // the partial failure instead of a lying 200 (#5137).
-        (StatusCode::MULTI_STATUS, Json(body))
-    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "updated",
+            "provider": name,
+            "model": model_id,
+            "api_key_env": env_var,
+            "persisted": persisted,
+        })),
+    )
 }
 
 /// Safely persist the `[default_model]` section into config.toml using proper
 /// TOML serialization (avoids format-string injection).
-///
-/// Read failures other than `NotFound` are propagated rather than silently
-/// degrading to an empty config — the previous `unwrap_or_default()` path
-/// would destroy every operator-authored section (e.g. `[email]`,
-/// `[telegram]`, `[proxy]`) on any transient `EACCES` / `EIO` because the
-/// rewrite then serialized a fresh table that contained only
-/// `[default_model]`. See #5116. The on-disk replacement still goes through
-/// [`crate::atomic_write`] so a crash between the temp-write and the rename
-/// can never leave a partially-written `config.toml`.
 fn persist_default_model(
     config_path: &std::path::Path,
     provider: &str,
@@ -1991,16 +1782,7 @@ fn persist_default_model(
         toml::Value::String(api_key_env.to_string()),
     );
 
-    // Read existing config. A missing file is fine — the daemon may write
-    // config.toml for the first time here — but any *other* read error
-    // (permission denied, I/O failure) must abort: degrading to an empty
-    // string would wipe out every other operator-authored section on
-    // rewrite (refs #5116).
-    let content = match std::fs::read_to_string(config_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(Box::new(e)),
-    };
+    let content = std::fs::read_to_string(config_path).unwrap_or_default();
     let mut doc: toml::Value = if content.trim().is_empty() {
         toml::Value::Table(toml::map::Map::new())
     } else {
@@ -2040,116 +1822,6 @@ fn normalize_base_url(input: &str) -> String {
         // Bare host[:port] — assume OpenAI-compatible default.
         format!("{trimmed}/v1")
     }
-}
-
-// ── Credential pools (#4965) ────────────────────────────────────────────────
-
-/// Render a `CredentialPoolStrategy` into the snake_case string used in
-/// `config.toml`. Kept inline so the API JSON shape matches the config TOML
-/// exactly — `round_robin`, never `RoundRobin` — and so we never depend on
-/// `Debug` formatting (which would silently change response shape on a
-/// future variant rename).
-fn strategy_label(s: &librefang_llm_drivers::PoolStrategy) -> &'static str {
-    use librefang_llm_drivers::PoolStrategy;
-    match s {
-        PoolStrategy::FillFirst => "fill_first",
-        PoolStrategy::RoundRobin => "round_robin",
-        PoolStrategy::Random => "random",
-        PoolStrategy::LeastUsed => "least_used",
-    }
-}
-
-/// GET /api/credential-pools — Per-provider credential pool snapshot.
-///
-/// Returns an array of provider pools (sorted by provider name) with their
-/// strategy, available/total key counts, and per-credential redacted
-/// snapshots. The raw API key is never serialized — only a `key_hint`
-/// (last 4 chars prefixed by `****`) and per-key telemetry are included.
-///
-/// Each credential entry has the shape:
-/// ```json
-/// {
-///   "label": "Primary",
-///   "key_hint": "****abcd",
-///   "priority": 10,
-///   "request_count": 42,
-///   "is_exhausted": false,
-///   "cooldown_remaining_secs": null
-/// }
-/// ```
-/// `cooldown_remaining_secs` is `null` while available, a non-negative
-/// integer (seconds) while in a 429/402/5xx cooldown, or the literal
-/// string `"permanent"` for keys marked permanently invalid by an auth
-/// failure (the kernel encodes this as the `u64::MAX` sentinel
-/// internally; this endpoint converts it to `"permanent"` so SDK
-/// consumers do not encounter a `2^64 - 1` magic number).
-///
-/// Labels are carried with each materialized credential, so partial
-/// env-var resolution (a configured pool entry whose env var is unset at
-/// boot time) never shifts a label onto the wrong key/cooldown row.
-///
-/// Issue #4965: backs the dashboard Providers page credential-pools card
-/// and the `librefang auth pool list` CLI command.
-#[utoipa::path(
-    get,
-    path = "/api/credential-pools",
-    tag = "models",
-    operation_id = "list_credential_pools",
-    responses(
-        (status = 200, description = "Per-provider credential pool snapshots. \
-            Each entry has `provider`, `strategy` (snake_case: \
-            fill_first / round_robin / random / least_used), \
-            `available_count`, `total_count`, and `credentials[]` with \
-            fields `label`, `key_hint` (last 4 chars prefixed by `****`), \
-            `priority`, `request_count`, `is_exhausted`, and \
-            `cooldown_remaining_secs` (null | non-negative integer seconds \
-            | literal string \"permanent\").",
-         body = Vec<serde_json::Value>)
-    )
-)]
-pub async fn list_credential_pools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // `credential_pool_summaries` is part of the `KernelApi` trait that
-    // `AppState::kernel` already implements via the inherent forward in
-    // `subsystem_forwards.rs` — the method is in scope on `state.kernel`
-    // without an explicit `use` import.
-    let summaries = state.kernel.credential_pool_summaries();
-
-    let mut out: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
-    for (_provider, summary) in summaries {
-        let credentials: Vec<serde_json::Value> = summary
-            .credentials
-            .iter()
-            .map(|c| {
-                // The label travels with the credential inside the pool
-                // (see PooledCredential::label), so a missing env-var skip
-                // at boot can never shift labels onto the wrong row.
-                let cooldown = c.cooldown_remaining_secs.map(|secs| {
-                    if secs == u64::MAX {
-                        serde_json::json!("permanent")
-                    } else {
-                        serde_json::json!(secs)
-                    }
-                });
-                serde_json::json!({
-                    "label": c.label,
-                    "key_hint": c.key_hint,
-                    "priority": c.priority,
-                    "request_count": c.request_count,
-                    "is_exhausted": c.is_exhausted,
-                    "cooldown_remaining_secs": cooldown,
-                })
-            })
-            .collect();
-        out.push(serde_json::json!({
-            "provider": summary.provider,
-            "strategy": strategy_label(&summary.strategy),
-            "available_count": summary.available_count,
-            "total_count": summary.total_count,
-            "credentials": credentials,
-        }));
-    }
-
-    (StatusCode::OK, Json(out))
 }
 
 #[cfg(test)]
@@ -2328,7 +2000,7 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
     // Clean up expired flows first
     COPILOT_FLOWS.retain(|_, state| state.expires_at > Instant::now());
 
-    match librefang_kernel::copilot_oauth::start_device_flow().await {
+    match librefang_runtime::copilot_oauth::start_device_flow().await {
         Ok(resp) => {
             let poll_id = uuid::Uuid::new_v4().to_string();
 
@@ -2391,12 +2063,12 @@ pub async fn copilot_oauth_poll(
     let device_code = flow.device_code.clone();
     drop(flow);
 
-    match librefang_kernel::copilot_oauth::poll_device_flow(&device_code).await {
-        librefang_kernel::copilot_oauth::DeviceFlowStatus::Pending => (
+    match librefang_runtime::copilot_oauth::poll_device_flow(&device_code).await {
+        librefang_runtime::copilot_oauth::DeviceFlowStatus::Pending => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "pending"})),
         ),
-        librefang_kernel::copilot_oauth::DeviceFlowStatus::Complete { access_token } => {
+        librefang_runtime::copilot_oauth::DeviceFlowStatus::Complete { access_token } => {
             // Save to secrets.env
             let secrets_path = state.kernel.home_dir().join("secrets.env");
             if let Err(e) = write_secret_env(&secrets_path, "GITHUB_TOKEN", &access_token) {
@@ -2408,15 +2080,25 @@ pub async fn copilot_oauth_poll(
                 );
             }
 
-            // Set in current process. Serialized through the process-global
-            // env write guard (#5142) — `spawn_blocking` does NOT serialize
-            // concurrent env mutations.
-            crate::secrets_env::set_env_var_guarded("GITHUB_TOKEN", access_token.to_string()).await;
+            // Set in current process.
+            // `std::env::set_var` is not thread-safe inside async; push to a
+            // blocking thread to avoid UB in the multithreaded tokio runtime.
+            {
+                let token = access_token.to_string();
+                let _ = tokio::task::spawn_blocking(move || {
+                    // SAFETY: single mutation on a dedicated blocking thread.
+                    unsafe { std::env::set_var("GITHUB_TOKEN", &token) };
+                })
+                .await;
+            }
 
             // Refresh auth detection
-            state.kernel.model_catalog_update(&mut |catalog| {
-                catalog.detect_auth();
-            });
+            state
+                .kernel
+                .model_catalog_ref()
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .detect_auth();
 
             // Clean up flow state
             COPILOT_FLOWS.remove(&poll_id);
@@ -2426,7 +2108,7 @@ pub async fn copilot_oauth_poll(
                 Json(serde_json::json!({"status": "complete"})),
             )
         }
-        librefang_kernel::copilot_oauth::DeviceFlowStatus::SlowDown { new_interval } => {
+        librefang_runtime::copilot_oauth::DeviceFlowStatus::SlowDown { new_interval } => {
             // Update interval
             if let Some(mut f) = COPILOT_FLOWS.get_mut(&poll_id) {
                 f.interval = new_interval;
@@ -2436,21 +2118,21 @@ pub async fn copilot_oauth_poll(
                 Json(serde_json::json!({"status": "pending", "interval": new_interval})),
             )
         }
-        librefang_kernel::copilot_oauth::DeviceFlowStatus::Expired => {
+        librefang_runtime::copilot_oauth::DeviceFlowStatus::Expired => {
             COPILOT_FLOWS.remove(&poll_id);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "expired"})),
             )
         }
-        librefang_kernel::copilot_oauth::DeviceFlowStatus::AccessDenied => {
+        librefang_runtime::copilot_oauth::DeviceFlowStatus::AccessDenied => {
             COPILOT_FLOWS.remove(&poll_id);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "denied"})),
             )
         }
-        librefang_kernel::copilot_oauth::DeviceFlowStatus::Error(e) => (
+        librefang_runtime::copilot_oauth::DeviceFlowStatus::Error(e) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "error", "error": e})),
         ),
@@ -2469,28 +2151,27 @@ pub async fn copilot_oauth_poll(
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
     let mirror = &cfg.registry.registry_mirror;
-    match librefang_kernel::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
+    match librefang_runtime::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
         Ok(result) => {
             // Refresh the in-memory catalog so the new models are available immediately
             {
-                let home_dir = state.kernel.home_dir().to_path_buf();
+                let mut catalog = state
+                    .kernel
+                    .model_catalog_ref()
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                catalog.load_cached_catalog_for(state.kernel.home_dir());
                 let cfg = state.kernel.config_ref();
-                let provider_regions = cfg.provider_regions.clone();
-                let provider_urls = cfg.provider_urls.clone();
-                drop(cfg);
-                state.kernel.model_catalog_update(&mut move |catalog| {
-                    catalog.load_cached_catalog_for(&home_dir);
-                    if !provider_regions.is_empty() {
-                        let region_urls = catalog.resolve_region_urls(&provider_regions);
-                        if !region_urls.is_empty() {
-                            catalog.apply_url_overrides(&region_urls);
-                        }
+                if !cfg.provider_regions.is_empty() {
+                    let region_urls = catalog.resolve_region_urls(&cfg.provider_regions);
+                    if !region_urls.is_empty() {
+                        catalog.apply_url_overrides(&region_urls);
                     }
-                    if !provider_urls.is_empty() {
-                        catalog.apply_url_overrides(&provider_urls);
-                    }
-                    catalog.detect_auth();
-                });
+                }
+                if !cfg.provider_urls.is_empty() {
+                    catalog.apply_url_overrides(&cfg.provider_urls);
+                }
+                catalog.detect_auth();
             }
             (
                 StatusCode::OK,
@@ -2517,7 +2198,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// GET /api/catalog/status — Check last catalog sync time.
 #[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = crate::types::JsonObject)))]
 pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let last_sync = librefang_kernel::catalog_sync::last_sync_time_for(state.kernel.home_dir());
+    let last_sync = librefang_runtime::catalog_sync::last_sync_time_for(state.kernel.home_dir());
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))
@@ -2525,7 +2206,7 @@ pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// GET /api/providers/ollama/detect — Probe localhost for Ollama availability
 pub async fn detect_ollama() -> impl IntoResponse {
-    let client = match librefang_kernel::http_client::client_builder()
+    let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
     {
@@ -2634,10 +2315,7 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("not found"));
+        assert!(json["error"].as_str().unwrap().contains("not found"));
     }
 
     #[test]

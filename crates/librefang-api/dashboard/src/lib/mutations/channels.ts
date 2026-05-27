@@ -1,37 +1,40 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  configureChannel,
+  testChannel,
   reloadChannels,
-  saveSidecarConfig,
   sendCommsMessage,
   postCommsTask,
 } from "../http/client";
 import { channelKeys, commsKeys } from "../queries/keys";
 
-export function useReloadChannels() {
+export function useConfigureChannel() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: reloadChannels,
+    mutationFn: ({
+      channelName,
+      config,
+    }: {
+      channelName: string;
+      config: Record<string, unknown>;
+    }) => configureChannel(channelName, config),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: channelKeys.all });
     },
   });
 }
 
-// Save a sidecar channel's schema-driven config (Phase 5,
-// sidecar-channel-configure). Invalidates the whole `channelKeys.all`
-// subtree because a successful save flips the channel from "discovery"
-// to "configured" — both the top-level list AND any per-channel detail
-// view need to re-fetch.
-export function useSaveSidecarConfig() {
+// Fire-and-forget: one-shot probe, test result returned to caller, no cache to invalidate.
+export function useTestChannel() {
+  return useMutation({
+    mutationFn: (channelName: string) => testChannel(channelName),
+  });
+}
+
+export function useReloadChannels() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      name,
-      values,
-    }: {
-      name: string;
-      values: Record<string, string>;
-    }) => saveSidecarConfig(name, values),
+    mutationFn: reloadChannels,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: channelKeys.all });
     },
@@ -47,11 +50,7 @@ export function useSendCommsMessage() {
       message: string;
     }) => sendCommsMessage(payload),
     onSuccess: () => {
-      // Sending a message changes the events feed and may shift the
-      // topology graph (new edge appears when two agents first
-      // converse). Both live under `commsKeys.lists()`; per-event
-      // detail caches are unaffected.
-      qc.invalidateQueries({ queryKey: commsKeys.lists() });
+      qc.invalidateQueries({ queryKey: commsKeys.all });
     },
   });
 }
@@ -65,9 +64,7 @@ export function usePostCommsTask() {
       assigned_to?: string;
     }) => postCommsTask(payload),
     onSuccess: () => {
-      // Posting a task emits a comms event; same invalidation scope as
-      // useSendCommsMessage.
-      qc.invalidateQueries({ queryKey: commsKeys.lists() });
+      qc.invalidateQueries({ queryKey: commsKeys.all });
     },
   });
 }

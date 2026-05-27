@@ -4,8 +4,6 @@ use chrono::Utc;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 
 /// Derive a short display label for a session from its first user message.
 ///
@@ -52,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 /// Result from a full-text session search.
@@ -80,17 +79,6 @@ pub struct Session {
     pub context_window_tokens: u64,
     /// Optional human-readable session label.
     pub label: Option<String>,
-    /// Per-session model override (issue #4898).
-    ///
-    /// When `Some`, `run_agent_loop` / `run_agent_loop_streaming` shadow
-    /// the agent manifest at entry and apply this override before any
-    /// LLM dispatch, so all 20+ `manifest.model.{model,provider}` read
-    /// sites in the loop transparently see the resolved effective model.
-    ///
-    /// Format: `"<provider>/<model>"` (sets both provider and model) or
-    /// `"<model>"` (model only — provider stays as agent manifest default).
-    /// `None` means "use the agent default" — fully backward compatible.
-    pub model_override: Option<String>,
     /// Monotonically incremented on every mutation to `messages`.
     /// Used to skip redundant repair passes when the history hasn't changed.
     pub messages_generation: u64,
@@ -192,13 +180,13 @@ pub struct SessionExport {
 /// Session store backed by SQLite.
 #[derive(Clone)]
 pub struct SessionStore {
-    pool: Pool<SqliteConnectionManager>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl SessionStore {
     /// Create a new session store wrapping the given connection.
-    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { pool }
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
     }
 
     /// Best-effort reconcile of the FTS index against `sessions`.
@@ -214,8 +202,8 @@ impl SessionStore {
     /// usable, full-text search just degrades to whatever the index
     /// currently holds.
     pub fn reconcile_fts_index(&self) {
-        let Ok(conn) = self.pool.get() else {
-            warn!("session FTS reconcile: failed to acquire pool connection");
+        let Ok(conn) = self.conn.lock() else {
+            warn!("session FTS reconcile: failed to lock connection");
             return;
         };
 
@@ -259,48 +247,41 @@ impl SessionStore {
 
     /// Load a session from the database.
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override, messages_generation FROM sessions WHERE id = ?1")
-            .map_err(LibreFangError::memory)?;
+            .prepare("SELECT agent_id, messages, context_window_tokens, label FROM sessions WHERE id = ?1")
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
             let agent_str: String = row.get(0)?;
             let messages_blob: Vec<u8> = row.get(1)?;
             let tokens: i64 = row.get(2)?;
             let label: Option<String> = row.get(3).unwrap_or(None);
-            let model_override: Option<String> = row.get(4).unwrap_or(None);
-            let messages_generation: i64 = row.get(5).unwrap_or(0);
-            Ok((
-                agent_str,
-                messages_blob,
-                tokens,
-                label,
-                model_override,
-                messages_generation,
-            ))
+            Ok((agent_str, messages_blob, tokens, label))
         });
 
         match result {
-            Ok((agent_str, messages_blob, tokens, label, model_override, messages_generation)) => {
+            Ok((agent_str, messages_blob, tokens, label)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
-                    .map_err(LibreFangError::memory)?;
-                let messages: Vec<Message> =
-                    rmp_serde::from_slice(&messages_blob).map_err(LibreFangError::serialization)?;
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let messages: Vec<Message> = rmp_serde::from_slice(&messages_blob)
+                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
                     messages,
                     context_window_tokens: tokens as u64,
                     label,
-                    model_override,
-                    messages_generation: messages_generation.max(0) as u64,
+                    messages_generation: 0,
                     last_repaired_generation: None,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::memory(e)),
+            Err(e) => Err(LibreFangError::Memory(e.to_string())),
         }
     }
 
@@ -309,10 +290,13 @@ impl SessionStore {
         &self,
         session_id: SessionId,
     ) -> LibreFangResult<Option<(Session, String)>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override, messages_generation FROM sessions WHERE id = ?1")
-            .map_err(LibreFangError::memory)?;
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at FROM sessions WHERE id = ?1")
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
             let agent_str: String = row.get(0)?;
@@ -320,34 +304,16 @@ impl SessionStore {
             let tokens: i64 = row.get(2)?;
             let label: Option<String> = row.get(3).unwrap_or(None);
             let created_at: String = row.get(4)?;
-            let model_override: Option<String> = row.get(5).unwrap_or(None);
-            let messages_generation: i64 = row.get(6).unwrap_or(0);
-            Ok((
-                agent_str,
-                messages_blob,
-                tokens,
-                label,
-                created_at,
-                model_override,
-                messages_generation,
-            ))
+            Ok((agent_str, messages_blob, tokens, label, created_at))
         });
 
         match result {
-            Ok((
-                agent_str,
-                messages_blob,
-                tokens,
-                label,
-                created_at,
-                model_override,
-                messages_generation,
-            )) => {
+            Ok((agent_str, messages_blob, tokens, label, created_at)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
-                    .map_err(LibreFangError::memory)?;
-                let messages: Vec<Message> =
-                    rmp_serde::from_slice(&messages_blob).map_err(LibreFangError::serialization)?;
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let messages: Vec<Message> = rmp_serde::from_slice(&messages_blob)
+                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 Ok(Some((
                     Session {
                         id: session_id,
@@ -355,45 +321,24 @@ impl SessionStore {
                         messages,
                         context_window_tokens: tokens as u64,
                         label,
-                        model_override,
-                        messages_generation: messages_generation.max(0) as u64,
+                        messages_generation: 0,
                         last_repaired_generation: None,
                     },
                     created_at,
                 )))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::memory(e)),
+            Err(e) => Err(LibreFangError::Memory(e.to_string())),
         }
     }
 
-    /// Hard ceiling on messages persisted per session, applied as a final
-    /// defense-in-depth guard before the blob is written to SQLite.
-    ///
-    /// This cap exists to bound worst-case DB blob size and cold-reload RAM
-    /// (introduced in #2929 to keep the 256 MB fly.io deployment from OOMing
-    /// when a long-running session is loaded back in). It is intentionally
-    /// set well above the runtime trim hard ceiling so it is normally inert.
-    ///
-    /// The runtime trim cap (`agent_loop::history::DEFAULT_MAX_HISTORY_MESSAGES`,
-    /// configurable per-agent via `AgentManifest.max_history_messages` and
-    /// globally via `KernelConfig.max_history_messages`, then clamped to the
-    /// `agent_loop::history::MAX_HISTORY_MESSAGES` ceiling) is what actually
-    /// shapes persisted history under normal operation. Pre-#5121 this
-    /// persistence cap was 200, low enough that a deliberately configured
-    /// `max_history_messages > 200` would silently lose context across daemon
-    /// restarts. 2000 stays well above the runtime ceiling while still bounding
-    /// the worst case at ~2 MB per blob assuming a ~1 KB average message.
-    ///
-    /// When truncation does fire, `save_session` emits a `warn!` log with
-    /// `agent_id`, `session_id`, `requested_count`, and `cap` so operators
-    /// are not blind to silent context loss.
-    ///
-    /// The value is sourced from
-    /// [`librefang_types::config::MAX_PERSISTED_SESSION_MESSAGES`] (#5138)
-    /// so the substrate enforcement and the config-load warning for
-    /// `cron_session_max_messages` cannot drift apart.
-    const MAX_PERSISTED_MESSAGES: usize = librefang_types::config::MAX_PERSISTED_SESSION_MESSAGES;
+    /// Maximum number of messages persisted per session.  Older messages beyond
+    /// this limit are trimmed before the blob is written to SQLite.  The
+    /// in-memory limit (agent_loop::DEFAULT_MAX_HISTORY_MESSAGES = 40, now
+    /// overridable per-agent and globally) is much lower,
+    /// so this cap only affects sessions that were built up over many turns
+    /// that were individually trimmed in memory but accumulated on disk.
+    const MAX_PERSISTED_MESSAGES: usize = 200;
 
     /// Save a session to the database and update the FTS5 index.
     ///
@@ -401,29 +346,21 @@ impl SessionStore {
     /// a single transaction so a crash between them cannot leave the session row
     /// and the FTS index inconsistent.
     pub fn save_session(&self, session: &Session) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         // Trim the tail of the message history before serialising so the
         // stored blob never exceeds MAX_PERSISTED_MESSAGES.  We keep the
         // *most recent* messages (slice from the end) so context is preserved.
-        // The cap is set well above the runtime in-memory clamp, so in
-        // practice this branch only fires for misconfigured agents or
-        // long-running cron sessions; when it does fire, emit a `warn!`
-        // so the silent context loss surfaces in logs (#5121).
-        let requested_count = session.messages.len();
-        let messages_to_persist: &[Message] = if requested_count > Self::MAX_PERSISTED_MESSAGES {
-            warn!(
-                agent_id = %session.agent_id.0,
-                session_id = %session.id.0,
-                requested_count,
-                cap = Self::MAX_PERSISTED_MESSAGES,
-                "session history exceeds persistence cap; truncating to most-recent window"
-            );
-            &session.messages[requested_count - Self::MAX_PERSISTED_MESSAGES..]
-        } else {
-            &session.messages
-        };
-        let messages_blob =
-            rmp_serde::to_vec_named(messages_to_persist).map_err(LibreFangError::serialization)?;
+        let messages_to_persist: &[Message] =
+            if session.messages.len() > Self::MAX_PERSISTED_MESSAGES {
+                &session.messages[session.messages.len() - Self::MAX_PERSISTED_MESSAGES..]
+            } else {
+                &session.messages
+            };
+        let messages_blob = rmp_serde::to_vec_named(messages_to_persist)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
 
         // Extract FTS content before acquiring the transaction so we don't hold
@@ -434,12 +371,11 @@ impl SessionStore {
 
         // Wrap session upsert + FTS update in a single transaction so a crash
         // between the three statements cannot leave session and FTS data
-        // inconsistent. `unchecked_transaction` is safe here because we own
-        // the `PooledConnection` for the duration of the transaction; no
-        // other thread can access this `Connection`.
+        // inconsistent. `unchecked_transaction` is safe here because we hold
+        // the Mutex exclusively (no other thread can access this Connection).
         let tx = conn
             .unchecked_transaction()
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         // `message_count` is denormalised here so `list_sessions()` can
         // render the count column without deserialising the messages blob
@@ -448,15 +384,10 @@ impl SessionStore {
         // derived by decoding the blob.
         let message_count = messages_to_persist.len() as i64;
 
-        // Persist `messages_generation` (#5138) so the repair-skip
-        // optimisation in the runtime survives a reload. Without the
-        // column, every cold load reset the counter to 0 and forced a
-        // full repair pass on the first post-load save even when the
-        // stored blob was already repaired.
         tx.execute(
-            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, messages_generation = ?7, updated_at = ?8",
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, updated_at = ?7",
             rusqlite::params![
                 session_id_str,
                 session.agent_id.0.to_string(),
@@ -464,11 +395,10 @@ impl SessionStore {
                 session.context_window_tokens as i64,
                 session.label.as_deref(),
                 message_count,
-                session.messages_generation as i64,
                 now,
             ],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         // Delete the existing FTS row and insert the fresh content. Failures
         // here MUST abort the transaction — previously they were logged and
@@ -480,7 +410,7 @@ impl SessionStore {
             "DELETE FROM sessions_fts WHERE session_id = ?1",
             rusqlite::params![session_id_str],
         )
-        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+        .map_err(|e| LibreFangError::Memory(format!("FTS delete failed: {e}")))?;
 
         // Always insert a FTS row, even when content is empty. The v33 migration
         // backfills a placeholder row for every session so it remains visible to
@@ -490,42 +420,21 @@ impl SessionStore {
             "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
             rusqlite::params![session_id_str, agent_id_str, content],
         )
-        .map_err(|e| LibreFangError::memory_msg(format!("FTS insert failed: {e}")))?;
+        .map_err(|e| LibreFangError::Memory(format!("FTS insert failed: {e}")))?;
 
-        tx.commit().map_err(LibreFangError::memory)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
     /// Extract concatenated text content from a list of messages.
-    ///
-    /// Streams each message's text into a single pre-sized `String` instead of
-    /// allocating an intermediate `Vec<String>` followed by `.join("\n")` on
-    /// every save (this runs in the FTS save hot path — see `save_session`).
-    /// The output is byte-identical to the previous
-    /// `iter().map(text_content).filter(non-empty).collect::<Vec<_>>().join("\n")`
-    /// implementation; the regression test
-    /// `extract_text_content_matches_legacy_join_shape` pins that contract.
     fn extract_text_content(messages: &[Message]) -> String {
-        // Capacity estimate: sum of every message's text length, plus one
-        // separator byte per message (an upper bound — empties will be
-        // skipped, and the final separator is never written, so we may
-        // over-allocate by a handful of bytes in exchange for never
-        // re-growing in the common case).
-        let estimated: usize = messages.iter().map(|m| m.content.text_length() + 1).sum();
-        let mut out = String::with_capacity(estimated);
-        let mut first = true;
-        for m in messages {
-            let text = m.content.text_content();
-            if text.is_empty() {
-                continue;
-            }
-            if !first {
-                out.push('\n');
-            }
-            out.push_str(&text);
-            first = false;
-        }
-        out
+        messages
+            .iter()
+            .map(|m| m.content.text_content())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Delete a session from the database and its FTS5 index entry.
@@ -539,37 +448,44 @@ impl SessionStore {
     /// the FTS error and roll the parent DELETE back. A subsequent retry
     /// re-attempts the whole pair atomically.
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let id_str = session_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         tx.execute(
             "DELETE FROM sessions WHERE id = ?1",
             rusqlite::params![id_str],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         tx.execute(
             "DELETE FROM sessions_fts WHERE session_id = ?1",
             rusqlite::params![id_str],
         )
-        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
-        tx.commit().map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(format!("FTS delete failed: {e}")))?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
     /// Return all session IDs belonging to an agent.
     pub fn get_agent_session_ids(&self, agent_id: AgentId) -> LibreFangResult<Vec<SessionId>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id FROM sessions WHERE agent_id = ?1 ORDER BY created_at DESC")
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
                 let id_str: String = row.get(0)?;
                 Ok(id_str)
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let mut ids = Vec::new();
         for id_str in rows.flatten() {
             if let Ok(uuid) = uuid::Uuid::parse_str(&id_str) {
@@ -597,7 +513,10 @@ impl SessionStore {
         since_ms: u64,
         exclude_session: Option<SessionId>,
     ) -> LibreFangResult<u32> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         // `updated_at` is stored as RFC3339 strings, not millis — convert
         // the timestamp on the Rust side so the comparison is a simple
         // lexicographic compare (RFC3339 sorts correctly).
@@ -620,14 +539,14 @@ impl SessionStore {
                     rusqlite::params![agent_id.0.to_string(), since_rfc3339, sid.0.to_string()],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?,
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?,
             None => conn
                 .query_row(
                     "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND updated_at > ?2",
                     rusqlite::params![agent_id.0.to_string(), since_rfc3339],
                     |row| row.get(0),
                 )
-                .map_err(LibreFangError::memory)?,
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?,
         };
         Ok(count.max(0) as u32)
     }
@@ -644,7 +563,10 @@ impl SessionStore {
         limit: u32,
         exclude_session: Option<SessionId>,
     ) -> LibreFangResult<Vec<String>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         // Fall back to the epoch (not "now") if the i64 cast somehow
         // produced an out-of-range millis value — the doc comment says
         // `since_ms = 0` means "count all sessions", and an out-of-range
@@ -664,7 +586,7 @@ impl SessionStore {
                          WHERE agent_id = ?1 AND updated_at > ?2 AND id != ?3 \
                          ORDER BY updated_at DESC LIMIT ?4",
                     )
-                    .map_err(LibreFangError::memory)?;
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                 let mapped = stmt
                     .query_map(
                         rusqlite::params![
@@ -675,10 +597,10 @@ impl SessionStore {
                         ],
                         |row| row.get::<_, String>(0),
                     )
-                    .map_err(LibreFangError::memory)?;
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                 let mut ids = Vec::new();
                 for row in mapped {
-                    ids.push(row.map_err(LibreFangError::memory)?);
+                    ids.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
                 }
                 ids
             }
@@ -688,16 +610,16 @@ impl SessionStore {
                         "SELECT id FROM sessions WHERE agent_id = ?1 AND updated_at > ?2 \
                          ORDER BY updated_at DESC LIMIT ?3",
                     )
-                    .map_err(LibreFangError::memory)?;
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                 let mapped = stmt
                     .query_map(
                         rusqlite::params![agent_id.0.to_string(), since_rfc3339, limit as i64],
                         |row| row.get::<_, String>(0),
                     )
-                    .map_err(LibreFangError::memory)?;
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                 let mut ids = Vec::new();
                 for row in mapped {
-                    ids.push(row.map_err(LibreFangError::memory)?);
+                    ids.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
                 }
                 ids
             }
@@ -715,22 +637,31 @@ impl SessionStore {
     /// makes write-side asymmetry a privacy regression, not just a
     /// recoverable hygiene issue.
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let agent_id_str = agent_id.0.to_string();
-        let tx = conn.transaction().map_err(LibreFangError::memory)?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         execute_session_agent_deletes(&tx, &agent_id_str)?;
-        tx.commit().map_err(LibreFangError::memory)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
     /// Delete the canonical (cross-channel) session for an agent.
     pub fn delete_canonical_session(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         conn.execute(
             "DELETE FROM canonical_sessions WHERE agent_id = ?1",
             rusqlite::params![agent_id.0.to_string()],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -761,10 +692,13 @@ impl SessionStore {
 
     /// Total number of sessions stored.
     pub fn count_sessions(&self) -> LibreFangResult<usize> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(total.max(0) as usize)
     }
 
@@ -784,7 +718,10 @@ impl SessionStore {
     /// monotonic. If a writer ever inserts a non-UTC offset (e.g.
     /// `+08:00`), this aggregator will silently miscount.
     pub fn agent_stats_24h(&self, agent_id: &str) -> LibreFangResult<AgentStats24h> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let now = chrono::Utc::now();
         let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
@@ -798,7 +735,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_24h],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let prev_sessions_24h: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions
@@ -806,7 +743,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_48h, cutoff_24h],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let active_now: i64 = conn
             .query_row(
@@ -814,7 +751,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_active],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         // usage_events.cost_usd and latency_ms are present from migration v4/v14.
         let cost_24h: f64 = conn
@@ -824,7 +761,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_24h],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let prev_cost_24h: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -832,7 +769,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_48h, cutoff_24h],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         // Pull latencies for both windows. Two prepared statements keep
         // the index hits clean (agent_id, timestamp) and let us return
@@ -845,14 +782,14 @@ impl SessionStore {
                      WHERE agent_id = ?1 AND timestamp >= ?2 AND latency_ms > 0
                      ORDER BY latency_ms ASC",
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let rows = stmt
                 .query_map(rusqlite::params![agent_id, cutoff_24h], |row| {
                     row.get::<_, i64>(0)
                 })
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             for row in rows {
-                cur_lat.push(row.map_err(LibreFangError::memory)?);
+                cur_lat.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
             }
         }
         let mut prev_lat: Vec<i64> = Vec::new();
@@ -863,14 +800,14 @@ impl SessionStore {
                      WHERE agent_id = ?1 AND timestamp >= ?2 AND timestamp < ?3 AND latency_ms > 0
                      ORDER BY latency_ms ASC",
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let rows = stmt
                 .query_map(rusqlite::params![agent_id, cutoff_48h, cutoff_24h], |row| {
                     row.get::<_, i64>(0)
                 })
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             for row in rows {
-                prev_lat.push(row.map_err(LibreFangError::memory)?);
+                prev_lat.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
             }
         }
 
@@ -908,7 +845,10 @@ impl SessionStore {
     pub fn agents_stats_24h_bulk(
         &self,
     ) -> LibreFangResult<std::collections::HashMap<String, (u64, f64)>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let now = chrono::Utc::now();
         let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
 
@@ -922,14 +862,14 @@ impl SessionStore {
                  FROM sessions WHERE created_at >= ?1
                  GROUP BY agent_id",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows_s = stmt_s
             .query_map(rusqlite::params![cutoff_24h], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         for row in rows_s {
-            let (id, n) = row.map_err(LibreFangError::memory)?;
+            let (id, n) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             out.entry(id).or_insert((0, 0.0)).0 = n.max(0) as u64;
         }
 
@@ -940,14 +880,14 @@ impl SessionStore {
                  FROM usage_events WHERE timestamp >= ?1
                  GROUP BY agent_id",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows_c = stmt_c
             .query_map(rusqlite::params![cutoff_24h], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         for row in rows_c {
-            let (id, c) = row.map_err(LibreFangError::memory)?;
+            let (id, c) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             out.entry(id).or_insert((0, 0.0)).1 = c;
         }
 
@@ -961,7 +901,10 @@ impl SessionStore {
         limit: Option<usize>,
         offset: usize,
     ) -> LibreFangResult<Vec<serde_json::Value>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         // SQLite uses -1 for "no limit"
         let lim_sql: i64 = limit.map(|n| n as i64).unwrap_or(-1);
         let off_sql: i64 = offset as i64;
@@ -982,7 +925,7 @@ impl SessionStore {
                  ) u ON u.session_id = s.id
                  ORDER BY s.created_at DESC LIMIT ?1 OFFSET ?2",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let rows = stmt
             .query_map(rusqlite::params![lim_sql, off_sql], |row| {
@@ -1039,11 +982,11 @@ impl SessionStore {
                     "total_tokens": total_tokens.max(0),
                 }))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            sessions.push(row.map_err(LibreFangError::memory)?);
+            sessions.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
         }
         Ok(sessions)
     }
@@ -1056,35 +999,11 @@ impl SessionStore {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
         };
         self.save_session(&session)?;
         Ok(session)
-    }
-
-    /// Set (or clear) the per-session model override (#4898).
-    ///
-    /// `model_override = Some("provider/model")` pins the session to a
-    /// specific model for subsequent LLM calls. `None` clears the override
-    /// and restores the agent's manifest default.
-    pub fn set_session_model_override(
-        &self,
-        session_id: SessionId,
-        model_override: Option<&str>,
-    ) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        conn.execute(
-            "UPDATE sessions SET model_override = ?1, updated_at = ?2 WHERE id = ?3",
-            rusqlite::params![
-                model_override,
-                Utc::now().to_rfc3339(),
-                session_id.0.to_string()
-            ],
-        )
-        .map_err(LibreFangError::memory)?;
-        Ok(())
     }
 
     /// Set the label on an existing session.
@@ -1093,12 +1012,15 @@ impl SessionStore {
         session_id: SessionId,
         label: Option<&str>,
     ) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         conn.execute(
             "UPDATE sessions SET label = ?1, updated_at = ?2 WHERE id = ?3",
             rusqlite::params![label, Utc::now().to_rfc3339(), session_id.0.to_string()],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -1108,51 +1030,44 @@ impl SessionStore {
         agent_id: AgentId,
         label: &str,
     ) -> LibreFangResult<Option<Session>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, messages, context_window_tokens, label, model_override, messages_generation FROM sessions \
+                "SELECT id, messages, context_window_tokens, label FROM sessions \
                  WHERE agent_id = ?1 AND label = ?2 LIMIT 1",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let result = stmt.query_row(rusqlite::params![agent_id.0.to_string(), label], |row| {
             let id_str: String = row.get(0)?;
             let messages_blob: Vec<u8> = row.get(1)?;
             let tokens: i64 = row.get(2)?;
             let lbl: Option<String> = row.get(3).unwrap_or(None);
-            let model_override: Option<String> = row.get(4).unwrap_or(None);
-            let messages_generation: i64 = row.get(5).unwrap_or(0);
-            Ok((
-                id_str,
-                messages_blob,
-                tokens,
-                lbl,
-                model_override,
-                messages_generation,
-            ))
+            Ok((id_str, messages_blob, tokens, lbl))
         });
 
         match result {
-            Ok((id_str, messages_blob, tokens, lbl, model_override, messages_generation)) => {
+            Ok((id_str, messages_blob, tokens, lbl)) => {
                 let session_id = uuid::Uuid::parse_str(&id_str)
                     .map(SessionId)
-                    .map_err(LibreFangError::memory)?;
-                let messages: Vec<Message> =
-                    rmp_serde::from_slice(&messages_blob).map_err(LibreFangError::serialization)?;
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let messages: Vec<Message> = rmp_serde::from_slice(&messages_blob)
+                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
                     messages,
                     context_window_tokens: tokens as u64,
                     label: lbl,
-                    model_override,
-                    messages_generation: messages_generation.max(0) as u64,
+                    messages_generation: 0,
                     last_repaired_generation: None,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::memory(e)),
+            Err(e) => Err(LibreFangError::Memory(e.to_string())),
         }
     }
 }
@@ -1179,13 +1094,16 @@ impl SessionStore {
         &self,
         agent_id: AgentId,
     ) -> LibreFangResult<Vec<serde_json::Value>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, message_count, created_at, label \
                  FROM sessions WHERE agent_id = ?1 ORDER BY created_at DESC",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
@@ -1200,11 +1118,11 @@ impl SessionStore {
                     "label": label,
                 }))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            sessions.push(row.map_err(LibreFangError::memory)?);
+            sessions.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
         }
         Ok(sessions)
     }
@@ -1221,7 +1139,6 @@ impl SessionStore {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: label.map(|s| s.to_string()),
-            model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1263,7 +1180,10 @@ impl SessionStore {
         if retention_days == 0 {
             return Ok(0);
         }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
         let cutoff_str = cutoff.to_rfc3339();
         let deleted = conn
@@ -1271,7 +1191,7 @@ impl SessionStore {
                 "DELETE FROM sessions WHERE updated_at < ?1",
                 rusqlite::params![cutoff_str],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(deleted as u64)
     }
 
@@ -1282,7 +1202,10 @@ impl SessionStore {
         if max_per_agent == 0 {
             return Ok(0);
         }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         // Single-query approach using window functions (SQLite 3.25+).
         // ROW_NUMBER partitions by agent and ranks by recency; rows beyond
@@ -1299,7 +1222,7 @@ impl SessionStore {
                 )",
                 rusqlite::params![max_per_agent],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         Ok(deleted as u64)
     }
@@ -1307,36 +1230,25 @@ impl SessionStore {
     /// Delete sessions whose agent_id is not in the provided live set.
     ///
     /// Returns the number of orphan sessions deleted.
-    ///
-    /// Audit: cleanup-orphan-sessions-format-sql. Previously this
-    /// built the IN-clause via `format!("'{}'", id.0)` and embedded
-    /// the values directly into the SQL string. That was safe today
-    /// because `AgentId(Uuid)` only emits `[0-9a-f-]`, but the rest
-    /// of the substrate uses `?` parameter binding without
-    /// exception and the moment `AgentId` is relaxed to wrap a
-    /// `String` (e.g. for hand-namespaced ids) the silent SQLi door
-    /// opens. Bind the values instead — same plan, no escaping
-    /// dependency on the inner type.
     pub fn cleanup_orphan_sessions(&self, live_agent_ids: &[AgentId]) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         if live_agent_ids.is_empty() {
             return Ok(0);
         }
 
-        // One `?` per live agent. `repeat_n` + `join` produces the
-        // canonical `?, ?, ?, …` placeholder string SQLite expects
-        // inside an `IN (...)` clause.
-        let placeholders = std::iter::repeat_n("?", live_agent_ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!("DELETE FROM sessions WHERE agent_id NOT IN ({placeholders})");
+        let placeholders: Vec<String> = live_agent_ids
+            .iter()
+            .map(|id| format!("'{}'", id.0))
+            .collect();
+        let in_clause = placeholders.join(",");
+        let sql = format!("DELETE FROM sessions WHERE agent_id NOT IN ({in_clause})");
         let deleted = conn
-            .execute(
-                &sql,
-                rusqlite::params_from_iter(live_agent_ids.iter().map(|id| id.0.to_string())),
-            )
-            .map_err(LibreFangError::memory)?;
+            .execute(&sql, [])
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         Ok(deleted as u64)
     }
@@ -1407,7 +1319,10 @@ impl SessionStore {
             .collect::<Vec<_>>()
             .join(" ");
 
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         // SQLite treats LIMIT < 0 as "no limit" — encode `None` that way so
         // the query plan stays a single prepared statement either way.
@@ -1429,7 +1344,7 @@ impl SessionStore {
                      ORDER BY rank, session_id
                      LIMIT ?3 OFFSET ?4",
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let rows = stmt
                 .query_map(
@@ -1443,7 +1358,7 @@ impl SessionStore {
                         })
                     },
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             rows.filter_map(|r| r.ok()).collect()
         } else {
@@ -1455,7 +1370,7 @@ impl SessionStore {
                      ORDER BY rank, session_id
                      LIMIT ?2 OFFSET ?3",
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let rows = stmt
                 .query_map(
@@ -1469,7 +1384,7 @@ impl SessionStore {
                         })
                     },
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             rows.filter_map(|r| r.ok()).collect()
         };
@@ -1514,7 +1429,10 @@ pub struct CanonicalSession {
 impl SessionStore {
     /// Load the canonical session for an agent, creating one if it doesn't exist.
     pub fn load_canonical(&self, agent_id: AgentId) -> LibreFangResult<CanonicalSession> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         load_canonical_in_tx(&conn, agent_id)
     }
 
@@ -1535,10 +1453,13 @@ impl SessionStore {
         // (canonical_sessions is keyed by agent_id and stored as a single blob).
         // BEGIN IMMEDIATE escalates to a write lock at the SQLite layer too, so
         // any future cross-process caller is also serialized.
-        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut canonical = load_canonical_in_tx(&tx, agent_id)?;
         canonical
@@ -1599,7 +1520,8 @@ impl SessionStore {
 
         canonical.updated_at = Utc::now().to_rfc3339();
         save_canonical_in_tx(&tx, &canonical)?;
-        tx.commit().map_err(LibreFangError::memory)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(canonical)
     }
 
@@ -1633,7 +1555,10 @@ impl SessionStore {
 
     /// Persist a canonical session to SQLite.
     fn save_canonical(&self, canonical: &CanonicalSession) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         save_canonical_in_tx(&conn, canonical)
     }
 }
@@ -1645,7 +1570,7 @@ fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult
             "SELECT messages, compaction_cursor, compacted_summary, updated_at \
              FROM canonical_sessions WHERE agent_id = ?1",
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
     let result = stmt.query_row(rusqlite::params![agent_id.0.to_string()], |row| {
         let messages_blob: Vec<u8> = row.get(0)?;
@@ -1663,7 +1588,7 @@ fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult
                     Ok(entries) => entries,
                     Err(_) => {
                         let legacy: Vec<Message> = rmp_serde::from_slice(&messages_blob)
-                            .map_err(LibreFangError::serialization)?;
+                            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                         legacy
                             .into_iter()
                             .map(|message| CanonicalEntry {
@@ -1691,14 +1616,14 @@ fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult
                 updated_at: now,
             })
         }
-        Err(e) => Err(LibreFangError::memory(e)),
+        Err(e) => Err(LibreFangError::Memory(e.to_string())),
     }
 }
 
 /// Persist a canonical session using an already-acquired connection.
 fn save_canonical_in_tx(conn: &Connection, canonical: &CanonicalSession) -> LibreFangResult<()> {
-    let messages_blob =
-        rmp_serde::to_vec(&canonical.messages).map_err(LibreFangError::serialization)?;
+    let messages_blob = rmp_serde::to_vec(&canonical.messages)
+        .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
     conn.execute(
         "INSERT INTO canonical_sessions (agent_id, messages, compaction_cursor, compacted_summary, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1711,7 +1636,7 @@ fn save_canonical_in_tx(conn: &Connection, canonical: &CanonicalSession) -> Libr
             canonical.updated_at,
         ],
     )
-    .map_err(LibreFangError::memory)?;
+    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
     Ok(())
 }
 
@@ -1836,12 +1761,12 @@ pub(crate) fn execute_session_agent_deletes(
         "DELETE FROM sessions WHERE agent_id = ?1",
         rusqlite::params![agent_id],
     )
-    .map_err(LibreFangError::memory)?;
+    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
     tx.execute(
         "DELETE FROM sessions_fts WHERE agent_id = ?1",
         rusqlite::params![agent_id],
     )
-    .map_err(LibreFangError::memory)?;
+    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
     Ok(())
 }
 
@@ -1851,10 +1776,9 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn setup() -> SessionStore {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
-        run_migrations(&pool.get().unwrap()).unwrap();
-        SessionStore::new(pool)
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        SessionStore::new(Arc::new(Mutex::new(conn)))
     }
 
     #[test]
@@ -1886,39 +1810,6 @@ mod tests {
         let store = setup();
         let result = store.get_session(SessionId::new()).unwrap();
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn messages_generation_round_trips_across_reload_5138() {
-        // #5138: the generation counter must survive a save/load cycle
-        // so the runtime's repair-skip optimisation does not pay a full
-        // repair pass on every cold load.
-        let store = setup();
-        let agent_id = AgentId::new();
-        let mut session = store.create_session(agent_id).unwrap();
-        session.push_message(Message::user("a"));
-        session.push_message(Message::assistant("b"));
-        session.mark_messages_mutated();
-        let gen_before = session.messages_generation;
-        assert!(gen_before > 0, "counter should have advanced");
-        store.save_session(&session).unwrap();
-
-        // get_session
-        let loaded = store.get_session(session.id).unwrap().unwrap();
-        assert_eq!(
-            loaded.messages_generation, gen_before,
-            "messages_generation must persist (get_session)"
-        );
-
-        // get_session_with_created_at
-        let (loaded2, _created) = store
-            .get_session_with_created_at(session.id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            loaded2.messages_generation, gen_before,
-            "messages_generation must persist (get_session_with_created_at)"
-        );
     }
 
     #[test]
@@ -2127,7 +2018,7 @@ mod tests {
         let blob = rmp_serde::to_vec(&legacy).unwrap();
         let now = Utc::now().to_rfc3339();
         {
-            let conn = store.pool.get().expect("session pool get");
+            let conn = store.conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO canonical_sessions (agent_id, messages, compaction_cursor, compacted_summary, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -2216,7 +2107,7 @@ mod tests {
 
         // Manually backdate s1 to 60 days ago
         {
-            let conn = store.pool.get().expect("session pool get");
+            let conn = store.conn.lock().unwrap();
             let old_date = (Utc::now() - chrono::Duration::days(60)).to_rfc3339();
             conn.execute(
                 "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -2254,7 +2145,7 @@ mod tests {
         let mut session_ids = Vec::new();
         for i in 0..5 {
             let s = store.create_session(agent_id).unwrap();
-            let conn = store.pool.get().expect("session pool get");
+            let conn = store.conn.lock().unwrap();
             let date = (Utc::now() + chrono::Duration::seconds(i)).to_rfc3339();
             conn.execute(
                 "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -2541,7 +2432,7 @@ mod tests {
 
         let id = session.id;
         let count_after_first: i64 = {
-            let conn = store.pool.get().expect("session pool get");
+            let conn = store.conn.lock().unwrap();
             conn.query_row(
                 "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
                 rusqlite::params![id.0.to_string()],
@@ -2554,7 +2445,7 @@ mod tests {
         // Delete the session — FTS row goes too.
         store.delete_session(id).unwrap();
         let count_after_delete: i64 = {
-            let conn = store.pool.get().expect("session pool get");
+            let conn = store.conn.lock().unwrap();
             conn.query_row(
                 "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
                 rusqlite::params![id.0.to_string()],
@@ -2572,7 +2463,6 @@ mod tests {
             messages: vec![Message::user("second incarnation phrase")],
             context_window_tokens: 0,
             label: None,
-            model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -2580,7 +2470,7 @@ mod tests {
 
         // Exactly ONE FTS row, not two.
         let count_after_recreate: i64 = {
-            let conn = store.pool.get().expect("session pool get");
+            let conn = store.conn.lock().unwrap();
             conn.query_row(
                 "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
                 rusqlite::params![id.0.to_string()],
@@ -2619,9 +2509,8 @@ mod tests {
     fn test_fts_v33_backfill_then_save_reflows_content() {
         use crate::migration::run_migrations;
 
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
-        run_migrations(&pool.get().unwrap()).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
         // Wipe FTS rows to mimic a pre-v12 / pre-fix DB. Sessions row
         // is inserted manually so we control the agent_id and the
         // messages blob shape.
@@ -2629,42 +2518,39 @@ mod tests {
         let session_id = SessionId::new();
         let messages_blob =
             rmp_serde::to_vec_named(&vec![Message::user("backfill needle alphawombat42")]).unwrap();
-        {
-            let conn = pool.get().unwrap();
-            conn.execute(
-                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
-                rusqlite::params![
-                    session_id.0.to_string(),
-                    agent_id.0.to_string(),
-                    messages_blob,
-                ],
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            rusqlite::params![
+                session_id.0.to_string(),
+                agent_id.0.to_string(),
+                messages_blob,
+            ],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM sessions_fts", []).unwrap();
+
+        // Run v33 explicitly (run_migrations is a no-op since
+        // user_version is already current).
+        crate::migration::__test_only_run_v33(&conn);
+
+        // FTS row is present with empty content.
+        let (count, content): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(content), '') FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![session_id.0.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-            conn.execute("DELETE FROM sessions_fts", []).unwrap();
-
-            // Run v33 explicitly (run_migrations is a no-op since
-            // user_version is already current).
-            crate::migration::__test_only_run_v33(&conn);
-
-            // FTS row is present with empty content.
-            let (count, content): (i64, String) = conn
-                .query_row(
-                    "SELECT COUNT(*), COALESCE(MAX(content), '') FROM sessions_fts WHERE session_id = ?1",
-                    rusqlite::params![session_id.0.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap();
-            assert_eq!(count, 1, "backfill must produce exactly one FTS row");
-            assert_eq!(
-                content, "",
-                "backfilled FTS rows have empty content until next save"
-            );
-        }
+        assert_eq!(count, 1, "backfill must produce exactly one FTS row");
+        assert_eq!(
+            content, "",
+            "backfilled FTS rows have empty content until next save"
+        );
 
         // Now drive save_session to reflow the real text into FTS, then
         // search to confirm the index works end-to-end.
-        let store = SessionStore::new(pool.clone());
+        let store = SessionStore::new(Arc::new(Mutex::new(conn)));
         let session = store.get_session(session_id).unwrap().unwrap();
         store.save_session(&session).unwrap();
 
@@ -2686,10 +2572,9 @@ mod tests {
     fn test_fts_v33_backfill_placeholder_survives_empty_content_save() {
         let agent_id = AgentId::new();
         let session_id = SessionId::new();
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
         {
-            let c = conn.get().unwrap();
+            let c = conn.lock().unwrap();
             run_migrations(&c).unwrap();
             // Empty messages vec → extract_text_content returns "".
             let messages_blob = rmp_serde::to_vec_named(&Vec::<Message>::new()).unwrap();
@@ -2711,12 +2596,12 @@ mod tests {
             assert_eq!(count, 1, "v33 backfill must produce a placeholder FTS row");
         }
 
-        let store = SessionStore::new(conn.clone());
+        let store = SessionStore::new(Arc::clone(&conn));
         let session = store.get_session(session_id).unwrap().unwrap();
         store.save_session(&session).unwrap();
 
         let count_after: i64 = conn
-            .get()
+            .lock()
             .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
@@ -2737,10 +2622,9 @@ mod tests {
     /// is computed from the message timestamps already in the messages blob.
     #[test]
     fn list_sessions_includes_cost_tokens_duration_aggregates() {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
-        run_migrations(&conn.get().unwrap()).unwrap();
-        let store = SessionStore::new(conn.clone());
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+        let store = SessionStore::new(Arc::clone(&conn));
 
         let agent_id = AgentId::new();
         let mut session = store.create_session(agent_id).unwrap();
@@ -2760,7 +2644,7 @@ mod tests {
         // Two usage_events tagged to this session: one tagged, one NULL.
         // The aggregate must include only the tagged one.
         {
-            let c = conn.get().unwrap();
+            let c = conn.lock().unwrap();
             c.execute(
                 "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, session_id)
                  VALUES (?1, ?2, datetime('now'), 'm', 'p', 100, 50, 0.012, 0, 0, ?3)",
@@ -2820,7 +2704,7 @@ mod tests {
         // The dedicated column must reflect the persisted count without
         // any blob deserialisation on the reader side.
         let stored: i64 = {
-            let conn = store.pool.get().expect("session pool get");
+            let conn = store.conn.lock().unwrap();
             conn.query_row(
                 "SELECT message_count FROM sessions WHERE id = ?1",
                 rusqlite::params![session.id.0.to_string()],
@@ -2844,7 +2728,7 @@ mod tests {
         store.save_session(&session).unwrap();
 
         let after: i64 = {
-            let conn = store.pool.get().expect("session pool get");
+            let conn = store.conn.lock().unwrap();
             conn.query_row(
                 "SELECT message_count FROM sessions WHERE id = ?1",
                 rusqlite::params![session.id.0.to_string()],
@@ -2881,7 +2765,7 @@ mod tests {
         // unwrap_or_default(), but the dedicated column is the source
         // of truth for the count.
         {
-            let conn = store.pool.get().expect("session pool get");
+            let conn = store.conn.lock().unwrap();
             conn.execute(
                 "UPDATE sessions SET messages = ?1 WHERE id = ?2",
                 rusqlite::params![vec![0xff_u8, 0xff], session.id.0.to_string()],
@@ -2929,10 +2813,9 @@ mod tests {
     ///   - scope every aggregate to the given agent_id.
     #[test]
     fn agent_stats_24h_aggregates_within_window() {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
-        run_migrations(&conn.get().unwrap()).unwrap();
-        let store = SessionStore::new(conn.clone());
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+        let store = SessionStore::new(Arc::clone(&conn));
 
         let agent_id = AgentId::new();
         let other_agent = AgentId::new();
@@ -2946,7 +2829,7 @@ mod tests {
         let stale = (now - chrono::Duration::hours(48)).to_rfc3339();
 
         let insert_session = |id: &str, agent: &AgentId, created: &str, updated: &str| {
-            let c = conn.get().unwrap();
+            let c = conn.lock().unwrap();
             c.execute(
                 "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
                  VALUES (?1, ?2, x'90', 0, ?3, ?4)",
@@ -2967,7 +2850,7 @@ mod tests {
         // (latencies 100/200/300 → P95 nearest-rank = ceil(0.95*3)=3 → 300),
         // one outside the window (must be ignored), one for the other agent.
         let insert_event = |agent: &AgentId, ts: &str, cost: f64, latency: i64| {
-            let c = conn.get().unwrap();
+            let c = conn.lock().unwrap();
             c.execute(
                 "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
                  VALUES (?1, ?2, ?3, 'm', 10, 20, ?4, 0, ?5)",
@@ -3039,10 +2922,9 @@ mod tests {
     /// - P95 is computed independently per window.
     #[test]
     fn agent_stats_24h_prev_window_boundaries() {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
-        run_migrations(&conn.get().unwrap()).unwrap();
-        let store = SessionStore::new(conn.clone());
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+        let store = SessionStore::new(Arc::clone(&conn));
         let agent_id = AgentId::new();
 
         let now = chrono::Utc::now();
@@ -3058,7 +2940,7 @@ mod tests {
         let outside = (now - chrono::Duration::hours(72)).to_rfc3339();
 
         let insert_session = |id: &str, created: &str| {
-            let c = conn.get().unwrap();
+            let c = conn.lock().unwrap();
             c.execute(
                 "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
                  VALUES (?1, ?2, x'90', 0, ?3, ?3)",
@@ -3074,7 +2956,7 @@ mod tests {
         insert_session(&uuid::Uuid::new_v4().to_string(), &outside);
 
         let insert_event = |ts: &str, cost: f64, latency: i64| {
-            let c = conn.get().unwrap();
+            let c = conn.lock().unwrap();
             c.execute(
                 "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
                  VALUES (?1, ?2, ?3, 'm', 1, 1, ?4, 0, ?5)",
@@ -3119,10 +3001,9 @@ mod tests {
     /// (sessions-only or events-only agents still appear).
     #[test]
     fn agents_stats_24h_bulk_groups_by_agent() {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
-        run_migrations(&conn.get().unwrap()).unwrap();
-        let store = SessionStore::new(conn.clone());
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+        let store = SessionStore::new(Arc::clone(&conn));
 
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
@@ -3133,7 +3014,7 @@ mod tests {
         let stale = (now - chrono::Duration::hours(48)).to_rfc3339();
 
         let insert_session = |agent: &AgentId, created: &str| {
-            let c = conn.get().unwrap();
+            let c = conn.lock().unwrap();
             c.execute(
                 "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
                  VALUES (?1, ?2, x'90', 0, ?3, ?3)",
@@ -3145,7 +3026,7 @@ mod tests {
             ).unwrap();
         };
         let insert_event = |agent: &AgentId, ts: &str, cost: f64| {
-            let c = conn.get().unwrap();
+            let c = conn.lock().unwrap();
             c.execute(
                 "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
                  VALUES (?1, ?2, ?3, 'm', 1, 1, ?4, 0, 0)",
@@ -3196,258 +3077,5 @@ mod tests {
 
         // Agents with only stale activity are absent.
         assert!(!bulk.contains_key(&AgentId::new().0.to_string()));
-    }
-
-    /// Regression for #5121: persisting a history that exceeds the historical
-    /// 200-message cap but stays below the new defense-in-depth ceiling must
-    /// round-trip without silent truncation. Pre-fix the SQLite blob only kept
-    /// the most-recent 200, so an agent configured with `max_history_messages`
-    /// above 200 lost messages 200..N across daemon restarts with no log.
-    #[test]
-    fn test_save_session_preserves_history_above_legacy_cap() {
-        let store = setup();
-        let agent_id = AgentId::new();
-        let mut session = store.create_session(agent_id).unwrap();
-
-        // 300 messages > old MAX_PERSISTED_MESSAGES (200) and < new cap (2000).
-        // Use unique payloads so a tail-only persist would be detectable on
-        // reload by checking the *first* surviving message id.
-        const N: usize = 300;
-        for i in 0..N {
-            // Alternate roles so the blob round-trips as a well-formed chat
-            // history (Role::User then Role::Assistant); the test only cares
-            // about count + first-element identity, not turn semantics.
-            let body = format!("msg-{i:04}");
-            if i % 2 == 0 {
-                session.messages.push(Message::user(body));
-            } else {
-                session.messages.push(Message::assistant(body));
-            }
-        }
-        assert_eq!(session.messages.len(), N);
-
-        store.save_session(&session).unwrap();
-
-        let loaded = store.get_session(session.id).unwrap().unwrap();
-        assert_eq!(
-            loaded.messages.len(),
-            N,
-            "history below the persistence cap must round-trip in full \
-             (regression for the old 200-message silent truncation, #5121)"
-        );
-
-        // Confirm the *first* message survived — a tail-only persist would
-        // start at msg-0100 instead of msg-0000 under the old 200 cap.
-        let first_text = loaded.messages[0].content.text_content();
-        assert!(
-            first_text.contains("msg-0000"),
-            "oldest message must survive when N <= cap; got first text = {first_text:?}"
-        );
-
-        // Confirm the denormalised message_count column matches the blob.
-        let conn = store.pool.get().unwrap();
-        let row_count: i64 = conn
-            .query_row(
-                "SELECT message_count FROM sessions WHERE id = ?1",
-                rusqlite::params![session.id.0.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            row_count as usize, N,
-            "denormalised message_count must match the persisted blob length"
-        );
-    }
-
-    /// Companion to the above: when the history genuinely exceeds the
-    /// defense-in-depth ceiling, the cap still fires and we keep the
-    /// most-recent window. The accompanying `warn!` log carries the
-    /// agent / session / requested_count / cap fields documented in #5121;
-    /// asserting structured-log emission requires a `tracing` subscriber
-    /// fixture and is out of scope here — the behavioural contract
-    /// (truncation point + window position) is what this test pins.
-    #[test]
-    fn test_save_session_truncates_above_defense_in_depth_cap() {
-        let store = setup();
-        let agent_id = AgentId::new();
-        let mut session = store.create_session(agent_id).unwrap();
-
-        let cap = SessionStore::MAX_PERSISTED_MESSAGES;
-        let n = cap + 500;
-        for i in 0..n {
-            let body = format!("msg-{i:05}");
-            if i % 2 == 0 {
-                session.messages.push(Message::user(body));
-            } else {
-                session.messages.push(Message::assistant(body));
-            }
-        }
-
-        store.save_session(&session).unwrap();
-
-        let loaded = store.get_session(session.id).unwrap().unwrap();
-        assert_eq!(
-            loaded.messages.len(),
-            cap,
-            "history above the cap must be truncated to exactly MAX_PERSISTED_MESSAGES"
-        );
-
-        // The *most-recent* window survived: first persisted message is
-        // index (n - cap) in the original sequence.
-        let expected_first = format!("msg-{:05}", n - cap);
-        let first_text = loaded.messages[0].content.text_content();
-        assert!(
-            first_text.contains(&expected_first),
-            "truncation must keep the most-recent window; expected first to contain \
-             {expected_first:?}, got {first_text:?}"
-        );
-
-        // And the very last message is preserved.
-        let expected_last = format!("msg-{:05}", n - 1);
-        let last_text = loaded.messages[cap - 1].content.text_content();
-        assert!(
-            last_text.contains(&expected_last),
-            "most-recent message must always survive; expected last to contain \
-             {expected_last:?}, got {last_text:?}"
-        );
-    }
-
-    /// Audit: cleanup-orphan-sessions-format-sql. Even with the
-    /// historical `AgentId(Uuid)` shape this query was safe — uuids
-    /// only emit `[0-9a-f-]`. The fix re-targets the safety
-    /// guarantee at the *substrate boundary* rather than at the
-    /// inner type, so the moment someone relaxes `AgentId` to a
-    /// `String`-wrapping variant (hand-namespaced ids, etc.) the
-    /// substrate continues to reject injection-shaped values
-    /// instead of silently emitting them as SQL literals. This
-    /// test forces the boundary: we construct an `AgentId` from a
-    /// uuid normally, then drive the helper with a `live` set
-    /// that contains an `AgentId` whose `.to_string()` we have
-    /// audited for `'` already (we can't actually construct a
-    /// `Uuid` containing a quote), and assert via the orphan-row
-    /// behaviour that the bind path works.
-    #[test]
-    fn test_cleanup_orphan_sessions_uses_bound_parameters_not_string_concat() {
-        let store = setup();
-
-        // Three live agents, one orphan agent — orphan row must be
-        // deleted, live rows must survive.
-        let live_a = AgentId::new();
-        let live_b = AgentId::new();
-        let live_c = AgentId::new();
-        let orphan = AgentId::new();
-
-        for aid in [live_a, live_b, live_c, orphan] {
-            let s = store.create_session(aid).unwrap();
-            assert_eq!(s.agent_id, aid);
-        }
-
-        let deleted = store
-            .cleanup_orphan_sessions(&[live_a, live_b, live_c])
-            .unwrap();
-        assert_eq!(deleted, 1, "exactly the orphan agent's session must go");
-
-        // Sanity: the live rows are still there.
-        for aid in [live_a, live_b, live_c] {
-            let listed = store.list_agent_sessions(aid).unwrap();
-            assert_eq!(
-                listed.len(),
-                1,
-                "live agent {aid:?} must keep its session after cleanup"
-            );
-        }
-        let orphan_left = store.list_agent_sessions(orphan).unwrap();
-        assert!(orphan_left.is_empty(), "orphan row must be gone");
-    }
-
-    /// Empty `live_agent_ids` is the "no live agents → don't touch
-    /// anything" early-return: documents the invariant so an
-    /// off-by-one in a future refactor doesn't silently wipe every
-    /// session when the registry is momentarily empty (e.g., during
-    /// startup reload).
-    #[test]
-    fn test_cleanup_orphan_sessions_empty_live_set_deletes_nothing() {
-        let store = setup();
-        let aid = AgentId::new();
-        store.create_session(aid).unwrap();
-
-        let deleted = store.cleanup_orphan_sessions(&[]).unwrap();
-        assert_eq!(
-            deleted, 0,
-            "empty live set must be treated as 'no live data, skip' — never \
-             as 'delete everything'"
-        );
-        let kept = store.list_agent_sessions(aid).unwrap();
-        assert_eq!(kept.len(), 1, "row must survive an empty cleanup call");
-    }
-
-    /// Regression guard for the perf rewrite of `extract_text_content`
-    /// (`Vec<String> + join("\n")` → streamed `String::with_capacity` +
-    /// `push_str`). The streamed implementation MUST be byte-identical
-    /// to the legacy join shape, because the result is hashed into the
-    /// FTS index — any change in separators, trimming, or empty-handling
-    /// would silently invalidate every existing search snippet.
-    ///
-    /// Covers the four shapes the production code actually sees:
-    ///   - all-text messages → newline-joined
-    ///   - empty-text messages interleaved → skipped, no double newline
-    ///   - non-text blocks (ToolUse / Thinking) → contribute "" → skipped
-    ///   - empty input slice → empty string
-    #[test]
-    fn extract_text_content_matches_legacy_join_shape() {
-        fn legacy(messages: &[Message]) -> String {
-            messages
-                .iter()
-                .map(|m| m.content.text_content())
-                .filter(|t| !t.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-
-        // Shape 1: all-text — exercises the inter-message separator.
-        let s1 = vec![
-            Message::user("hello"),
-            Message::assistant("hi there"),
-            Message::user("how are you?"),
-        ];
-        assert_eq!(SessionStore::extract_text_content(&s1), legacy(&s1));
-
-        // Shape 2: empties interleaved — `MessageContent::Text("")` must
-        // be filtered, no leading/trailing/double newline.
-        let s2 = vec![
-            Message::user(""),
-            Message::assistant("only-real-line"),
-            Message::user(""),
-        ];
-        assert_eq!(SessionStore::extract_text_content(&s2), legacy(&s2));
-        assert_eq!(SessionStore::extract_text_content(&s2), "only-real-line");
-
-        // Shape 3: non-text blocks (tool calls, thinking) yield empty
-        // `text_content()` and must therefore be skipped too.
-        let s3 = vec![
-            Message::user("first"),
-            Message {
-                role: Role::Assistant,
-                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "noop".into(),
-                    input: serde_json::json!({}),
-                    provider_metadata: None,
-                }]),
-                pinned: false,
-                timestamp: None,
-            },
-            Message::user("third"),
-        ];
-        assert_eq!(SessionStore::extract_text_content(&s3), legacy(&s3));
-        assert_eq!(SessionStore::extract_text_content(&s3), "first\nthird");
-
-        // Shape 4: empty input — must produce an empty string, not "\n"
-        // or any other artefact (the v33 backfill placeholder relies on
-        // this exact value — see
-        // `test_fts_v33_backfill_placeholder_survives_empty_content_save`).
-        let s4: Vec<Message> = Vec::new();
-        assert_eq!(SessionStore::extract_text_content(&s4), legacy(&s4));
-        assert_eq!(SessionStore::extract_text_content(&s4), "");
     }
 }

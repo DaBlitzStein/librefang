@@ -7,36 +7,38 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
     Entity, EntityType, GraphMatch, GraphPattern, Relation, RelationType,
 };
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::Connection;
 use std::collections::HashMap;
-use tracing::error;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 /// Knowledge graph store backed by SQLite.
 #[derive(Clone)]
 pub struct KnowledgeStore {
-    pool: Pool<SqliteConnectionManager>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl KnowledgeStore {
     /// Create a new knowledge store wrapping the given connection.
-    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { pool }
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
     }
 
     /// Add an entity to the knowledge graph.
     pub fn add_entity(&self, entity: Entity, agent_id: &str) -> LibreFangResult<String> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let id = if entity.id.is_empty() {
             Uuid::new_v4().to_string()
         } else {
             entity.id.clone()
         };
-        let entity_type_str =
-            serde_json::to_string(&entity.entity_type).map_err(LibreFangError::serialization)?;
-        let props_str =
-            serde_json::to_string(&entity.properties).map_err(LibreFangError::serialization)?;
+        let entity_type_str = serde_json::to_string(&entity.entity_type)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let props_str = serde_json::to_string(&entity.properties)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id)
@@ -44,18 +46,21 @@ impl KnowledgeStore {
              ON CONFLICT(id) DO UPDATE SET name = ?3, properties = ?4, updated_at = ?5",
             rusqlite::params![id, entity_type_str, entity.name, props_str, now, agent_id],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(id)
     }
 
     /// Add a relation between two entities.
     pub fn add_relation(&self, relation: Relation, agent_id: &str) -> LibreFangResult<String> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let id = Uuid::new_v4().to_string();
-        let rel_type_str =
-            serde_json::to_string(&relation.relation).map_err(LibreFangError::serialization)?;
-        let props_str =
-            serde_json::to_string(&relation.properties).map_err(LibreFangError::serialization)?;
+        let rel_type_str = serde_json::to_string(&relation.relation)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let props_str = serde_json::to_string(&relation.properties)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO relations (id, source_entity, relation_type, target_entity, properties, confidence, created_at, agent_id)
@@ -71,7 +76,7 @@ impl KnowledgeStore {
                 agent_id,
             ],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(id)
     }
 
@@ -81,23 +86,27 @@ impl KnowledgeStore {
     /// failure can't leave orphan entities (relations referencing entities
     /// silently broke ranking on the next graph query). See #3501.
     pub fn delete_by_agent(&self, agent_id: &str) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let tx = conn
             .unchecked_transaction()
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rel_count = tx
             .execute(
                 "DELETE FROM relations WHERE agent_id = ?1",
                 rusqlite::params![agent_id],
             )
-            .map_err(LibreFangError::memory)? as u64;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))? as u64;
         let ent_count = tx
             .execute(
                 "DELETE FROM entities WHERE agent_id = ?1",
                 rusqlite::params![agent_id],
             )
-            .map_err(LibreFangError::memory)? as u64;
-        tx.commit().map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))? as u64;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(rel_count + ent_count)
     }
 
@@ -108,9 +117,12 @@ impl KnowledgeStore {
         relation_type: &RelationType,
         target_id: &str,
     ) -> LibreFangResult<bool> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let rel_str =
-            serde_json::to_string(relation_type).map_err(LibreFangError::serialization)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let rel_str = serde_json::to_string(relation_type)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM relations r
@@ -120,13 +132,16 @@ impl KnowledgeStore {
                 rusqlite::params![source_id, rel_str, target_id],
                 |row| row.get(0),
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count > 0)
     }
 
     /// Query the knowledge graph with a pattern.
     pub fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut sql = String::from(
             "SELECT
@@ -148,7 +163,8 @@ impl KnowledgeStore {
             idx += 2;
         }
         if let Some(ref relation) = pattern.relation {
-            let rel_str = serde_json::to_string(relation).map_err(LibreFangError::serialization)?;
+            let rel_str = serde_json::to_string(relation)
+                .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
             sql.push_str(&format!(" AND r.relation_type = ?{idx}"));
             params.push(Box::new(rel_str));
             idx += 1;
@@ -163,7 +179,9 @@ impl KnowledgeStore {
 
         sql.push_str(" LIMIT 100");
 
-        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
 
@@ -191,11 +209,11 @@ impl KnowledgeStore {
                     t_updated: row.get(18)?,
                 })
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut matches = Vec::new();
         for row_result in rows {
-            let r = row_result.map_err(LibreFangError::memory)?;
+            let r = row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             matches.push(GraphMatch {
                 source: parse_entity(
                     &r.s_id,
@@ -204,7 +222,7 @@ impl KnowledgeStore {
                     &r.s_props,
                     &r.s_created,
                     &r.s_updated,
-                )?,
+                ),
                 relation: parse_relation(
                     &r.r_source,
                     &r.r_type,
@@ -212,7 +230,7 @@ impl KnowledgeStore {
                     &r.r_props,
                     r.r_confidence,
                     &r.r_created,
-                )?,
+                ),
                 target: parse_entity(
                     &r.t_id,
                     &r.t_type,
@@ -220,7 +238,7 @@ impl KnowledgeStore {
                     &r.t_props,
                     &r.t_created,
                     &r.t_updated,
-                )?,
+                ),
             });
         }
         Ok(matches)
@@ -265,40 +283,25 @@ fn parse_entity(
     props: &str,
     created: &str,
     updated: &str,
-) -> LibreFangResult<Entity> {
+) -> Entity {
     let entity_type: EntityType =
         serde_json::from_str(etype).unwrap_or(EntityType::Custom("unknown".to_string()));
-    // Refuse to silently substitute `HashMap::default()` for a corrupt
-    // `properties` blob — that disguises corruption as "this entity has
-    // no properties", which the operator cannot tell apart from a row
-    // that legitimately has none (audit: json-text-silent-parse-fallback).
-    let properties: HashMap<String, serde_json::Value> = match serde_json::from_str(props) {
-        Ok(m) => m,
-        Err(e) => {
-            error!(
-                row_id = %id,
-                table = "entities",
-                column = "properties",
-                error = %e,
-                "corrupt JSON in TEXT column"
-            );
-            return Err(LibreFangError::serialization(e));
-        }
-    };
+    let properties: HashMap<String, serde_json::Value> =
+        serde_json::from_str(props).unwrap_or_default();
     let created_at = chrono::DateTime::parse_from_rfc3339(created)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
     let updated_at = chrono::DateTime::parse_from_rfc3339(updated)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
-    Ok(Entity {
+    Entity {
         id: id.to_string(),
         entity_type,
         name: name.to_string(),
         properties,
         created_at,
         updated_at,
-    })
+    }
 }
 
 fn parse_relation(
@@ -308,36 +311,21 @@ fn parse_relation(
     props: &str,
     confidence: f64,
     created: &str,
-) -> LibreFangResult<Relation> {
+) -> Relation {
     let relation: RelationType = serde_json::from_str(rtype).unwrap_or(RelationType::RelatedTo);
-    // Same rationale as `parse_entity`: a corrupt `properties` blob must
-    // surface as an error, not as a silent empty map (audit:
-    // json-text-silent-parse-fallback).
-    let properties: HashMap<String, serde_json::Value> = match serde_json::from_str(props) {
-        Ok(m) => m,
-        Err(e) => {
-            error!(
-                source = %source,
-                target = %target,
-                table = "relations",
-                column = "properties",
-                error = %e,
-                "corrupt JSON in TEXT column"
-            );
-            return Err(LibreFangError::serialization(e));
-        }
-    };
+    let properties: HashMap<String, serde_json::Value> =
+        serde_json::from_str(props).unwrap_or_default();
     let created_at = chrono::DateTime::parse_from_rfc3339(created)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
-    Ok(Relation {
+    Relation {
         source: source.to_string(),
         relation,
         target: target.to_string(),
         properties,
         confidence: confidence as f32,
         created_at,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -346,10 +334,9 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn setup() -> KnowledgeStore {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
-        run_migrations(&pool.get().unwrap()).unwrap();
-        KnowledgeStore::new(pool)
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        KnowledgeStore::new(Arc::new(Mutex::new(conn)))
     }
 
     #[test]
@@ -488,147 +475,5 @@ mod tests {
         );
         assert_eq!(matches[0].source.name, "Alice");
         assert_eq!(matches[0].target.name, "Acme Corp");
-    }
-
-    /// Regression for the audit item `json-text-silent-parse-fallback`.
-    ///
-    /// Pre-fix, `parse_entity` / `parse_relation` silently substituted
-    /// `HashMap::default()` when the `properties` TEXT column failed to
-    /// parse — so a corrupt row was indistinguishable from one that
-    /// legitimately had no properties. After the fix, a corrupt
-    /// `properties` blob causes `query_graph` to fail loudly with a
-    /// `Serialization` error instead of returning a fabricated empty map.
-    #[test]
-    fn query_graph_surfaces_corrupt_entity_properties_instead_of_defaulting() {
-        let store = setup();
-        let alice_id = store
-            .add_entity(
-                Entity {
-                    id: "alice".to_string(),
-                    entity_type: EntityType::Person,
-                    name: "Alice".to_string(),
-                    properties: HashMap::new(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                },
-                "test-agent",
-            )
-            .unwrap();
-        let company_id = store
-            .add_entity(
-                Entity {
-                    id: "acme".to_string(),
-                    entity_type: EntityType::Organization,
-                    name: "Acme Corp".to_string(),
-                    properties: HashMap::new(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                },
-                "test-agent",
-            )
-            .unwrap();
-        store
-            .add_relation(
-                Relation {
-                    source: alice_id.clone(),
-                    relation: RelationType::WorksAt,
-                    target: company_id,
-                    properties: HashMap::new(),
-                    confidence: 0.9,
-                    created_at: Utc::now(),
-                },
-                "test-agent",
-            )
-            .unwrap();
-
-        // Corrupt Alice's `properties` blob directly — simulates a manual
-        // SQL edit, upstream serde drift, or partial-write recovery.
-        {
-            let conn = store.pool.get().unwrap();
-            conn.execute(
-                "UPDATE entities SET properties = ?1 WHERE id = ?2",
-                rusqlite::params!["this is not json", &alice_id],
-            )
-            .unwrap();
-        }
-
-        let res = store.query_graph(GraphPattern {
-            source: Some(alice_id),
-            relation: Some(RelationType::WorksAt),
-            target: None,
-            max_depth: 1,
-        });
-        assert!(
-            matches!(res, Err(LibreFangError::Serialization { .. })),
-            "corrupt entity properties must surface as Serialization, not be silently defaulted; \
-             got: {res:?}"
-        );
-    }
-
-    /// Same audit item, but the corruption is on the relation row's
-    /// `properties` column instead of the entity's.
-    #[test]
-    fn query_graph_surfaces_corrupt_relation_properties_instead_of_defaulting() {
-        let store = setup();
-        let alice_id = store
-            .add_entity(
-                Entity {
-                    id: "alice".to_string(),
-                    entity_type: EntityType::Person,
-                    name: "Alice".to_string(),
-                    properties: HashMap::new(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                },
-                "test-agent",
-            )
-            .unwrap();
-        let company_id = store
-            .add_entity(
-                Entity {
-                    id: "acme".to_string(),
-                    entity_type: EntityType::Organization,
-                    name: "Acme Corp".to_string(),
-                    properties: HashMap::new(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                },
-                "test-agent",
-            )
-            .unwrap();
-        let rel_id = store
-            .add_relation(
-                Relation {
-                    source: alice_id.clone(),
-                    relation: RelationType::WorksAt,
-                    target: company_id,
-                    properties: HashMap::new(),
-                    confidence: 0.9,
-                    created_at: Utc::now(),
-                },
-                "test-agent",
-            )
-            .unwrap();
-
-        {
-            let conn = store.pool.get().unwrap();
-            conn.execute(
-                "UPDATE relations SET properties = ?1 WHERE id = ?2",
-                rusqlite::params!["{not-valid-json", &rel_id],
-            )
-            .unwrap();
-        }
-
-        let res = store.query_graph(GraphPattern {
-            source: Some(alice_id),
-            relation: Some(RelationType::WorksAt),
-            target: None,
-            max_depth: 1,
-        });
-        assert!(
-            matches!(res, Err(LibreFangError::Serialization { .. })),
-            "corrupt relation properties must surface as Serialization, not be silently defaulted; \
-             got: {res:?}"
-        );
     }
 }

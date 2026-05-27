@@ -10,10 +10,8 @@ import {
   listExperiments,
   getExperimentMetrics,
   loadAgentSession,
-  listTools,
-  getAgentTools,
 } from "../http/client";
-import { agentKeys, toolKeys } from "./keys";
+import { agentKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 30_000;
@@ -96,17 +94,6 @@ export const agentQueries = {
       staleTime: 5 * 60_000,
       refetchOnWindowFocus: false,
     }),
-  agentTools: (agentId: string) =>
-    queryOptions({
-      queryKey: agentKeys.tools(agentId),
-      queryFn: () => getAgentTools(agentId),
-      enabled: !!agentId,
-    }),
-  toolsList: () =>
-    queryOptions({
-      queryKey: toolKeys.list(),
-      queryFn: listTools,
-    }),
 };
 
 export function useAgents(
@@ -150,12 +137,4 @@ export function useExperiments(agentId: string, options: QueryOverrides = {}) {
 
 export function useExperimentMetrics(experimentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.experimentMetrics(experimentId), options));
-}
-
-export function useTools(options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.toolsList(), options));
-}
-
-export function useAgentTools(agentId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.agentTools(agentId), options));
 }

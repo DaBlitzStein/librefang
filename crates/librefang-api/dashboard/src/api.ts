@@ -58,12 +58,6 @@ export interface ProviderItem {
   is_custom?: boolean;
   error_message?: string;
   last_tested?: string;
-  /** True when the user explicitly suppressed this provider via
-   *  `DELETE /api/providers/{id}/key`. Pairs with the
-   *  `POST /api/providers/{id}/enable` endpoint that revives it.
-   *  Lets the dashboard distinguish "user-hidden" from "never configured"
-   *  for the otherwise indistinguishable `auth_status: "missing"`. */
-  suppressed?: boolean;
 }
 
 export interface MediaProvider {
@@ -135,19 +129,18 @@ export interface ChannelItem {
   name: string;
   display_name?: string;
   configured?: boolean;
-  /** True iff every required secret env var on the sidecar manifest
-   *  is present and non-empty. The backend computes this per row. */
   has_token?: boolean;
   category?: string;
   description?: string;
   icon?: string;
-  /** Schema-driven configure form for a sidecar adapter (returned by
-   *  `python -m <module> --describe` and cached daemon-side). */
+  difficulty?: string;
+  setup_time?: string;
+  quick_setup?: string;
+  setup_type?: string;
+  setup_steps?: string[];
   fields?: ChannelField[];
-  /** Read-only TOML snippet the operator can copy into config.toml
-   *  if they prefer hand-editing over the configure drawer. Emitted
-   *  by the backend on every row. */
-  config_template?: string;
+  /** Webhook endpoint path on the shared server (e.g. "/channels/feishu/webhook"). */
+  webhook_endpoint?: string;
   /** Messages exchanged through this channel in the last 24 hours.
    *  Computed via a single grouped query on `usage_events` keyed by
    *  the `channel` column. Surfaced as the `kind · N msgs/24h`
@@ -383,95 +376,14 @@ export interface AgentFileUploadResult {
   transcription?: string;
 }
 
-/** Mirrors `ContentBlock` in `crates/librefang-types/src/message.rs` —
- *  serde-tagged on `type`. Keep variants in sync with the Rust enum;
- *  unknown server-side variants land in `ContentBlockUnknown` so the
- *  client never throws on a forward-compatible payload. */
-export interface ContentBlockText {
-  type: "text";
-  text: string;
-  provider_metadata?: unknown;
-}
-
-export interface ContentBlockThinking {
-  type: "thinking";
-  thinking: string;
-  provider_metadata?: unknown;
-}
-
-export interface ContentBlockToolUse {
-  type: "tool_use";
-  id: string;
-  name: string;
-  input: unknown;
-  provider_metadata?: unknown;
-}
-
-export interface ContentBlockToolResult {
-  type: "tool_result";
-  tool_use_id: string;
-  tool_name?: string;
-  content: string;
-  is_error: boolean;
-  status?: unknown;
-  approval_request_id?: string;
-}
-
-export interface ContentBlockImage {
-  type: "image";
-  media_type: string;
-  data: string;
-}
-
-export interface ContentBlockImageFile {
-  type: "image_file";
-  media_type: string;
-  path: string;
-}
-
-/** Forward-compat fallback for variants the Rust enum may add later.
- *  Intentionally NOT part of the `ContentBlock` discriminated union below:
- *  if `type: string` were a member, TypeScript could not narrow
- *  `block.type === "text"` to `ContentBlockText` (the `string` literal
- *  overlap collapses every variant). Walkers that need to tolerate
- *  unknown shapes do so at runtime via `"type" in block`, which keeps
- *  forward-compat without losing narrowing in the typed branches. */
-export interface ContentBlockUnknown {
-  type: string;
-  [key: string]: unknown;
-}
-
-export type ContentBlock =
-  | ContentBlockText
-  | ContentBlockThinking
-  | ContentBlockToolUse
-  | ContentBlockToolResult
-  | ContentBlockImage
-  | ContentBlockImageFile;
-
 export interface AgentSessionMessage {
   role?: string;
-  /** Either a plain string (legacy `MessageContent::Text`) or an array
-   *  of structured blocks (`MessageContent::Blocks`) — the Rust enum is
-   *  `#[serde(untagged)]` so both shapes appear on the wire.
-   *
-   *  The agent-scoped session endpoint (`/api/agents/{id}/session`) flattens
-   *  blocks server-side and returns a string here; the raw-blocks endpoint
-   *  (`/api/sessions/{id}`) returns the full `ContentBlock[]`. The mapper
-   *  handles both shapes via `extractAssistantHistoryParts`. */
-  content?: string | ContentBlock[];
+  content?: unknown;
   tools?: AgentTool[];
   images?: AgentSessionImage[];
   /** RFC 3339 timestamp from the server; may be absent for messages
    * persisted before the field was introduced. */
   timestamp?: string;
-  /** Flat reasoning trace surfaced by the agent-scoped session endpoint
-   *  for assistant messages that contained `ContentBlock::Thinking`. The
-   *  server joins multiple thinking blocks with a blank line, mirroring
-   *  the live-streaming `thinking_delta` accumulation. Absent when the
-   *  message had no thinking blocks (preserves response shape for
-   *  non-thinking models). */
-  thinking?: string;
 }
 
 export interface AgentSessionResponse {
@@ -481,8 +393,6 @@ export interface AgentSessionResponse {
   context_window_tokens?: number;
   label?: string;
   messages?: AgentSessionMessage[];
-  /** LLM-generated summary from the last compaction, null when none exists. */
-  compacted_summary?: string | null;
 }
 
 export interface AgentMessageResponse {
@@ -495,15 +405,6 @@ export interface AgentMessageResponse {
   memories_saved?: string[];
   memories_used?: string[];
   thinking?: string;
-  /**
-   * Issue #5199 — session id the server actually used for this turn.
-   * Populated only when the request omitted `session_id`, so the
-   * dashboard's HTTP fallback path can auto-pin `?sessionId=` in the
-   * URL exactly like the WS `response` path does. Mirrors the WS
-   * handler's `explicit_session.is_none()` branch in `ws.rs`. Absent
-   * when the caller pinned an explicit session in the request.
-   */
-  session_id?: string;
 }
 
 export interface SendAgentMessageOptions {
@@ -686,15 +587,7 @@ export interface CronJobItem {
   id?: string;
   enabled?: boolean;
   name?: string;
-  /**
-   * Cron schedule descriptor. The backend serializes
-   * `librefang_types::scheduler::CronSchedule` as a tagged object
-   * (`{ kind: "cron" | "every" | "at", … }`), so consumers must narrow
-   * before reading fields. Older code paths sometimes received a
-   * pre-rendered string; keep the union for back-compat (see
-   * `HandsPage.tsx::resolveCronSchedule` for an example consumer).
-   */
-  schedule?: string | CronScheduleSpec;
+  schedule?: string;
   [key: string]: unknown;
 }
 
@@ -992,7 +885,7 @@ export interface GoalItem {
   updated_at?: string;
 }
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+type Json = Record<string, unknown>;
 const DEFAULT_POST_TIMEOUT_MS = 60_000;
 const LONG_RUNNING_TIMEOUT_MS = 300_000;
 
@@ -1058,34 +951,36 @@ export function buildAuthenticatedWebSocket(path: string): {
 }
 
 async function parseError(response: Response): Promise<ApiError> {
+  // If 401, trigger global logout (only once to prevent infinite loop)
   if (response.status === 401 && _onUnauthorized && !_unauthorizedFired) {
     _unauthorizedFired = true;
     clearApiKey();
     _onUnauthorized();
   }
-  return ApiError.fromResponse(response);
-}
-
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-): Promise<Response> {
-  const signal = AbortSignal.timeout(timeoutMs);
+  const text = await response.text();
+  let message = response.statusText;
+  let code = `HTTP_${response.status}`;
   try {
-    return await fetch(url, { ...init, signal });
-  } catch (error) {
-    if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
-      throw new Error(
-        `Request timeout after ${Math.round(timeoutMs / 1000)}s - operation may still be running`,
-      );
+    const json = JSON.parse(text) as Json;
+    // Prefer the human-readable `detail` field over the machine-code `error` field
+    if (typeof json.detail === "string") {
+      message = json.detail;
+    } else if (typeof json.error === "string") {
+      message = json.error;
+      code = json.error;
     }
-    throw error;
+  } catch {
+    // ignore parse errors
   }
+  return new ApiError(response.status, code, message || `HTTP ${response.status}`);
 }
 
 async function get<T>(path: string): Promise<T> {
-  const response = await fetchWithTimeout(path, { headers: buildHeaders() });
+  const response = await fetch(path, {
+    headers: buildHeaders({
+      "Content-Type": "application/json",
+    })
+  });
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -1141,10 +1036,12 @@ async function post<T>(
 }
 
 async function put<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetchWithTimeout(path, {
+  const response = await fetch(path, {
     method: "PUT",
-    headers: buildHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
+    headers: buildHeaders({
+      "Content-Type": "application/json",
+    }),
+    body: JSON.stringify(body)
   });
   if (!response.ok) {
     throw await parseError(response);
@@ -1153,10 +1050,12 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function patch<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetchWithTimeout(path, {
+  const response = await fetch(path, {
     method: "PATCH",
-    headers: buildHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
+    headers: buildHeaders({
+      "Content-Type": "application/json",
+    }),
+    body: JSON.stringify(body)
   });
   if (!response.ok) {
     throw await parseError(response);
@@ -1165,24 +1064,22 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function del<T>(path: string): Promise<T> {
-  const response = await fetchWithTimeout(path, {
+  const response = await fetch(path, {
     method: "DELETE",
-    headers: buildHeaders({ "Content-Type": "application/json" }),
+    headers: buildHeaders({
+      "Content-Type": "application/json",
+    })
   });
   if (!response.ok) {
     throw await parseError(response);
-  }
-  if (response.status === 204 || response.headers.get("content-length") === "0") {
-    // 204 No Content — no JSON body. Return an empty object so callers
-    // that access optional fields (e.g. r.status on ApiActionResponse)
-    // get `undefined` per-field instead of NPE on the root value.
-    return {} as T;
   }
   return (await response.json()) as T;
 }
 
 async function getText(path: string): Promise<string> {
-  const response = await fetchWithTimeout(path, { headers: buildHeaders() });
+  const response = await fetch(path, {
+    headers: buildHeaders(),
+  });
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -1381,11 +1278,13 @@ export async function patchHandAgentRuntimeConfig(
  * shared `del<T>` helper (which assumes a JSON body) and handle the empty
  * response explicitly. */
 export async function clearHandAgentRuntimeConfig(agentId: string): Promise<void> {
-  const response = await fetchWithTimeout(
+  const response = await fetch(
     `/api/agents/${encodeURIComponent(agentId)}/hand-runtime-config`,
     {
       method: "DELETE",
-      headers: buildHeaders({ "Content-Type": "application/json" }),
+      headers: buildHeaders({
+        "Content-Type": "application/json",
+      }),
     },
   );
   if (!response.ok) {
@@ -1393,24 +1292,10 @@ export async function clearHandAgentRuntimeConfig(agentId: string): Promise<void
   }
 }
 
-/**
- * Schedule-mode payload accepted by `PATCH /api/agents/{id}`.
- *
- * Mirrors the Rust `librefang_types::agent::ScheduleMode` enum which is
- * `#[serde(rename_all = "snake_case")]` (externally tagged). The unit
- * variant (`reactive`) is the bare string `"reactive"`; the
- * fielded variants are wrapped objects (`{ continuous: { … } }`).
- */
-export type AgentSchedulePatch =
-  | "reactive"
-  | { periodic: { cron: string } }
-  | { proactive: { conditions: string[] } }
-  | { continuous: { check_interval_secs: number } };
-
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
- * system_prompt, mcp_servers, model, schedule). Distinct from `/agents/{id}/config`
+ * system_prompt, mcp_servers, model). Distinct from `/agents/{id}/config`
  * which only accepts the model-tuning subset. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch }): Promise<ApiActionResponse> {
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[] }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
 }
 
@@ -1466,13 +1351,7 @@ export async function getAgentTemplateToml(name: string): Promise<string> {
 }
 
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
-  // Refs #4614 — DELETE requires explicit confirmation. The dashboard
-  // already wraps this call in a confirmation modal, so we send the
-  // confirm flag here. Without it the API returns 409 with the
-  // canonical-UUID data-loss warning.
-  return del<ApiActionResponse>(
-    `/api/agents/${encodeURIComponent(agentId)}?confirm=true`,
-  );
+  return del<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
 export async function cloneAgent(agentId: string): Promise<ApiActionResponse> {
@@ -1488,7 +1367,7 @@ export async function clearAgentHistory(agentId: string): Promise<ApiActionRespo
 }
 
 export async function resetAgentSession(agentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session/reset`, {});
+  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/reset`, {});
 }
 
 export async function loadAgentSession(
@@ -1521,33 +1400,6 @@ export async function listProviders(): Promise<ProviderItem[]> {
   return data.providers ?? [];
 }
 
-// ── Credential pools (#4965) ────────────────────────────────────────────────
-
-/// Per-credential redacted snapshot returned by `GET /api/credential-pools`.
-/// `cooldown_remaining_secs` is either a number (seconds until cooldown
-/// expires) or the literal string `"permanent"` for keys marked invalid by
-/// a 401/403 response.
-export interface CredentialPoolKeySnapshot {
-  label: string;
-  key_hint: string;
-  priority: number;
-  request_count: number;
-  is_exhausted: boolean;
-  cooldown_remaining_secs: number | "permanent" | null;
-}
-
-export interface CredentialPoolStatus {
-  provider: string;
-  strategy: "fill_first" | "round_robin" | "random" | "least_used";
-  available_count: number;
-  total_count: number;
-  credentials: CredentialPoolKeySnapshot[];
-}
-
-export async function listCredentialPools(): Promise<CredentialPoolStatus[]> {
-  return get<CredentialPoolStatus[]>("/api/credential-pools");
-}
-
 export async function testProvider(providerId: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/test`, {});
 }
@@ -1561,18 +1413,10 @@ export interface ModelItem {
   max_output_tokens?: number;
   input_cost_per_m?: number;
   output_cost_per_m?: number;
-  // Effective (catalog ∘ override) — use for "what the model actually does". Refs #4745.
   supports_tools?: boolean;
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
-  // Raw catalog defaults — use for "Auto = revert target" in override editors.
-  capabilities_catalog?: {
-    supports_tools?: boolean;
-    supports_vision?: boolean;
-    supports_streaming?: boolean;
-    supports_thinking?: boolean;
-  };
   aliases?: string[];
   available?: boolean;
 }
@@ -1618,12 +1462,6 @@ export interface ModelOverrides {
   use_max_completion_tokens?: boolean;
   no_system_role?: boolean;
   force_max_tokens?: boolean;
-  // Refs #4745: capability overrides — undefined = use catalog default,
-  // true/false = force the capability on/off regardless of catalog metadata.
-  supports_tools?: boolean;
-  supports_vision?: boolean;
-  supports_streaming?: boolean;
-  supports_thinking?: boolean;
 }
 
 export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {
@@ -1644,10 +1482,6 @@ export async function setProviderKey(providerId: string, key: string): Promise<A
 
 export async function deleteProviderKey(providerId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`);
-}
-
-export async function enableProvider(providerId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/enable`, {});
 }
 
 export async function setProviderUrl(providerId: string, baseUrl: string, proxyUrl?: string): Promise<ApiActionResponse> {
@@ -1685,11 +1519,13 @@ export async function synthesizeSpeech(req: { text: string; provider?: string; m
 }
 
 export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; provider: string; model: string }> {
-  const response = await fetchWithTimeout("/api/media/transcribe", {
+  const response = await fetch("/api/media/transcribe", {
     method: "POST",
-    headers: buildHeaders({ "Content-Type": audioBlob.type || "audio/webm" }),
+    headers: buildHeaders({
+      "Content-Type": audioBlob.type || "audio/webm",
+    }),
     body: audioBlob,
-  }, LONG_RUNNING_TIMEOUT_MS);
+  });
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -1712,18 +1548,14 @@ function sanitizeFilenameForHeader(name: string): string {
 // original name. Server-side limits: 10MB and an exact MIME allowlist
 // (image/audio/text/pdf) — callers should still pre-validate to fail fast.
 export async function uploadAgentFile(agentId: string, file: File): Promise<AgentFileUploadResult> {
-  const response = await fetchWithTimeout(
-    `/api/agents/${encodeURIComponent(agentId)}/upload`,
-    {
-      method: "POST",
-      headers: buildHeaders({
-        "Content-Type": file.type || "application/octet-stream",
-        "X-Filename": sanitizeFilenameForHeader(file.name),
-      }),
-      body: file,
-    },
-    LONG_RUNNING_TIMEOUT_MS,
-  );
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/upload`, {
+    method: "POST",
+    headers: buildHeaders({
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Filename": sanitizeFilenameForHeader(file.name),
+    }),
+    body: file,
+  });
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -1747,104 +1579,47 @@ export async function listChannels(): Promise<ChannelItem[]> {
   return data.items ?? [];
 }
 
-export interface SidecarSaveResult {
-  status: "saved";
-  restart_required: boolean;
-  hot_actions_applied: string[];
-  // Secret-typed field keys whose value is already present in the
-  // daemon's process environment (e.g. exported by the launching shell).
-  // The dotenv loader's priority puts process env above secrets.env, so
-  // those shell-exported values will out-rank the freshly-written
-  // secrets.env entry until the operator unsets them and restarts the
-  // daemon. Always emitted; empty when no shadow detected.
-  shadowed_secrets: string[];
+export async function testChannel(channelName: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/test`, {});
 }
 
-// Sidecar channel save (Phase 5, sidecar-channel-configure). Splits values
-// across `secrets.env` (secret-typed fields) and `config.toml` (everything
-// else + the `[[sidecar_channels]]` boilerplate) on the server. Triggers
-// hot-reload of the channels registry; whether the sidecar child needs an
-// out-of-band restart is reported via `restart_required`.
-export async function saveSidecarConfig(
-  name: string,
-  values: Record<string, string>,
-): Promise<SidecarSaveResult> {
-  return post<SidecarSaveResult>(
-    `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
-    { values },
-  );
+export async function configureChannel(channelName: string, config: Record<string, unknown>): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/configure`, { fields: config });
 }
 
 export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
 }
 
-/** One QR-login lifecycle state, mirrors `QrStatusKind` in the
- * `librefang-channels` crate. Wire form is snake_case per the
- * `#[serde(rename_all = "snake_case")]` on the Rust enum. */
-export type QrStatusKind =
-  | "pending"
-  | "scanning"
-  | "confirmed"
-  | "expired"
-  | "failed";
-
-/** Projection of `ChannelStatus.qr` returned by
- * `GET /api/channels/{name}/qr`. Lifecycle:
- * - `pending` — sidecar fetched a QR; render and wait.
- * - `scanning` — user scanned, platform is finalising.
- * - `confirmed` — login succeeded; the sidecar's in-memory session
- *    continues with the captured credential. The operator follows
- *    the `message` ("set WECHAT_BOT_TOKEN in secrets.env to skip QR
- *    next time") to persist; auto-persist was dropped because the
- *    only available endpoint is a full-form upsert that would wipe
- *    other schema-managed env keys on a partial save.
- * - `expired` / `failed` — terminal failure; show `message`.
- *
- * `updated_at` advances on every state transition so consumers can
- * use it as a cheap diff signal between polls. */
-export interface QrState {
-  status: QrStatusKind;
-  qr_code: string;
+export interface QrStartResponse {
+  available: boolean;
+  qr_code?: string;
   qr_url?: string;
   message?: string;
-  expires_at?: string;
-  updated_at: string;
 }
 
-/** Fetch the current QR-login state for a channel.
- *
- * Returns `null` when the sidecar is running but has not published a
- * QR session yet (HTTP 204 — e.g. WeChat sidecar still authenticating
- * from a cached `WECHAT_BOT_TOKEN`). 404 is surfaced as a thrown
- * `ApiError` like every other route — the caller distinguishes
- * "unknown channel" (impossible if the dashboard listed it) from
- * "sidecar not running" via the message.
- *
- * The pre-migration `wechatQrStart` / `wechatQrStatus` /
- * `whatsappQrStart` / `whatsappQrStatus` quadruple was removed when
- * those adapters migrated to sidecars — the sidecar now drives the
- * QR lifecycle itself and emits `qr_ready` / `qr_status` events, the
- * daemon caches `ChannelStatus.qr`, and this single endpoint reads it. */
-export async function getChannelQr(channelName: string): Promise<QrState | null> {
-  // The route returns 204 No Content when the sidecar is running but
-  // has not published a QR session — e.g. WeChat already authenticated
-  // from a cached `WECHAT_BOT_TOKEN`, no scan needed. The shared
-  // `get<T>` helper doesn't model that branch (it always parses JSON),
-  // so this endpoint uses `fetch` directly.
-  const response = await fetch(
-    `/api/channels/${encodeURIComponent(channelName)}/qr`,
-    { headers: buildHeaders() },
-  );
-  if (response.status === 204) {
-    return null;
-  }
-  if (!response.ok) {
-    throw await parseError(response);
-  }
-  return (await response.json()) as QrState;
+export interface QrStatusResponse {
+  connected: boolean;
+  expired: boolean;
+  message?: string;
+  bot_token?: string;
 }
 
+export async function wechatQrStart(): Promise<QrStartResponse> {
+  return post<QrStartResponse>("/api/channels/wechat/qr/start", {});
+}
+
+export async function wechatQrStatus(qrCode: string): Promise<QrStatusResponse> {
+  return get<QrStatusResponse>(`/api/channels/wechat/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
+}
+
+export async function whatsappQrStart(): Promise<QrStartResponse> {
+  return post<QrStartResponse>("/api/channels/whatsapp/qr/start", {});
+}
+
+export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse> {
+  return get<QrStatusResponse>(`/api/channels/whatsapp/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
+}
 
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
@@ -1931,79 +1706,6 @@ export interface SupportingFileContents {
 
 export async function getSupportingFile(name: string, path: string): Promise<SupportingFileContents> {
   return get<SupportingFileContents>(`/api/skills/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`);
-}
-
-// Skill workshop pending review (#3328)
-
-export type PendingCaptureSource =
-  | { kind: "explicit_instruction"; trigger: string }
-  | { kind: "user_correction"; trigger: string }
-  | { kind: "repeated_tool_pattern"; tools: string; repeat_count: number };
-
-export interface PendingProvenance {
-  user_message_excerpt: string;
-  assistant_response_excerpt?: string | null;
-  turn_index: number;
-}
-
-export interface PendingCandidate {
-  id: string;
-  agent_id: string;
-  session_id?: string | null;
-  /** RFC3339 timestamp set by the workshop when the candidate was captured. */
-  captured_at: string;
-  source: PendingCaptureSource;
-  name: string;
-  description: string;
-  prompt_context: string;
-  provenance: PendingProvenance;
-}
-
-// Discriminated on `status`:
-//   * `approved` — fresh promotion; `version` carries the new skill's
-//     initial version string.
-//   * `already_promoted` — the active skill already existed (a previous
-//     approve promoted it but the pending-file cleanup failed). The
-//     server idempotently dropped the phantom pending row and returned
-//     200; no `version` field, since this call did not perform a write.
-//     UI should treat both as a successful resolution of the candidate.
-export type PendingApprovalResult =
-  | {
-      status: "approved";
-      candidate_id: string;
-      skill_name: string;
-      version?: string;
-      message: string;
-    }
-  | {
-      status: "already_promoted";
-      candidate_id: string;
-      skill_name: string;
-      message: string;
-    };
-
-export async function listPendingCandidates(agent?: string): Promise<PendingCandidate[]> {
-  const query = agent ? `?agent=${encodeURIComponent(agent)}` : "";
-  const data = await get<{ candidates?: PendingCandidate[] }>(`/api/skills/pending${query}`);
-  return data.candidates ?? [];
-}
-
-export async function getPendingCandidate(id: string): Promise<PendingCandidate> {
-  const data = await get<{ candidate: PendingCandidate }>(
-    `/api/skills/pending/${encodeURIComponent(id)}`,
-  );
-  return data.candidate;
-}
-
-export async function approvePendingCandidate(id: string): Promise<PendingApprovalResult> {
-  return post<PendingApprovalResult>(`/api/skills/pending/${encodeURIComponent(id)}/approve`, {});
-}
-
-export async function rejectPendingCandidate(id: string): Promise<{ status: "rejected"; candidate_id: string }> {
-  return post<{ status: "rejected"; candidate_id: string }>(
-    `/api/skills/pending/${encodeURIComponent(id)}/reject`,
-    {},
-  );
 }
 
 // ClawHub types
@@ -2203,16 +1905,7 @@ export async function getWorkflow(workflowId: string): Promise<WorkflowItem> {
   return get<WorkflowItem>(`/api/workflows/${encodeURIComponent(workflowId)}`);
 }
 
-// `input` may be a plain string (free-text `{{input}}`) or an object whose
-// keys bind to `{{key}}` placeholders in step prompts — the backend
-// serialises an object body so the engine's per-key seeding resolves
-// declared parameters (e.g. `{{challenge}}`) at run time.
-export type WorkflowRunInput = string | Record<string, unknown>;
-
-export async function runWorkflow(
-  workflowId: string,
-  input: WorkflowRunInput,
-): Promise<ApiActionResponse> {
+export async function runWorkflow(workflowId: string, input: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/run`, {
     input
   }, LONG_RUNNING_TIMEOUT_MS); // 5 min timeout — workflows run multiple LLM steps
@@ -2288,10 +1981,7 @@ export interface DryRunResult {
  * Validate a workflow without making any LLM calls.
  * Returns per-step previews with resolved prompts and agent resolution status.
  */
-export async function dryRunWorkflow(
-  workflowId: string,
-  input: WorkflowRunInput,
-): Promise<DryRunResult> {
+export async function dryRunWorkflow(workflowId: string, input: string): Promise<DryRunResult> {
   return post<DryRunResult>(
     `/api/workflows/${encodeURIComponent(workflowId)}/dry-run`,
     { input },
@@ -2302,83 +1992,6 @@ export async function dryRunWorkflow(
 /** Fetch full detail for a single workflow run (includes step-level I/O). */
 export async function getWorkflowRun(runId: string): Promise<WorkflowRunDetail> {
   return get<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(runId)}`);
-}
-
-// ---------------------------------------------------------------------------
-// HITL operator-step pause inspection + resolution (#4977).
-//
-// Wire shape mirrors `OperatorAction` on the Rust side. Verbs are
-// snake_case (`approve` / `reject` / `edit` / `freeform_input` /
-// `provide_input`); `provide_input` carries the additional `field`
-// name. `edit` / `freeform_input` / `provide_input` require a non-empty
-// `payload`; the rest ignore it.
-// ---------------------------------------------------------------------------
-
-/** Discriminator for the action verbs the operator may invoke at a paused
- *  operator step. Matches `OperatorAction` serde shape exactly. */
-export type OperatorActionVerb =
-  | "approve"
-  | "reject"
-  | "edit"
-  | "freeform_input"
-  | "provide_input";
-
-/** One element of the `actions` array returned by the inspect endpoint. */
-export type OperatorActionDescriptor =
-  | "approve"
-  | "reject"
-  | "edit"
-  | "freeform_input"
-  | { provide_input: { field: string } };
-
-/** Snapshot of a single paused operator-step pause — what the dashboard
- *  renders to drive the action-button UI. */
-export interface OperatorPause {
-  /** Workflow run id (string-encoded `WorkflowRunId`). */
-  run_id: string;
-  /** Workflow definition id. */
-  workflow_id: string;
-  /** Workflow name (denormalised for the worklist row). */
-  workflow_name: string;
-  /** Name of the operator step holding the run paused. */
-  step_name: string;
-  /** Index of the operator step inside the workflow's step list. */
-  operator_step_index: number;
-  /** Output of the step that ran immediately before the operator step —
-   *  the thing the operator must review. */
-  artifact: string;
-  /** Actions the workflow author authorised at this step. */
-  actions: OperatorActionDescriptor[];
-  /** ISO-8601 run start time. */
-  started_at: string;
-  /** ISO-8601 pause time. Null only in the race window between pause and
-   *  state-write — treat as "just now" if missing. */
-  paused_at: string | null;
-}
-
-/** Fetch the operator pause for a single run. 404 if the run doesn't
- *  exist, 409 (`{error: "not_operator_pause"}`) if the run is not paused
- *  at an operator step — the HTTP layer's `request()` helper surfaces
- *  both as thrown errors the caller can branch on. */
-export async function inspectOperatorPause(runId: string): Promise<OperatorPause> {
-  return get<OperatorPause>(`/api/workflows/runs/${encodeURIComponent(runId)}/operator`);
-}
-
-/** List every run currently paused at an operator step (oldest first). */
-export async function listPendingOperatorRuns(): Promise<OperatorPause[]> {
-  return get<OperatorPause[]>(`/api/workflows/operator/pending`);
-}
-
-/** Resolve a paused operator step with an action + optional payload.
- *  Returns 200 immediately; the workflow continues asynchronously. */
-export async function resolveOperatorStep(
-  runId: string,
-  body: { action: OperatorActionVerb; payload?: string; field?: string },
-): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(
-    `/api/workflows/runs/${encodeURIComponent(runId)}/operator`,
-    body,
-  );
 }
 
 export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiActionResponse> {
@@ -2467,90 +2080,6 @@ export async function listCronJobs(agentId?: string): Promise<CronJobItem[]> {
   return data.jobs ?? [];
 }
 
-/**
- * Cron schedule discriminated union — mirrors the Rust
- * `librefang_types::scheduler::CronSchedule` enum which is
- * `#[serde(tag = "kind", rename_all = "snake_case")]`.
- */
-export type CronScheduleSpec =
-  | { kind: "at"; at: string }
-  | { kind: "every"; every_secs: number }
-  | { kind: "cron"; expr: string; tz?: string | null };
-
-/**
- * Cron action discriminated union — mirrors the Rust
- * `librefang_types::scheduler::CronAction` enum.
- *
- * The dashboard exposes only `agent_turn` for the agent-detail Schedule
- * tab (the most common case). `system_event` / `workflow` exist on the
- * backend; consumers needing those should extend this type.
- */
-export type CronActionSpec =
-  | { kind: "agent_turn"; message: string; model_override?: string | null; timeout_secs?: number | null }
-  | { kind: "system_event"; text: string }
-  | { kind: "workflow"; workflow_id: string; input?: string | null; timeout_secs?: number | null };
-
-/**
- * Cron delivery (single legacy destination) — mirrors the Rust
- * `librefang_types::scheduler::CronDelivery` enum.
- */
-export type CronDeliverySpec =
-  | { kind: "none" }
-  | { kind: "last_channel" }
-  | { kind: "channel"; channel: string; to: string }
-  | { kind: "webhook"; url: string };
-
-export interface CreateCronJobPayload {
-  agent_id: string;
-  name: string;
-  schedule: CronScheduleSpec;
-  action: CronActionSpec;
-  delivery?: CronDeliverySpec;
-  /** Multi-destination fan-out. Optional; omit for single-target delivery. */
-  delivery_targets?: CronDeliveryTarget[];
-  /** Per-job session-mode override. `undefined` → use agent default. */
-  session_mode?: "persistent" | "new";
-  /** Optional peer/user ID used as SenderContext.user_id when the job fires. */
-  peer_id?: string;
-  /** Auto-delete after first fire; defaults to true for `at` schedules. */
-  one_shot?: boolean;
-}
-
-export interface UpdateCronJobPayload {
-  name?: string;
-  enabled?: boolean;
-  schedule?: CronScheduleSpec;
-  action?: CronActionSpec;
-  delivery?: CronDeliverySpec;
-  delivery_targets?: CronDeliveryTarget[];
-  session_mode?: "persistent" | "new" | null;
-  peer_id?: string | null;
-}
-
-export async function createCronJob(
-  payload: CreateCronJobPayload,
-): Promise<{ job_id?: string; status?: string }> {
-  return post<{ job_id?: string; status?: string }>("/api/cron/jobs", payload);
-}
-
-export async function updateCronJob(
-  jobId: string,
-  payload: UpdateCronJobPayload,
-): Promise<CronJobItem> {
-  return put<CronJobItem>(`/api/cron/jobs/${encodeURIComponent(jobId)}`, payload);
-}
-
-export async function deleteCronJob(jobId: string): Promise<ApiActionResponse> {
-  return del<ApiActionResponse>(`/api/cron/jobs/${encodeURIComponent(jobId)}`);
-}
-
-export async function toggleCronJob(jobId: string, enabled: boolean): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(
-    `/api/cron/jobs/${encodeURIComponent(jobId)}/enable`,
-    { enabled },
-  );
-}
-
 export async function getVersionInfo(): Promise<VersionResponse> {
   return get<VersionResponse>("/api/version");
 }
@@ -2634,19 +2163,6 @@ export interface TaskQueueItem {
 
 export async function getHealthDetail(): Promise<HealthDetailResponse> {
   return get<HealthDetailResponse>("/api/health/detail");
-}
-
-/**
- * Minimal liveness probe for the `<OfflineBanner />`. `/api/health` is
- * always-public (load-balancer / probe contract) while `/api/health/detail`
- * requires auth because its payload leaks operational telemetry. The
- * banner only needs "is the daemon reachable" — anchor on the minimal
- * probe so it never trips the auth gate pre-login and never receives
- * sensitive data (#4868 review fix; #4893 attempted the inverse and
- * silently broke the auth contract on the detail endpoint).
- */
-export async function getHealth(): Promise<{ status?: string }> {
-  return get<{ status?: string }>("/api/health");
 }
 
 export interface MemoryConfigResponse {
@@ -2893,7 +2409,7 @@ export async function totpStatus(): Promise<TotpStatusResponse> {
 }
 
 export async function totpRevoke(code: string): Promise<ApiActionResponse> {
-  const response = await fetchWithTimeout("/api/approvals/totp/revoke", {
+  const response = await fetch("/api/approvals/totp/revoke", {
     method: "POST",
     headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ code }),
@@ -3006,13 +2522,14 @@ export async function createAgentSession(
   return post(`/api/agents/${encodeURIComponent(agentId)}/sessions`, label ? { label } : {});
 }
 
-export type ListSessionsResult = { items: SessionListItem[]; truncated: boolean };
-
-export async function listSessions(): Promise<ListSessionsResult> {
+export async function listSessions(): Promise<SessionListItem[]> {
+  // Bumped past the server's default page size (50) so SessionsPage doesn't
+  // silently clip the global list. Per-agent KPI rollups read from
+  // `GET /api/agents/{id}/stats`; AgentsPage row aggregates read the
+  // `sessions_24h` / `cost_24h` fields embedded on each AgentItem by
+  // `enrich_agent_json`, so this endpoint is no longer used for that path.
   const data = await get<PaginatedResponse<SessionListItem>>("/api/sessions?limit=500");
-  const items = data.items ?? [];
-  const total = data.total ?? 0;
-  return { items, truncated: total > items.length };
+  return data.items ?? [];
 }
 
 export async function getSessionDetails(sessionId: string): Promise<SessionDetailResponse> {
@@ -3029,15 +2546,6 @@ export async function setSessionLabel(
 ): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/label`, {
     label
-  });
-}
-
-export async function setSessionModelOverride(
-  sessionId: string,
-  modelOverride: string | null
-): Promise<ApiActionResponse> {
-  return patch<ApiActionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
-    model_override: modelOverride
   });
 }
 
@@ -3144,23 +2652,10 @@ export async function getUsageDaily(): Promise<UsageDailyResponse> {
   return get<UsageDailyResponse>("/api/usage/daily");
 }
 
-// Mirrors the kernel-side `BudgetStatus` (crates/librefang-kernel-metering)
-// which the API layer returns directly from `GET /api/budget`. The field
-// names are deliberately *not* the `BudgetConfig` names — they include the
-// current `*_spend` and `*_pct` rollups computed against the live
-// `usage_events` table. Issue #4797 (the dashboard read these as
-// `max_hourly_usd` etc.) was a typed-shape regression that always
-// rendered "-" for the operator's configured caps.
 export interface BudgetStatus {
-  hourly_spend?: number;
-  hourly_limit?: number;
-  hourly_pct?: number;
-  daily_spend?: number;
-  daily_limit?: number;
-  daily_pct?: number;
-  monthly_spend?: number;
-  monthly_limit?: number;
-  monthly_pct?: number;
+  max_hourly_usd?: number;
+  max_daily_usd?: number;
+  max_monthly_usd?: number;
   alert_threshold?: number;
   default_max_llm_tokens_per_hour?: number;
   [key: string]: unknown;
@@ -3172,70 +2667,6 @@ export async function getBudgetStatus(): Promise<BudgetStatus> {
 
 export async function updateBudget(payload: Partial<BudgetStatus>): Promise<ApiActionResponse> {
   return put<ApiActionResponse>("/api/budget", payload);
-}
-
-// Per-provider budget snapshot (#5650). Mirrors the JSON envelope returned
-// by `GET /api/budget/providers` — see `crates/librefang-api/src/routes/
-// budget.rs::provider_budget_list`. Rows arrive pre-sorted ascending by
-// `provider`, so the dashboard table can render them as-is.
-export interface ProviderBudgetRow {
-  provider: string;
-  // `true` when the provider is observed in `usage_events` but has NO
-  // `[budget.providers.<id>]` entry. The dashboard surfaces a "Set a cap"
-  // CTA for these.
-  unconfigured: boolean;
-  // Configured caps — 0 / 0.0 means "unlimited", matching the on-disk
-  // `ProviderBudget` contract. Naming-wise these are deliberately
-  // distinct from the spend fields below so the wire is self-describing.
-  cap_hourly_usd: number;
-  cap_daily_usd: number;
-  cap_monthly_usd: number;
-  cap_tokens_per_hour: number;
-  // Current rollups from `usage_events`, aggregated server-side. UTC
-  // window boundaries (matches every other rollup in the budget surface).
-  spend_hourly_usd: number;
-  spend_daily_usd: number;
-  spend_monthly_usd: number;
-  tokens_this_hour: number;
-  // Live state from `ProviderExhaustionStore`. `is_exhausted=true` means
-  // the LLM fallback chain is currently skipping this provider; the
-  // reason and remaining auto-clear ms come straight from the store row.
-  is_exhausted: boolean;
-  exhaustion_reason: string | null;
-  exhaustion_remaining_ms: number | null;
-}
-
-export interface ProviderBudgetSnapshot {
-  providers: ProviderBudgetRow[];
-  // Echoed from the global `[budget]` table so the dashboard renders the
-  // green/yellow/red coloring against the same threshold the metering
-  // gate uses, without a second `/api/budget` roundtrip.
-  alert_threshold: number;
-}
-
-export async function getProviderBudgets(): Promise<ProviderBudgetSnapshot> {
-  return get<ProviderBudgetSnapshot>("/api/budget/providers");
-}
-
-/// Body shape for PUT /api/budget/providers/{provider_id}. All fields are
-/// optional — the handler does a partial update, so an unset field keeps
-/// its prior on-disk value. Set a field to 0 / 0.0 to explicitly clear a
-/// cap (the gate treats 0 as unlimited).
-export interface ProviderBudgetPayload {
-  max_cost_per_hour_usd?: number;
-  max_cost_per_day_usd?: number;
-  max_cost_per_month_usd?: number;
-  max_tokens_per_hour?: number;
-}
-
-export async function updateProviderBudget(
-  providerId: string,
-  payload: ProviderBudgetPayload,
-): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(
-    `/api/budget/providers/${encodeURIComponent(providerId)}`,
-    payload,
-  );
 }
 
 export async function suspendAgent(agentId: string): Promise<ApiActionResponse> {
@@ -3484,32 +2915,14 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 // ── Network / Peers ──────────────────────────────────
 
 export interface NetworkStatusResponse {
-  // `online` is strictly "the OFP PeerNode actually bound a listener"
-  // (peer_node_ref().is_some() on the daemon). `enabled` is the looser
-  // config-mirror (`network_enabled && !shared_secret.is_empty()`) — so
-  // `enabled === true && online === false` is the genuine "configured
-  // but listener bind failed" state, surfaced separately from
-  // "disabled". Both fields ship for SDK back-compat; the dashboard
-  // reads `online`.
   online?: boolean;
-  enabled?: boolean;
   node_id?: string;
   protocol_version?: string;
-  // Daemon emits both `listen_addr` (dashboard-aligned) and
-  // `listen_address` (legacy SDK consumers). They carry the same value;
-  // both may be `""` when OFP is disabled.
   listen_addr?: string;
-  listen_address?: string;
-  // `peer_count` equals `connected_peers`. Both ship for SDK
-  // back-compat; the dashboard reads `peer_count` when present.
   peer_count?: number;
-  connected_peers?: number;
-  total_peers?: number;
   // SECURITY (#3873): null when this node has no Ed25519 identity
   // (HMAC-only legacy mode); operators should treat that as "new defense
-  // is dormant" and investigate. Distinct from "OFP disabled" — when
-  // `online === false` the identity simply has not been initialized
-  // because OFP never started.
+  // is dormant" and investigate.
   identity_fingerprint?: string | null;
   pinned_peers?: number;
   [key: string]: unknown;
@@ -3623,11 +3036,11 @@ export function clearApiKey() {
  *  Safe to call even when the token is already gone. */
 export async function dashboardLogout(): Promise<void> {
   try {
-    await fetchWithTimeout("/api/auth/logout", {
+    await fetch("/api/auth/logout", {
       method: "POST",
       credentials: "same-origin",
       headers: authHeader(),
-    }, 10_000);
+    });
   } catch {
     // Network failure shouldn't block local cleanup — fall through.
   }
@@ -3643,7 +3056,7 @@ export type AuthMode = "credentials" | "api_key" | "hybrid" | "none";
 
 export async function checkDashboardAuthMode(): Promise<AuthMode> {
   try {
-    const resp = await fetchWithTimeout("/api/auth/dashboard-check", {}, 5_000);
+    const resp = await fetch("/api/auth/dashboard-check");
     if (!resp.ok) return "none";
     const data = await resp.json();
     return (data.mode as AuthMode) || "none";
@@ -3654,7 +3067,7 @@ export async function checkDashboardAuthMode(): Promise<AuthMode> {
 
 export async function getDashboardUsername(): Promise<string> {
   try {
-    const resp = await fetchWithTimeout("/api/auth/dashboard-check", {}, 5_000);
+    const resp = await fetch("/api/auth/dashboard-check");
     if (!resp.ok) return "";
     const data = await resp.json();
     return (data.username as string) || "";
@@ -3667,7 +3080,7 @@ export async function dashboardLogin(username: string, password: string, totpCod
   try {
     const body: Record<string, string> = { username, password };
     if (totpCode) body.totp_code = totpCode;
-    const resp = await fetchWithTimeout("/api/auth/dashboard-login", {
+    const resp = await fetch("/api/auth/dashboard-login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -3689,7 +3102,7 @@ export async function verifyStoredAuth(): Promise<boolean> {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetchWithTimeout("/api/security", {
+      const response = await fetch("/api/security", {
         headers: buildHeaders(),
       });
       if (response.status === 401) {
@@ -4235,14 +3648,16 @@ export async function getTerminalHealth(): Promise<TerminalHealth> {
 }
 
 export async function listTerminalWindows(): Promise<TerminalWindow[]> {
-  const response = await fetchWithTimeout("/api/terminal/windows", { headers: buildHeaders() });
+  const response = await fetch("/api/terminal/windows", {
+    headers: buildHeaders(),
+  });
   if (!response.ok) throw await parseError(response);
   const data = (await response.json()) as { windows?: TerminalWindow[] } | TerminalWindow[];
   return Array.isArray(data) ? data : (data.windows ?? []);
 }
 
 export async function createTerminalWindow(body: { name?: string } = {}): Promise<void> {
-  const response = await fetchWithTimeout("/api/terminal/windows", {
+  const response = await fetch("/api/terminal/windows", {
     method: "POST",
     headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
@@ -4251,7 +3666,7 @@ export async function createTerminalWindow(body: { name?: string } = {}): Promis
 }
 
 export async function renameTerminalWindow(windowId: string, name: string): Promise<void> {
-  const response = await fetchWithTimeout(
+  const response = await fetch(
     `/api/terminal/windows/${encodeURIComponent(windowId)}`,
     {
       method: "PATCH",
@@ -4263,7 +3678,7 @@ export async function renameTerminalWindow(windowId: string, name: string): Prom
 }
 
 export async function deleteTerminalWindow(windowId: string): Promise<void> {
-  const response = await fetchWithTimeout(
+  const response = await fetch(
     `/api/terminal/windows/${encodeURIComponent(windowId)}`,
     { method: "DELETE", headers: buildHeaders() },
   );
@@ -4572,7 +3987,7 @@ export async function getUserBudget(name: string): Promise<UserBudgetResponse> {
 export async function updateUserBudget(
   name: string,
   payload: UserBudgetPayload,
-): Promise<UserBudgetPayload> {
+): Promise<{ status: string; budget: UserBudgetPayload }> {
   return put(
     `/api/budget/users/${encodeURIComponent(name)}`,
     payload,

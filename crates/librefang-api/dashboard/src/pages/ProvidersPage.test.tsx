@@ -11,14 +11,12 @@ import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ProviderItem } from "../api";
 import { ProvidersPage } from "./ProvidersPage";
-import { useDrawerStore } from "../lib/drawerStore";
 import { useProviders, useProviderStatus } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import {
   useTestProvider,
   useSetProviderKey,
   useDeleteProviderKey,
-  useEnableProvider,
   useSetProviderUrl,
   useSetDefaultProvider,
   useCreateRegistryContent,
@@ -27,15 +25,6 @@ import {
 vi.mock("../lib/queries/providers", () => ({
   useProviders: vi.fn(),
   useProviderStatus: vi.fn(),
-  // CredentialPoolsSection (#5459-era addition) calls this; default to the
-  // empty/hidden state so the existing provider-list tests don't have to
-  // care about the niche credential-pools feature. Tests that exercise it
-  // can override via the exported mock.
-  useCredentialPools: vi.fn(() => ({
-    data: undefined,
-    isLoading: false,
-    error: null,
-  })),
 }));
 
 vi.mock("../lib/queries/models", () => ({
@@ -46,7 +35,6 @@ vi.mock("../lib/mutations/providers", () => ({
   useTestProvider: vi.fn(),
   useSetProviderKey: vi.fn(),
   useDeleteProviderKey: vi.fn(),
-  useEnableProvider: vi.fn(),
   useSetProviderUrl: vi.fn(),
   useSetDefaultProvider: vi.fn(),
   useCreateRegistryContent: vi.fn(),
@@ -80,9 +68,6 @@ const useTestProviderMock = useTestProvider as unknown as ReturnType<
   typeof vi.fn
 >;
 const useSetProviderKeyMock = useSetProviderKey as unknown as ReturnType<
-  typeof vi.fn
->;
-const useEnableProviderMock = useEnableProvider as unknown as ReturnType<
   typeof vi.fn
 >;
 const useDeleteProviderKeyMock = useDeleteProviderKey as unknown as ReturnType<
@@ -135,20 +120,8 @@ function renderPage(): void {
   render(
     <QueryClientProvider client={queryClient}>
       <ProvidersPage />
-      <DrawerSlot />
     </QueryClientProvider>,
   );
-}
-
-// Renders the current global drawer body once into a stable host so tests
-// can query the drawer's content alongside the page. Mirrors the helper in
-// ChannelsPage.test.tsx; <PushDrawer /> mounts twice (desktop + mobile) and
-// breaks unique text queries.
-function DrawerSlot(): React.ReactNode {
-  const content = useDrawerStore((s) => s.content);
-  const isOpen = useDrawerStore((s) => s.isOpen);
-  if (!isOpen || !content) return null;
-  return <div data-testid="drawer-slot">{content.body}</div>;
 }
 
 describe("ProvidersPage", () => {
@@ -156,9 +129,6 @@ describe("ProvidersPage", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    // Drawer state is a global zustand store — reset between tests so a
-    // drawer left open by one test doesn't bleed into the next.
-    useDrawerStore.setState({ isOpen: false, content: null });
     testMutateAsync = vi.fn().mockResolvedValue({ status: "ok" });
 
     useProviderStatusMock.mockReturnValue({
@@ -177,9 +147,6 @@ describe("ProvidersPage", () => {
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
     useDeleteProviderKeyMock.mockReturnValue(
-      stubMutation(vi.fn().mockResolvedValue(undefined)),
-    );
-    useEnableProviderMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
     useSetProviderUrlMock.mockReturnValue(
@@ -251,7 +218,7 @@ describe("ProvidersPage", () => {
     expect(screen.queryByText("Groq")).not.toBeInTheDocument();
   });
 
-  it("opens the Add picker drawer and lists only unconfigured providers", async () => {
+  it("switches to the unconfigured tab and shows only setup-needed providers", async () => {
     useProvidersMock.mockReturnValue({
       data: PROVIDERS,
       isLoading: false,
@@ -261,20 +228,11 @@ describe("ProvidersPage", () => {
 
     renderPage();
 
-    // Configured providers are visible on the page; unconfigured ones live
-    // behind the picker (post-tab-removal: ProvidersPage now mirrors
-    // ChannelsPage's add-via-picker pattern).
-    expect(screen.queryByText("Groq")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: /providers\.unconfigured/ }));
 
-    // Header has the Add button — click it to open the picker drawer.
-    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
-
-    // Drawer renders the unconfigured catalog. Groq (auth_status: missing)
-    // shows up; OpenAI/Anthropic don't, since they're already configured.
-    const drawer = await screen.findByTestId("drawer-slot");
-    expect(within(drawer).getByText("Groq")).toBeInTheDocument();
-    expect(within(drawer).queryByText("OpenAI")).not.toBeInTheDocument();
-    expect(within(drawer).queryByText("Anthropic")).not.toBeInTheDocument();
+    // AnimatePresence (mode="wait") keys on activeTab so the swap is async.
+    expect(await screen.findByText("Groq")).toBeInTheDocument();
+    expect(screen.queryByText("OpenAI")).not.toBeInTheDocument();
   });
 
   it("filters configured providers by search term", () => {

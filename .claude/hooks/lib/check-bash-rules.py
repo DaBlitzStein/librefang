@@ -21,8 +21,9 @@ Usage (called from the hook shell scripts):
 
 Available rules:
 
-  cargo-build-run           -> banned anywhere in the librefang repo
+  cargo-build-run-install   -> banned anywhere in the librefang repo
   cargo-test-unscoped       -> banned (allow `cargo test -p <crate>` only)
+  cargo-add-remove-upgrade  -> banned (deps need user OK)
   worktree-remove-main      -> banned (`git worktree remove/move` of main path)
   git-mutation-main         -> banned (when kind=main)
   sed-i-main / perl-pi-main -> banned (when kind=main)
@@ -156,8 +157,8 @@ def walk_git_invocations(toks: list[str]):
 # -----------------------------------------------------------------------------
 
 
-def rule_cargo_build_run(toks, ctx):
-    hit = find_cargo_subcommand(toks, {"build", "run"})
+def rule_cargo_build_run_install(toks, ctx):
+    hit = find_cargo_subcommand(toks, {"build", "run", "install"})
     if hit:
         sub = hit[0]
         return (
@@ -179,6 +180,18 @@ def rule_cargo_test_unscoped(toks, ctx):
         "Unscoped `cargo test` builds and runs the whole workspace, which is "
         "too slow / target-contending for the AI to invoke. Re-run with "
         "`-p <crate>` (or `--package <crate>`)."
+    )
+
+
+def rule_cargo_add_remove_upgrade(toks, ctx):
+    hit = find_cargo_subcommand(toks, {"add", "rm", "remove", "upgrade"})
+    if not hit:
+        return None
+    sub = hit[0]
+    return (
+        f"`cargo {sub}` mutates Cargo.toml dependencies, which CLAUDE.md "
+        f"(global) forbids without explicit user approval. Surface the "
+        f"proposed dep change first and let the user run the command."
     )
 
 
@@ -414,24 +427,12 @@ def rule_broad_git_add(toks, ctx):
     return None
 
 
-# `credentials` / `secrets` are restricted to credential-STORAGE extensions
-# (data formats + common backup / DB suffixes) so that source files that
-# *handle* credentials — e.g. `crates/librefang-extensions/src/credentials.rs`
-# — don't trip the guard. The earlier `(\.[a-z]+)?` form swept in `.rs` /
-# `.py` / `.go` and forced a manual user override on every legitimate
-# code-edit commit.
-#
-# Whitelisted suffixes:
-#   - data formats: json toml yaml yml txt csv ini conf env cfg
-#   - credential DBs: kdbx (KeePass), dat (generic credential blob)
-#   - backups: bak old (`credentials.bak` / `credentials.old` still hold real keys)
-_DATA_EXT = r"(json|toml|yaml|yml|txt|csv|ini|conf|env|cfg|kdbx|dat|bak|old)"
 _SENSITIVE_RE = re.compile(
     r"^("
     r"\.env(\.[a-z0-9._-]+)?"
     r"|id_(rsa|ed25519|ecdsa|dsa)(\.pub)?"
-    rf"|credentials(\.{_DATA_EXT})?"
-    rf"|secrets?(\.{_DATA_EXT})?"
+    r"|credentials(\.[a-z]+)?"
+    r"|secrets?(\.[a-z]+)?"
     r"|vault[_-][a-z0-9_-]+\.(key|json)"
     r"|.+\.(pem|p12|pfx|jks|keystore)"
     r")$",
@@ -638,8 +639,9 @@ def rule_gh_pr_merge(toks, ctx):
 # -----------------------------------------------------------------------------
 
 RULES = {
-    "cargo-build-run":           rule_cargo_build_run,
+    "cargo-build-run-install":   rule_cargo_build_run_install,
     "cargo-test-unscoped":       rule_cargo_test_unscoped,
+    "cargo-add-remove-upgrade":  rule_cargo_add_remove_upgrade,
     "worktree-remove-main":      rule_worktree_remove_main,
     "git-mutation-main":         rule_git_mutation_main,
     "sed-i-perl-pi-main":        rule_sed_i_perl_pi_main,

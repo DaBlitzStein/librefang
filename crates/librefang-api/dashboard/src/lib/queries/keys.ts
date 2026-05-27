@@ -27,10 +27,8 @@ export const agentKeys = {
   // History snapshot for a single (agent, session) pair — hydrates ChatPage
   // when the user navigates to an agent or switches sessions. `sessionId`
   // omitted/null means "the agent's current active session".
-  sessionSnapshots: (agentId: string) =>
-    [...agentKeys.all, "session", agentId] as const,
   session: (agentId: string, sessionId?: string | null) =>
-    [...agentKeys.sessionSnapshots(agentId), sessionId ?? null] as const,
+    [...agentKeys.all, "session", agentId, sessionId ?? null] as const,
   stats: (agentId: string) =>
     [...agentKeys.all, "stats", agentId] as const,
   events: (agentId: string, limit: number) =>
@@ -41,13 +39,6 @@ export const agentKeys = {
     [...agentKeys.all, "experiments", agentId] as const,
   experimentMetrics: (experimentId: string) =>
     [...agentKeys.all, "experimentMetrics", experimentId] as const,
-  tools: (agentId: string) =>
-    [...agentKeys.all, "tools", agentId] as const,
-};
-
-export const toolKeys = {
-  all: ["tools"] as const,
-  list: () => [...toolKeys.all, "list"] as const,
 };
 
 export const modelKeys = {
@@ -69,43 +60,15 @@ export const providerKeys = {
   lists: () => [...providerKeys.all, "list"] as const,
 };
 
-// Credential pools (#4965) — per-provider multi-key rotation status. Kept
-// hierarchical so an invalidate on `credentialPoolKeys.all` clears every
-// pool query after a mutation (future `auth pool add` / `strategy` HTTP
-// endpoint will live alongside `useCredentialPools`).
-export const credentialPoolKeys = {
-  all: ["credentialPools"] as const,
-  lists: () => [...credentialPoolKeys.all, "list"] as const,
-};
-
 export const channelKeys = {
   all: ["channels"] as const,
   lists: () => [...channelKeys.all, "list"] as const,
-  // QR-login state polling (replaces the pre-migration wechatQrStart /
-  // wechatQrStatus / whatsappQrStart / whatsappQrStatus quadruple).
-  // Anchored under `channelKeys.all` so `invalidateQueries({ queryKey:
-  // channelKeys.all })` after a channel configure mutation also
-  // refreshes any open QR section — e.g. after the dashboard
-  // auto-persists the captured bot_token, the next QR poll surfaces
-  // any sidecar-restart-triggered state change.
-  qr: (name: string) => [...channelKeys.all, "qr", name] as const,
 };
 
-// Cross-agent comms / message bus. Hierarchical mirror of `agentKeys` so
-// `invalidateQueries({ queryKey: commsKeys.lists() })` batches every
-// list-shaped read (topology + events) in a single sweep — the previous
-// shape had `topology()` and `events(limit)` parked directly under `all`,
-// which forced mutations to invalidate the whole `commsKeys.all` subtree
-// or enumerate each list factory by hand. `details()`/`detail(id)` are
-// reserved for the per-event drill-down view planned alongside the
-// `/api/comms/events/:id` endpoint.
 export const commsKeys = {
   all: ["comms"] as const,
-  lists: () => [...commsKeys.all, "list"] as const,
-  topology: () => [...commsKeys.lists(), "topology"] as const,
-  events: (limit = 200) => [...commsKeys.lists(), "events", limit] as const,
-  details: () => [...commsKeys.all, "detail"] as const,
-  detail: (id: string) => [...commsKeys.details(), id] as const,
+  topology: () => [...commsKeys.all, "topology"] as const,
+  events: (limit = 200) => [...commsKeys.all, "events", limit] as const,
 };
 
 export const skillKeys = {
@@ -117,14 +80,6 @@ export const skillKeys = {
     [...skillKeys.detail(name), "supportingFile"] as const,
   supportingFile: (name: string, path: string) =>
     [...skillKeys.supportingFiles(name), path] as const,
-  // Skill workshop (#3328) pending-candidate queries. Hierarchical so
-  // `invalidateQueries({ queryKey: skillKeys.pending() })` clears every
-  // pending list / detail at once after an approve / reject mutation.
-  pending: () => [...skillKeys.all, "pending"] as const,
-  pendingList: (agent?: string | null) =>
-    [...skillKeys.pending(), "list", agent ?? null] as const,
-  pendingDetail: (id: string) =>
-    [...skillKeys.pending(), "detail", id] as const,
 };
 
 export const clawhubKeys = {
@@ -199,16 +154,6 @@ export const workflowKeys = {
     [...workflowKeys.runDetails(), runId] as const,
   templates: (filters: { q?: string; category?: string } = {}) =>
     [...workflowKeys.all, "templates", filters] as const,
-  // HITL operator-step pauses (#4977). Two surfaces:
-  //   - `operatorPause(runId)` — single-run inspector behind the
-  //     workflow-run detail panel; returns the artifact + allowed
-  //     actions.
-  //   - `pendingOperator()` — worklist across all currently-paused
-  //     operator runs.
-  operatorAll: () => [...workflowKeys.all, "operator"] as const,
-  operatorPause: (runId: string) =>
-    [...workflowKeys.operatorAll(), "pause", runId] as const,
-  pendingOperator: () => [...workflowKeys.operatorAll(), "pending"] as const,
 };
 
 export const scheduleKeys = {
@@ -284,12 +229,6 @@ export const usageKeys = {
 export const budgetKeys = {
   all: ["budget"] as const,
   status: () => [...budgetKeys.all, "status"] as const,
-  // Per-provider snapshot (#5650). Hierarchical under `budgetKeys.all`
-  // so `invalidateQueries({ queryKey: budgetKeys.all })` after a global
-  // `PUT /api/budget` (which can change `alert_threshold` and therefore
-  // the green/yellow/red coloring on each provider row) drops this cache
-  // too without a second `invalidateQueries` call.
-  providers: () => [...budgetKeys.all, "providers"] as const,
 };
 
 export const goalKeys = {
@@ -334,7 +273,6 @@ export const runtimeKeys = {
   status: () => [...runtimeKeys.all, "status"] as const,
   queueStatus: () => [...runtimeKeys.all, "queue", "status"] as const,
   healthDetail: () => [...runtimeKeys.all, "health", "detail"] as const,
-  healthLiveness: () => [...runtimeKeys.all, "health", "liveness"] as const,
   security: () => [...runtimeKeys.all, "security"] as const,
   backups: () => [...runtimeKeys.all, "backups"] as const,
   tasks: () => [...runtimeKeys.all, "tasks"] as const,

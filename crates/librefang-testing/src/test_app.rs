@@ -7,7 +7,6 @@ use axum::Router;
 use librefang_api::middleware::ApiUserAuth;
 use librefang_api::routes::AppState;
 use librefang_kernel::LibreFangKernel;
-use librefang_kernel::MemorySubsystemApi;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -193,19 +192,10 @@ impl TestAppState {
     fn build_state(kernel: Arc<LibreFangKernel>, tmp: &TempDir) -> Arc<AppState> {
         let channels_config = kernel.config_ref().channels.clone();
 
-        // Idempotency-Key replay store (#3637) — wired against the
-        // substrate's shared SQLite connection so tests exercise the
-        // same persistence path as production.
-        let idempotency_store: Arc<
-            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
-        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
-            kernel.substrate_ref().pool(),
-        ));
-
         Arc::new(AppState {
             kernel,
             started_at: Instant::now(),
-            bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(None)),
+            bridge_manager: tokio::sync::Mutex::new(None),
             channels_config: tokio::sync::RwLock::new(channels_config),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             clawhub_cache: dashmap::DashMap::new(),
@@ -230,7 +220,6 @@ impl TestAppState {
             // per-IP rate-limiter / WS slot keying always uses the TCP peer.
             trusted_proxies: Arc::new(librefang_api::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
-            idempotency_store,
         })
     }
 }

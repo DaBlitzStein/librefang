@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, useDeferredValue, memo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { type RegistrySchema, type RegistrySchemaField, type RegistrySchemaSection } from "../api";
 import { useRegistrySchema } from "../lib/queries/config";
@@ -8,27 +8,6 @@ import { Button } from "./ui/Button";
 import { Skeleton } from "./ui/Skeleton";
 import { ErrorState } from "./ui/ErrorState";
 import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
-
-let _uidCounter = 0;
-function uid(): string {
-  return `_${_uidCounter++}`;
-}
-
-function ensureUids(items: unknown[]): Record<string, unknown>[] {
-  return (items as Record<string, unknown>[]).map((item) => ({ ...item, _uid: uid() }));
-}
-
-function stripUids(obj: unknown): unknown {
-  if (Array.isArray(obj)) return obj.map(stripUids);
-  if (obj && typeof obj === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-      if (k !== "_uid") result[k] = stripUids(v);
-    }
-    return result;
-  }
-  return obj;
-}
 
 interface SchemaFormProps {
   contentType: string;
@@ -58,7 +37,7 @@ function buildSectionDefaults(
   }
   for (const [sKey, s] of Object.entries(section.sections ?? {})) {
     if (initialValues && sKey in initialValues) {
-      defaults[sKey] = s.repeatable ? ensureUids(initialValues[sKey] as unknown[]) : initialValues[sKey];
+      defaults[sKey] = initialValues[sKey];
     } else if (s.repeatable) {
       defaults[sKey] = [];
     } else {
@@ -91,7 +70,7 @@ function buildDefaults(
   // non-repeatable sections get a single flat object with defaults (recursive)
   for (const [sectionKey, section] of Object.entries(schema.sections ?? {})) {
     if (initialValues && sectionKey in initialValues) {
-      values[sectionKey] = section.repeatable ? ensureUids(initialValues[sectionKey] as unknown[]) : initialValues[sectionKey];
+      values[sectionKey] = initialValues[sectionKey];
     } else if (section.repeatable) {
       values[sectionKey] = [];
     } else {
@@ -107,7 +86,7 @@ function buildDefaults(
 
 // Build a blank entry for a repeatable section (including sub-section defaults)
 function blankSectionEntry(section: RegistrySchemaSection): Record<string, unknown> {
-  const entry: Record<string, unknown> = { _uid: uid() };
+  const entry: Record<string, unknown> = {};
   for (const [key, field] of Object.entries(section.fields ?? {})) {
     if (field.default !== undefined) {
       entry[key] = field.default;
@@ -213,7 +192,7 @@ function validateRequired(
 }
 
 // Single field renderer
-const SchemaField = memo(function SchemaField({
+function SchemaField({
   fieldKey,
   field,
   value,
@@ -295,14 +274,8 @@ const SchemaField = memo(function SchemaField({
           value={value === "" || value === undefined ? "" : String(value)}
           onChange={(e) => {
             const raw = e.target.value;
-            if (raw === "") {
-              onChange("");
-            } else {
-              const num = Number(raw);
-              if (!Number.isNaN(num)) {
-                onChange(num);
-              }
-            }
+            const num = Number(raw);
+            onChange(raw === "" ? "" : Number.isNaN(num) ? raw : num);
           }}
           placeholder={field.example != null ? String(field.example) : ""}
           className={hasError ? "border-error" : ""}
@@ -356,10 +329,10 @@ const SchemaField = memo(function SchemaField({
       )}
     </div>
   );
-});
+}
 
 // Collapsible section fieldset (supports recursive sub-sections)
-const SectionFieldset = memo(function SectionFieldset({
+function SectionFieldset({
   sectionKey,
   section,
   values,
@@ -370,8 +343,8 @@ const SectionFieldset = memo(function SectionFieldset({
   sectionKey: string;
   section: RegistrySchemaSection;
   values: Record<string, unknown>;
-  errors: Set<string>;
-  onChange: (sectionKey: string, newVal: unknown, errorPathsToClear?: string[]) => void;
+  errors: string[];
+  onChange: (sectionKey: string, newVal: unknown) => void;
   pathPrefix?: string;
 }) {
   const { t } = useTranslation();
@@ -382,18 +355,18 @@ const SectionFieldset = memo(function SectionFieldset({
     const items = (Array.isArray(values[sectionKey]) ? values[sectionKey] : []) as Record<string, unknown>[];
 
     const addItem = () => {
-      onChange(sectionKey, [...items, blankSectionEntry(section)], []);
+      onChange(sectionKey, [...items, blankSectionEntry(section)]);
     };
 
     const removeItem = (idx: number) => {
-      onChange(sectionKey, items.filter((_, i) => i !== idx), [`${fullPath}[${idx}]`]);
+      onChange(sectionKey, items.filter((_, i) => i !== idx));
     };
 
-    const updateItem = (idx: number, fieldKey: string, fieldValue: unknown, errorPaths?: string[]) => {
+    const updateItem = (idx: number, fieldKey: string, fieldValue: unknown) => {
       const updated = items.map((item, i) =>
         i === idx ? { ...item, [fieldKey]: fieldValue } : item,
       );
-      onChange(sectionKey, updated, errorPaths);
+      onChange(sectionKey, updated);
     };
 
     return (
@@ -424,7 +397,7 @@ const SectionFieldset = memo(function SectionFieldset({
 
             {items.map((item, idx) => (
               <div
-                key={String(item._uid ?? idx)}
+                key={idx}
                 className="p-3 rounded-lg border border-border-subtle/30 bg-surface space-y-3"
               >
                 <div className="flex items-center justify-between">
@@ -446,8 +419,8 @@ const SectionFieldset = memo(function SectionFieldset({
                     fieldKey={fKey}
                     field={f}
                     value={item[fKey]}
-                    onChange={(v) => updateItem(idx, fKey, v, [`${fullPath}[${idx}].${fKey}`])}
-                    hasError={errors.has(`${fullPath}[${idx}].${fKey}`)}
+                    onChange={(v) => updateItem(idx, fKey, v)}
+                    hasError={errors.includes(`${fullPath}[${idx}].${fKey}`)}
                   />
                 ))}
                 {Object.entries(section.sections ?? {}).map(([subKey, subSection]) => (
@@ -457,8 +430,8 @@ const SectionFieldset = memo(function SectionFieldset({
                     section={subSection}
                     values={item}
                     errors={errors}
-                    onChange={(subSectionKey, newSubVal, subErrorPaths) => {
-                      updateItem(idx, subSectionKey, newSubVal, subErrorPaths);
+                    onChange={(subSectionKey, newSubVal) => {
+                      updateItem(idx, subSectionKey, newSubVal);
                     }}
                     pathPrefix={`${fullPath}[${idx}].${subKey}`}
                   />
@@ -486,7 +459,7 @@ const SectionFieldset = memo(function SectionFieldset({
   const sectionVal = (values[sectionKey] ?? {}) as Record<string, unknown>;
 
   const updateField = (fieldKey: string, fieldValue: unknown) => {
-    onChange(sectionKey, { ...sectionVal, [fieldKey]: fieldValue }, [`${fullPath}.${fieldKey}`]);
+    onChange(sectionKey, { ...sectionVal, [fieldKey]: fieldValue });
   };
 
   return (
@@ -518,7 +491,7 @@ const SectionFieldset = memo(function SectionFieldset({
               field={f}
               value={sectionVal[fKey]}
               onChange={(v) => updateField(fKey, v)}
-              hasError={errors.has(`${fullPath}.${fKey}`)}
+              hasError={errors.includes(`${fullPath}.${fKey}`)}
             />
           ))}
           {Object.entries(section.sections ?? {}).map(([subKey, subSection]) => (
@@ -528,8 +501,8 @@ const SectionFieldset = memo(function SectionFieldset({
               section={subSection}
               values={sectionVal}
               errors={errors}
-              onChange={(subSectionKey, newSubVal, subErrorPaths) => {
-                onChange(sectionKey, { ...sectionVal, [subSectionKey]: newSubVal }, subErrorPaths);
+              onChange={(subSectionKey, newSubVal) => {
+                onChange(sectionKey, { ...sectionVal, [subSectionKey]: newSubVal });
               }}
               pathPrefix={`${fullPath}.${subKey}`}
             />
@@ -538,7 +511,7 @@ const SectionFieldset = memo(function SectionFieldset({
       )}
     </fieldset>
   );
-});
+}
 
 // Loading skeleton for the form
 function FormSkeleton() {
@@ -570,7 +543,6 @@ export function SchemaForm({
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const errorSet = useMemo(() => new Set(errors), [errors]);
 
   const schemaQuery = useRegistrySchema(contentType);
 
@@ -583,7 +555,6 @@ export function SchemaForm({
   }, [schema, initialValues]);
 
   const [values, setValues] = useState<Record<string, unknown>>({});
-  const deferredValues = useDeferredValue(values);
 
   // Sync defaults into values when schema arrives or when the caller passes
   // structurally different initialValues (e.g. opening the form to edit a
@@ -611,18 +582,12 @@ export function SchemaForm({
     setErrors((prev) => prev.filter((e) => e !== key));
   }, []);
 
-  const updateSection = useCallback((sectionKey: string, newVal: unknown, errorPathsToClear?: string[]) => {
+  const updateSection = useCallback((sectionKey: string, newVal: unknown) => {
     setValues((prev) => ({ ...prev, [sectionKey]: newVal }));
-    setErrors((prev) => {
-      if (errorPathsToClear) {
-        return errorPathsToClear.length > 0
-          ? prev.filter((e) => !errorPathsToClear.some((p) => e === p || e.startsWith(`${p}.`) || e.startsWith(`${p}[`)))
-          : prev;
-      }
-      return prev.filter((e) =>
-        e !== sectionKey && !e.startsWith(`${sectionKey}.`) && !e.startsWith(`${sectionKey}[`)
-      );
-    });
+    // Clear section errors (match "key." or "key[" to avoid prefix collisions)
+    setErrors((prev) => prev.filter((e) =>
+      e !== sectionKey && !e.startsWith(`${sectionKey}.`) && !e.startsWith(`${sectionKey}[`)
+    ));
   }, []);
 
   const handleSubmit = async () => {
@@ -637,7 +602,7 @@ export function SchemaForm({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onSubmit(stripUids(values) as Record<string, unknown>);
+      await onSubmit(values);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -716,7 +681,7 @@ export function SchemaForm({
             field={field}
             value={values[key]}
             onChange={(v) => updateField(key, v)}
-            hasError={errorSet.has(key)}
+            hasError={errors.includes(key)}
           />
         ))}
 
@@ -726,8 +691,8 @@ export function SchemaForm({
             key={sKey}
             sectionKey={sKey}
             section={section}
-            values={deferredValues}
-            errors={errorSet}
+            values={values}
+            errors={errors}
             onChange={updateSection}
           />
         ))}

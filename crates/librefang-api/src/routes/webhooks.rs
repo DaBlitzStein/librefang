@@ -157,7 +157,6 @@ fn webhook_unauthorized_response(message: String) -> axum::response::Response {
         code: Some("webhook_invalid_token".to_string()),
         r#type: Some("webhook_invalid_token".to_string()),
         details: None,
-        request_id: None,
         status: StatusCode::UNAUTHORIZED,
     };
     let mut resp = body.into_response();
@@ -408,26 +407,6 @@ pub async fn create_event_webhook(
         return ApiErrorResponse::bad_request(err_invalid_url).into_json_tuple();
     }
 
-    // SSRF gate at write-time (audit: webhook-create-no-ssrf-check).
-    // Pre-fix, `create_event_webhook` only ran `url::Url::parse`;
-    // internal URLs (`http://169.254.169.254/...`,
-    // `http://localhost:6379/`, `http://10.0.0.1/`) **persisted** in
-    // `EVENT_WEBHOOKS`. The `/test` route and the daemon's normal
-    // delivery path re-validate at fire-time, but defence in depth
-    // matters: the cron equivalent
-    // (`librefang_types::scheduler::validate_webhook_url`) already
-    // rejects at write time, and a future "test without validation"
-    // / "bulk dispatch" feature would turn every stored hostile URL
-    // into a live exploit. Reject the literal-IP / hostname-resolves-
-    // to-private cases up front so the store never holds them. (DNS-
-    // rebind hardening at fire-time keeps using
-    // `validate_webhook_url_resolved` — the cheap literal check here
-    // is the additional layer, not a replacement.)
-    if let Err(reason) = crate::webhook_store::validate_webhook_url(&url) {
-        return ApiErrorResponse::bad_request(format!("{err_invalid_url}: {reason}"))
-            .into_json_tuple();
-    }
-
     let events = match req.get("events").and_then(|v| v.as_array()) {
         Some(arr) => match validate_event_types(arr, lang.as_ref()) {
             Ok(ev) => ev,
@@ -485,14 +464,6 @@ pub async fn update_event_webhook(
     if let Some(url_val) = req.get("url").and_then(|v| v.as_str()) {
         if url::Url::parse(url_val).is_err() {
             return ApiErrorResponse::bad_request(err_invalid_url).into_json_tuple();
-        }
-        // Mirror the create-time SSRF gate (audit:
-        // webhook-create-no-ssrf-check). Without this, an attacker
-        // who created a benign webhook could `PATCH` it to an
-        // internal URL post-creation, bypassing the gate.
-        if let Err(reason) = crate::webhook_store::validate_webhook_url(url_val) {
-            return ApiErrorResponse::bad_request(format!("{err_invalid_url}: {reason}"))
-                .into_json_tuple();
         }
         updated["url"] = serde_json::json!(url_val);
     }
@@ -581,71 +552,22 @@ pub async fn get_webhook(
 }
 
 /// POST /api/webhooks — Create a new webhook subscription.
-///
-/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
-/// with the same key + same body replays the cached response instead
-/// of creating a second subscription. A different body under the same
-/// key is rejected with 409 Conflict.
 pub async fn create_webhook(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    let key = crate::idempotency::extract_key(&headers);
-    let body_bytes: Vec<u8> = body.to_vec();
-    let store = Arc::clone(&state.idempotency_store);
-    let inner_body = body_bytes.clone();
-    let l = super::resolve_lang(lang.as_ref());
-
-    crate::idempotency::run_idempotent(
-        store.as_ref(),
-        key.as_deref(),
-        &body_bytes,
-        move || async move { create_webhook_inner(state, l, &inner_body).await },
-    )
-    .await
-}
-
-/// Inner handler — produces a `(StatusCode, Vec<u8>)` snapshot suitable
-/// for caching by the Idempotency-Key middleware.
-async fn create_webhook_inner(
-    state: Arc<AppState>,
-    l: &'static str,
-    body_bytes: &[u8],
-) -> (StatusCode, Vec<u8>) {
-    let t = ErrorTranslator::new(l);
-    let req: crate::webhook_store::CreateWebhookRequest = match serde_json::from_slice(body_bytes) {
-        Ok(r) => r,
-        Err(e) => {
-            let payload = serde_json::json!({"error": format!("Invalid JSON body: {e}"), "code": "invalid_json", "type": "invalid_json"});
-            return (
-                StatusCode::BAD_REQUEST,
-                serde_json::to_vec(&payload).unwrap_or_default(),
-            );
-        }
-    };
+    Json(req): Json<crate::webhook_store::CreateWebhookRequest>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match state.webhook_store.create(req) {
         Ok(webhook) => {
             let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
-            match serde_json::to_vec(&redacted) {
-                Ok(v) => (StatusCode::CREATED, v),
-                Err(_) => {
-                    let payload = serde_json::json!({"error": t.t("api-error-webhook-serialize-error"), "code": "serialize_error", "type": "serialize_error"});
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        serde_json::to_vec(&payload).unwrap_or_default(),
-                    )
-                }
+            match serde_json::to_value(&redacted) {
+                Ok(v) => (StatusCode::CREATED, Json(v)),
+                Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
+                    .into_json_tuple(),
             }
         }
-        Err(e) => {
-            let payload = serde_json::json!({"error": e, "code": "invalid_request", "type": "invalid_request"});
-            (
-                StatusCode::BAD_REQUEST,
-                serde_json::to_vec(&payload).unwrap_or_default(),
-            )
-        }
+        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
     }
 }
 
@@ -763,28 +685,13 @@ pub async fn test_webhook(
     // (DNS rebind), bypassing the SSRF check (#3701). `.resolve(host, addr)`
     // forces the connection to go to `addr` and skips reqwest's resolver
     // for that hostname.
-    let mut builder = librefang_kernel::http_client::proxied_client_builder()
+    let mut builder = librefang_runtime::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none());
     if let Some((ref host, addr)) = pinned_host {
         builder = builder.resolve(host, addr);
     }
-    let client = match builder.build() {
-        Ok(c) => c,
-        Err(e) => {
-            // A TLS / root-cert / proxy misconfiguration must not panic the
-            // user-facing handler — surface it as a 500 so the dashboard
-            // shows an error instead of the connection resetting.
-            let msg = {
-                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-                t.t_args(
-                    "api-error-webhook-reach-failed",
-                    &[("error", &e.to_string())],
-                )
-            };
-            return ApiErrorResponse::internal(msg).into_json_tuple();
-        }
-    };
+    let client = builder.build().expect("HTTP client build");
 
     let mut request = client
         .post(&webhook.url)

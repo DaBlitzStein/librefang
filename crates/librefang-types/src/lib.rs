@@ -12,13 +12,10 @@ pub mod capability;
 pub mod comms;
 pub mod config;
 pub mod error;
-pub mod error_code;
 pub mod event;
 pub mod goal;
 pub mod i18n;
-pub mod integration;
 pub mod manifest_signing;
-pub mod mcp;
 pub mod media;
 pub mod memory;
 pub mod message;
@@ -29,17 +26,14 @@ pub mod scheduler;
 pub mod serde_compat;
 pub mod subagent;
 pub mod taint;
-pub mod task;
 pub mod tool;
 pub mod tool_class;
 pub mod tool_compat;
-pub mod tool_exec;
 pub mod tool_policy;
 pub mod user_policy;
 pub mod webhook;
 pub mod workflow_template;
 
-pub use task::{TaskCompletionEvent, TaskHandle, TaskId, TaskKind, TaskStatus, WorkflowRunId};
 pub use tool_class::ToolApprovalClass;
 
 /// Check if a response is a NO\_REPLY sentinel. Matches:

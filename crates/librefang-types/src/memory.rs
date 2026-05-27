@@ -166,12 +166,7 @@ impl MemoryItem {
 /// auto_retrieve = true
 /// max_retrieve = 10
 /// session_ttl_hours = 24
-/// # Use the kernel's default provider:
-/// extraction_model = "gpt-4o-mini"
-/// # Or target a specific provider with `provider/model` format:
-/// extraction_model = "anthropic/claude-haiku-4"
-/// # The colon form (`provider:model`) also works:
-/// extraction_model = "anthropic:claude-haiku-4"
+/// extraction_model = "gpt-4o-mini"  # optional, enables LLM-powered extraction
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -188,18 +183,6 @@ pub struct ProactiveMemoryConfig {
     /// Confidence threshold for near-duplicate detection (0.0 - 1.0).
     pub extraction_threshold: f32,
     /// LLM model to use for extraction. If None, uses rule-based extraction.
-    ///
-    /// The value is parsed by `resolve_extraction_model_target`. Three forms
-    /// are accepted, in priority order:
-    ///
-    /// 1. `provider:model` — e.g. `"anthropic:claude-haiku-4"`
-    /// 2. `provider/model` — e.g. `"anthropic/claude-haiku-4"`
-    /// 3. Bare model name — e.g. `"gpt-4o-mini"`
-    ///
-    /// For bare model names the kernel's `default_model.provider` is used as
-    /// the driver. Use the `provider/model` form when extraction should run
-    /// through a different provider — there is no separate
-    /// `extraction_provider` field.
     pub extraction_model: Option<String>,
     /// Categories to extract from conversations.
     pub extract_categories: Vec<String>,
@@ -253,171 +236,6 @@ impl Default for ProactiveMemoryConfig {
             confidence_decay_rate: 0.01,
             max_memories_per_agent: 1000,
         }
-    }
-}
-
-/// Per-agent override for the kernel-global [`ProactiveMemoryConfig`] (#4870).
-///
-/// `[proactive_memory]` in `config.toml` sets a single, kernel-wide policy.
-/// On hosts that mix one chatty user-facing agent with cron-driven
-/// sub-agents (data collectors, ETL, brief composers), enabling
-/// `auto_memorize` globally costs an extraction LLM call per sub-agent
-/// turn for content that has no recall value. This struct lets an
-/// agent's manifest disable proactive memory (in whole, or just one of
-/// `auto_memorize` / `auto_retrieve`) without forcing the global policy
-/// to follow.
-///
-/// Each field is `Option<bool>`: `None` inherits the global setting,
-/// `Some(b)` overrides it. Resolution lives in
-/// [`ProactiveMemoryOverrides::resolve_auto_retrieve`] and
-/// [`ProactiveMemoryOverrides::resolve_auto_memorize`] so call sites in
-/// the runtime can gate without reproducing the merge logic.
-///
-/// Boot caveat: the global [`ProactiveMemoryConfig::enabled = false`]
-/// short-circuits store construction in
-/// `librefang_kernel::kernel::boot`; per-agent `enabled = Some(true)`
-/// cannot resurrect a non-existent store. For the same reason, per-field
-/// overrides like `auto_memorize = Some(true)` or `auto_retrieve = Some(true)`
-/// against a globally-off config are dead letters — the gate they would
-/// flip never receives a store to act on. The intended (and currently
-/// supported) shape is **per-agent opt-out** when the global is on.
-///
-/// Example in `agent.toml`:
-/// ```toml
-/// # full opt-out for this agent
-/// [proactive_memory]
-/// enabled = false
-///
-/// # or: keep retrieve, skip memorize (tool-output extraction is noise)
-/// [proactive_memory]
-/// auto_memorize = false
-///
-/// # or: per-agent extractor model (#5475) — agent A on a cheap OpenAI
-/// # tier while the global default points elsewhere
-/// [proactive_memory]
-/// extraction_model = "openai/gpt-4o-mini"
-/// ```
-///
-/// **The override surface is `{workspace}/agent.toml`, NOT `config.toml`** (#5476).
-/// A `[agents.<name>.proactive_memory]` block in `~/.librefang/config.toml`
-/// is silently ignored — `KernelConfig` has no `agents` field, so the
-/// block parses but never feeds into any `AgentManifest`. Since #5476
-/// the kernel emits a targeted `WARN` at boot (and on
-/// `POST /api/config/reload`) when this misplacement is detected, but
-/// the load-bearing path is still the agent's own manifest:
-/// ```toml
-/// # ~/.librefang/config.toml — kernel-global default
-/// [proactive_memory]
-/// auto_memorize = false
-///
-/// # ~/.librefang/workspaces/agents/my-agent/agent.toml — per-agent override
-/// [proactive_memory]
-/// auto_memorize = true
-/// ```
-///
-/// Note: `Copy` was removed when `extraction_model: Option<String>` was
-/// added in #5475 — the struct is now small but heap-allocating. Callers
-/// that previously moved-by-copy now move-by-clone; that's a trivial
-/// `Arc`-free `Option<String>` deep copy and not on a hot path.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct ProactiveMemoryOverrides {
-    /// Override the master switch. `Some(false)` disables both retrieve
-    /// and memorize for this agent regardless of the global config.
-    /// `Some(true)` is documented but not load-bearing — see the boot
-    /// caveat above.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-    /// Override `auto_memorize`. `Some(false)` skips the after-turn
-    /// extraction call for this agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_memorize: Option<bool>,
-    /// Override `auto_retrieve`. `Some(false)` skips the before-turn
-    /// retrieval (no memory items injected into the prompt).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_retrieve: Option<bool>,
-    /// Per-agent override for the LLM model used by proactive memory
-    /// extraction (#5475). Same shape as the global
-    /// [`ProactiveMemoryConfig::extraction_model`] — accepts
-    /// `provider/model`, `provider:model`, or a bare model name that
-    /// falls through to the kernel's default driver. `None` (the
-    /// default) inherits the kernel-global `[proactive_memory]
-    /// extraction_model`.
-    ///
-    /// Use case: multi-provider deployments where each agent's
-    /// extractor should match the provider that hosts its primary
-    /// model — e.g. agent A on `openai/gpt-4o-mini`, agent B on
-    /// `anthropic/claude-haiku-4-5`, agent C on `gemini/gemini-2.0-flash`.
-    /// Without this, the global must pick one extractor that may not
-    /// even be reachable from the other agents' provider keys.
-    ///
-    /// Limitation in this PR: the override switches the model **name**
-    /// passed to the boot-time extraction driver. Cross-provider
-    /// switching (where the override picks a provider different from
-    /// the one the kernel initialised the extraction driver with) is
-    /// honoured only when the same driver supports both — typically
-    /// within an OpenAI-compatible family. Full per-agent driver
-    /// switching (rebuilding the LLM driver per-agent) is tracked as a
-    /// follow-up.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extraction_model: Option<String>,
-}
-
-impl ProactiveMemoryOverrides {
-    /// Resolve the effective `auto_retrieve` for this agent given the
-    /// kernel-global `[proactive_memory]` defaults.
-    pub fn resolve_auto_retrieve(&self, global: &ProactiveMemoryConfig) -> bool {
-        if matches!(self.enabled, Some(false)) {
-            return false;
-        }
-        if let Some(v) = self.auto_retrieve {
-            return v;
-        }
-        global.enabled && global.auto_retrieve
-    }
-
-    /// Resolve the effective `auto_memorize` for this agent given the
-    /// kernel-global `[proactive_memory]` defaults.
-    pub fn resolve_auto_memorize(&self, global: &ProactiveMemoryConfig) -> bool {
-        if matches!(self.enabled, Some(false)) {
-            return false;
-        }
-        if let Some(v) = self.auto_memorize {
-            return v;
-        }
-        global.enabled && global.auto_memorize
-    }
-
-    /// Resolve the effective `extraction_model` for this agent given
-    /// the kernel-global `[proactive_memory]` defaults (#5475).
-    ///
-    /// Resolution chain: agent override → kernel-global → `None`
-    /// (callers fall back to the agent's primary model). Empty strings
-    /// on either side are treated as unset — operators sometimes leave
-    /// `extraction_model = ""` to denote "no override", and the
-    /// global-side `filter(|s| !s.is_empty())` upstream of boot already
-    /// applies that convention.
-    pub fn resolve_extraction_model(&self, global: &ProactiveMemoryConfig) -> Option<String> {
-        if let Some(m) = self.extraction_model.as_ref() {
-            if !m.is_empty() {
-                return Some(m.clone());
-            }
-        }
-        global
-            .extraction_model
-            .as_ref()
-            .filter(|s| !s.is_empty())
-            .cloned()
-    }
-
-    /// True when *no* field is set — equivalent to `Default::default()`.
-    /// Used by call sites that want to skip the resolve dance entirely
-    /// for the common "no override" case.
-    pub fn is_empty(&self) -> bool {
-        self.enabled.is_none()
-            && self.auto_memorize.is_none()
-            && self.auto_retrieve.is_none()
-            && self.extraction_model.is_none()
     }
 }
 
@@ -1269,7 +1087,6 @@ pub trait Memory: Send + Sync {
         source: MemorySource,
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
-        peer_id: Option<&str>,
     ) -> crate::error::LibreFangResult<MemoryId>;
 
     /// Semantic search for relevant memories.
@@ -1369,56 +1186,6 @@ pub trait ProactiveMemory: Send + Sync {
     ) -> crate::error::LibreFangResult<bool>;
 }
 
-/// Metadata key under which `auto_memorize` tags memories with their
-/// originating `(channel, chat)` scope. Format mirrors the kernel's
-/// `sender_channel`: either a bare channel type (`"telegram"`) or a
-/// chat-qualified form (`"whatsapp:<chatJid>"`). When present, recall
-/// filters this against the active request's `chat_scope` so a memory
-/// extracted from a group chat cannot bleed into a DM with the same
-/// peer — and vice versa (#5227).
-///
-/// Memories without this key are treated as chat-agnostic (legacy /
-/// manually-stored / `MemoryLevel::User`) and remain recallable across
-/// all chats for the same `(agent, peer)` pair.
-pub const CHAT_SCOPE_METADATA_KEY: &str = "chat_scope";
-
-/// Decide whether a memory (identified by its stored `scope` string and
-/// `metadata` map) is allowed to surface in a recall whose active
-/// `(channel, chat)` scope is `current`. Returns `true` for three
-/// classes that must always cross chats:
-///
-/// 1. `MemoryLevel::User` — stable per-user facts (the `scope` column
-///    stores `"user_memory"` for these). Cross-chat by design.
-/// 2. Memories with no `CHAT_SCOPE_METADATA_KEY` tag — pre-#5227
-///    rows plus anything written through a non-channel path
-///    (dashboard, direct API). Treating them as chat-agnostic avoids
-///    silently hiding existing data.
-/// 3. Memories whose stamped `chat_scope` equals `current`.
-///
-/// All other tagged memories are filtered out.
-///
-/// Pulled out into the types crate so every recall site — proactive
-/// (`MemoryItem`), substrate (`MemoryFragment`), context engine — uses
-/// the same predicate and cannot drift.
-pub fn memory_scope_allows_recall(
-    scope: &str,
-    metadata: &HashMap<String, serde_json::Value>,
-    current: &str,
-) -> bool {
-    // Class 1 — user-level memories cross chats by design.
-    if scope == MemoryLevel::User.scope_str() {
-        return true;
-    }
-    match metadata.get(CHAT_SCOPE_METADATA_KEY) {
-        // Class 3 — stamped scope matches the active one.
-        Some(serde_json::Value::String(s)) if s == current => true,
-        // Stamped scope is set but differs → block.
-        Some(serde_json::Value::String(_)) => false,
-        // Class 2 — no tag (or non-string sentinel) → chat-agnostic.
-        _ => true,
-    }
-}
-
 /// Trait for proactive memory hooks (auto_memorize, auto_retrieve).
 ///
 /// This provides hooks for automatic memory extraction and retrieval:
@@ -1428,31 +1195,20 @@ pub fn memory_scope_allows_recall(
 pub trait ProactiveMemoryHooks: Send + Sync {
     /// Extract and store important information after agent execution.
     /// When `peer_id` is `Some`, memories are scoped to that peer for isolation.
-    /// When `chat_scope` is `Some`, the originating `(channel, chat)` scope is
-    /// stamped onto each memory's metadata so subsequent recalls in a
-    /// **different** chat (same peer) will not surface it (#5227). Pass `None`
-    /// when the caller has no channel context (e.g. direct API, dashboard) —
-    /// memories then remain chat-agnostic.
     async fn auto_memorize(
         &self,
         user_id: &str,
         conversation: &[serde_json::Value],
         peer_id: Option<&str>,
-        chat_scope: Option<&str>,
     ) -> crate::error::LibreFangResult<ExtractionResult>;
 
     /// Proactively retrieve relevant context before agent execution.
     /// When `peer_id` is `Some`, only retrieves memories for that peer.
-    /// When `chat_scope` is `Some`, memories tagged with a **different**
-    /// chat scope are filtered out post-recall — chat-agnostic memories
-    /// (no scope tag, or stamped with the current scope) still surface.
-    /// This is the read side of the #5227 cross-chat isolation guard.
     async fn auto_retrieve(
         &self,
         user_id: &str,
         query: &str,
         peer_id: Option<&str>,
-        chat_scope: Option<&str>,
     ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
 }
 
@@ -1589,139 +1345,6 @@ mod tests {
         assert!(config.auto_memorize);
         assert!(config.auto_retrieve);
         assert_eq!(config.max_retrieve, 10);
-    }
-
-    #[test]
-    fn test_proactive_memory_overrides_default_inherits_global() {
-        // No fields set → resolution returns the global truth verbatim.
-        let global = ProactiveMemoryConfig::default();
-        let overrides = ProactiveMemoryOverrides::default();
-        assert!(overrides.is_empty());
-        assert!(overrides.resolve_auto_retrieve(&global));
-        assert!(overrides.resolve_auto_memorize(&global));
-
-        let disabled_global = ProactiveMemoryConfig {
-            auto_memorize: false,
-            ..ProactiveMemoryConfig::default()
-        };
-        assert!(!overrides.resolve_auto_memorize(&disabled_global));
-    }
-
-    #[test]
-    fn test_proactive_memory_overrides_per_field_disable() {
-        // The issue's main use case: cron sub-agents disable memorize
-        // while the global remains on for the user-facing agent.
-        let global = ProactiveMemoryConfig::default();
-        let overrides = ProactiveMemoryOverrides {
-            auto_memorize: Some(false),
-            ..Default::default()
-        };
-        assert!(!overrides.resolve_auto_memorize(&global));
-        assert!(
-            overrides.resolve_auto_retrieve(&global),
-            "retrieve untouched when only auto_memorize override is set"
-        );
-    }
-
-    #[test]
-    fn test_proactive_memory_overrides_master_switch_disables_both() {
-        let global = ProactiveMemoryConfig::default();
-        let overrides = ProactiveMemoryOverrides {
-            enabled: Some(false),
-            auto_memorize: Some(true), // Set but should be ignored.
-            auto_retrieve: Some(true),
-            extraction_model: None,
-        };
-        assert!(
-            !overrides.resolve_auto_memorize(&global),
-            "enabled=false wins over per-field auto_memorize=true"
-        );
-        assert!(
-            !overrides.resolve_auto_retrieve(&global),
-            "enabled=false wins over per-field auto_retrieve=true"
-        );
-    }
-
-    #[test]
-    fn test_proactive_memory_overrides_extraction_model_resolution() {
-        // #5475: agent override wins over global, global wins over None.
-        let mut global = ProactiveMemoryConfig::default();
-        let none_override = ProactiveMemoryOverrides::default();
-        assert_eq!(
-            none_override.resolve_extraction_model(&global),
-            None,
-            "no override, no global → None"
-        );
-
-        global.extraction_model = Some("openai/gpt-4o-mini".to_string());
-        assert_eq!(
-            none_override.resolve_extraction_model(&global),
-            Some("openai/gpt-4o-mini".to_string()),
-            "no override → inherit global"
-        );
-
-        let agent_override = ProactiveMemoryOverrides {
-            extraction_model: Some("anthropic/claude-haiku-4-5".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            agent_override.resolve_extraction_model(&global),
-            Some("anthropic/claude-haiku-4-5".to_string()),
-            "agent override wins over global"
-        );
-
-        // Empty-string override is treated as unset (operators sometimes
-        // write `extraction_model = ""` to mean "no override").
-        let empty_override = ProactiveMemoryOverrides {
-            extraction_model: Some(String::new()),
-            ..Default::default()
-        };
-        assert_eq!(
-            empty_override.resolve_extraction_model(&global),
-            Some("openai/gpt-4o-mini".to_string()),
-            "empty-string override falls through to global"
-        );
-
-        // `is_empty()` accounts for the new field.
-        assert!(!agent_override.is_empty());
-        assert!(none_override.is_empty());
-    }
-
-    #[test]
-    fn test_proactive_memory_overrides_global_disabled_inherits_off() {
-        // Global says off → no override fields set → per-agent stays off.
-        let global = ProactiveMemoryConfig {
-            enabled: false,
-            ..ProactiveMemoryConfig::default()
-        };
-        let overrides = ProactiveMemoryOverrides::default();
-        assert!(!overrides.resolve_auto_memorize(&global));
-        assert!(!overrides.resolve_auto_retrieve(&global));
-    }
-
-    #[test]
-    fn test_proactive_memory_overrides_serde_roundtrip() {
-        let overrides = ProactiveMemoryOverrides {
-            enabled: None,
-            auto_memorize: Some(false),
-            auto_retrieve: None,
-            extraction_model: Some("openai/gpt-4o-mini".to_string()),
-        };
-        let toml = toml::to_string(&overrides).expect("serialize");
-        // Only the set fields are emitted (skip_serializing_if on None).
-        assert!(toml.contains("auto_memorize"));
-        assert!(toml.contains("extraction_model"));
-        assert!(toml.contains("openai/gpt-4o-mini"));
-        assert!(!toml.contains("auto_retrieve"));
-        assert!(!toml.contains("enabled"));
-        let parsed: ProactiveMemoryOverrides = toml::from_str(&toml).expect("deserialize");
-        assert_eq!(parsed.auto_memorize, Some(false));
-        assert_eq!(parsed.auto_retrieve, None);
-        assert_eq!(parsed.enabled, None);
-        assert_eq!(
-            parsed.extraction_model,
-            Some("openai/gpt-4o-mini".to_string())
-        );
     }
 
     #[test]

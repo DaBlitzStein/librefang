@@ -3,12 +3,6 @@
 //! Exposes agent management, status, and chat via JSON REST endpoints.
 //! The kernel runs in-process; the CLI connects over HTTP.
 
-// `routes::config::ui_sections_overlay()` builds a 32-entry
-// `serde_json::json!([...])` literal that exceeds the default 128-token macro
-// recursion limit. Lift it to 256 — well below `rustc`'s practical ceiling
-// and headroom for future sections without re-touching this attribute.
-#![recursion_limit = "256"]
-
 /// Decode percent-encoded strings (e.g. `%2B` -> `+`).
 ///
 /// Used to normalise `?token=` values without using
@@ -112,17 +106,12 @@ pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::R
     Ok(())
 }
 
-#[cfg(windows)]
-pub mod acp_pipe;
-#[cfg(unix)]
-pub mod acp_uds;
 pub mod approval;
 pub mod channel_bridge;
 pub mod client_ip;
 pub mod error;
 pub mod extensions;
 pub mod extractors;
-pub mod idempotency;
 pub mod mcp_oauth;
 pub mod middleware;
 pub mod oauth;
@@ -131,7 +120,6 @@ pub mod openapi;
 pub mod password_hash;
 pub mod rate_limiter;
 pub mod routes;
-pub mod secrets_env;
 pub mod server;
 pub mod stream_chunker;
 pub mod stream_dedup;
