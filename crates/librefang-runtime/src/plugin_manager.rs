@@ -10,20 +10,295 @@
 //! - **Local path**: copy from a local directory
 //! - **Git URL**: clone a git repo into the plugins directory
 
-use librefang_types::config::{PluginManifest, PluginSystemRequirement};
+use librefang_types::config::{PluginI18n, PluginManifest, PluginSystemRequirement};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-mod install;
-mod registry;
-mod scaffold;
+/// Well-known public key for the official LibreFang plugin registry.
+///
+/// This is an Ed25519 public key (32 bytes, base64url-encoded).
+/// Override via `LIBREFANG_REGISTRY_PUBKEY` env var for custom registries.
+/// Set to `LIBREFANG_REGISTRY_VERIFY=0` to skip verification entirely (development only).
+///
+/// # Security note
+/// The placeholder value below (all-zero bytes once decoded) is intentionally
+/// detected at runtime. Any install attempt while this placeholder is in effect
+/// is rejected with a hard error — no plugin is accepted without a real key.
+/// To configure a real key, set the `LIBREFANG_REGISTRY_PUBKEY` environment
+/// variable to the base64-encoded 32-byte Ed25519 public key of your registry.
+const OFFICIAL_REGISTRY_PUBKEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+// ^ all-zero placeholder — triggers hard error at runtime (see is_placeholder check)
 
-pub use self::install::{
-    install_plugin, install_requirements, list_registry_plugins, remove_plugin, RegistryPluginEntry,
-};
-pub use self::scaffold::scaffold_plugin;
+/// Verify an Ed25519 signature over registry index JSON bytes.
+///
+/// The registry is expected to serve a companion file `index.json.sig`
+/// containing the raw 64-byte Ed25519 signature, base64-encoded.
+///
+/// # Arguments
+/// - `index_bytes`: the raw bytes of `index.json`
+/// - `sig_b64`: base64-encoded 64-byte signature from `index.json.sig`
+/// - `pubkey_b64`: base64-encoded 32-byte Ed25519 public key
+///
+/// Returns `Ok(())` if the signature is valid, `Err(reason)` otherwise.
+fn verify_registry_index(
+    index_bytes: &[u8],
+    sig_b64: &str,
+    pubkey_b64: &str,
+) -> Result<(), String> {
+    use base64::Engine as _;
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-use self::registry::fetch_verified_index;
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(sig_b64.trim())
+        .map_err(|e| format!("Invalid signature encoding: {e}"))?;
+
+    let key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(pubkey_b64.trim())
+        .map_err(|e| format!("Invalid public key encoding: {e}"))?;
+
+    let sig_arr: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| "Signature must be exactly 64 bytes".to_string())?;
+
+    let key_arr: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| "Public key must be exactly 32 bytes".to_string())?;
+
+    let signature = Signature::from_bytes(&sig_arr);
+    let verifying_key =
+        VerifyingKey::from_bytes(&key_arr).map_err(|e| format!("Invalid public key: {e}"))?;
+
+    verifying_key
+        .verify(index_bytes, &signature)
+        .map_err(|e| format!("Signature verification failed: {e}"))
+}
+
+/// Verify an Ed25519 signature over plugin archive bytes.
+///
+/// The registry is expected to serve a companion file `{archive_url}.sig`
+/// containing the raw 64-byte Ed25519 signature, base64-encoded.
+///
+/// Returns `Ok(())` if the signature is valid or if no signature file exists
+/// (signature is optional — absence is a warning, not an error).
+/// Returns `Err(reason)` if a signature file exists but is invalid.
+async fn verify_archive_signature(
+    client: &reqwest::Client,
+    archive_url: &str,
+    archive_bytes: &[u8],
+    pubkey_b64: &str,
+) -> Result<(), String> {
+    use base64::Engine as _;
+
+    // Try to fetch the signature file.
+    let sig_url = format!("{archive_url}.sig");
+    let sig_resp = client.get(&sig_url).send().await;
+    let sig_b64 = match sig_resp {
+        Ok(r) if r.status().is_success() => match r.text().await {
+            Ok(t) => t.trim().to_string(),
+            Err(e) => {
+                warn!("Failed to read archive signature from {sig_url}: {e}");
+                return Ok(()); // treat as absent
+            }
+        },
+        _ => {
+            debug!("No archive signature found at {sig_url} — skipping");
+            return Ok(()); // absent is fine
+        }
+    };
+
+    // Decode and verify.
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&sig_b64)
+        .map_err(|e| format!("Invalid base64 in archive signature: {e}"))?;
+    let pubkey_bytes = base64::engine::general_purpose::STANDARD
+        .decode(pubkey_b64)
+        .map_err(|e| format!("Invalid base64 in public key: {e}"))?;
+
+    if sig_bytes.len() != 64 {
+        return Err(format!(
+            "Archive signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        ));
+    }
+    if pubkey_bytes.len() != 32 {
+        return Err(format!(
+            "Public key must be 32 bytes, got {}",
+            pubkey_bytes.len()
+        ));
+    }
+
+    let sig_array: [u8; 64] = sig_bytes.try_into().unwrap();
+    let pubkey_array: [u8; 32] = pubkey_bytes.try_into().unwrap();
+
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_array)
+        .map_err(|e| format!("Invalid public key: {e}"))?;
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
+
+    use ed25519_dalek::Verifier as _;
+    verifying_key
+        .verify(archive_bytes, &signature)
+        .map_err(|_| format!("Archive signature verification FAILED for {archive_url}"))?;
+
+    info!("Archive signature verified for {archive_url}");
+    Ok(())
+}
+
+/// Return the path used to cache a registry index locally.
+/// The filename is a sanitised form of the registry URL.
+fn registry_cache_path(registry: &str) -> std::path::PathBuf {
+    let cache_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".librefang")
+        .join("registry_cache");
+    // Sanitise the URL into a safe filename (replace non-alphanumeric with '_').
+    let safe_name: String = registry
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    cache_dir.join(format!("{safe_name}.json"))
+}
+
+/// Return the default registry cache TTL in seconds (1 hour).
+fn default_registry_cache_ttl_secs() -> u64 {
+    3600
+}
+
+/// Try to load a cached registry index.
+/// Returns `Some(bytes)` if the cache file exists and is newer than `ttl_secs`.
+fn load_registry_cache(path: &std::path::Path, ttl_secs: u64) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(std::time::Duration::MAX);
+    if age.as_secs() > ttl_secs {
+        return None; // stale
+    }
+    std::fs::read(path).ok()
+}
+
+/// Write bytes to the registry cache, creating parent dirs as needed.
+fn save_registry_cache(path: &std::path::Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, bytes);
+}
+
+/// Fetch registry `index.json` and optionally verify its Ed25519 signature.
+///
+/// Signature verification is skipped when:
+/// - `LIBREFANG_REGISTRY_VERIFY=0` env var is set
+/// - No `index.json.sig` companion file exists at the registry
+/// - The configured public key is the placeholder value (all-zero bytes)
+///
+/// A missing signature file produces a warning; a present but invalid
+/// signature is always a hard error.
+pub async fn fetch_verified_index(
+    client: &reqwest::Client,
+    registry: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    use base64::Engine as _;
+
+    let cache_path = registry_cache_path(registry);
+    let ttl = std::env::var("LIBREFANG_REGISTRY_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(default_registry_cache_ttl_secs);
+
+    // Try cache first (skip if LIBREFANG_REGISTRY_NO_CACHE=1).
+    let skip_cache = std::env::var("LIBREFANG_REGISTRY_NO_CACHE").as_deref() == Ok("1");
+    if !skip_cache {
+        if let Some(cached) = load_registry_cache(&cache_path, ttl) {
+            if let Ok(value) = serde_json::from_slice::<Vec<serde_json::Value>>(&cached) {
+                debug!("Using cached registry index for {registry} (age < {ttl}s)");
+                return Ok(value);
+            }
+        }
+    }
+
+    let index_url = format!("https://raw.githubusercontent.com/{registry}/main/index.json");
+    let sig_url = format!("https://raw.githubusercontent.com/{registry}/main/index.json.sig");
+
+    // Fetch index bytes.
+    let index_resp = client
+        .get(&index_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch registry index: {e}"))?;
+
+    if !index_resp.status().is_success() {
+        return Err(format!(
+            "Registry index returned HTTP {}",
+            index_resp.status()
+        ));
+    }
+
+    let index_bytes = index_resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read registry index body: {e}"))?;
+
+    // Skip verification if explicitly disabled.
+    if std::env::var("LIBREFANG_REGISTRY_VERIFY").as_deref() == Ok("0") {
+        warn!("Registry signature verification disabled via LIBREFANG_REGISTRY_VERIFY=0");
+    } else {
+        // Resolve which public key to use.
+        let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
+            .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
+
+        // Detect the all-zero placeholder key.  A placeholder means no real
+        // registry key has been configured, so we REFUSE rather than silently
+        // skip — accepting an unverified index would let a compromised or
+        // man-in-the-middle registry serve arbitrary plugin lists.
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(pubkey.trim())
+            .unwrap_or_default();
+        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
+
+        if is_placeholder {
+            return Err(
+                "Plugin registry public key is not configured — refusing to fetch registry \
+                 index without signature verification. \
+                 Set LIBREFANG_REGISTRY_PUBKEY to the base64-encoded Ed25519 public key of \
+                 your registry, or set LIBREFANG_REGISTRY_VERIFY=0 to disable verification \
+                 (development use only)."
+                    .to_string(),
+            );
+        }
+
+        // Key is present and non-placeholder — try to verify the signature.
+        match client.get(&sig_url).send().await {
+            Ok(sig_resp) if sig_resp.status().is_success() => {
+                let sig_text = sig_resp
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read signature: {e}"))?;
+                verify_registry_index(&index_bytes, sig_text.trim(), &pubkey)?;
+                info!(registry, "Registry index signature verified OK");
+            }
+            _ => {
+                warn!(
+                    registry,
+                    "No index.json.sig found — registry index not signature-verified"
+                );
+            }
+        }
+    }
+
+    // Persist to disk cache for future calls.
+    save_registry_cache(&cache_path, &index_bytes);
+
+    serde_json::from_slice::<Vec<serde_json::Value>>(&index_bytes)
+        .map_err(|e| format!("Failed to parse registry index JSON: {e}"))
+}
 
 /// Returns the list of hook script paths declared in `[hooks]` that have no
 /// matching entry in `[integrity]`. An empty result means every declared hook
@@ -437,10 +712,2375 @@ pub fn list_plugins() -> Vec<PluginInfo> {
         .collect()
 }
 
+/// Install a plugin from a source.
+pub async fn install_plugin(source: &PluginSource) -> Result<PluginInfo, String> {
+    let plugins = ensure_plugins_dir().map_err(|e| format!("Cannot create plugins dir: {e}"))?;
+
+    let info = match source {
+        PluginSource::Local { path } => {
+            // install_from_local walks/copies a directory tree synchronously;
+            // run it on the blocking pool so we don't stall the async runtime.
+            let path = path.clone();
+            let plugins = plugins.clone();
+            tokio::task::spawn_blocking(move || install_from_local(&path, &plugins))
+                .await
+                .map_err(|e| format!("install_from_local task panicked: {e}"))?
+        }
+        PluginSource::Registry { name, github_repo } => {
+            let repo = github_repo
+                .as_deref()
+                .unwrap_or("librefang/librefang-registry");
+            install_from_registry(name, repo, &plugins).await
+        }
+        PluginSource::Git { url, branch } => {
+            install_from_git(url, branch.as_deref(), &plugins).await
+        }
+    }?;
+
+    // Check that all declared plugin dependencies are already installed.
+    let raw_toml = tokio::fs::read_to_string(info.path.join("plugin.toml"))
+        .await
+        .unwrap_or_default();
+    let needs = extract_needs(&raw_toml);
+    if let Err(e) = check_plugin_needs(&needs) {
+        // Don't remove the partially-installed plugin — let the user decide.
+        // Just warn so they know what to install next.
+        warn!("{e}");
+    }
+
+    // Warn about missing system binaries declared in [[requires]].
+    let missing_bins = check_system_requires(&info.manifest.requires);
+    for (bin, hint) in &missing_bins {
+        let hint_str = hint.as_deref().unwrap_or("(no install hint provided)");
+        warn!(
+            "Plugin '{}' requires system binary '{}' which was not found on PATH. {}",
+            info.manifest.name, bin, hint_str
+        );
+    }
+
+    Ok(info)
+}
+
+/// Install from a local directory by copying.
+fn install_from_local(src: &Path, plugins_dir: &Path) -> Result<PluginInfo, String> {
+    // Canonicalize the source path to resolve symlinks and relative components
+    let canonical_src = src
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve local path '{}': {e}", src.display()))?;
+
+    // Reject paths that still contain '..' after canonicalization (should not happen, but defense in depth)
+    if canonical_src
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "Refusing to install from path with '..' components: {}",
+            canonical_src.display()
+        ));
+    }
+
+    warn!(
+        path = %canonical_src.display(),
+        "Installing plugin from local path"
+    );
+
+    // Validate source has a plugin.toml
+    let manifest = load_plugin_manifest(&canonical_src)?;
+    // Validate manifest name is safe for use as a directory name
+    validate_plugin_name(&manifest.name)?;
+    let target_dir = plugins_dir.join(&manifest.name);
+
+    if target_dir.exists() {
+        return Err(format!(
+            "Plugin '{}' already installed at {}. Remove it first.",
+            manifest.name,
+            target_dir.display()
+        ));
+    }
+
+    copy_dir_recursive(&canonical_src, &target_dir)
+        .map_err(|e| format!("Failed to copy plugin: {e}"))?;
+
+    info!(plugin = manifest.name, "Installed plugin from local path");
+    get_plugin_info(&manifest.name)
+}
+
+/// Validate that a GitHub repo string looks like `owner/repo`.
+fn validate_github_repo(repo: &str) -> Result<(), String> {
+    let parts: Vec<&str> = repo.split('/').collect();
+    if parts.len() != 2
+        || parts[0].is_empty()
+        || parts[1].is_empty()
+        || repo.contains("..")
+        || repo.contains(' ')
+    {
+        return Err(format!(
+            "Invalid GitHub repo '{repo}': must be 'owner/repo'"
+        ));
+    }
+    Ok(())
+}
+
+/// Install from a GitHub plugin registry (`owner/repo`).
+async fn install_from_registry(
+    name: &str,
+    github_repo: &str,
+    plugins_dir: &Path,
+) -> Result<PluginInfo, String> {
+    validate_plugin_name(name)?;
+    validate_github_repo(github_repo)?;
+    let target_dir = plugins_dir.join(name);
+    if target_dir.exists() {
+        return Err(format!(
+            "Plugin '{name}' already installed. Remove it first."
+        ));
+    }
+
+    let base_url = format!("https://api.github.com/repos/{github_repo}/contents/plugins");
+    let listing_url = format!("{base_url}/{name}");
+
+    let client = crate::http_client::client_builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    // List files in the plugin directory
+    let resp = client
+        .get(&listing_url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch plugin '{name}' from registry: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Plugin '{name}' not found in registry (HTTP {})",
+            resp.status()
+        ));
+    }
+
+    let files: Vec<GitHubContent> = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse registry response: {e}"))?;
+
+    // Create target directory
+    tokio::fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|e| format!("Failed to create plugin dir: {e}"))?;
+
+    // Download each file — cleanup on failure
+    let download_result = async {
+        for file in &files {
+            download_github_entry(&client, file, &target_dir, 0).await?;
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(e) = download_result {
+        // Clean up partial download
+        let _ = tokio::fs::remove_dir_all(&target_dir).await;
+        return Err(format!("Failed to download plugin '{name}': {e}"));
+    }
+
+    // Verify checksum if available (non-fatal warning if no checksum file exists).
+    match fetch_checksum(&client, &listing_url, name).await {
+        Some(expected) => {
+            // For registry plugins installed file-by-file, compute checksum over
+            // the serialised manifest as a representative integrity check.
+            let manifest_bytes = tokio::fs::read(target_dir.join("plugin.toml"))
+                .await
+                .unwrap_or_default();
+            if let Err(e) = verify_checksum(&manifest_bytes, &expected) {
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                return Err(e);
+            }
+            info!(plugin = name, "Checksum verified OK");
+        }
+        None => {
+            warn!(
+                plugin = name,
+                "No checksum file found for this plugin release. \
+                 Install proceeds without integrity verification."
+            );
+        }
+    }
+
+    // Verify Ed25519 archive signature.
+    // A placeholder (all-zero) public key means no real key is configured —
+    // refuse installation rather than silently skip.  An attacker who knows the
+    // key is all-zero bytes can trivially craft valid signatures, so accepting
+    // plugins while the placeholder is active is equivalent to no verification.
+    let archive_bytes = tokio::fs::read(target_dir.join("plugin.toml"))
+        .await
+        .unwrap_or_default();
+    if std::env::var("LIBREFANG_ARCHIVE_VERIFY").as_deref() == Ok("0") {
+        debug!("Archive signature verification disabled via LIBREFANG_ARCHIVE_VERIFY=0");
+    } else {
+        use base64::Engine as _;
+        let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
+            .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(pubkey.trim())
+            .unwrap_or_default();
+        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
+        if is_placeholder {
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
+            return Err(
+                "Plugin registry public key is not configured — refusing to install plugin \
+                 without signature verification. \
+                 Set LIBREFANG_REGISTRY_PUBKEY to the base64-encoded Ed25519 public key of \
+                 your registry, or set LIBREFANG_ARCHIVE_VERIFY=0 to disable verification \
+                 (development use only)."
+                    .to_string(),
+            );
+        }
+        if let Err(e) =
+            verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await
+        {
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
+            return Err(e);
+        }
+    }
+
+    // Bug #3804 — verify hook script integrity after install.
+    //
+    // The checksum above only covers plugin.toml (the manifest).  Hook scripts
+    // that are referenced in the manifest but NOT listed in its [integrity]
+    // section bypass all content verification — an attacker who controls the
+    // download can serve a legitimate manifest with a valid checksum while
+    // substituting malicious hook scripts.
+    //
+    // If the manifest declares hook scripts, every one of them MUST have a
+    // corresponding entry in [integrity].  Missing entries are a hard error
+    // for registry-installed plugins; authors who intentionally omit integrity
+    // hashes (e.g. during development) can install via Local or Git sources.
+    {
+        let manifest_path = target_dir.join("plugin.toml");
+        let manifest_opt = tokio::fs::read_to_string(&manifest_path)
+            .await
+            .ok()
+            .and_then(|s| toml::from_str::<PluginManifest>(&s).ok());
+        match manifest_opt {
+            Some(manifest) => {
+                let missing_integrity = manifest_missing_integrity_hooks(&manifest);
+                if !missing_integrity.is_empty() {
+                    // Hard error: registry plugins must declare integrity hashes for
+                    // every hook script.  Without them, the hook content is unverified
+                    // and could have been substituted after the manifest was signed.
+                    let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                    return Err(format!(
+                        "Plugin '{}' is missing [integrity] hashes for hook script(s): {}. \
+                         Registry-installed plugins must provide SHA-256 checksums for every \
+                         hook script declared in [hooks] so that tampered scripts are detected \
+                         at load time. Add an [integrity] section to plugin.toml with \
+                         \"hooks/<script>\" = \"<sha256hex>\" entries, or install via a local \
+                         path (PluginSource::Local) to bypass this requirement.",
+                        manifest.name,
+                        missing_integrity.join(", ")
+                    ));
+                }
+            }
+            None => {
+                // Manifest could not be re-read after install — treat as integrity failure.
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                return Err(format!(
+                    "Plugin '{name}': failed to re-read plugin.toml after install \
+                     — cannot verify hook script integrity"
+                ));
+            }
+        }
+    }
+
+    info!(
+        plugin = name,
+        "Plugin installed successfully (manifest + hook script integrity verified)"
+    );
+
+    // Bust the registry cache so subsequent searches see an up-to-date index.
+    let cache_path = registry_cache_path(github_repo);
+    let _ = tokio::fs::remove_file(&cache_path).await;
+
+    get_plugin_info(name)
+}
+
+/// Lightweight entry returned when browsing a registry.
+///
+/// Populated from each plugin's `plugin.toml` when available. Fields beyond
+/// `name`/`registry` are optional so that registries that fail to serve a
+/// manifest still degrade gracefully to a name-only listing.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RegistryPluginEntry {
+    pub name: String,
+    pub registry: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// Hook names declared by the plugin (e.g. `ingest`, `after_turn`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<String>,
+    /// Per-language overrides for `name` / `description`. Keyed by BCP-47
+    /// tag (`zh`, `zh-TW`, …). API routes resolve `Accept-Language` against
+    /// this and fall back to the English values above.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub i18n: HashMap<String, PluginI18n>,
+}
+
+/// Disk cache file for an enriched registry listing.
+///
+/// Stored separately from the `index.json` cache so that listings built from
+/// the GitHub Contents API + per-plugin manifest fetches do not clobber a
+/// signed index cache.
+fn registry_listing_cache_path(registry: &str) -> std::path::PathBuf {
+    let cache_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".librefang")
+        .join("registry_cache");
+    let safe_name: String = registry
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    cache_dir.join(format!("{safe_name}__listing.json"))
+}
+
+/// Fetch and parse `plugins/<name>/plugin.toml` from a registry, extracting the
+/// fields we care about for a browse-listing card. Network and parse errors
+/// degrade to `None` so a single bad plugin does not sink the whole listing.
+async fn fetch_registry_plugin_meta(
+    client: &reqwest::Client,
+    github_repo: &str,
+    name: &str,
+) -> RegistryPluginEntry {
+    let mut entry = RegistryPluginEntry {
+        name: name.to_string(),
+        registry: github_repo.to_string(),
+        ..Default::default()
+    };
+
+    let url =
+        format!("https://raw.githubusercontent.com/{github_repo}/main/plugins/{name}/plugin.toml");
+    let text = match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
+        _ => None,
+    };
+    let Some(text) = text else { return entry };
+
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return entry;
+    };
+    if let Some(v) = value.get("version").and_then(|v| v.as_str()) {
+        entry.version = Some(v.to_string());
+    }
+    if let Some(v) = value.get("description").and_then(|v| v.as_str()) {
+        entry.description = Some(v.to_string());
+    }
+    if let Some(v) = value.get("author").and_then(|v| v.as_str()) {
+        entry.author = Some(v.to_string());
+    }
+    if let Some(hooks) = value.get("hooks").and_then(|v| v.as_table()) {
+        entry.hooks = hooks.keys().cloned().collect();
+        entry.hooks.sort();
+    }
+    entry.i18n = parse_plugin_i18n_blocks(&value);
+    entry
+}
+
+/// Pull `[i18n.<lang>]` tables off a parsed plugin TOML, keeping only the
+/// `name` and `description` overrides. Empty entries (neither field set)
+/// are dropped to keep the map tight.
+///
+/// Exposed as `pub(crate)` so it can be unit-tested without a network
+/// round-trip; the production caller is `fetch_registry_plugin_meta`.
+pub(crate) fn parse_plugin_i18n_blocks(value: &toml::Value) -> HashMap<String, PluginI18n> {
+    let mut out: HashMap<String, PluginI18n> = HashMap::new();
+    let Some(i18n) = value.get("i18n").and_then(|v| v.as_table()) else {
+        return out;
+    };
+    for (lang, body) in i18n {
+        let Some(tbl) = body.as_table() else { continue };
+        let pi = PluginI18n {
+            name: tbl
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            description: tbl
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        };
+        if pi.name.is_some() || pi.description.is_some() {
+            out.insert(lang.clone(), pi);
+        }
+    }
+    out
+}
+
+/// List available plugins in a GitHub registry, enriched with manifest metadata.
+///
+/// Lists `plugins/` via the GitHub Contents API, then fetches each plugin's
+/// `plugin.toml` concurrently to populate `version/description/author/hooks`.
+/// Results are cached to disk with the same TTL as the signed index cache
+/// to avoid hammering GitHub on every dashboard reload.
+pub async fn list_registry_plugins(github_repo: &str) -> Result<Vec<RegistryPluginEntry>, String> {
+    validate_github_repo(github_repo)?;
+
+    let ttl = std::env::var("LIBREFANG_REGISTRY_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(default_registry_cache_ttl_secs);
+    let skip_cache = std::env::var("LIBREFANG_REGISTRY_NO_CACHE").as_deref() == Ok("1");
+    let cache_path = registry_listing_cache_path(github_repo);
+
+    if !skip_cache {
+        if let Some(bytes) = load_registry_cache(&cache_path, ttl) {
+            if let Ok(cached) = serde_json::from_slice::<Vec<RegistryPluginEntry>>(&bytes) {
+                debug!(
+                    "Using cached registry listing for {github_repo} ({} plugins)",
+                    cached.len()
+                );
+                return Ok(cached);
+            }
+        }
+    }
+
+    let client = crate::http_client::client_builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let url = format!("https://api.github.com/repos/{github_repo}/contents/plugins");
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch registry '{github_repo}': {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Registry '{github_repo}' not accessible (HTTP {})",
+            resp.status()
+        ));
+    }
+
+    let entries: Vec<GitHubContent> = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse registry listing: {e}"))?;
+
+    let names: Vec<String> = entries
+        .into_iter()
+        .filter(|e| e.content_type == "dir")
+        .map(|e| e.name)
+        .collect();
+
+    let futs = names
+        .iter()
+        .map(|n| fetch_registry_plugin_meta(&client, github_repo, n));
+    let mut plugins: Vec<RegistryPluginEntry> = futures::future::join_all(futs).await;
+    plugins.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if !skip_cache {
+        if let Ok(bytes) = serde_json::to_vec(&plugins) {
+            save_registry_cache(&cache_path, &bytes);
+        }
+    }
+
+    Ok(plugins)
+}
+
+/// Install from a git URL by cloning.
+async fn install_from_git(
+    url: &str,
+    branch: Option<&str>,
+    plugins_dir: &Path,
+) -> Result<PluginInfo, String> {
+    // Validate URL to prevent argument injection (git interprets `-` prefixed args as flags)
+    if url.starts_with('-') {
+        return Err("Invalid git URL: must not start with '-'".to_string());
+    }
+    if !url.starts_with("https://")
+        && !url.starts_with("http://")
+        && !url.starts_with("git://")
+        && !url.starts_with("ssh://")
+        && !url.contains('@')
+    {
+        return Err(
+            "Invalid git URL: must start with https://, http://, git://, or ssh://".to_string(),
+        );
+    }
+    if let Some(b) = branch {
+        if b.starts_with('-') {
+            return Err("Invalid branch name: must not start with '-'".to_string());
+        }
+    }
+
+    // Clone into a temp dir, validate, then move
+    let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
+
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("clone").arg("--depth=1");
+    if let Some(b) = branch {
+        cmd.arg("--branch").arg(b);
+    }
+    // Use `--` to separate options from positional args
+    cmd.arg("--").arg(url).arg(temp_dir.path());
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run git clone: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git clone failed: {stderr}"));
+    }
+
+    // Validate the cloned repo has a plugin.toml with a safe name.
+    // load_plugin_manifest reads files synchronously; run on the blocking pool.
+    let manifest_dir = temp_dir.path().to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || load_plugin_manifest(&manifest_dir))
+        .await
+        .map_err(|e| format!("load_plugin_manifest task failed: {e}"))??;
+    validate_plugin_name(&manifest.name)?;
+    let target_dir = plugins_dir.join(&manifest.name);
+
+    if target_dir.exists() {
+        return Err(format!(
+            "Plugin '{}' already installed. Remove it first.",
+            manifest.name
+        ));
+    }
+
+    // Move (rename) from temp to plugins dir.
+    // copy_dir_recursive walks/copies a directory tree synchronously; run on the
+    // blocking pool so we don't stall the async runtime.
+    let copy_src = temp_dir.path().to_path_buf();
+    let copy_dst = target_dir.clone();
+    tokio::task::spawn_blocking(move || copy_dir_recursive(&copy_src, &copy_dst))
+        .await
+        .map_err(|e| format!("copy_dir_recursive task failed: {e}"))?
+        .map_err(|e| format!("Failed to install plugin: {e}"))?;
+
+    // Remove .git directory to save space
+    let git_dir = target_dir.join(".git");
+    if git_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&git_dir).await;
+    }
+
+    info!(plugin = manifest.name, "Installed plugin from git");
+    get_plugin_info(&manifest.name)
+}
+
+/// Remove an installed plugin.
+pub fn remove_plugin(name: &str) -> Result<(), String> {
+    validate_plugin_name(name)?;
+    let plugin_dir = plugins_dir().join(name);
+    if !plugin_dir.exists() {
+        return Err(format!("Plugin '{name}' is not installed"));
+    }
+
+    // Validate it's actually a plugin directory (has plugin.toml)
+    if !plugin_dir.join("plugin.toml").exists() {
+        return Err(format!(
+            "Directory {} does not appear to be a plugin (no plugin.toml)",
+            plugin_dir.display()
+        ));
+    }
+
+    std::fs::remove_dir_all(&plugin_dir)
+        .map_err(|e| format!("Failed to remove plugin '{name}': {e}"))?;
+
+    info!(plugin = name, "Removed plugin");
+    Ok(())
+}
+
+/// Create a scaffold for a new plugin. `runtime` defaults to `"python"`;
+/// pass `"v"` / `"node"` / `"go"` / `"deno"` / `"native"` to generate a
+/// template for that language instead.
+pub fn scaffold_plugin(
+    name: &str,
+    description: &str,
+    runtime: Option<&str>,
+) -> Result<PathBuf, String> {
+    validate_plugin_name(name)?;
+    let plugins = ensure_plugins_dir().map_err(|e| format!("Cannot create plugins dir: {e}"))?;
+    let plugin_dir = plugins.join(name);
+
+    if plugin_dir.exists() {
+        return Err(format!("Plugin '{name}' already exists"));
+    }
+
+    let hooks_dir = plugin_dir.join("hooks");
+    std::fs::create_dir_all(&hooks_dir)
+        .map_err(|e| format!("Failed to create plugin directory: {e}"))?;
+
+    // Normalize the runtime tag via PluginRuntime so aliases (py/js/golang/...)
+    // resolve the same way the hook dispatcher will at runtime.
+    let runtime_kind = crate::plugin_runtime::PluginRuntime::from_tag(runtime);
+    let runtime_tag = runtime_kind.label();
+
+    // Each runtime declares its own hook filenames + template body so the
+    // manifest + files stay in sync.
+    let files = hook_templates(runtime_kind.clone());
+    let (ingest_file, ingest_body) = files.ingest;
+    let (after_file, after_body) = files.after_turn;
+    let (assemble_file, assemble_body) = files.assemble;
+    let (compact_file, compact_body) = files.compact;
+    let (bootstrap_file, bootstrap_body) = files.bootstrap;
+    let (prepare_file, prepare_body) = files.prepare_subagent;
+    let (merge_file, merge_body) = files.merge_subagent;
+
+    // Write plugin.toml as a hand-crafted string so we can include comments
+    // that guide users toward the new hook slots.
+    let runtime_line = if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
+        String::new()
+    } else {
+        format!("runtime = \"{runtime_tag}\"\n")
+    };
+    let requirements_line = if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python)
+    {
+        "requirements = \"requirements.txt\"\n".to_string()
+    } else {
+        String::new()
+    };
+    let manifest_toml = format!(
+        r#"name = "{name}"
+version = "0.1.0"
+description = "{description}"
+# librefang_min_version = "2026.4.0"   # refuse to load on older daemons
+{runtime_line}
+# hook_timeout_secs = 30   # per-invocation timeout; bootstrap gets 2× this value
+# max_retries       = 0    # retry hook on failure (0 = no retry)
+# retry_delay_ms    = 500  # wait between retries
+# on_hook_failure   = "warn"   # "warn" | "abort" | "skip"
+
+[hooks]
+# --- Active hooks ---
+ingest    = "hooks/{ingest_file}"
+after_turn = "hooks/{after_file}"
+
+# ingest_filter = "remember"  # only run ingest when message contains this string
+
+# --- Optional hooks (uncomment to activate; template files already written) ---
+# bootstrap        = "hooks/{bootstrap_file}"   # runs once at startup (2× timeout)
+# assemble         = "hooks/{assemble_file}"    # control what the LLM sees (powerful)
+# compact          = "hooks/{compact_file}"     # custom context compression
+# prepare_subagent = "hooks/{prepare_file}"     # called before sub-agent spawns
+# merge_subagent   = "hooks/{merge_file}"       # called after sub-agent completes
+
+# [env]
+# MY_SERVICE_URL = "http://localhost:6333"
+# MY_API_KEY     = "${{MY_API_KEY}}"   # expanded from daemon environment at runtime
+{requirements_line}"#,
+        name = name,
+        description = description,
+        ingest_file = ingest_file,
+        after_file = after_file,
+        bootstrap_file = bootstrap_file,
+        assemble_file = assemble_file,
+        compact_file = compact_file,
+        prepare_file = prepare_file,
+        merge_file = merge_file,
+        runtime_line = runtime_line,
+        requirements_line = requirements_line,
+    );
+    std::fs::write(plugin_dir.join("plugin.toml"), manifest_toml)
+        .map_err(|e| format!("Failed to write plugin.toml: {e}"))?;
+
+    let ingest_path = hooks_dir.join(ingest_file);
+    let after_path = hooks_dir.join(after_file);
+    let assemble_path = hooks_dir.join(assemble_file);
+    let compact_path = hooks_dir.join(compact_file);
+    let bootstrap_path = hooks_dir.join(bootstrap_file);
+    let prepare_path = hooks_dir.join(prepare_file);
+    let merge_path = hooks_dir.join(merge_file);
+    std::fs::write(&ingest_path, ingest_body)
+        .map_err(|e| format!("Failed to write {ingest_file}: {e}"))?;
+    std::fs::write(&after_path, after_body)
+        .map_err(|e| format!("Failed to write {after_file}: {e}"))?;
+    std::fs::write(&assemble_path, assemble_body)
+        .map_err(|e| format!("Failed to write {assemble_file}: {e}"))?;
+    std::fs::write(&compact_path, compact_body)
+        .map_err(|e| format!("Failed to write {compact_file}: {e}"))?;
+    std::fs::write(&bootstrap_path, bootstrap_body)
+        .map_err(|e| format!("Failed to write {bootstrap_file}: {e}"))?;
+    // prepare_subagent and merge_subagent may share the same template body;
+    // write them to distinct files so users can customise them independently.
+    std::fs::write(&prepare_path, prepare_body)
+        .map_err(|e| format!("Failed to write {prepare_file}: {e}"))?;
+    std::fs::write(&merge_path, merge_body)
+        .map_err(|e| format!("Failed to write {merge_file}: {e}"))?;
+
+    // Native plugins exec the file directly, so the scaffolded shell wrapper
+    // needs the executable bit. No-op on Windows (which uses extension-based
+    // execution) and on other runtimes (interpreter handles execution).
+    if runtime_kind.requires_executable_bit() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [
+                &ingest_path,
+                &after_path,
+                &assemble_path,
+                &compact_path,
+                &bootstrap_path,
+                &prepare_path,
+                &merge_path,
+            ] {
+                if let Ok(meta) = std::fs::metadata(path) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(0o755);
+                    let _ = std::fs::set_permissions(path, perms);
+                }
+            }
+        }
+    }
+
+    // Python plugins get requirements.txt; other runtimes manage deps
+    // their own way (go.mod, package.json, v.mod, ...).
+    if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
+        std::fs::write(
+            plugin_dir.join("requirements.txt"),
+            "# Python dependencies\n",
+        )
+        .map_err(|e| format!("Failed to write requirements.txt: {e}"))?;
+    }
+
+    info!(
+        plugin = name,
+        runtime = runtime_tag.as_ref(),
+        "Scaffolded new plugin"
+    );
+    Ok(plugin_dir)
+}
+
+/// All hook file names and template bodies for a given runtime.
+struct HookFiles {
+    /// `(filename, template_body)` pairs for each hook.
+    ingest: (&'static str, &'static str),
+    after_turn: (&'static str, &'static str),
+    assemble: (&'static str, &'static str),
+    compact: (&'static str, &'static str),
+    /// One-shot startup hook (connect to vector DB, warm cache, etc.)
+    bootstrap: (&'static str, &'static str),
+    /// Called before a sub-agent spawns.
+    prepare_subagent: (&'static str, &'static str),
+    /// Called after a sub-agent completes.
+    merge_subagent: (&'static str, &'static str),
+}
+
+/// Return scaffolded hook filenames + body content for a given runtime.
+///
+/// Each hook gets a working template showing the stdin/stdout protocol.
+/// Python, Node, Go, and Deno get full implementations with token-budget
+/// logic; other runtimes get minimal no-op stubs with protocol comments.
+fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
+    use crate::plugin_runtime::PluginRuntime as R;
+    match runtime {
+        R::Python => HookFiles {
+            ingest: ("ingest.py", PY_INGEST),
+            after_turn: ("after_turn.py", PY_AFTER_TURN),
+            assemble: ("assemble.py", PY_ASSEMBLE),
+            compact: ("compact.py", PY_COMPACT),
+            bootstrap: ("bootstrap.py", PY_BOOTSTRAP),
+            prepare_subagent: ("prepare_subagent.py", PY_PREPARE_SUBAGENT),
+            merge_subagent: ("merge_subagent.py", PY_MERGE_SUBAGENT),
+        },
+        R::Node => HookFiles {
+            ingest: ("ingest.js", NODE_INGEST),
+            after_turn: ("after_turn.js", NODE_AFTER_TURN),
+            assemble: ("assemble.js", NODE_ASSEMBLE),
+            compact: ("compact.js", NODE_COMPACT),
+            bootstrap: ("bootstrap.js", NODE_BOOTSTRAP),
+            prepare_subagent: ("prepare_subagent.js", STUB_BOOTSTRAP_NODE),
+            merge_subagent: ("merge_subagent.js", STUB_BOOTSTRAP_NODE),
+        },
+        R::Deno => HookFiles {
+            ingest: ("ingest.ts", DENO_INGEST),
+            after_turn: ("after_turn.ts", DENO_AFTER_TURN),
+            assemble: ("assemble.ts", DENO_ASSEMBLE),
+            compact: ("compact.ts", DENO_COMPACT),
+            bootstrap: ("bootstrap.ts", DENO_BOOTSTRAP),
+            prepare_subagent: ("prepare_subagent.ts", STUB_LIFECYCLE_DENO),
+            merge_subagent: ("merge_subagent.ts", STUB_LIFECYCLE_DENO),
+        },
+        R::Go => HookFiles {
+            ingest: ("ingest.go", GO_INGEST),
+            after_turn: ("after_turn.go", GO_AFTER_TURN),
+            assemble: ("assemble.go", GO_ASSEMBLE),
+            compact: ("compact.go", GO_COMPACT),
+            bootstrap: ("bootstrap.go", GO_BOOTSTRAP),
+            prepare_subagent: ("prepare_subagent.go", STUB_LIFECYCLE_GO),
+            merge_subagent: ("merge_subagent.go", STUB_LIFECYCLE_GO),
+        },
+        R::V => HookFiles {
+            ingest: ("ingest.v", V_INGEST),
+            after_turn: ("after_turn.v", V_AFTER_TURN),
+            assemble: ("assemble.v", STUB_ASSEMBLE_V),
+            compact: ("compact.v", STUB_COMPACT_V),
+            bootstrap: ("bootstrap.v", STUB_LIFECYCLE_V),
+            prepare_subagent: ("prepare_subagent.v", STUB_LIFECYCLE_V),
+            merge_subagent: ("merge_subagent.v", STUB_LIFECYCLE_V),
+        },
+        R::Ruby => HookFiles {
+            ingest: ("ingest.rb", RUBY_INGEST),
+            after_turn: ("after_turn.rb", RUBY_AFTER_TURN),
+            assemble: ("assemble.rb", STUB_ASSEMBLE_RUBY),
+            compact: ("compact.rb", STUB_COMPACT_RUBY),
+            bootstrap: ("bootstrap.rb", STUB_LIFECYCLE_RUBY),
+            prepare_subagent: ("prepare_subagent.rb", STUB_LIFECYCLE_RUBY),
+            merge_subagent: ("merge_subagent.rb", STUB_LIFECYCLE_RUBY),
+        },
+        R::Bash => HookFiles {
+            ingest: ("ingest.sh", BASH_INGEST),
+            after_turn: ("after_turn.sh", BASH_AFTER_TURN),
+            assemble: ("assemble.sh", STUB_ASSEMBLE_BASH),
+            compact: ("compact.sh", STUB_COMPACT_BASH),
+            bootstrap: ("bootstrap.sh", STUB_LIFECYCLE_BASH),
+            prepare_subagent: ("prepare_subagent.sh", STUB_LIFECYCLE_BASH),
+            merge_subagent: ("merge_subagent.sh", STUB_LIFECYCLE_BASH),
+        },
+        R::Bun => HookFiles {
+            ingest: ("ingest.ts", BUN_INGEST),
+            after_turn: ("after_turn.ts", BUN_AFTER_TURN),
+            assemble: ("assemble.ts", STUB_ASSEMBLE_BUN),
+            compact: ("compact.ts", STUB_COMPACT_BUN),
+            bootstrap: ("bootstrap.ts", STUB_LIFECYCLE_BUN),
+            prepare_subagent: ("prepare_subagent.ts", STUB_LIFECYCLE_BUN),
+            merge_subagent: ("merge_subagent.ts", STUB_LIFECYCLE_BUN),
+        },
+        R::Php => HookFiles {
+            ingest: ("ingest.php", PHP_INGEST),
+            after_turn: ("after_turn.php", PHP_AFTER_TURN),
+            assemble: ("assemble.php", STUB_ASSEMBLE_PHP),
+            compact: ("compact.php", STUB_COMPACT_PHP),
+            bootstrap: ("bootstrap.php", STUB_LIFECYCLE_PHP),
+            prepare_subagent: ("prepare_subagent.php", STUB_LIFECYCLE_PHP),
+            merge_subagent: ("merge_subagent.php", STUB_LIFECYCLE_PHP),
+        },
+        R::Lua => HookFiles {
+            ingest: ("ingest.lua", LUA_INGEST),
+            after_turn: ("after_turn.lua", LUA_AFTER_TURN),
+            assemble: ("assemble.lua", STUB_ASSEMBLE_LUA),
+            compact: ("compact.lua", STUB_COMPACT_LUA),
+            bootstrap: ("bootstrap.lua", STUB_LIFECYCLE_LUA),
+            prepare_subagent: ("prepare_subagent.lua", STUB_LIFECYCLE_LUA),
+            merge_subagent: ("merge_subagent.lua", STUB_LIFECYCLE_LUA),
+        },
+        R::Native => HookFiles {
+            // Shell wrapper — users replace with a real pre-compiled binary.
+            ingest: ("ingest", NATIVE_INGEST),
+            after_turn: ("after_turn", NATIVE_AFTER_TURN),
+            assemble: ("assemble", STUB_ASSEMBLE_NATIVE),
+            compact: ("compact", STUB_COMPACT_NATIVE),
+            bootstrap: ("bootstrap", STUB_LIFECYCLE_NATIVE),
+            prepare_subagent: ("prepare_subagent", STUB_LIFECYCLE_NATIVE),
+            merge_subagent: ("merge_subagent", STUB_LIFECYCLE_NATIVE),
+        },
+        R::Wasm => HookFiles {
+            // Wasm hooks run inline via wasmtime — no template files needed.
+            // Scaffold stubs so the directory structure is consistent.
+            ingest: ("ingest.wasm", NATIVE_INGEST),
+            after_turn: ("after_turn.wasm", NATIVE_AFTER_TURN),
+            assemble: ("assemble.wasm", STUB_ASSEMBLE_NATIVE),
+            compact: ("compact.wasm", STUB_COMPACT_NATIVE),
+            bootstrap: ("bootstrap.wasm", STUB_LIFECYCLE_NATIVE),
+            prepare_subagent: ("prepare_subagent.wasm", STUB_LIFECYCLE_NATIVE),
+            merge_subagent: ("merge_subagent.wasm", STUB_LIFECYCLE_NATIVE),
+        },
+        // Custom launchers: fall back to the native (shell-wrapper) templates.
+        // Users will replace these with scripts suitable for their launcher.
+        R::Custom(_) => HookFiles {
+            ingest: ("ingest", NATIVE_INGEST),
+            after_turn: ("after_turn", NATIVE_AFTER_TURN),
+            assemble: ("assemble", STUB_ASSEMBLE_NATIVE),
+            compact: ("compact", STUB_COMPACT_NATIVE),
+            bootstrap: ("bootstrap", STUB_LIFECYCLE_NATIVE),
+            prepare_subagent: ("prepare_subagent", STUB_LIFECYCLE_NATIVE),
+            merge_subagent: ("merge_subagent", STUB_LIFECYCLE_NATIVE),
+        },
+    }
+}
+
+// --- Python templates (the original, kept verbatim for backwards compat) ---
+
+const PY_INGEST: &str = r#"#!/usr/bin/env python3
+"""Context engine ingest hook.
+
+Receives via stdin:
+    {
+      "type": "ingest",
+      "agent_id": "...",
+      "message": "user message text",
+      "peer_id": "platform-user-id-or-null"
+    }
+
+Should print to stdout:
+    {"type": "ingest_result", "memories": [{"content": "recalled fact"}]}
+
+Tip: scope your recall to peer_id when present to prevent cross-user leaks.
+"""
+import json
+import sys
+
+def main():
+    request = json.loads(sys.stdin.read())
+    agent_id = request["agent_id"]
+    message = request["message"]
+    peer_id = request.get("peer_id")  # None when called directly via API
+
+    # TODO: Implement your custom recall logic here.
+    # Example: query a vector database, search a knowledge base, etc.
+    memories = []
+
+    print(json.dumps({"type": "ingest_result", "memories": memories}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PY_AFTER_TURN: &str = r#"#!/usr/bin/env python3
+"""Context engine after_turn hook.
+
+Receives via stdin:
+    {
+      "type": "after_turn",
+      "agent_id": "...",
+      "messages": [{"role": "user"|"assistant", "content": "...", "pinned": false}, ...]
+    }
+
+Note: message content is truncated to 500 chars per message for performance.
+
+Should print to stdout:
+    {"type": "ok"}
+"""
+import json
+import sys
+
+def main():
+    request = json.loads(sys.stdin.read())
+    agent_id = request["agent_id"]
+    messages = request["messages"]
+
+    # TODO: Implement your post-turn logic here.
+    # Example: update indexes, persist state, log analytics, etc.
+
+    print(json.dumps({"type": "ok"}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PY_ASSEMBLE: &str = r#"#!/usr/bin/env python3
+"""Context engine assemble hook — controls what the LLM sees.
+
+This is the most powerful hook. Called before every LLM request.
+
+Receives via stdin:
+    {
+      "type": "assemble",
+      "system_prompt": "...",
+      "messages": [
+        {"role": "user"|"assistant"|"tool", "content": <text or blocks>, "pinned": false},
+        ...
+      ],
+      "context_window_tokens": 200000
+    }
+
+Messages use the full LibreFang message format — content can be a plain string
+or a list of blocks (text, tool_use, tool_result, image, thinking).
+
+Should print to stdout:
+    {"type": "assemble_result", "messages": [...]}
+
+Return a trimmed/reordered subset of messages that fits the token budget.
+If you return an empty list or fail, LibreFang falls back to its default
+overflow recovery (trim oldest, then compact).
+"""
+import json
+import sys
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token."""
+    return max(1, len(text) // 4)
+
+def message_text(msg: dict) -> str:
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            b.get("text", b.get("content", ""))
+            for b in content
+            if isinstance(b, dict)
+        )
+    return ""
+
+def main():
+    request = json.loads(sys.stdin.read())
+    messages = request["messages"]
+    context_window_tokens = request["context_window_tokens"]
+
+    # Reserve tokens for system prompt and response headroom
+    budget = context_window_tokens - 4000
+
+    # Keep messages newest-first until we exceed the budget, then stop
+    kept = []
+    used = 0
+    for msg in reversed(messages):
+        tokens = estimate_tokens(message_text(msg))
+        if used + tokens > budget:
+            break
+        kept.append(msg)
+        used += tokens
+
+    kept.reverse()
+    print(json.dumps({"type": "assemble_result", "messages": kept}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PY_COMPACT: &str = r#"#!/usr/bin/env python3
+"""Context engine compact hook — custom context compression.
+
+Called when the context window is under pressure.
+
+Receives via stdin:
+    {
+      "type": "compact",
+      "agent_id": "...",
+      "messages": [...],   # full message list (same format as assemble)
+      "model": "llama-3.3-70b-versatile",
+      "context_window_tokens": 200000
+    }
+
+Should print to stdout:
+    {"type": "compact_result", "messages": [...]}
+
+Return a compacted version of the message list. If you fail or return
+an empty list, LibreFang falls back to its built-in LLM-based compaction.
+"""
+import json
+import sys
+
+def message_text(msg: dict) -> str:
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            b.get("text", b.get("content", ""))
+            for b in content
+            if isinstance(b, dict)
+        )
+    return ""
+
+def main():
+    request = json.loads(sys.stdin.read())
+    messages = request["messages"]
+
+    # Simple strategy: keep the first (system/context) message and the last 10
+    pinned = [m for m in messages if m.get("pinned")]
+    rest = [m for m in messages if not m.get("pinned")]
+
+    summary_text = "... (older messages summarized) ..."
+    summary_msg = {"role": "assistant", "content": summary_text, "pinned": False}
+
+    if len(rest) > 10:
+        compacted = pinned + [summary_msg] + rest[-10:]
+    else:
+        compacted = pinned + rest
+
+    print(json.dumps({"type": "compact_result", "messages": compacted}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+// --- Python lifecycle hooks (bootstrap / prepare_subagent / merge_subagent) ---
+
+const PY_BOOTSTRAP: &str = r#"#!/usr/bin/env python3
+"""Context engine bootstrap hook — runs ONCE when the engine initialises.
+
+Use this to connect to external services (vector databases, caches, HTTP APIs)
+and warm any state your other hooks will read at runtime.
+
+Receives via stdin:
+    {
+      "type": "bootstrap",
+      "context_window_tokens": 200000,
+      "stable_prefix_mode": false,
+      "max_recall_results": 10
+    }
+
+Should print to stdout:
+    {"type": "ok"}
+
+Failures here are non-fatal — the engine continues without your bootstrap work,
+but the missing connection may cause later hooks to fail silently.
+
+Note: bootstrap gets DOUBLE the configured hook_timeout_secs.
+"""
+import json
+import sys
+
+def main():
+    request = json.loads(sys.stdin.read())
+    context_window_tokens = request.get("context_window_tokens", 200000)
+    stable_prefix_mode = request.get("stable_prefix_mode", False)
+
+    # TODO: Connect to your data store here.
+    # Example: initialise a SQLite connection, ping a vector DB, etc.
+    #
+    # import sqlite3
+    # db = sqlite3.connect(os.path.expanduser("~/.librefang/my-plugin.db"))
+    # db.execute("CREATE TABLE IF NOT EXISTS memories (...)")
+    # db.commit()
+    # db.close()
+    #
+    # Any errors raised here are caught and logged as warnings.
+
+    print(json.dumps({"type": "ok"}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PY_PREPARE_SUBAGENT: &str = r#"#!/usr/bin/env python3
+"""Context engine prepare_subagent hook.
+
+Called just before a sub-agent is spawned. Use this to isolate memory scope,
+snapshot parent state, or set up any resources the child agent needs.
+
+Receives via stdin:
+    {
+      "type": "prepare_subagent",
+      "parent_id": "uuid-of-parent-agent",
+      "child_id":  "uuid-of-child-agent"
+    }
+
+Should print to stdout:
+    {"type": "ok"}
+
+Non-fatal: failures are logged as warnings and the sub-agent still spawns.
+"""
+import json
+import sys
+
+def main():
+    request = json.loads(sys.stdin.read())
+    parent_id = request["parent_id"]
+    child_id = request["child_id"]
+
+    # TODO: Snapshot or fork per-agent state here.
+    # Example: copy parent memories to child scope in your data store.
+
+    print(json.dumps({"type": "ok"}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PY_MERGE_SUBAGENT: &str = r#"#!/usr/bin/env python3
+"""Context engine merge_subagent hook.
+
+Called after a sub-agent completes. Use this to merge the child agent's
+findings or memories back into the parent context.
+
+Receives via stdin:
+    {
+      "type": "merge_subagent",
+      "parent_id": "uuid-of-parent-agent",
+      "child_id":  "uuid-of-child-agent"
+    }
+
+Should print to stdout:
+    {"type": "ok"}
+
+Non-fatal: failures are logged as warnings; the parent agent continues normally.
+"""
+import json
+import sys
+
+def main():
+    request = json.loads(sys.stdin.read())
+    parent_id = request["parent_id"]
+    child_id = request["child_id"]
+
+    # TODO: Merge child agent state into the parent here.
+    # Example: copy child memories back to parent scope in your data store.
+
+    print(json.dumps({"type": "ok"}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+// --- Node templates (assemble + compact) ---
+
+const NODE_ASSEMBLE: &str = r#"#!/usr/bin/env node
+// Context engine assemble hook (Node.js).
+// Controls what the LLM sees — called before every LLM request.
+//
+// Receives on stdin:
+//   {
+//     "type": "assemble",
+//     "system_prompt": "...",
+//     "messages": [{"role":"user"|"assistant", "content": ..., "pinned": false}, ...],
+//     "context_window_tokens": 200000
+//   }
+// content can be a plain string or an array of blocks (tool_use, tool_result, image, thinking).
+//
+// Emits on stdout:
+//   {"type": "assemble_result", "messages": [...]}
+//
+// Return an empty list or fail to trigger fallback to LibreFang's default trimming.
+
+"use strict";
+
+function estimateTokens(msg) {
+  const text = typeof msg.content === "string"
+    ? msg.content
+    : (Array.isArray(msg.content)
+        ? msg.content.map(b => b.text || b.content || "").join(" ")
+        : "");
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+let buf = "";
+process.stdin.on("data", chunk => { buf += chunk.toString("utf8"); });
+process.stdin.on("end", () => {
+  const req = JSON.parse(buf);
+  const messages = req.messages;
+  const budget = req.context_window_tokens - 4000; // headroom for system + response
+
+  // Keep newest messages that fit within the token budget.
+  let used = 0;
+  const kept = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const tokens = estimateTokens(messages[i]);
+    if (used + tokens > budget) break;
+    kept.unshift(messages[i]);
+    used += tokens;
+  }
+
+  process.stdout.write(JSON.stringify({ type: "assemble_result", messages: kept }) + "\n");
+});
+"#;
+
+const NODE_COMPACT: &str = r#"#!/usr/bin/env node
+// Context engine compact hook (Node.js).
+// Custom context compression — called under context pressure.
+//
+// Receives on stdin:
+//   {
+//     "type": "compact",
+//     "agent_id": "...",
+//     "messages": [...],
+//     "model": "...",
+//     "context_window_tokens": 200000
+//   }
+//
+// Emits on stdout:
+//   {"type": "compact_result", "messages": [...]}
+//
+// Return an empty list or fail to trigger fallback to LLM-based compaction.
+
+"use strict";
+
+let buf = "";
+process.stdin.on("data", chunk => { buf += chunk.toString("utf8"); });
+process.stdin.on("end", () => {
+  const req = JSON.parse(buf);
+  const messages = req.messages;
+
+  const pinned = messages.filter(m => m.pinned);
+  const rest   = messages.filter(m => !m.pinned);
+
+  // Keep last 10 non-pinned messages; summarise the rest with a placeholder.
+  let compacted;
+  if (rest.length > 10) {
+    const summary = { role: "assistant", content: "... (older messages summarised) ...", pinned: false };
+    compacted = [...pinned, summary, ...rest.slice(-10)];
+  } else {
+    compacted = [...pinned, ...rest];
+  }
+
+  process.stdout.write(JSON.stringify({ type: "compact_result", messages: compacted }) + "\n");
+});
+"#;
+
+// --- Deno / TypeScript templates (assemble + compact) ---
+
+const DENO_ASSEMBLE: &str = r#"// Context engine assemble hook (Deno / TypeScript).
+// Controls what the LLM sees — called before every LLM request.
+//
+// Run via: deno run --allow-read assemble.ts
+
+type ContentBlock = { type: string; text?: string; content?: string; [k: string]: unknown };
+type Message = { role: string; content: string | ContentBlock[]; pinned: boolean };
+
+function estimateTokens(msg: Message): number {
+  const text = typeof msg.content === "string"
+    ? msg.content
+    : msg.content.map((b: ContentBlock) => b.text ?? b.content ?? "").join(" ");
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+const req = JSON.parse(raw) as { type: string; messages: Message[]; context_window_tokens: number };
+const budget = req.context_window_tokens - 4000;
+
+let used = 0;
+const kept: Message[] = [];
+for (let i = req.messages.length - 1; i >= 0; i--) {
+  const tokens = estimateTokens(req.messages[i]);
+  if (used + tokens > budget) break;
+  kept.unshift(req.messages[i]);
+  used += tokens;
+}
+
+console.log(JSON.stringify({ type: "assemble_result", messages: kept }));
+"#;
+
+const DENO_COMPACT: &str = r#"// Context engine compact hook (Deno / TypeScript).
+// Custom context compression — called under context pressure.
+//
+// Run via: deno run --allow-read compact.ts
+
+type Message = { role: string; content: unknown; pinned: boolean };
+
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+const req = JSON.parse(raw) as { type: string; messages: Message[] };
+const messages = req.messages;
+
+const pinned = messages.filter((m: Message) => m.pinned);
+const rest   = messages.filter((m: Message) => !m.pinned);
+
+const summary: Message = { role: "assistant", content: "... (older messages summarised) ...", pinned: false };
+const compacted = rest.length > 10
+  ? [...pinned, summary, ...rest.slice(-10)]
+  : [...pinned, ...rest];
+
+console.log(JSON.stringify({ type: "compact_result", messages: compacted }));
+"#;
+
+// --- Go templates (assemble + compact) ---
+
+const GO_ASSEMBLE: &str = r#"// Context engine assemble hook (Go).
+// Controls what the LLM sees — called before every LLM request.
+//
+// Run with: go run assemble.go
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+)
+
+type Message struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+	Pinned  bool   `json:"pinned"`
+}
+
+type AssembleRequest struct {
+	Type                string    `json:"type"`
+	SystemPrompt        string    `json:"system_prompt"`
+	Messages            []Message `json:"messages"`
+	ContextWindowTokens int       `json:"context_window_tokens"`
+}
+
+type AssembleResult struct {
+	Type     string    `json:"type"`
+	Messages []Message `json:"messages"`
+}
+
+func estimateTokens(m Message) int {
+	text := ""
+	switch v := m.Content.(type) {
+	case string:
+		text = v
+	}
+	tokens := len(text) / 4
+	if tokens < 1 {
+		tokens = 1
+	}
+	return tokens
+}
+
+func main() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(1)
+	}
+	var req AssembleRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		os.Exit(1)
+	}
+
+	budget := req.ContextWindowTokens - 4000
+	used := 0
+	kept := []Message{}
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		tokens := estimateTokens(req.Messages[i])
+		if used+tokens > budget {
+			break
+		}
+		kept = append([]Message{req.Messages[i]}, kept...)
+		used += tokens
+	}
+
+	out, _ := json.Marshal(AssembleResult{Type: "assemble_result", Messages: kept})
+	os.Stdout.Write(out)
+	os.Stdout.Write([]byte("\n"))
+}
+"#;
+
+const GO_COMPACT: &str = r#"// Context engine compact hook (Go).
+// Custom context compression — called under context pressure.
+//
+// Run with: go run compact.go
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+)
+
+type Message struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+	Pinned  bool   `json:"pinned"`
+}
+
+type CompactRequest struct {
+	Type                string    `json:"type"`
+	AgentID             string    `json:"agent_id"`
+	Messages            []Message `json:"messages"`
+	Model               string    `json:"model"`
+	ContextWindowTokens int       `json:"context_window_tokens"`
+}
+
+type CompactResult struct {
+	Type     string    `json:"type"`
+	Messages []Message `json:"messages"`
+}
+
+func main() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(1)
+	}
+	var req CompactRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		os.Exit(1)
+	}
+
+	var pinned, rest []Message
+	for _, m := range req.Messages {
+		if m.Pinned {
+			pinned = append(pinned, m)
+		} else {
+			rest = append(rest, m)
+		}
+	}
+
+	compacted := append(pinned, rest...)
+	if len(rest) > 10 {
+		summary := Message{
+			Role:    "assistant",
+			Content: "... (older messages summarised) ...",
+			Pinned:  false,
+		}
+		compacted = append(pinned, summary)
+		compacted = append(compacted, rest[len(rest)-10:]...)
+	}
+
+	out, _ := json.Marshal(CompactResult{Type: "compact_result", Messages: compacted})
+	os.Stdout.Write(out)
+	os.Stdout.Write([]byte("\n"))
+}
+"#;
+
+// --- Node / Deno / Go bootstrap templates ---
+
+const NODE_BOOTSTRAP: &str = r#"#!/usr/bin/env node
+// Context engine bootstrap hook (Node.js).
+// Runs ONCE at engine startup — connect to external services here.
+// Receives: { type, context_window_tokens, stable_prefix_mode, max_recall_results }
+// Returns:  { type: "ok" }
+'use strict';
+const { stdin } = process;
+let raw = '';
+stdin.setEncoding('utf8');
+stdin.on('data', chunk => { raw += chunk; });
+stdin.on('end', () => {
+  // const req = JSON.parse(raw);
+  // TODO: initialise your data store, warm caches, etc.
+  process.stdout.write(JSON.stringify({ type: 'ok' }) + '\n');
+});
+"#;
+
+const DENO_BOOTSTRAP: &str = r#"// Context engine bootstrap hook (Deno / TypeScript).
+// Runs ONCE at engine startup — connect to external services here.
+// Receives: { type, context_window_tokens, stable_prefix_mode, max_recall_results }
+// Returns:  { type: "ok" }
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+// const req = JSON.parse(raw);
+// TODO: initialise your data store, warm caches, etc.
+console.log(JSON.stringify({ type: 'ok' }));
+"#;
+
+const GO_BOOTSTRAP: &str = r#"// Context engine bootstrap hook (Go).
+// Runs ONCE at engine startup — connect to external services here.
+// go run bootstrap.go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+type BootstrapRequest struct {
+	Type               string `json:"type"`
+	ContextWindowTokens int   `json:"context_window_tokens"`
+	StablePrefixMode   bool   `json:"stable_prefix_mode"`
+	MaxRecallResults   int    `json:"max_recall_results"`
+}
+
+func main() {
+	var req BootstrapRequest
+	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+		fmt.Fprintln(os.Stderr, "bootstrap: invalid JSON on stdin:", err)
+		os.Exit(1)
+	}
+
+	// TODO: connect to your database, warm caches, etc.
+
+	fmt.Println(`{"type":"ok"}`)
+}
+"#;
+
+// --- Minimal lifecycle stubs for other runtimes ---
+// bootstrap / prepare_subagent / merge_subagent all use the same "ok" response.
+// These stubs print {"type":"ok"} and exit — sufficient to acknowledge the hook.
+
+const STUB_BOOTSTRAP_NODE: &str = r#"#!/usr/bin/env node
+// Lifecycle hook stub (Node.js) — bootstrap / prepare_subagent / merge_subagent.
+// Replace body with your logic; response must be {"type":"ok"}.
+'use strict';
+let raw = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', c => { raw += c; });
+process.stdin.on('end', () => {
+  // const req = JSON.parse(raw);
+  process.stdout.write(JSON.stringify({ type: 'ok' }) + '\n');
+});
+"#;
+
+const STUB_LIFECYCLE_DENO: &str = r#"// Lifecycle hook stub (Deno / TypeScript).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+await Deno.readAll(Deno.stdin); // consume stdin
+console.log(JSON.stringify({ type: 'ok' }));
+"#;
+
+const STUB_LIFECYCLE_GO: &str = r#"// Lifecycle hook stub (Go).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+// go run <hook>.go
+package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+)
+
+func main() {
+	io.ReadAll(os.Stdin) // consume stdin
+	fmt.Println(`{"type":"ok"}`)
+}
+"#;
+
+const STUB_LIFECYCLE_V: &str = r#"// Lifecycle hook stub (V).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+import os
+
+fn main() {
+    os.get_raw_stdin()  // consume stdin
+    println('{"type":"ok"}')
+}
+"#;
+
+const STUB_LIFECYCLE_RUBY: &str = r#"# Lifecycle hook stub (Ruby).
+# bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+require 'json'
+$stdin.read  # consume stdin
+puts JSON.generate({ type: 'ok' })
+"#;
+
+const STUB_LIFECYCLE_BASH: &str = r#"#!/usr/bin/env bash
+# Lifecycle hook stub (Bash).
+# bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+cat /dev/stdin > /dev/null   # consume stdin
+printf '{"type":"ok"}\n'
+"#;
+
+const STUB_LIFECYCLE_BUN: &str = r#"// Lifecycle hook stub (Bun / TypeScript).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+await Bun.stdin.text(); // consume stdin
+console.log(JSON.stringify({ type: 'ok' }));
+"#;
+
+const STUB_LIFECYCLE_PHP: &str = r#"<?php
+// Lifecycle hook stub (PHP).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+file_get_contents('php://stdin'); // consume stdin
+echo json_encode(['type' => 'ok']) . "\n";
+"#;
+
+const STUB_LIFECYCLE_LUA: &str = r#"-- Lifecycle hook stub (Lua).
+-- bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+io.read("*a")  -- consume stdin
+print('{"type":"ok"}')
+"#;
+
+const STUB_LIFECYCLE_NATIVE: &str = r#"#!/bin/sh
+# Lifecycle hook stub (native/shell wrapper).
+# bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+cat > /dev/null  # consume stdin
+printf '{"type":"ok"}\n'
+"#;
+
+// --- Minimal stubs for other runtimes (assemble + compact) ---
+// These fall back gracefully — returning an empty messages list causes
+// LibreFang to use its default overflow recovery / LLM compaction.
+
+const STUB_ASSEMBLE_V: &str = r#"// Context engine assemble hook stub (V).
+// See docs/agent/plugins for the full protocol.
+// Returning empty messages triggers LibreFang's default context trimming.
+module main
+import os
+import json
+
+fn main() {
+    _ := os.get_raw_stdin().bytestr()
+    // TODO: implement assemble logic or delete this file to use default trimming.
+    println(json.encode({ 'type': 'assemble_result', 'messages': [] }))
+}
+"#;
+
+const STUB_COMPACT_V: &str = r#"// Context engine compact hook stub (V).
+module main
+import os
+import json
+
+fn main() {
+    _ := os.get_raw_stdin().bytestr()
+    // TODO: implement compact logic or delete this file to use LLM compaction.
+    println(json.encode({ 'type': 'compact_result', 'messages': [] }))
+}
+"#;
+
+const STUB_ASSEMBLE_RUBY: &str = r#"# Context engine assemble hook stub (Ruby).
+# See docs/agent/plugins for the full protocol.
+require "json"
+_req = JSON.parse($stdin.read)
+# TODO: implement assemble logic, or delete this file to use default trimming.
+puts JSON.generate({ "type" => "assemble_result", "messages" => [] })
+"#;
+
+const STUB_COMPACT_RUBY: &str = r#"# Context engine compact hook stub (Ruby).
+require "json"
+_req = JSON.parse($stdin.read)
+# TODO: implement compact logic, or delete this file to use LLM compaction.
+puts JSON.generate({ "type" => "compact_result", "messages" => [] })
+"#;
+
+const STUB_ASSEMBLE_BASH: &str = r#"#!/usr/bin/env bash
+# Context engine assemble hook stub (Bash).
+# See docs/agent/plugins for the full protocol.
+# For non-trivial logic, pipe stdin through `jq` or call a helper binary.
+set -euo pipefail
+_input=$(cat)
+# TODO: implement assemble logic, or delete this file to use default trimming.
+printf '{"type":"assemble_result","messages":[]}\n'
+"#;
+
+const STUB_COMPACT_BASH: &str = r#"#!/usr/bin/env bash
+# Context engine compact hook stub (Bash).
+set -euo pipefail
+_input=$(cat)
+# TODO: implement compact logic, or delete this file to use LLM compaction.
+printf '{"type":"compact_result","messages":[]}\n'
+"#;
+
+const STUB_ASSEMBLE_BUN: &str = r#"// Context engine assemble hook stub (Bun / TypeScript).
+// See docs/agent/plugins for the full protocol.
+const _req = JSON.parse(await Bun.stdin.text());
+// TODO: implement assemble logic, or delete this file to use default trimming.
+console.log(JSON.stringify({ type: "assemble_result", messages: [] }));
+"#;
+
+const STUB_COMPACT_BUN: &str = r#"// Context engine compact hook stub (Bun / TypeScript).
+const _req = JSON.parse(await Bun.stdin.text());
+// TODO: implement compact logic, or delete this file to use LLM compaction.
+console.log(JSON.stringify({ type: "compact_result", messages: [] }));
+"#;
+
+const STUB_ASSEMBLE_PHP: &str = r#"<?php
+// Context engine assemble hook stub (PHP).
+// See docs/agent/plugins for the full protocol.
+$_req = json_decode(file_get_contents('php://stdin'), true);
+// TODO: implement assemble logic, or delete this file to use default trimming.
+echo json_encode(['type' => 'assemble_result', 'messages' => []]) . "\n";
+"#;
+
+const STUB_COMPACT_PHP: &str = r#"<?php
+// Context engine compact hook stub (PHP).
+$_req = json_decode(file_get_contents('php://stdin'), true);
+// TODO: implement compact logic, or delete this file to use LLM compaction.
+echo json_encode(['type' => 'compact_result', 'messages' => []]) . "\n";
+"#;
+
+const STUB_ASSEMBLE_LUA: &str = r#"-- Context engine assemble hook stub (Lua).
+-- See docs/agent/plugins for the full protocol.
+local json = require("json")  -- install lua-cjson or dkjson
+local _req = json.decode(io.read("*a"))
+-- TODO: implement assemble logic, or delete this file to use default trimming.
+print(json.encode({ type = "assemble_result", messages = {} }))
+"#;
+
+const STUB_COMPACT_LUA: &str = r#"-- Context engine compact hook stub (Lua).
+local json = require("json")
+local _req = json.decode(io.read("*a"))
+-- TODO: implement compact logic, or delete this file to use LLM compaction.
+print(json.encode({ type = "compact_result", messages = {} }))
+"#;
+
+const STUB_ASSEMBLE_NATIVE: &str = r#"#!/bin/sh
+# Context engine assemble hook stub (native shell wrapper).
+# Replace this script with a pre-compiled binary that speaks the JSON protocol.
+# Returning empty messages triggers LibreFang's default context trimming.
+read -r _input
+printf '{"type":"assemble_result","messages":[]}\n'
+"#;
+
+const STUB_COMPACT_NATIVE: &str = r#"#!/bin/sh
+# Context engine compact hook stub (native shell wrapper).
+# Replace with a pre-compiled binary that speaks the JSON protocol.
+read -r _input
+printf '{"type":"compact_result","messages":[]}\n'
+"#;
+
+// --- V language templates ---
+
+const V_INGEST: &str = r#"// Context engine ingest hook (V).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "user message text"}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "recalled fact"}]}
+//
+// Run with: `v run ingest.v` (or pre-compile: `v ingest.v`)
+module main
+
+import os
+import json
+
+struct IngestRequest {
+	@type     string @[json: 'type']
+	agent_id  string
+	message   string
+}
+
+struct Memory {
+	content string
+}
+
+struct IngestResult {
+	@type    string   @[json: 'type']
+	memories []Memory
+}
+
+fn main() {
+	input := os.get_raw_stdin().bytestr()
+	req := json.decode(IngestRequest, input) or {
+		eprintln('ingest: invalid JSON on stdin: ${err}')
+		exit(1)
+	}
+	_ := req.agent_id
+	_ := req.message
+
+	// TODO: Implement your custom recall logic here.
+	result := IngestResult{
+		@type: 'ingest_result'
+		memories: []
+	}
+	println(json.encode(result))
+}
+"#;
+
+const V_AFTER_TURN: &str = r#"// Context engine after_turn hook (V).
+//
+// Receives on stdin:
+//   {"type": "after_turn", "agent_id": "...", "messages": [...]}
+// Emits on stdout:
+//   {"type": "ok"}
+module main
+
+import os
+import json
+
+struct AfterTurnRequest {
+	@type    string @[json: 'type']
+	agent_id string
+}
+
+struct Ok {
+	@type string @[json: 'type']
+}
+
+fn main() {
+	input := os.get_raw_stdin().bytestr()
+	_ := json.decode(AfterTurnRequest, input) or {
+		eprintln('after_turn: invalid JSON on stdin: ${err}')
+		exit(1)
+	}
+
+	// TODO: persist state, update indexes, log analytics, ...
+
+	println(json.encode(Ok{ @type: 'ok' }))
+}
+"#;
+
+// --- Node templates ---
+
+const NODE_INGEST: &str = r#"#!/usr/bin/env node
+// Context engine ingest hook (Node.js).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "user message text"}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "recalled fact"}]}
+
+"use strict";
+
+let buf = "";
+process.stdin.on("data", (chunk) => { buf += chunk.toString("utf8"); });
+process.stdin.on("end", () => {
+  const req = JSON.parse(buf);
+  const agentId = req.agent_id;
+  const message = req.message;
+
+  // TODO: Implement your custom recall logic here.
+  const memories = [];
+
+  process.stdout.write(JSON.stringify({ type: "ingest_result", memories }) + "\n");
+});
+"#;
+
+const NODE_AFTER_TURN: &str = r#"#!/usr/bin/env node
+// Context engine after_turn hook (Node.js).
+
+"use strict";
+
+let buf = "";
+process.stdin.on("data", (chunk) => { buf += chunk.toString("utf8"); });
+process.stdin.on("end", () => {
+  const req = JSON.parse(buf);
+  const _agentId = req.agent_id;
+  const _messages = req.messages;
+
+  // TODO: persist state, update indexes, log analytics, ...
+
+  process.stdout.write(JSON.stringify({ type: "ok" }) + "\n");
+});
+"#;
+
+// --- Deno / TypeScript templates ---
+
+const DENO_INGEST: &str = r#"// Context engine ingest hook (Deno / TypeScript).
+//
+// Run via `deno run --allow-read ingest.ts`.
+
+interface IngestRequest { type: "ingest"; agent_id: string; message: string; }
+interface Memory { content: string; }
+interface IngestResult { type: "ingest_result"; memories: Memory[]; }
+
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+const req = JSON.parse(raw) as IngestRequest;
+void req.agent_id; void req.message;
+
+// TODO: Implement your custom recall logic here.
+const result: IngestResult = { type: "ingest_result", memories: [] };
+console.log(JSON.stringify(result));
+"#;
+
+const DENO_AFTER_TURN: &str = r#"// Context engine after_turn hook (Deno / TypeScript).
+
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+void JSON.parse(raw);
+
+// TODO: persist state, update indexes, log analytics, ...
+
+console.log(JSON.stringify({ type: "ok" }));
+"#;
+
+// --- Go templates ---
+
+const GO_INGEST: &str = r#"// Context engine ingest hook (Go).
+//
+// Run with: `go run ingest.go`
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+)
+
+type IngestRequest struct {
+	Type    string `json:"type"`
+	AgentID string `json:"agent_id"`
+	Message string `json:"message"`
+}
+
+type Memory struct {
+	Content string `json:"content"`
+}
+
+type IngestResult struct {
+	Type     string   `json:"type"`
+	Memories []Memory `json:"memories"`
+}
+
+func main() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(1)
+	}
+	var req IngestRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		os.Exit(1)
+	}
+	_ = req.AgentID
+	_ = req.Message
+
+	// TODO: Implement your custom recall logic here.
+	out, _ := json.Marshal(IngestResult{Type: "ingest_result", Memories: []Memory{}})
+	os.Stdout.Write(out)
+	os.Stdout.Write([]byte("\n"))
+}
+"#;
+
+const GO_AFTER_TURN: &str = r#"// Context engine after_turn hook (Go).
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+)
+
+func main() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(1)
+	}
+	var req map[string]any
+	_ = json.Unmarshal(raw, &req)
+
+	// TODO: persist state, update indexes, log analytics, ...
+
+	out, _ := json.Marshal(map[string]string{"type": "ok"})
+	os.Stdout.Write(out)
+	os.Stdout.Write([]byte("\n"))
+}
+"#;
+
+// --- Native (bring-your-own-binary) templates ---
+
+const NATIVE_INGEST: &str = r#"#!/bin/sh
+# Native plugin ingest hook.
+#
+# Replace this shell wrapper with your own pre-compiled binary
+# (V / Rust / Go / Zig / C++ — anything that speaks the JSON
+# stdin/stdout protocol).
+#
+# Receives on stdin:
+#   {"type": "ingest", "agent_id": "...", "message": "..."}
+# Emits on stdout:
+#   {"type": "ingest_result", "memories": [...]}
+#
+# chmod +x hooks/ingest to make this executable.
+
+read -r _input
+printf '{"type":"ingest_result","memories":[]}\n'
+"#;
+
+const NATIVE_AFTER_TURN: &str = r#"#!/bin/sh
+# Native plugin after_turn hook — replace with your binary.
+read -r _input
+printf '{"type":"ok"}\n'
+"#;
+
+// --- Ruby templates ---
+
+const RUBY_INGEST: &str = r#"# Context engine ingest hook (Ruby).
+#
+# Receives on stdin:
+#   {"type": "ingest", "agent_id": "...", "message": "..."}
+# Emits on stdout:
+#   {"type": "ingest_result", "memories": [{"content": "..."}]}
+require "json"
+
+req = JSON.parse($stdin.read)
+_agent_id = req["agent_id"]
+_message  = req["message"]
+
+# TODO: Implement your custom recall logic here.
+memories = []
+
+puts JSON.generate({ "type" => "ingest_result", "memories" => memories })
+"#;
+
+const RUBY_AFTER_TURN: &str = r#"# Context engine after_turn hook (Ruby).
+require "json"
+
+req = JSON.parse($stdin.read)
+_agent_id = req["agent_id"]
+_messages = req["messages"]
+
+# TODO: Implement your post-turn logic here.
+
+puts JSON.generate({ "type" => "ok" })
+"#;
+
+// --- Bash templates ---
+
+const BASH_INGEST: &str = r#"#!/usr/bin/env bash
+# Context engine ingest hook (Bash).
+#
+# Receives on stdin:
+#   {"type":"ingest","agent_id":"...","message":"..."}
+# Emits on stdout:
+#   {"type":"ingest_result","memories":[]}
+#
+# For non-trivial logic, pipe stdin through `jq` or call out to a helper binary.
+set -euo pipefail
+
+_input=$(cat)
+# TODO: parse "$_input" and build your recall result.
+printf '{"type":"ingest_result","memories":[]}\n'
+"#;
+
+const BASH_AFTER_TURN: &str = r#"#!/usr/bin/env bash
+# Context engine after_turn hook (Bash).
+set -euo pipefail
+
+_input=$(cat)
+# TODO: persist state, update indexes, etc.
+printf '{"type":"ok"}\n'
+"#;
+
+// --- Bun templates (TypeScript via Bun) ---
+
+const BUN_INGEST: &str = r#"// Context engine ingest hook (Bun / TypeScript).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "..."}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "..."}]}
+//
+// Run with: `bun run ingest.ts`
+
+interface IngestRequest {
+  type: "ingest";
+  agent_id: string;
+  message: string;
+}
+
+interface Memory { content: string }
+
+const input = await Bun.stdin.text();
+const req = JSON.parse(input) as IngestRequest;
+void req.agent_id;
+void req.message;
+
+// TODO: Implement your custom recall logic here.
+const memories: Memory[] = [];
+
+console.log(JSON.stringify({ type: "ingest_result", memories }));
+"#;
+
+const BUN_AFTER_TURN: &str = r#"// Context engine after_turn hook (Bun / TypeScript).
+const input = await Bun.stdin.text();
+const _req = JSON.parse(input);
+
+// TODO: Implement your post-turn logic here.
+
+console.log(JSON.stringify({ type: "ok" }));
+"#;
+
+// --- PHP templates ---
+
+const PHP_INGEST: &str = r#"<?php
+// Context engine ingest hook (PHP).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "..."}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "..."}]}
+
+$raw = stream_get_contents(STDIN);
+$req = json_decode($raw, true);
+$_agentId = $req["agent_id"] ?? null;
+$_message = $req["message"] ?? null;
+
+// TODO: Implement your custom recall logic here.
+$memories = [];
+
+echo json_encode(["type" => "ingest_result", "memories" => $memories]), "\n";
+"#;
+
+const PHP_AFTER_TURN: &str = r#"<?php
+// Context engine after_turn hook (PHP).
+$raw = stream_get_contents(STDIN);
+$_req = json_decode($raw, true);
+
+// TODO: Implement your post-turn logic here.
+
+echo json_encode(["type" => "ok"]), "\n";
+"#;
+
+// --- Lua templates ---
+
+const LUA_INGEST: &str = r#"-- Context engine ingest hook (Lua).
+--
+-- Receives on stdin:
+--   {"type": "ingest", "agent_id": "...", "message": "..."}
+-- Emits on stdout:
+--   {"type": "ingest_result", "memories": [{"content": "..."}]}
+--
+-- Requires a JSON library on LUA_PATH (`luarocks install dkjson`).
+local json = require("dkjson")
+
+local raw = io.read("*a")
+local req = json.decode(raw)
+local _agent_id = req.agent_id
+local _message  = req.message
+
+-- TODO: Implement your custom recall logic here.
+local memories = {}
+
+io.write(json.encode({ type = "ingest_result", memories = memories }), "\n")
+"#;
+
+const LUA_AFTER_TURN: &str = r#"-- Context engine after_turn hook (Lua).
+local json = require("dkjson")
+
+local raw = io.read("*a")
+local _req = json.decode(raw)
+
+-- TODO: Implement your post-turn logic here.
+
+io.write(json.encode({ type = "ok" }), "\n")
+"#;
+
+/// Install Python requirements for a plugin.
+pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
+    validate_plugin_name(plugin_name)?;
+    let plugin_dir = plugins_dir().join(plugin_name);
+    let requirements = plugin_dir.join("requirements.txt");
+
+    if !requirements.exists() {
+        return Ok("No requirements.txt found — nothing to install".to_string());
+    }
+
+    // In virtualenv/conda environments, pip forbids --user installs.
+    let in_venv = std::env::var("VIRTUAL_ENV").is_ok() || std::env::var("CONDA_PREFIX").is_ok();
+    let mut args = vec!["-m", "pip", "install"];
+    if !in_venv {
+        args.push("--user");
+    }
+    args.push("-r");
+
+    warn!(
+        plugin = plugin_name,
+        requirements = %requirements.display(),
+        venv = in_venv,
+        "Installing Python requirements"
+    );
+
+    let output = tokio::process::Command::new("python")
+        .args(&args)
+        .arg(&requirements)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run python -m pip: {e}"))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("python -m pip install failed: {stderr}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GitHub API types
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct GitHubContent {
+    name: String,
+    #[serde(rename = "type")]
+    content_type: String,
+    download_url: Option<String>,
+    url: Option<String>,
+}
+
+/// Recursively download a GitHub directory entry.
+///
+/// `depth` limits recursion to prevent unbounded traversal (max 10 levels).
+async fn download_github_entry(
+    client: &reqwest::Client,
+    entry: &GitHubContent,
+    target_dir: &Path,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > 10 {
+        return Err("GitHub directory recursion depth exceeded (max 10 levels)".to_string());
+    }
+
+    // Validate entry.name to prevent path traversal attacks
+    if entry.name.contains('/')
+        || entry.name.contains('\\')
+        || entry.name.contains("..")
+        || entry.name.contains('\0')
+    {
+        return Err(format!(
+            "Refusing to download entry with unsafe name: '{}'",
+            entry.name
+        ));
+    }
+
+    let target_path = target_dir.join(&entry.name);
+
+    match entry.content_type.as_str() {
+        "file" => {
+            let download_url = entry
+                .download_url
+                .as_ref()
+                .ok_or_else(|| format!("No download URL for {}", entry.name))?;
+
+            let resp = client
+                .get(download_url)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to download {}: {e}", entry.name))?;
+
+            // Check Content-Length before downloading to reject oversized files early
+            const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB per file
+            if let Some(len) = resp.content_length() {
+                if len > MAX_FILE_SIZE {
+                    return Err(format!(
+                        "File '{}' too large ({len} bytes, max {MAX_FILE_SIZE})",
+                        entry.name
+                    ));
+                }
+            }
+
+            let content = resp
+                .bytes()
+                .await
+                .map_err(|e| format!("Failed to read {}: {e}", entry.name))?;
+
+            if content.len() as u64 > MAX_FILE_SIZE {
+                return Err(format!(
+                    "File '{}' too large ({} bytes, max {MAX_FILE_SIZE})",
+                    entry.name,
+                    content.len()
+                ));
+            }
+
+            tokio::fs::write(&target_path, &content)
+                .await
+                .map_err(|e| format!("Failed to write {}: {e}", target_path.display()))?;
+
+            debug!(
+                file = entry.name,
+                bytes = content.len(),
+                "Downloaded plugin file"
+            );
+        }
+        "dir" => {
+            tokio::fs::create_dir_all(&target_path)
+                .await
+                .map_err(|e| format!("Failed to create dir: {e}"))?;
+
+            // Recursively list and download subdirectory
+            let sub_url = entry
+                .url
+                .as_ref()
+                .ok_or_else(|| format!("No API URL for dir {}", entry.name))?;
+
+            let resp = client
+                .get(sub_url)
+                .header("Accept", "application/vnd.github.v3+json")
+                .send()
+                .await
+                .map_err(|e| format!("Failed to list dir {}: {e}", entry.name))?;
+
+            let sub_entries: Vec<GitHubContent> = resp
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse dir listing: {e}"))?;
+
+            for sub_entry in &sub_entries {
+                Box::pin(download_github_entry(
+                    client,
+                    sub_entry,
+                    &target_path,
+                    depth + 1,
+                ))
+                .await?;
+            }
+        }
+        other => {
+            debug!(
+                name = entry.name,
+                r#type = other,
+                "Skipping unknown entry type"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Check that all declared hook scripts exist on disk and are within the plugin directory.
 /// Compute a hex-encoded SHA-256 digest of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     // NOTE: Rust's `DefaultHasher` is NOT cryptographic. We use a simple
@@ -1738,4 +4378,725 @@ pub fn open_trace_store() -> Result<crate::trace_store::TraceStore, String> {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_plugins_dir() {
+        let dir = plugins_dir();
+        assert!(dir.ends_with("plugins"));
+        assert!(dir.to_string_lossy().contains(".librefang"));
+    }
+
+    #[test]
+    fn test_list_plugins_no_panic() {
+        // Should not panic even if plugins dir doesn't exist
+        let _ = list_plugins();
+    }
+
+    #[test]
+    fn test_get_plugin_not_installed() {
+        let result = get_plugin_info("nonexistent-test-plugin-xyz");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not installed"));
+    }
+
+    #[test]
+    fn test_remove_not_installed() {
+        let result = remove_plugin("nonexistent-test-plugin-xyz");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_scaffold_and_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Override HOME to use temp dir
+        let plugin_dir = tmp.path().join("test-scaffold-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        // Test manifest parsing from scaffold content
+        let manifest_content = r#"name = "test-scaffold"
+version = "0.1.0"
+description = "Test scaffold"
+author = ""
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+"#;
+        let manifest: PluginManifest = toml::from_str(manifest_content).unwrap();
+        assert_eq!(manifest.name, "test-scaffold");
+        assert_eq!(manifest.version, "0.1.0");
+        assert_eq!(manifest.hooks.ingest.as_deref(), Some("hooks/ingest.py"));
+        assert_eq!(
+            manifest.hooks.after_turn.as_deref(),
+            Some("hooks/after_turn.py")
+        );
+    }
+
+    #[test]
+    fn test_copy_dir_recursive() {
+        let tmp_src = tempfile::tempdir().unwrap();
+        let tmp_dst = tempfile::tempdir().unwrap();
+
+        // Create source structure
+        std::fs::create_dir_all(tmp_src.path().join("hooks")).unwrap();
+        std::fs::write(tmp_src.path().join("plugin.toml"), "name = \"test\"").unwrap();
+        std::fs::write(tmp_src.path().join("hooks/ingest.py"), "# hook").unwrap();
+
+        let dst = tmp_dst.path().join("copied");
+        copy_dir_recursive(tmp_src.path(), &dst).unwrap();
+
+        assert!(dst.join("plugin.toml").exists());
+        assert!(dst.join("hooks/ingest.py").exists());
+    }
+
+    #[test]
+    fn test_dir_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "hello").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "world!").unwrap();
+        let size = dir_size(tmp.path());
+        assert_eq!(size, 11); // 5 + 6
+    }
+
+    #[test]
+    fn test_check_hooks_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+        std::fs::write(plugin_dir.join("hooks/ingest.py"), "").unwrap();
+
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            hooks: librefang_types::config::ContextEngineHooks {
+                ingest: Some("hooks/ingest.py".to_string()),
+                after_turn: Some("hooks/after_turn.py".to_string()), // missing
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(!check_hooks_exist(&plugin_dir, &manifest));
+
+        // Now create the missing file
+        std::fs::write(plugin_dir.join("hooks/after_turn.py"), "").unwrap();
+        assert!(check_hooks_exist(&plugin_dir, &manifest));
+
+        // Path traversal: hook pointing outside plugin dir should fail
+        let manifest_escape = PluginManifest {
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            hooks: librefang_types::config::ContextEngineHooks {
+                ingest: Some("../../etc/passwd".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!check_hooks_exist(&plugin_dir, &manifest_escape));
+    }
+
+    /// Live listing smoke test — ensures the enriched listing populates
+    /// `description`/`version`/`hooks` from at least one plugin's `plugin.toml`.
+    /// Ignored by default — requires network access to GitHub.
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_registry_plugins_enriched() {
+        // Skip disk cache so a cached name-only listing from a previous run
+        // cannot mask a regression.
+        // SAFETY: this test is marked #[ignore] and only runs explicitly (not
+        // in parallel); no other test thread races on this env var.
+        unsafe { std::env::set_var("LIBREFANG_REGISTRY_NO_CACHE", "1") };
+        let entries = list_registry_plugins("librefang/librefang-registry")
+            .await
+            .expect("registry listing should succeed");
+        assert!(!entries.is_empty(), "expected at least one plugin");
+        assert!(
+            entries.iter().any(|e| e.description.is_some()),
+            "expected at least one plugin with a description"
+        );
+        assert!(
+            entries.iter().any(|e| e.version.is_some()),
+            "expected at least one plugin with a version"
+        );
+        assert!(
+            entries.iter().any(|e| !e.hooks.is_empty()),
+            "expected at least one plugin declaring hooks"
+        );
+    }
+
+    /// Integration test: install from GitHub registry, run hook, then remove.
+    /// Ignored by default — requires network access.
+    #[tokio::test]
+    #[ignore]
+    async fn test_registry_install_run_remove() {
+        // 1. Install echo-memory from registry
+        let source = PluginSource::Registry {
+            name: "echo-memory".to_string(),
+            github_repo: None,
+        };
+        let info = install_plugin(&source)
+            .await
+            .expect("registry install failed");
+        assert_eq!(info.manifest.name, "echo-memory");
+        assert_eq!(info.manifest.version, "0.1.0");
+        assert!(info.hooks_valid);
+
+        // 2. List should include it
+        let plugins = list_plugins();
+        assert!(plugins.iter().any(|p| p.manifest.name == "echo-memory"));
+
+        // 3. Run ingest hook
+        let ingest_path = info.path.join("hooks/ingest.py");
+        assert!(ingest_path.exists());
+
+        let mut child = tokio::process::Command::new("python3")
+            .arg(&ingest_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("python3 should be available");
+
+        {
+            use tokio::io::AsyncWriteExt;
+            let stdin = child.stdin.as_mut().unwrap();
+            stdin
+                .write_all(br#"{"type":"ingest","agent_id":"test-001","message":"Hello world"}"#)
+                .await
+                .unwrap();
+        }
+        child.stdin.take(); // close stdin
+        let out = child.wait_with_output().await.unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("ingest_result"), "got: {stdout}");
+        assert!(stdout.contains("echo-memory"), "got: {stdout}");
+
+        // 4. Remove
+        remove_plugin("echo-memory").expect("remove failed");
+        assert!(get_plugin_info("echo-memory").is_err());
+    }
+
+    /// Sanity: a manifest with no `[i18n.*]` tables yields an empty map,
+    /// not a serialization error or panic.
+    #[test]
+    fn parse_plugin_i18n_no_block() {
+        let toml_str = r#"
+name = "test-plugin"
+version = "0.1.0"
+description = "English description"
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert!(i18n.is_empty());
+    }
+
+    /// Multiple `[i18n.<lang>]` blocks with both fields populate cleanly.
+    #[test]
+    fn parse_plugin_i18n_multi_lang() {
+        let toml_str = r#"
+name = "auto-summarizer"
+version = "0.1.0"
+description = "English description"
+
+[i18n.zh]
+name = "自动摘要"
+description = "持续维护会话摘要。"
+
+[i18n.zh-TW]
+name = "自動摘要"
+description = "持續維護會話摘要。"
+
+[i18n.fr]
+name = "Auto-résumé"
+description = "Maintient un résumé continu."
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert_eq!(i18n.len(), 3);
+        assert_eq!(i18n["zh"].name.as_deref(), Some("自动摘要"));
+        assert_eq!(i18n["zh-TW"].name.as_deref(), Some("自動摘要"));
+        assert_eq!(
+            i18n["fr"].description.as_deref(),
+            Some("Maintient un résumé continu.")
+        );
+    }
+
+    /// A block that only sets `name` (no description) survives, with
+    /// description left as `None` so callers know to fall back.
+    #[test]
+    fn parse_plugin_i18n_partial_entry() {
+        let toml_str = r#"
+[i18n.de]
+name = "Beispiel"
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert_eq!(i18n.len(), 1);
+        assert_eq!(i18n["de"].name.as_deref(), Some("Beispiel"));
+        assert!(i18n["de"].description.is_none());
+    }
+
+    /// A `[i18n.<lang>]` block that sets neither field is dropped — keeping
+    /// it would just take memory for no observable effect at the API
+    /// boundary.
+    #[test]
+    fn parse_plugin_i18n_empty_entry_dropped() {
+        let toml_str = r#"
+[i18n.ja]
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert!(i18n.is_empty(), "empty i18n.ja entry should not be kept");
+    }
+
+    /// Non-string `name` / `description` values (e.g. someone wrote a
+    /// number by mistake) are silently ignored rather than panicking.
+    #[test]
+    fn parse_plugin_i18n_non_string_values_ignored() {
+        let toml_str = r#"
+[i18n.es]
+name = 42
+description = "Spanish description"
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert_eq!(i18n.len(), 1);
+        assert!(i18n["es"].name.is_none(), "non-string name dropped");
+        assert_eq!(
+            i18n["es"].description.as_deref(),
+            Some("Spanish description")
+        );
+    }
+
+    // ── Bug #3799 — placeholder public key must be refused, not silently skipped ──
+
+    /// Decoding the built-in `OFFICIAL_REGISTRY_PUBKEY_B64` constant must
+    /// produce an all-zero 32-byte slice.  If someone replaces the placeholder
+    /// with a real key this test will fail, signalling that the is_placeholder
+    /// gate should also be re-evaluated.
+    #[test]
+    fn official_registry_pubkey_is_placeholder_all_zeros() {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(OFFICIAL_REGISTRY_PUBKEY_B64)
+            .expect("OFFICIAL_REGISTRY_PUBKEY_B64 must be valid base64");
+        assert_eq!(
+            bytes.len(),
+            32,
+            "placeholder key must decode to exactly 32 bytes"
+        );
+        assert!(
+            bytes.iter().all(|&b| b == 0),
+            "placeholder key must be all zeros"
+        );
+    }
+
+    /// The is_placeholder detection used in fetch_verified_index and
+    /// install_from_registry must flag the built-in constant as a placeholder.
+    #[test]
+    fn is_placeholder_detects_built_in_constant() {
+        use base64::Engine as _;
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(OFFICIAL_REGISTRY_PUBKEY_B64)
+            .unwrap_or_default();
+        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
+        assert!(
+            is_placeholder,
+            "the built-in registry pubkey must be detected as a placeholder \
+             so installs fail loudly instead of silently skipping verification"
+        );
+    }
+
+    /// A non-zero 32-byte key must NOT be treated as a placeholder.
+    #[test]
+    fn is_placeholder_passes_real_key() {
+        use base64::Engine as _;
+        // Synthesise a fake non-zero key (not a real Ed25519 key — just for the
+        // placeholder-detection logic which only checks bytes, not curve validity).
+        let real_key = [0xABu8; 32];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(real_key);
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .unwrap_or_default();
+        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
+        assert!(
+            !is_placeholder,
+            "a non-zero 32-byte key must not be treated as a placeholder"
+        );
+    }
+
+    // ── Bug #3804 — hook script integrity check logic ────────────────────────
+
+    /// Helper: build a minimal PluginManifest with the given hook paths and
+    /// integrity entries so we can exercise the detection logic without
+    /// spinning up an HTTP server.
+    fn make_manifest_with_hooks(
+        hooks: &[(&str, &str)],     // (field_name, script_path)
+        integrity: &[(&str, &str)], // (script_path, sha256hex)
+    ) -> PluginManifest {
+        let mut m = PluginManifest {
+            name: "test-plugin".to_string(),
+            version: "0.1.0".to_string(),
+            ..Default::default()
+        };
+        for &(field, path) in hooks {
+            match field {
+                "ingest" => m.hooks.ingest = Some(path.to_string()),
+                "after_turn" => m.hooks.after_turn = Some(path.to_string()),
+                "bootstrap" => m.hooks.bootstrap = Some(path.to_string()),
+                "assemble" => m.hooks.assemble = Some(path.to_string()),
+                "compact" => m.hooks.compact = Some(path.to_string()),
+                "prepare_subagent" => m.hooks.prepare_subagent = Some(path.to_string()),
+                "merge_subagent" => m.hooks.merge_subagent = Some(path.to_string()),
+                _ => {}
+            }
+        }
+        for &(path, hash) in integrity {
+            m.integrity.insert(path.to_string(), hash.to_string());
+        }
+        m
+    }
+
+    /// Extracts the list of hook script paths that are declared in a manifest
+    /// but missing from its integrity map.  Delegates to the production
+    /// `manifest_missing_integrity_hooks` so the install-time check, the
+    /// `lint_plugin` warning, and these regression tests can never drift.
+    fn missing_integrity_hooks(manifest: &PluginManifest) -> Vec<String> {
+        super::manifest_missing_integrity_hooks(manifest)
+    }
+
+    /// A plugin with no hooks declared requires no integrity entries.
+    #[test]
+    fn hook_integrity_no_hooks_no_requirement() {
+        let m = make_manifest_with_hooks(&[], &[]);
+        assert!(
+            missing_integrity_hooks(&m).is_empty(),
+            "no hooks → no integrity entries required"
+        );
+    }
+
+    /// Every declared hook must appear in [integrity]; any missing entry is flagged.
+    #[test]
+    fn hook_integrity_missing_entries_detected() {
+        let m = make_manifest_with_hooks(
+            &[
+                ("ingest", "hooks/ingest.py"),
+                ("after_turn", "hooks/after_turn.py"),
+            ],
+            &[
+                // after_turn is covered, but ingest is not
+                ("hooks/after_turn.py", "abc123"),
+            ],
+        );
+        let missing = missing_integrity_hooks(&m);
+        assert_eq!(missing, vec!["hooks/ingest.py"]);
+    }
+
+    /// When all declared hooks have integrity entries, no missing entries are reported.
+    #[test]
+    fn hook_integrity_all_covered_passes() {
+        let m = make_manifest_with_hooks(
+            &[
+                ("ingest", "hooks/ingest.py"),
+                ("after_turn", "hooks/after_turn.py"),
+            ],
+            &[
+                ("hooks/ingest.py", "deadbeef"),
+                ("hooks/after_turn.py", "cafebabe"),
+            ],
+        );
+        assert!(
+            missing_integrity_hooks(&m).is_empty(),
+            "all hooks covered → no missing integrity entries"
+        );
+    }
+
+    /// All seven hook fields are checked, not just ingest/after_turn.
+    #[test]
+    fn hook_integrity_all_hook_fields_checked() {
+        let all_hooks = [
+            ("ingest", "hooks/ingest.py"),
+            ("after_turn", "hooks/after_turn.py"),
+            ("bootstrap", "hooks/bootstrap.py"),
+            ("assemble", "hooks/assemble.py"),
+            ("compact", "hooks/compact.py"),
+            ("prepare_subagent", "hooks/prepare_subagent.py"),
+            ("merge_subagent", "hooks/merge_subagent.py"),
+        ];
+        // Provide integrity for all but compact and merge_subagent.
+        let integrity_provided = [
+            ("hooks/ingest.py", "h1"),
+            ("hooks/after_turn.py", "h2"),
+            ("hooks/bootstrap.py", "h3"),
+            ("hooks/assemble.py", "h4"),
+            ("hooks/prepare_subagent.py", "h6"),
+        ];
+        let m = make_manifest_with_hooks(&all_hooks, &integrity_provided);
+        let mut missing = missing_integrity_hooks(&m);
+        missing.sort();
+        assert_eq!(
+            missing,
+            vec!["hooks/compact.py", "hooks/merge_subagent.py"],
+            "compact and merge_subagent must be flagged"
+        );
+    }
+
+    // ── Bug #4036 — registry publish pipeline must auto-inject integrity ──
+
+    /// Helper: write a minimal plugin layout into `dir` with the requested
+    /// hook scripts and the requested raw `plugin.toml` body.  Returns the
+    /// directory path so the caller can keep ownership of the tempdir.
+    fn write_fake_plugin(
+        dir: &Path,
+        manifest_toml: &str,
+        scripts: &[(&str, &[u8])],
+    ) -> std::path::PathBuf {
+        std::fs::write(dir.join("plugin.toml"), manifest_toml).unwrap();
+        for (rel, body) in scripts {
+            let abs = dir.join(rel);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&abs, body).unwrap();
+        }
+        dir.to_path_buf()
+    }
+
+    /// pack_plugin_for_publish must write [integrity] entries with the
+    /// correct SHA-256 of every declared hook.  Mirrors the real
+    /// `context-decay` regression: declares two hooks, no [integrity].
+    #[test]
+    fn pack_plugin_for_publish_auto_injects_hashes_for_context_decay_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("context-decay");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "context-decay"
+version = "0.1.0"
+description = "Decay older context entries"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+"#;
+        let ingest_body = b"# ingest hook\nprint('ingest')\n";
+        let after_turn_body = b"# after_turn hook\nprint('after')\n";
+        let plugin_dir = write_fake_plugin(
+            &plugin_dir,
+            manifest,
+            &[
+                ("hooks/ingest.py", ingest_body),
+                ("hooks/after_turn.py", after_turn_body),
+            ],
+        );
+
+        // Sanity: the unsigned manifest must fail validation up-front,
+        // matching the user-visible error in the bug report.
+        let pre = validate_publish_ready(&plugin_dir).expect_err("unsigned must fail");
+        assert!(
+            pre.contains("hooks/ingest.py") && pre.contains("hooks/after_turn.py"),
+            "validate_publish_ready must list every missing hook, got: {pre}"
+        );
+
+        // Run the publish packer.
+        let written = pack_plugin_for_publish(&plugin_dir).expect("pack must succeed");
+        assert_eq!(written.len(), 2, "both hooks must be hashed");
+        assert_eq!(written["hooks/ingest.py"], sha256_hex(ingest_body));
+        assert_eq!(written["hooks/after_turn.py"], sha256_hex(after_turn_body));
+
+        // Re-read the manifest and confirm the [integrity] block is present
+        // and matches the expected hashes.
+        let rewritten = std::fs::read_to_string(plugin_dir.join("plugin.toml")).unwrap();
+        let parsed: PluginManifest = toml::from_str(&rewritten).expect("rewritten manifest valid");
+        assert_eq!(
+            parsed.integrity.get("hooks/ingest.py").map(String::as_str),
+            Some(sha256_hex(ingest_body).as_str())
+        );
+        assert_eq!(
+            parsed
+                .integrity
+                .get("hooks/after_turn.py")
+                .map(String::as_str),
+            Some(sha256_hex(after_turn_body).as_str())
+        );
+
+        // The packed plugin must now satisfy the publish-readiness check.
+        validate_publish_ready(&plugin_dir).expect("packed plugin must validate");
+
+        // And the install-time loader must accept it without complaint.
+        let loaded = load_plugin_manifest(&plugin_dir).expect("install-time load must accept");
+        assert_eq!(loaded.name, "context-decay");
+        assert_eq!(loaded.integrity.len(), 2);
+    }
+
+    /// pack_plugin_for_publish must replace a stale [integrity] block — not
+    /// duplicate it — when authors re-pack after editing a hook script.
+    #[test]
+    fn pack_plugin_for_publish_replaces_stale_integrity_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("stale-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "stale-test"
+version = "0.1.0"
+description = "Replace stale integrity"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+
+[integrity]
+"hooks/ingest.py" = "deadbeef_stale_hash_must_be_replaced"
+"hooks/removed.py" = "0000_orphan_hash_must_be_dropped"
+"#;
+        let ingest_body = b"# fresh content\n";
+        write_fake_plugin(&plugin_dir, manifest, &[("hooks/ingest.py", ingest_body)]);
+
+        let written = pack_plugin_for_publish(&plugin_dir).expect("pack must succeed");
+        assert_eq!(written.len(), 1);
+
+        let rewritten = std::fs::read_to_string(plugin_dir.join("plugin.toml")).unwrap();
+        // Only one [integrity] header — no duplicates from the stale block.
+        assert_eq!(
+            rewritten.matches("[integrity]").count(),
+            1,
+            "stale [integrity] block must be replaced, not appended:\n{rewritten}"
+        );
+        // Stale entry for a hook that no longer exists must be gone.
+        assert!(
+            !rewritten.contains("hooks/removed.py"),
+            "orphan integrity entry must be dropped:\n{rewritten}"
+        );
+
+        let parsed: PluginManifest = toml::from_str(&rewritten).unwrap();
+        assert_eq!(
+            parsed.integrity.get("hooks/ingest.py").map(String::as_str),
+            Some(sha256_hex(ingest_body).as_str())
+        );
+        assert!(!parsed.integrity.contains_key("hooks/removed.py"));
+    }
+
+    /// pack_plugin_for_publish must fail loudly when a manifest references
+    /// a hook script that isn't on disk — that's a packaging bug and
+    /// emitting the SHA-256 of empty bytes would silently mask it.
+    #[test]
+    fn pack_plugin_for_publish_rejects_missing_hook_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("missing-hook");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "missing-hook"
+version = "0.1.0"
+description = "Hook file is not shipped"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+"#;
+        // Note: deliberately do NOT write hooks/ingest.py.
+        std::fs::write(plugin_dir.join("plugin.toml"), manifest).unwrap();
+
+        let err = pack_plugin_for_publish(&plugin_dir).expect_err("missing hook must fail");
+        assert!(
+            err.contains("hooks/ingest.py"),
+            "error must name the missing hook, got: {err}"
+        );
+    }
+
+    /// A plugin that declares no hooks at all is publish-ready by definition
+    /// — pack returns an empty map, validate accepts.
+    #[test]
+    fn pack_plugin_for_publish_accepts_no_hooks_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("metadata-only");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "metadata-only"
+version = "0.1.0"
+description = "No hooks, just metadata"
+author = "Test"
+"#;
+        std::fs::write(plugin_dir.join("plugin.toml"), manifest).unwrap();
+
+        validate_publish_ready(&plugin_dir).expect("no-hooks plugin is publish-ready");
+        let written = pack_plugin_for_publish(&plugin_dir).expect("pack must succeed");
+        assert!(written.is_empty(), "no hooks → no hashes written");
+    }
+
+    /// validate_publish_ready must accept a partially-signed manifest only
+    /// when EVERY declared hook is covered.  A plugin that ships
+    /// `[integrity]` for some but not all hooks is still rejected — this is
+    /// the defense-in-depth backstop for issue #4036.
+    #[test]
+    fn validate_publish_ready_rejects_partial_integrity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("partial");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "partial"
+version = "0.1.0"
+description = "Half-signed"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+
+[integrity]
+"hooks/ingest.py" = "abc"
+"#;
+        std::fs::write(plugin_dir.join("plugin.toml"), manifest).unwrap();
+
+        let err = validate_publish_ready(&plugin_dir).expect_err("partial must fail");
+        assert!(
+            err.contains("hooks/after_turn.py"),
+            "after_turn must be flagged as missing, got: {err}"
+        );
+        assert!(
+            !err.contains("hooks/ingest.py"),
+            "ingest is signed and must NOT be flagged, got: {err}"
+        );
+    }
+
+    /// pack_plugin_for_publish must produce byte-identical output across
+    /// repeated invocations on identical inputs — a property the registry
+    /// archive checksum and any reproducible-build verifier depend on.
+    #[test]
+    fn pack_plugin_for_publish_is_deterministic() {
+        fn pack_once(seed: &[u8]) -> String {
+            let tmp = tempfile::tempdir().unwrap();
+            let plugin_dir = tmp.path().join("det");
+            std::fs::create_dir_all(&plugin_dir).unwrap();
+            let manifest = r#"name = "det"
+version = "0.1.0"
+description = "Determinism test"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+bootstrap = "hooks/bootstrap.py"
+"#;
+            write_fake_plugin(
+                &plugin_dir,
+                manifest,
+                &[
+                    ("hooks/ingest.py", seed),
+                    ("hooks/after_turn.py", seed),
+                    ("hooks/bootstrap.py", seed),
+                ],
+            );
+            pack_plugin_for_publish(&plugin_dir).unwrap();
+            std::fs::read_to_string(plugin_dir.join("plugin.toml")).unwrap()
+        }
+
+        let a = pack_once(b"identical seed");
+        let b = pack_once(b"identical seed");
+        assert_eq!(
+            a, b,
+            "pack output must be byte-identical for identical inputs"
+        );
+    }
+}

@@ -24,20 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # setup-node's `cache: pnpm` runs `pnpm store path --silent` from the
-      # repo root to compute the cache directory. Our `packageManager` field
-      # lives in docs/package.json, so corepack at the root falls back to the
-      # runner image's default pnpm 11 and records `~/.local/share/pnpm/store/v11`.
-      # The actual install (`cd docs && pnpm install`) then runs pnpm 10.x,
-      # which writes to `…/store/v10`. Post-job cache save then errors with
-      # "Path Validation Error" because the v11 directory was never populated.
-      # Pin pnpm explicitly via docs/package.json so PATH carries the right
-      # version before setup-node's cache pre-step runs.
-      - name: Install pnpm (version from docs/package.json packageManager)
-        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
-        with:
-          package_json_file: docs/package.json
-          run_install: false
+      # `cache: pnpm` feature runs `pnpm --version` to compute the cache
+      # key, and that fails if pnpm isn't on PATH yet. Modern setup-node
+      # (v6 + Node ≥22, which bundles corepack) preserves corepack shims
+      # across the Node swap, so running `enable` once up front is
+      # sufficient — no need for the second call after setup-node.
+      - name: Enable corepack (activates pnpm from packageManager field)
+        run: corepack enable
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
@@ -50,13 +43,7 @@ jobs:
       - run: cd docs && pnpm build
 
       - name: Deploy to Cloudflare Pages
-        # Dependabot PRs come from in-repo `dependabot/...` branches, so
-        # they match the same-repo guard below, but they run with the
-        # restricted Dependabot token which cannot read Actions secrets.
-        # Without the actor check, wrangler errors with "Not logged in"
-        # because CLOUDFLARE_API_TOKEN expands to an empty string. The
-        # post-merge push to main still triggers a real deploy.
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository) && github.actor != 'dependabot[bot]'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

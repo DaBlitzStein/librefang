@@ -2,7 +2,6 @@
 
 use crate::{KernelState, PortState};
 use librefang_kernel::config::librefang_home;
-use librefang_kernel::AgentSubsystemApi;
 use tauri_plugin_dialog::DialogExt;
 use tracing::info;
 
@@ -33,7 +32,7 @@ pub fn get_status(
     let inner = guard
         .as_ref()
         .ok_or_else(|| "No local server running".to_string())?;
-    let agents = inner.kernel.agent_registry_ref().list().len();
+    let agents = inner.kernel.agent_registry().list().len();
     let uptime_secs = inner.started_at.elapsed().as_secs();
 
     Ok(serde_json::json!({
@@ -51,7 +50,7 @@ pub fn get_agent_count(kernel_state: tauri::State<'_, KernelState>) -> Result<us
     let inner = guard
         .as_ref()
         .ok_or_else(|| "No local server running".to_string())?;
-    Ok(inner.kernel.agent_registry_ref().list().len())
+    Ok(inner.kernel.agent_registry().list().len())
 }
 
 /// Open a native file picker to import an agent TOML manifest.
@@ -263,10 +262,6 @@ pub fn open_logs_dir() -> Result<(), String> {
 /// - **Linux/AppImage**: deletes the AppImage binary directly.
 /// - **Linux/system package**: returns a hint to run the distro uninstall command.
 #[tauri::command]
-#[cfg_attr(
-    not(any(target_os = "windows", target_os = "macos", target_os = "linux")),
-    allow(unused_variables)
-)]
 pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {

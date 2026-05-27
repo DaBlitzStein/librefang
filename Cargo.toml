@@ -3,16 +3,13 @@ resolver = "2"
 members = [
     "crates/librefang-types",
     "crates/librefang-memory",
-    "crates/librefang-memory-wiki",
     "crates/librefang-runtime",
-    "crates/librefang-runtime-audit",
-    "crates/librefang-runtime-media",
-    "crates/librefang-runtime-sandbox-docker",
     "crates/librefang-runtime-mcp",
+    "crates/librefang-runtime-oauth",
     "crates/librefang-llm-drivers",
+    "crates/librefang-runtime-wasm",
     "crates/librefang-llm-driver",
     "crates/librefang-kernel-handle",
-    "crates/librefang-acp",
     "crates/librefang-http",
     "crates/librefang-wire",
     "crates/librefang-api",
@@ -21,19 +18,18 @@ members = [
     "crates/librefang-kernel-metering",
     "crates/librefang-cli",
     "crates/librefang-channels",
-    "crates/librefang-import",
+    "crates/librefang-migrate",
     "crates/librefang-skills",
     "crates/librefang-desktop",
     "crates/librefang-hands",
     "crates/librefang-extensions",
     "crates/librefang-telemetry",
-    "crates/librefang-rl-export",
     "xtask",
     "crates/librefang-testing",
 ]
 
 [workspace.package]
-version = "2026.5.25-beta.13"
+version = "2026.5.2-beta8"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -65,16 +61,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # OpenTelemetry
-# Whole stack aligned on 0.32: `tracing-opentelemetry 0.33` now depends on
-# `opentelemetry 0.32` / `opentelemetry_sdk 0.32`, so the previous 0.31 pin
-# (kept by #4947's revert) is no longer needed. Dependabot bumped
-# `opentelemetry-otlp` to 0.32 (#5270) and `tracing-opentelemetry` to 0.33
-# (#5273) without simultaneously bumping `opentelemetry` /
-# `opentelemetry_sdk` / `opentelemetry-http`, which left two copies of
-# `opentelemetry::trace::Tracer` in the dep graph and broke
-# `SdkTracer: Tracer` in telemetry.rs. This commit completes the upgrade.
-opentelemetry = "0.32"
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 # `default-features = false` is critical: opentelemetry-otlp's default feature
 # set enables `http-proto` + `reqwest-blocking-client`, which forces
 # `opentelemetry-http` to pull `reqwest = "0.12"` alongside the workspace
@@ -82,15 +70,8 @@ opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 # (rustls-platform-verifier 0.6 + 0.7, hyper-util, h2, …). We only ship
 # OTLP traces over gRPC (tonic), so the reqwest-based exporters are dead
 # weight. See #3679.
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace", "metrics", "logs"] }
-tracing-opentelemetry = "0.33"
-# W3C trace-context HeaderInjector for outbound LLM HTTP requests. Pulled in
-# explicitly (not transitively via opentelemetry-otlp, which is built with
-# `default-features = false` to avoid its reqwest-based exporters — see the
-# note above). 0.32 aligns with `opentelemetry = "0.32"` and uses `http = 1`,
-# matching the workspace `reqwest = "0.13"` http stack — no second http/reqwest
-# tree is introduced.
-opentelemetry-http = "0.32"
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace", "metrics", "logs"] }
+tracing-opentelemetry = "0.32"
 
 # Prometheus metrics
 metrics = "0.24"
@@ -105,22 +86,18 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # Database
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
-r2d2 = "0.8"
-r2d2_sqlite = "0.34"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 
 # HTTP client (for LLM drivers)
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "multipart", "rustls", "gzip", "deflate", "brotli", "form", "query", "socks"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "multipart", "rustls", "gzip", "deflate", "brotli", "form", "query"] }
 
 # TLS fallback — bundled Mozilla CA roots for systems without system certs (musl, Termux, minimal containers)
 rustls = "0.23"
 webpki-roots = "1"
 rustls-native-certs = "0.8"
-# PEM parsing for user-supplied IMAP root CA certs (#4877). Tiny dep, no I/O.
-rustls-pemfile = "2"
 
 # Async trait
 async-trait = "0.1"
@@ -138,45 +115,11 @@ bytes = "1"
 futures = "0.3"
 
 # MCP SDK
-rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
-
-# ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
-# `unstable` enables session/{resume,close,fork,list-additional-directories}, message-id, session-usage,
-# and auth-method extensions so our agent surface matches what Zed publishes downstream.
-#
-# Pinned exactly (`=`-prefix). The `unstable` feature is explicitly
-# marked breaking by upstream, so a caret bump (0.11.x) could change
-# wire-format expectations between minor releases without warning.
-# Bumping this pin is an explicit, reviewed change.
-agent-client-protocol = { version = "=0.11.1", features = ["unstable"] }
-agent-client-protocol-tokio = "=0.11.1"
-tokio-util = { version = "0.7", features = ["compat"] }
+rmcp = { version = "1.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 # WebSocket client (for Discord/Slack gateway)
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 url = "2"
-urlencoding = "2"
-
-# pulldown-cmark removed: matrix migrated to a sidecar (#5368), which
-# was the sole consumer of CommonMark → HTML rendering for the Matrix
-# `formatted_body` field. The Python sidecar
-# (librefang.sidecar.adapters.matrix) brings its own stdlib renderer.
-
-# Public Suffix List — used by mcp_auth to decide whether a metadata-declared
-# token_endpoint shares a registrable domain with the operator-typed issuer
-# host (refs #4665). Picked over `publicsuffix` because `psl` ships the PSL
-# data baked-in at compile time (no runtime fetch), keeping the security check
-# self-contained and reproducible.
-psl = "2"
-
-# Tera template engine — Jinja2-flavoured templates used by the workflow
-# `Transform` operator (#4980 step 3). Sandboxed by default (no I/O,
-# bounded recursion), well-maintained, MIT, and the standard pick when
-# the alternative is `mlua` / `rhai` / a hand-rolled DSL — all heavier
-# trees that we would have to babysit for security. Pin a single major
-# so a future bump is a deliberate review, not a transient dependabot
-# ping.
-tera = { version = "1", default-features = false }
 
 # WASM sandbox
 wasmtime = "44"
@@ -194,9 +137,8 @@ dirs = "6"
 # the OS keyring is genuinely unavailable.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
-# YAML parsing — maintained drop-in fork of the archived serde_yaml (RUSTSEC-2024-0320).
-# Aliased to the `serde_yaml` name so existing `use serde_yaml::...` call sites stay unchanged.
-serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
+# YAML parsing
+serde_yaml = "0.9"
 
 # JSON5 parsing
 json5 = "1.3.1"
@@ -206,8 +148,14 @@ walkdir = "2"
 
 # Security
 sha2 = { version = "0.10", features = ["oid"] }
+# sha1 0.10 is paired with hmac 0.12 via digest 0.10. sha1 0.11+ moved to
+# digest 0.11 and is incompatible with our hmac version.
+sha1 = "0.10"
+aes = "0.9"
+cbc = "0.2"
 hmac = "0.12"
 hex = "0.4"
+k256 = { version = "0.13", features = ["schnorr"] }
 subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -220,17 +168,7 @@ zeroize = { version = "1", features = ["derive"] }
 totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 
 # JWT validation
-#
-# `jsonwebtoken` 10.x defers RSA / EC signature operations to a
-# process-level `CryptoProvider` and panics at `decode::<_>` time if no
-# provider feature is enabled. The default features only enable PEM
-# parsing, so we explicitly turn on `aws_lc_rs` to match the rustls
-# provider that `librefang-cli` installs at startup
-# (`aws_lc_rs::default_provider().install_default()`). Without this,
-# any real OIDC token validation (`/api/auth/introspect`, the OAuth
-# callback's ID-token path, and the `oidc_auth_middleware`) panics in
-# production. Discovered while landing the #5128 `sub`-required tests.
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = "10"
 
 # Rate limiting
 governor = "0.10.4"
@@ -245,6 +183,9 @@ colored = "3"
 # Encryption
 aes-gcm = "0.10"
 argon2 = { version = "0.5", features = ["rand"] }
+
+# HTML entity decoding
+html-escape = "0.2"
 
 # Lightweight regex
 regex = "1"
@@ -268,6 +209,9 @@ mailparse = "0.16"
 fluent = "0.17"
 unic-langid = "0.9"
 
+# MQTT client
+rumqttc = "0.25"
+
 # Sync HTTP client (for registry sync without async runtime)
 ureq = "3"
 
@@ -276,16 +220,12 @@ flate2 = "1"
 tar = "0.4"
 
 # Testing
+tokio-test = "0.4"
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 
 # Performance
 smallvec = "1"
-
-# Build-script helpers — used by `crates/librefang-api/build.rs` and
-# `crates/librefang-cli/build.rs` to resolve `git` via PATH instead of
-# invoking it by bare name (refs #5667). Lightweight, well-maintained.
-which = { version = "7", default-features = false }
 
 [profile.dev]
 split-debuginfo = "unpacked" # Speeds up incremental linking on macOS

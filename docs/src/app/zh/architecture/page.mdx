@@ -83,7 +83,7 @@ librefang/
 │   ├── librefang-hands/       #   自主 Hands
 │   ├── librefang-wire/        #   OFP P2P 协议
 │   ├── librefang-extensions/  #   OAuth、凭证金库、MCP 设置
-│   ├── librefang-import/      #   框架导入引擎（OpenClaw / OpenFang / LangChain / AutoGPT）
+│   ├── librefang-migrate/     #   迁移引擎
 │   ├── librefang-desktop/     #   Tauri 桌面应用
 │   ├── librefang-telemetry/   #   OpenTelemetry 指标和追踪
 │   └── librefang-testing/     #   测试工具
@@ -190,7 +190,7 @@ librefang-kernel         内核: 组装所有子系统、工作流引擎、RBAC�
     +-- librefang-runtime      Agent 循环、3 个 LLM 驱动、60 个工具、WASM 沙箱、MCP、A2A
     +-- librefang-channels     44 个通道适配器、桥接器、格式化器、速率限制器
     +-- librefang-wire         OFP 点对点网络，HMAC-SHA256 认证
-    +-- librefang-import       框架导入引擎（OpenClaw YAML->TOML、OpenFang、LangChain、AutoGPT）
+    +-- librefang-migrate      迁移引擎 (OpenClaw YAML->TOML)
     +-- librefang-skills       60 个内置技能、FangHub 市场、ClawHub 客户端
     +-- librefang-extensions   扩展与集成系统（凭证保险库、OAuth2 PKCE、一键 MCP 配置）
     +-- librefang-hands        自主 Hands 系统（注册表中的 15 个 hand agent）
@@ -210,11 +210,11 @@ librefang-types          共享类型: Agent、Capability、Event、Memory、Mes
 | **librefang-runtime** | Agent 执行引擎。包含 Agent 循环（`run_agent_loop`、`run_agent_loop_streaming`）、3 个原生 LLM 驱动（Anthropic、Gemini、OpenAI 兼容，覆盖 49 个提供商）、60 个内置工具、WASM 沙箱（Wasmtime 双燃料+epoch 计量）、MCP 客户端/服务器（JSON-RPC 2.0 over stdio/SSE）、A2A 协议（AgentCard、任务管理）、Web 搜索引擎（4 个提供商：Tavily/Brave/Perplexity/DuckDuckGo）、带 SSRF 保护的 Web 抓取、循环守卫（基于 SHA256 的工具循环检测）、会话修复（历史验证）、LLM 会话压缩器（块感知）、Merkle 哈希链审计追踪、嵌入驱动、浏览器自动化（Playwright，`browser.rs`）、Docker 沙箱执行（`docker_sandbox.rs`）、图像生成（`image_gen.rs`）、文本转语音（`tts.rs`）、插件管理器（`plugin_manager.rs`）、上下文引擎（`context_engine.rs`）、主动记忆（`proactive_memory.rs`）和进程管理器（`process_manager.rs`）。定义了 `KernelHandle` trait，使 Agent 间工具调用不产生循环 crate 依赖。 |
 | **librefang-kernel** | 中央协调器。`LibreFangKernel` 组装所有子系统：`AgentRegistry`、`AgentScheduler`、`CapabilityManager`、`EventBus`、`Supervisor`、`WorkflowEngine`、`TriggerEngine`、`BackgroundExecutor`、`WasmSandbox`、`ModelCatalog`、`MeteringEngine`、`ModelRouter`、`AuthManager`（RBAC）、`HeartbeatMonitor`、`SetupWizard`、`SkillRegistry`、MCP 连接和 `WebToolsContext`。实现 `KernelHandle` 以支持 Agent 间操作。处理 Agent 创建/终止、消息分发、工作流执行、触发器评估、能力继承验证和优雅关闭（带状态持久化）。 |
 | **librefang-api** | 基于 Axum 0.8 的 HTTP API 服务器，提供 230+ 个端点。路由涵盖 agents、workflows、triggers、memory、channels、templates、models、providers、skills、ClawHub、MCP、health、status、version 和 shutdown。WebSocket 处理器用于实时 Agent 聊天和流式输出。SSE 端点用于流式响应。OpenAI 兼容端点（`POST /v1/chat/completions`、`GET /v1/models`）。A2A 端点（`/.well-known/agent.json`、`/a2a/*`）。中间件：Bearer token 认证、请求 ID 注入、结构化请求日志、GCRA 速率限制器（感知成本）、安全头（CSP、X-Frame-Options 等）、健康端点信息脱敏。提供两个仪表板 UI：传统的 Alpine.js SPA（`static/index_body.html`）和现代 React 仪表板（`static/react/`，基于 Vite + React + TanStack Router/Query 构建）。两个仪表板共存，共享同一套 REST/WS API。 |
-| **librefang-channels** | 通道桥接层，包含 in-process 适配器集 + sidecar 机制。每个 in-process 适配器实现 `ChannelAdapter` trait。包括：WhatsApp、Webhook、Sidecar、Teams、Google Chat、WeChat。Telegram / ntfy / Gotify / Mastodon / Bluesky / Reddit / Twitch / Rocket.Chat / Nextcloud Talk / Discord / Slack / Webex / LINE / Zulip / Mattermost / Signal / QQ / Matrix / WeCom（企业微信）/ Email / Feishu / DingTalk（钉钉）通过 `librefang-sdk` Python 包以 sidecar 形式提供。功能特性：`AgentRouter` 消息路由、`BridgeManager` 生命周期协调、`ChannelRateLimiter`（基于 DashMap 的每用户追踪）、`formatter.rs`（Markdown 转 TelegramHTML/SlackMrkdwn/PlainText）、`ChannelOverrides`（模型/系统提示/私聊策略/群聊策略/速率限制/消息线程/输出格式）、私聊/群聊策略执行、sidecar_channels 辅助通道接入机制。 |
+| **librefang-channels** | 通道桥接层，包含 44 个适配器。每个适配器实现 `ChannelAdapter` trait。包括：Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Webhook、MQTT、Sidecar、Teams、Mattermost、IRC、Google Chat、Twitch、Rocket.Chat、Zulip、XMPP、LINE、Viber、Messenger、Reddit、Mastodon、Bluesky、Feishu、Revolt、Nextcloud、Guilded、Keybase、Threema、Nostr、Webex、Pumble、Flock、Twist、Mumble、DingTalk、QQ、WeCom（企业微信）、Discourse、Gitter、Ntfy、Gotify、LinkedIn。功能特性：`AgentRouter` 消息路由、`BridgeManager` 生命周期协调、`ChannelRateLimiter`（基于 DashMap 的每用户追踪）、`formatter.rs`（Markdown 转 TelegramHTML/SlackMrkdwn/PlainText）、`ChannelOverrides`（模型/系统提示/私聊策略/群聊策略/速率限制/消息线程/输出格式）、私聊/群聊策略执行、sidecar_channels 辅助通道接入机制。 |
 | **librefang-wire** | LibreFang 协议 (OFP)，用于 Agent 间点对点通信。TCP 上的 JSON 帧消息，HMAC-SHA256 双向认证（nonce + 通过 `subtle` crate 实现常数时间验证）。`PeerNode` 监听连接并管理节点。`PeerRegistry` 跟踪已知远程节点及其 Agent。 |
 | **librefang-cli** | 基于 Clap 的 CLI。支持所有命令：`init`、`start`、`status`、`doctor`、`agent spawn/list/chat/kill`、`workflow list/create/run`、`trigger list/create/delete`、`migrate`、`skill install/list/remove/search/create`、`channel list/setup/test/enable/disable`、`config show/edit`、`chat`、`mcp`。守护进程自动检测：检查 `~/.librefang/daemon.json` 并发送健康探测；当守护进程运行时使用 HTTP 通信，否则回退到进程内启动内核。内置 MCP 服务器模式。 |
 | **librefang-desktop** | Tauri 2.0 原生桌面应用。在进程内启动内核，后台线程运行 axum 服务器，WebView 指向 `http://127.0.0.1:{随机端口}`。功能特性：系统托盘（显示/浏览器/状态/退出）、单实例强制、桌面通知、关闭时隐藏到托盘。IPC 命令：`get_port`、`get_status`。通过 `#[cfg(desktop)]` 守卫实现移动端就绪。 |
-| **librefang-import** | 框架导入引擎。支持 OpenClaw（`~/.openclaw/`）、OpenFang、LangChain、AutoGPT。将 YAML 配置转换为 TOML，映射工具名称，映射提供商名称，导入 Agent 清单，复制内存文件，转换通道配置。生成包含已导入项、已跳过项和警告的 `MigrationReport`。（从 `librefang-migrate` 重命名，以与 `librefang-memory/src/migration.rs` 中的 SQLite 模式迁移进行区分。） |
+| **librefang-migrate** | 迁移引擎。支持 OpenClaw（`~/.openclaw/`）。将 YAML 配置转换为 TOML，映射工具名称，映射提供商名称，导入 Agent 清单，复制内存文件，转换通道配置。生成包含已导入项、已跳过项和警告的 `MigrationReport`。 |
 | **librefang-skills** | 可插拔工具捆绑的技能系统。60 个内置技能通过 `include_str!()` 编译进二进制。技能由 `skill.toml` + Python/WASM/Node.js/PromptOnly 代码组成。`SkillManifest` 定义元数据、运行时配置、提供的工具和依赖要求。`SkillRegistry` 管理已安装和已捆绑的技能。`FangHubClient` 连接 FangHub 市场。`ClawHubClient` 连接 clawhub.ai 实现跨生态技能发现。`SKILL.md` 解析器用于 OpenClaw 兼容性（YAML frontmatter + Markdown 正文）。`SkillVerifier` 提供 SHA256 验证。提示注入扫描器（`scan_prompt_content()`）检测覆盖尝试、数据窃取和 shell 引用。 |
 | **librefang-extensions** | 扩展与集成系统。提供凭证保险库以安全存储第三方服务凭证，OAuth2 PKCE 流程用于用户授权集成，以及一键 MCP 配置助手以快速对接流行的外部服务。 |
 | **librefang-hands** | 自主 Hands 系统。15 个来自注册表的 hand agent，各自独立运行并具备专业领域能力：analytics、apitester、browser、clip、collector、devops、lead、linkedin、predictor、reddit、researcher、strategist、trader、twitter。每个 hand 暴露结构化的工具接口，可通过 `hand_activate`/`hand_deactivate` 工具在运行时激活或停用。 |
@@ -562,7 +562,7 @@ pub trait LlmDriver: Send + Sync {
 [model]
 provider = "openai"                   # 不同于内核默认值
 model = "gpt-4o"
-api_key_env = "OPENAI_API_KEY"        # 自定义密钥环境变量  # pragma: allowlist secret
+api_key_env = "OPENAI_API_KEY"        # 自定义密钥环境变量
 base_url = "https://custom.api.com"   # 可选的自定义端点
 ```
 
@@ -769,12 +769,12 @@ Wire 协议认证在握手双方使用 `hmac_sign(secret, nonce + node_id)`。No
 
 | 批次 | 通道 |
 |------|------|
-| **第一批 (15)** | Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Mattermost、IRC、Google Chat、Zulip、XMPP（Twitch、Rocket.Chat 已迁移为 sidecar）|
-| **第二批 (6)** | LINE、Feishu、Revolt（Mastodon、Bluesky、Reddit 已迁移为 sidecar）|
-| **第三批 (6)** | Guilded、Keybase、Threema、Pumble、Flock、Twist（Nextcloud Talk、Webex 已迁移为 sidecar）|
-| **第四批 (9)** | Mumble、Gitter、Ntfy、Gotify、Webhook、Sidecar（DingTalk、QQ、WeCom（企业微信）已迁移为 sidecar）|
+| **第一批 (15)** | Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Mattermost、IRC、Google Chat、Twitch、Rocket.Chat、Zulip、XMPP |
+| **第二批 (8)** | LINE、Viber、Messenger、Reddit、Mastodon、Bluesky、Feishu、Revolt |
+| **第三批 (9)** | Nextcloud、Guilded、Keybase、Threema、Nostr、Webex、Pumble、Flock、Twist |
+| **第四批 (12)** | Mumble、DingTalk、QQ、WeCom（企业微信）、Discourse、Gitter、Ntfy、Gotify、Webhook、LinkedIn、MQTT、Sidecar |
 
-> Sidecar 适配器允许使用任何语言编写的外部进程通过 stdin/stdout 上的 JSON-RPC 充当通道适配器。Telegram / ntfy / Gotify / Mastodon / Bluesky / Reddit / Twitch / Rocket.Chat / Nextcloud Talk / Discord / Slack / Webex / LINE / Zulip / Mattermost / Signal / QQ / Matrix / WeCom / Feishu / Email / DingTalk 作为一等公民 Python sidecar 在 `librefang-sdk` 中提供。
+> 共计：44 个适配器。Sidecar 适配器允许使用任何语言编写的外部进程通过 stdin/stdout 上的 JSON-RPC 充当通道适配器。
 
 ### 通道功能
 

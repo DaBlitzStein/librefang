@@ -44,18 +44,10 @@ include = ["librefang*"]
 exclude = ["examples*"]
 
 [tool.setuptools.package-data]
-# `sidecar/template/*` ships the adapter scaffold the sidecar docs tell
-# users to copy — without this it is absent from the installed wheel.
-librefang = ["py.typed", "sidecar/template/*"]
+librefang = ["py.typed"]
 
-# `python_files = ["*.py"]` made pytest import every example *script*
-# as a test module (they target the legacy flat `librefang_sdk`
-# layout, not the `librefang.*` package), so `pytest` errored at
-# collection on a clean checkout. Restrict to real test files — the
-# standard convention — so example scripts stay scripts.
 [tool.pytest.ini_options]
-testpaths = ["tests", "examples"]
-python_files = ["test_*.py"]
+testpaths = ["examples"]
+python_files = ["*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-asyncio_mode = "auto"

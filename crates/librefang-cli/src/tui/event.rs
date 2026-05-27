@@ -1,9 +1,6 @@
 //! Event system: crossterm polling, tick timer, streaming bridges.
 
-use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
-use librefang_kernel::McpSubsystemApi;
-use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::agent_loop::AgentLoopResult;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
@@ -14,6 +11,7 @@ use std::time::Duration;
 
 use super::screens::{
     audit::AuditEntry,
+    channels::ChannelInfo,
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
     hands::{HandInfo, HandInstanceInfo},
@@ -90,8 +88,10 @@ pub enum AppEvent {
         enabled: bool,
         rows: Vec<crate::tui::screens::dashboard::DreamRow>,
     },
-    // `ChannelListLoaded` + `ChannelTestResult` removed alongside the
-    // TUI Channels tab.
+    /// Channel list loaded.
+    ChannelListLoaded(Vec<ChannelInfo>),
+    /// Channel test result.
+    ChannelTestResult { success: bool, message: String },
     /// Workflow list loaded.
     WorkflowListLoaded(Vec<WorkflowInfo>),
     /// Workflow runs loaded for a specific workflow.
@@ -519,11 +519,6 @@ pub fn spawn_daemon_stream(
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
-            // The TUI streams over the daemon's SSE bridge, which does
-            // not surface the fallback-chain provider tag. Metering on
-            // the daemon side has already billed against the right
-            // provider; no value to forward here.
-            actual_provider: None,
         })));
     });
     token
@@ -571,11 +566,6 @@ fn daemon_fallback(
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
-            // Daemon's `POST /agents/<id>/message` JSON shape does not
-            // include the fallback-chain provider tag. Metering on the
-            // daemon side has already billed against the right
-            // provider; no value to forward here.
-            actual_provider: None,
         })
     } else {
         Err(body["error"]
@@ -723,7 +713,7 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             }
         }
         BackendRef::InProcess(kernel) => {
-            let count = kernel.agent_registry_ref().count() as u64;
+            let count = kernel.agent_registry().count() as u64;
             let _ = tx.send(AppEvent::DashboardData {
                 agent_count: count,
                 uptime_secs: 0,
@@ -772,8 +762,101 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
-// `spawn_fetch_channels` + `spawn_test_channel` retired alongside
-// the TUI Channels tab.
+/// Fetch channel list in background.
+pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+
+            if let Ok(resp) = client.get(format!("{base_url}/api/channels")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let channels: Vec<ChannelInfo> = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|ch| {
+                                    use super::screens::channels::ChannelStatus;
+                                    let status_str =
+                                        ch["status"].as_str().unwrap_or("not_configured");
+                                    let status = match status_str {
+                                        "ready" => ChannelStatus::Ready,
+                                        "missing_env" => ChannelStatus::MissingEnv,
+                                        _ => ChannelStatus::NotConfigured,
+                                    };
+                                    ChannelInfo {
+                                        name: ch["name"].as_str().unwrap_or("?").to_string(),
+                                        display_name: ch["display_name"]
+                                            .as_str()
+                                            .unwrap_or(ch["name"].as_str().unwrap_or("?"))
+                                            .to_string(),
+                                        category: ch["category"]
+                                            .as_str()
+                                            .unwrap_or("messaging")
+                                            .to_string(),
+                                        status,
+                                        env_vars: Vec::new(),
+                                        enabled: ch["enabled"].as_bool().unwrap_or(false),
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::ChannelListLoaded(channels));
+                }
+            }
+        }
+        BackendRef::InProcess(_kernel) => {
+            // In-process: fall back to default channel detection
+            let _ = tx.send(AppEvent::ChannelListLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Test a channel in background.
+pub fn spawn_test_channel(backend: BackendRef, channel: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
+
+            match client
+                .post(format!("{base_url}/api/channels/{channel}/test"))
+                .send()
+            {
+                Ok(resp) => {
+                    let success = resp.status().is_success();
+                    let msg = resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|b| b["message"].as_str().map(String::from))
+                        .unwrap_or_else(|| {
+                            if success {
+                                "Test passed".to_string()
+                            } else {
+                                "Test failed".to_string()
+                            }
+                        });
+                    let _ = tx.send(AppEvent::ChannelTestResult {
+                        success,
+                        message: msg,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::ChannelTestResult {
+                        success: false,
+                        message: format!("{e}"),
+                    });
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::ChannelTestResult {
+                success: false,
+                message: "Channel test not available in in-process mode".to_string(),
+            });
+        }
+    });
+}
 
 /// Fetch workflow list in background.
 pub fn spawn_fetch_workflows(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
@@ -1107,7 +1190,7 @@ pub fn spawn_fetch_agent_skills(backend: BackendRef, agent_id: String, tx: mpsc:
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
                 let aid = librefang_types::agent::AgentId(uuid);
                 let assigned = kernel
-                    .agent_registry_ref()
+                    .agent_registry()
                     .get(aid)
                     .map(|e| e.manifest.skills.clone())
                     .unwrap_or_default();
@@ -1170,14 +1253,14 @@ pub fn spawn_fetch_agent_mcp_servers(
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
                 let aid = librefang_types::agent::AgentId(uuid);
                 let assigned = kernel
-                    .agent_registry_ref()
+                    .agent_registry()
                     .get(aid)
                     .map(|e| e.manifest.mcp_servers.clone())
                     .unwrap_or_default();
                 let mut available = Vec::new();
-                if let Ok(mcp_tools) = kernel.tools_ref().lock() {
+                if let Ok(mcp_tools) = kernel.mcp_tools_ref().lock() {
                     let configured_servers: Vec<String> = kernel
-                        .effective_servers_ref()
+                        .effective_mcp_servers_ref()
                         .read()
                         .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
                         .unwrap_or_default();
@@ -1395,7 +1478,7 @@ pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>
         }
         BackendRef::InProcess(kernel) => {
             let agents: Vec<AgentEntry> = kernel
-                .agent_registry_ref()
+                .agent_registry()
                 .list()
                 .iter()
                 .map(|e| AgentEntry {
@@ -2231,12 +2314,12 @@ pub fn spawn_fetch_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             }
         }
         BackendRef::InProcess(kernel) => {
-            let defs = kernel.hand_registry_ref().list_definitions();
+            let defs = kernel.hands().list_definitions();
             let hands: Vec<HandInfo> = defs
                 .iter()
                 .map(|d| {
                     let reqs_met = kernel
-                        .hand_registry_ref()
+                        .hands()
                         .check_requirements(&d.id)
                         .map(|r| r.iter().all(|(_, ok)| *ok))
                         .unwrap_or(false);
@@ -2289,7 +2372,7 @@ pub fn spawn_fetch_active_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>)
         }
         BackendRef::InProcess(kernel) => {
             let instances: Vec<HandInstanceInfo> = kernel
-                .hand_registry_ref()
+                .hands()
                 .list_instances()
                 .iter()
                 .map(|i| HandInstanceInfo {
@@ -2510,7 +2593,10 @@ pub fn spawn_fetch_extensions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                 .iter()
                 .filter_map(|s| s.template_id.clone())
                 .collect();
-            let catalog = kernel.mcp_catalog_load();
+            let catalog = kernel
+                .mcp_catalog()
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             let extensions: Vec<ExtensionInfo> = catalog
                 .list()
                 .iter()
@@ -2573,7 +2659,7 @@ pub fn spawn_fetch_extension_health(backend: BackendRef, tx: mpsc::Sender<AppEve
             }
         }
         BackendRef::InProcess(kernel) => {
-            let health = kernel.health().all_health();
+            let health = kernel.mcp_health().all_health();
             let entries: Vec<ExtensionHealthInfo> = health
                 .iter()
                 .map(|h| ExtensionHealthInfo {

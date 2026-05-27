@@ -14,13 +14,8 @@ on:
     branches: [main]
   check_suite:
     types: [completed]
-  # NOTE: pull_request_review submissions are handled by
-  # `pr-review-collector.yml` + `pr-review-state-applier.yml`. GitHub
-  # downgrades GITHUB_TOKEN to read-only for pull_request_review-triggered
-  # workflows, even on internal PRs and even when the workflow declares
-  # `permissions: write`, so the addLabels/removeLabel calls would 403
-  # if we kept that trigger here. The applier runs in workflow_run
-  # context where the default-branch token retains write access.
+  pull_request_review:
+    types: [submitted]
   workflow_dispatch:
 
 permissions:
@@ -181,15 +176,7 @@ jobs:
               'Conflict Check', 'CI Status Check', 'PR Size',
               'Docs/CI Check', 'Review State',
             ]);
-            // Guard against undefined / partial entries — `github.paginate`
-            // can surface items without a `name` when a transient API hiccup
-            // leaves `response.data.check_runs` shaped unexpectedly on one
-            // page. Without the guard, the next line crashed on main
-            // b7b39ee1 with `TypeError: Cannot read properties of undefined
-            // (reading 'name')` (run 25899402530) and the whole job failed.
-            const externalRuns = allCheckRuns.filter(
-              cr => cr && cr.name && !SELF_JOBS.has(cr.name),
-            );
+            const externalRuns = allCheckRuns.filter(cr => !SELF_JOBS.has(cr.name));
 
             const hasFailure = externalRuns.some(
               cr => cr.conclusion === 'failure' || cr.conclusion === 'timed_out'
@@ -354,20 +341,13 @@ jobs:
               core.info(`#${pr.number}: removed "${LABEL}" (has .rs files)`);
             }
 
-  # ── Review state: needs-changes cleanup on push ──────────────────
-  # Real-time sync of approve / changes_requested labels lives in
-  # `pr-review-collector.yml` + `pr-review-state-applier.yml` (split via
-  # workflow_run because pull_request_review tokens are read-only). This
-  # job only handles the post-push case: a new push may have addressed
-  # an outstanding changes_requested review, in which case needs-changes
-  # should clear if no reviewer still has CHANGES_REQUESTED as their
-  # latest state.
+  # ── Review state: ready-for-review ↔ needs-changes ───────────────
   review-state:
     name: Review State
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request_target' && github.event.action == 'synchronize'
+    if: github.event_name == 'pull_request_review' || (github.event_name == 'pull_request_target' && github.event.action == 'synchronize')
     steps:
-      - name: Clear needs-changes after push if all reviews resolved
+      - name: Sync review labels
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
@@ -404,38 +384,58 @@ jobs:
               }
             }
 
+            // Don't add ready-for-review if blocking labels are present
             const hasBlocker = labels.includes('has-conflicts') || labels.includes('ci-failed');
 
-            // Only act if needs-changes is currently set; otherwise nothing to do.
-            if (!labels.includes(NEEDS)) return;
+            if (context.eventName === 'pull_request_review') {
+              const state = context.payload.review.state;
+              if (state === 'changes_requested') {
+                await addLabel(NEEDS);
+                await removeLabel(READY);
+                core.info(`#${prNumber}: changes requested → +${NEEDS} -${READY}`);
+              } else if (state === 'approved') {
+                await removeLabel(NEEDS);
+                if (!hasBlocker) {
+                  await addLabel(READY);
+                  core.info(`#${prNumber}: approved → -${NEEDS} +${READY}`);
+                } else {
+                  core.info(`#${prNumber}: approved but has blockers, skipping ${READY}`);
+                }
+              }
+            } else if (context.eventName === 'pull_request_target' && context.payload.action === 'synchronize') {
+              // New push — check whether any changes_requested reviews are still
+              // pending (not superseded by a later approved/dismissed review from
+              // the same reviewer). Only clear needs-changes when all such reviews
+              // have been resolved.
+              if (labels.includes(NEEDS)) {
+                const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  per_page: 100,
+                });
 
-            const reviews = await github.paginate(github.rest.pulls.listReviews, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-              per_page: 100,
-            });
+                // Build per-reviewer latest state (last review wins)
+                const latestByReviewer = new Map();
+                for (const r of reviews) {
+                  if (!r.user || r.state === 'COMMENTED' || r.state === 'PENDING') continue;
+                  latestByReviewer.set(r.user.login, r.state);
+                }
 
-            // Build per-reviewer latest state (last review wins)
-            const latestByReviewer = new Map();
-            for (const r of reviews) {
-              if (!r.user || r.state === 'COMMENTED' || r.state === 'PENDING') continue;
-              latestByReviewer.set(r.user.login, r.state);
-            }
+                const hasPendingChangesRequested = [...latestByReviewer.values()].some(
+                  s => s === 'CHANGES_REQUESTED'
+                );
 
-            const hasPendingChangesRequested = [...latestByReviewer.values()].some(
-              s => s === 'CHANGES_REQUESTED'
-            );
-
-            if (hasPendingChangesRequested) {
-              core.info(`#${prNumber}: new push but changes_requested still pending, keeping ${NEEDS}`);
-              return;
-            }
-
-            await removeLabel(NEEDS);
-            if (!hasBlocker) {
-              await addLabel(READY);
-              core.info(`#${prNumber}: new push, all reviews resolved → -${NEEDS} +${READY}`);
-            } else {
-              core.info(`#${prNumber}: new push → -${NEEDS}, skipping ${READY} (blockers)`);
+                if (hasPendingChangesRequested) {
+                  core.info(`#${prNumber}: new push but changes_requested still pending, keeping ${NEEDS}`);
+                } else {
+                  await removeLabel(NEEDS);
+                  if (!hasBlocker) {
+                    await addLabel(READY);
+                    core.info(`#${prNumber}: new push, all reviews resolved → -${NEEDS} +${READY}`);
+                  } else {
+                    core.info(`#${prNumber}: new push → -${NEEDS}, skipping ${READY} (blockers)`);
+                  }
+                }
+              }
             }

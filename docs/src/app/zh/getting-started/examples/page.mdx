@@ -135,7 +135,7 @@ librefang message customer-support "A user says their payment failed."
 
 ## 4. 把渠道接到 Agent
 
-渠道配置写在 `~/.librefang/config.toml` 的 `[[sidecar_channels]]` array-of-tables 条目里。每条条目声明一个独立进程的 sidecar adapter（`name` / `command` / `args` / `channel_type`，加上 `[sidecar_channels.env]` 子表存放非 secret 环境变量）。Secret 类的环境变量写到 `~/.librefang/secrets.env`。
+渠道配置写在 `~/.librefang/config.toml` 的 `[channels.<name>]` 下，不是 `[telegram]` 或 `[discord]` 顶层表。
 
 这层对应的是 LibreFang 的“外部入口”能力：让 Agent 不只在 CLI 里用，而是能在 Telegram、Discord、Slack、WeChat 等地方直接工作。
 
@@ -146,16 +146,17 @@ librefang channel setup telegram
 librefang channel list
 ```
 
-手动配置示例（Telegram 使用 sidecar 适配器）：
+手动配置示例：
 
 ```toml
-[[sidecar_channels]]
-name = "telegram"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.telegram"]
-channel_type = "telegram"
-[sidecar_channels.env]
-TELEGRAM_BOT_TOKEN = "..."
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+default_agent = "customer-support"
+allowed_users = []
+
+[channels.telegram.overrides]
+system_prompt = "Reply as a concise and polite support bot."
+rate_limit_per_user = 10
 ```
 
 修改完配置后重启：
@@ -164,11 +165,10 @@ TELEGRAM_BOT_TOKEN = "..."
 librefang restart
 ```
 
-要确认 sidecar 已起、能连上 Telegram，热加载后 tail 一下 sidecar 自己的日志（sidecar 把结构化状态打到 stdout）：
+如果已经有聊天目标，可以做一次联通性检查：
 
 ```bash
-curl -X POST http://127.0.0.1:4545/api/channels/reload
-librefang logs --filter sidecar/telegram --tail 50
+librefang channel test telegram --chat-id 123456789
 ```
 
 ---
@@ -346,7 +346,7 @@ JSON
 ## 10. 当前源码里的几个关键点
 
 - Agent 提示词写在 `[model].system_prompt`，不是 `[system_prompt].prompt`。
-- 通道配置写在 `[channels.<name>]`，例如 `[channels.discord]`。Telegram 现已改为 sidecar 模式，使用 `[[sidecar_channels]]` 而非 `[channels.telegram]`。
+- 通道配置写在 `[channels.<name>]`，例如 `[channels.telegram]`。
 - 工作流步骤使用 `agent_name` 或 `agent_id` 加 `prompt`，不是 `type/agent/input` 这一套。
 - 定时任务用 `librefang cron ...`，Webhook 用 `librefang webhooks ...`。
 - 当前 CLI 没有 `librefang memory search` 或 `librefang kg query` 这两个命令。
@@ -356,5 +356,5 @@ JSON
 1. `librefang start`
 2. `librefang agent new <template>` 或 `librefang agent spawn ./agent.toml`
 3. `librefang message <agent> "..."`
-4. `librefang channel setup <channel>` 或者直接编辑一条 `[[sidecar_channels]]`
+4. `librefang channel setup <channel>` 或编辑 `[channels.<name>]`
 5. `librefang cron create ...` / `librefang workflow create ...`

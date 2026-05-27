@@ -14,6 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_kernel::kernel_handle::prelude::*;
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
 
@@ -249,7 +250,6 @@ pub async fn get_approval(
 /// when an agent invokes a tool that requires approval. This endpoint exists
 /// for external integrations that need to inject approval gates.
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct CreateApprovalRequest {
     pub agent_id: String,
     pub tool_name: String,
@@ -292,14 +292,9 @@ pub async fn create_approval(
         timeout_secs: policy.timeout_secs,
         sender_id: None,
         channel: None,
-        chat_id: None,
         route_to: Vec::new(),
         escalation_count: 0,
         session_id: req.session_id,
-        // Manual approvals created via the dashboard / API have no
-        // originating tool_use_id — operators are creating them
-        // directly, not in response to an LLM tool_use block.
-        tool_use_id: None,
     };
 
     // Spawn the request in the background (it will block until resolved or timed out)
@@ -318,7 +313,6 @@ pub async fn create_approval(
 ///
 /// When TOTP is enabled, the request body must include a `totp_code` field.
 #[derive(serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct ApproveRequestBody {
     #[serde(default)]
     totp_code: Option<String>,
@@ -478,7 +472,7 @@ pub async fn approve_request(
                             // tables.
                             state.kernel.audit().record_with_context(
                                 "system",
-                                librefang_kernel::audit::AuditAction::AuthAttempt,
+                                librefang_runtime::audit::AuditAction::AuthAttempt,
                                 format!("totp_used_for_approval:{uuid}"),
                                 "totp_verified",
                                 None,
@@ -545,7 +539,7 @@ pub async fn approve_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::bad_request(e.to_string()).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple().into_response(),
     }
 }
 
@@ -584,12 +578,7 @@ pub async fn reject_request(
             ),
         )
             .into_response(),
-        // #3541: route the typed `KernelOpError` through the central
-        // status-code map. The previous `not_found(_)` was wrong — a
-        // `KernelOpError::Unavailable` (approval gate disabled) was
-        // surfacing as 404 instead of 503, and an internal `Other`
-        // failure surfaced as 404 instead of 500.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
     }
 }
 
@@ -599,7 +588,6 @@ pub async fn reject_request(
 
 /// POST /api/approvals/{id}/modify — Return a pending request with feedback for modification.
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct ModifyRequestBody {
     #[serde(default)]
     feedback: String,
@@ -647,31 +635,16 @@ pub async fn modify_request(
             ),
         )
             .into_response(),
-        // #3541: see `reject_request` above — route through the typed
-        // `KernelOpError` mapping so non-NotFound variants get the
-        // status code their semantics demand.
-        Err(e) => ApiErrorResponse::from(e).into_response(),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
     }
 }
 
 /// POST /api/approvals/batch — Batch resolve multiple pending requests.
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct BatchResolveRequest {
     ids: Vec<String>,
     decision: String,
 }
-
-/// Maximum number of approvals resolvable in a single batch call.
-///
-/// Distinct from the agents' `BULK_LIMIT` (50): batch approval is a UI-
-/// driven flow where an operator selecting "approve all" on a busy
-/// dashboard view legitimately resolves up to ~100 pending requests at
-/// once. Lowering the cap silently would degrade that workflow, so the
-/// approvals lane keeps its historical 100 even after migrating onto
-/// the shared `validate_bulk_size` guard
-/// (`docs/issues/bulk-with-capacity-no-validate.md`).
-const BULK_APPROVAL_LIMIT: usize = 100;
 
 #[utoipa::path(post, path = "/api/approvals/batch", tag = "approvals", request_body = crate::types::JsonObject, responses((status = 200, description = "Batch resolve results", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
@@ -679,11 +652,15 @@ pub async fn batch_resolve(
     State(state): State<Arc<AppState>>,
     Json(body): Json<BatchResolveRequest>,
 ) -> impl IntoResponse {
-    // Guard BEFORE the `Vec::with_capacity(body.ids.len())` below — without
-    // this an attacker could send an array of empty strings within the
-    // 8 MiB body limit and force millions of pre-allocated entries.
-    if let Err(resp) = crate::validation::validate_bulk_size(body.ids.len(), BULK_APPROVAL_LIMIT) {
-        return resp;
+    const MAX_BATCH_SIZE: usize = 100;
+
+    if body.ids.len() > MAX_BATCH_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("batch size {} exceeds maximum {MAX_BATCH_SIZE}", body.ids.len())}),
+            ),
+        );
     }
 
     let decision = match body.decision.as_str() {
@@ -751,8 +728,9 @@ pub async fn batch_resolve(
                 "decision": resp.decision.as_str(),
                 "decided_at": resp.decided_at.to_rfc3339(),
             })),
-            Err(e) => result_json
-                .push(serde_json::json!({"id": id, "status": "error", "message": e.to_string()})),
+            Err(e) => {
+                result_json.push(serde_json::json!({"id": id, "status": "error", "message": e}))
+            }
         }
     }
 
@@ -826,7 +804,6 @@ pub async fn list_approvals_for_session(
 /// resolve_all=True)`.  TOTP pre-check is enforced — if any pending request
 /// requires TOTP, the entire batch is rejected before any mutation.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct ApproveAllForSessionRequest {
     /// Optional count of approvals the caller expects to be pending.
     /// If provided, the server verifies the actual pending count matches
@@ -1096,7 +1073,6 @@ pub async fn approval_count(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// If TOTP is already confirmed, the request body must include a valid
 /// `current_code` (TOTP or recovery code) to authorize the reset.
 #[derive(serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct TotpSetupBody {
     /// Required when resetting an already-confirmed TOTP enrollment.
     #[serde(default)]
@@ -1275,7 +1251,6 @@ pub async fn totp_setup(
 
 /// POST /api/approvals/totp/confirm — Confirm TOTP enrollment by verifying a code.
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TotpConfirmBody {
     code: String,
 }
@@ -1395,7 +1370,6 @@ pub async fn totp_status(State(state): State<Arc<AppState>>) -> impl IntoRespons
 ///
 /// Requires a valid TOTP or recovery code to authorize revocation.
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TotpRevokeBody {
     code: String,
 }

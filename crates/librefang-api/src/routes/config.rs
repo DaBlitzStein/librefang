@@ -1,7 +1,6 @@
 //! Health, status, configuration, security, and migration handlers.
 
 use super::AppState;
-use librefang_kernel::config_reload::{validate_config_for_reload, HotAction};
 
 /// Build routes for the config/health/security/migration domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
@@ -229,17 +228,11 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .iter()
         .filter(|e| matches!(e.state, librefang_types::agent::AgentState::Running))
         .count();
-    // Use the indexed `SELECT COUNT(*)` projection — `list_sessions()`
-    // here would return a `Vec<serde_json::Value>` with each session's
-    // full rmp-encoded message history decoded just to call `.len()`.
-    // The dashboard hammers this route on its 5 s status poll, so on
-    // a workspace with 100 sessions × 200 KB history apiece the daemon
-    // decoded ~20 MB (≈ 4 MB/s) of message bodies every poll for what
-    // is morphologically a `SELECT COUNT(*)`.
     let session_count = state
         .kernel
         .memory_substrate()
-        .count_sessions()
+        .list_sessions()
+        .map(|s| s.len())
         .unwrap_or(0);
 
     let memory_used_mb = current_process_rss_mb();
@@ -295,7 +288,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
 
     // Detect best available provider
     let (provider, api_key_env) = if let Some((p, _model, env_var)) =
-        librefang_kernel::drivers::detect_available_provider()
+        librefang_runtime::drivers::detect_available_provider()
     {
         (p.to_string(), env_var.to_string())
     } else {
@@ -303,7 +296,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
     };
 
     // Resolve default model from catalog
-    let model = librefang_kernel::model_catalog::ModelCatalog::default()
+    let model = librefang_runtime::model_catalog::ModelCatalog::default()
         .default_model_for_provider(&provider)
         .unwrap_or_else(|| "auto".to_string());
 
@@ -376,7 +369,7 @@ pub async fn shutdown(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_kernel::audit::AuditAction::ConfigChange,
+        librefang_runtime::audit::AuditAction::ConfigChange,
         "shutdown requested via API",
         "ok",
         user_id,
@@ -791,28 +784,63 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     let config = state.kernel.config_ref();
 
     // -- channels: show which platforms are configured (instance counts), no tokens --
-    // All previously in-process channels (whatsapp, teams,
-    // google_chat, webhook, …) migrated to sidecars; their fields no
-    // longer exist on `ChannelsConfig` so there's nothing to
-    // enumerate here. The macro shape + lookup are preserved as a
-    // comment block so a future in-process channel can rebuild this
-    // block by uncommenting + appending one `ch!()` line per field.
-    //
-    //   let c = &config.channels;
-    //   let mut map = serde_json::Map::new();
-    //   macro_rules! ch {
-    //       ($name:ident) => {{
-    //           if !c.$name.is_empty() {
-    //               map.insert(
-    //                   stringify!($name).to_string(),
-    //                   serde_json::json!({ "instances": c.$name.len() }),
-    //               );
-    //           }
-    //       }};
-    //   }
-    //   ch!(<future_in_process_channel>);
-    //   serde_json::Value::Object(map)
-    let channels = serde_json::Value::Object(serde_json::Map::new());
+    let channels = {
+        let c = &config.channels;
+        let mut map = serde_json::Map::new();
+        macro_rules! ch {
+            ($name:ident) => {
+                if !c.$name.is_empty() {
+                    map.insert(
+                        stringify!($name).to_string(),
+                        serde_json::json!({ "instances": c.$name.len() }),
+                    );
+                }
+            };
+        }
+        ch!(telegram);
+        ch!(discord);
+        ch!(slack);
+        ch!(whatsapp);
+        ch!(signal);
+        ch!(matrix);
+        ch!(email);
+        ch!(teams);
+        ch!(mattermost);
+        ch!(irc);
+        ch!(google_chat);
+        ch!(twitch);
+        ch!(rocketchat);
+        ch!(zulip);
+        ch!(xmpp);
+        ch!(line);
+        ch!(viber);
+        ch!(messenger);
+        ch!(reddit);
+        ch!(mastodon);
+        ch!(bluesky);
+        ch!(feishu);
+        ch!(revolt);
+        ch!(nextcloud);
+        ch!(guilded);
+        ch!(keybase);
+        ch!(threema);
+        ch!(nostr);
+        ch!(webex);
+        ch!(pumble);
+        ch!(flock);
+        ch!(twist);
+        ch!(mumble);
+        ch!(dingtalk);
+        ch!(qq);
+        ch!(discourse);
+        ch!(gitter);
+        ch!(ntfy);
+        ch!(gotify);
+        ch!(webhook);
+        ch!(linkedin);
+        ch!(wecom);
+        serde_json::Value::Object(map)
+    };
 
     // -- mcp_servers: list names/commands, redact env secrets --
     let mcp_servers: Vec<serde_json::Value> = config
@@ -1337,266 +1365,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         );
     }
 
-    // ── Newly surfaced sections (#4678) ──
-
-    // Top-level scalar additions exposed in the "general" section overlay.
-    set!(
-        "update_channel",
-        serde_json::to_value(config.update_channel).unwrap_or(serde_json::json!("stable"))
-    );
-    set!("max_history_messages", config.max_history_messages);
-    set!("max_upload_size_bytes", config.max_upload_size_bytes);
-    set!("max_concurrent_bg_llm", config.max_concurrent_bg_llm);
-    set!("max_agent_call_depth", config.max_agent_call_depth);
-    set!("max_request_body_bytes", config.max_request_body_bytes);
-    set!(
-        "workflow_stale_timeout_minutes",
-        config.workflow_stale_timeout_minutes
-    );
-    set!("tool_timeout_secs", config.tool_timeout_secs);
-    set!(
-        "local_probe_interval_secs",
-        config.local_probe_interval_secs
-    );
-    set!("require_auth_for_reads", config.require_auth_for_reads);
-    set!("dashboard_user", config.dashboard_user);
-    set!(
-        "log_dir",
-        config
-            .log_dir
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-    );
-    set!("cors_origin", config.cors_origin);
-    set!("trust_forwarded_for", config.trust_forwarded_for);
-    set!("cron_session_max_tokens", config.cron_session_max_tokens);
-    set!(
-        "cron_session_max_messages",
-        config.cron_session_max_messages
-    );
-    set!(
-        "cron_session_warn_fraction",
-        config.cron_session_warn_fraction
-    );
-    set!(
-        "cron_session_warn_total_tokens",
-        config.cron_session_warn_total_tokens
-    );
-    set!("strict_config", config.strict_config);
-
-    // ── llm (auxiliary fallback chains; provider:model strings — not secrets) ──
-    set!("llm", {
-        "auxiliary": serde_json::to_value(&config.llm.auxiliary).unwrap_or(serde_json::json!({})),
-    });
-
-    // ── skills ──
-    set!("skills", {
-        "load_user": config.skills.load_user,
-        "extra_dirs": config.skills.extra_dirs.iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect::<Vec<_>>(),
-        "disabled": config.skills.disabled,
-        "env_passthrough_denied_patterns": config.skills.env_passthrough_denied_patterns,
-        "env_passthrough_per_skill": config.skills.env_passthrough_per_skill,
-    });
-
-    // ── triggers ──
-    set!("triggers", {
-        "cooldown_secs": config.triggers.cooldown_secs,
-        "max_per_event": config.triggers.max_per_event,
-        "max_depth": config.triggers.max_depth,
-        "max_workflow_secs": config.triggers.max_workflow_secs,
-    });
-
-    // ── notification (channel routing — recipients are not secrets, but pass through unchanged) ──
-    set!(
-        "notification",
-        serde_json::to_value(&config.notification).unwrap_or(serde_json::json!({}))
-    );
-
-    // ── task_board ──
-    set!("task_board", {
-        "claim_ttl_secs": config.task_board.claim_ttl_secs,
-        "sweep_interval_secs": config.task_board.sweep_interval_secs,
-        "max_retries": config.task_board.max_retries,
-    });
-
-    // ── tool_policy (rules + groups, no secrets) ──
-    set!(
-        "tool_policy",
-        serde_json::to_value(&config.tool_policy).unwrap_or(serde_json::json!({}))
-    );
-
-    // ── context_engine (engine name, plugin paths, hook scripts — no secrets) ──
-    set!(
-        "context_engine",
-        serde_json::to_value(&config.context_engine).unwrap_or(serde_json::json!({}))
-    );
-
-    // ── audit ──
-    set!("audit", {
-        "retention_days": config.audit.retention_days,
-        "anchor_path": config.audit.anchor_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-        "retention": serde_json::to_value(&config.audit.retention).unwrap_or(serde_json::json!({})),
-    });
-
-    // ── health_check ──
-    set!("health_check", {
-        "health_check_interval_secs": config.health_check.health_check_interval_secs,
-    });
-
-    // ── heartbeat ──
-    set!("heartbeat", {
-        "check_interval_secs": config.heartbeat.check_interval_secs,
-        "default_timeout_secs": config.heartbeat.default_timeout_secs,
-        "keep_recent": config.heartbeat.keep_recent,
-    });
-
-    // ── plugins ──
-    set!("plugins", {
-        "plugin_registries": config.plugins.plugin_registries,
-    });
-
-    // ── registry (mirror URL is not a secret, just a public proxy prefix) ──
-    set!("registry", {
-        "cache_ttl_secs": config.registry.cache_ttl_secs,
-        "registry_mirror": config.registry.registry_mirror,
-    });
-
-    // ── privacy ──
-    set!("privacy", {
-        "mode": serde_json::to_value(&config.privacy.mode).unwrap_or(serde_json::json!("off")),
-        "redact_patterns": config.privacy.redact_patterns,
-    });
-
-    // ── sanitize ──
-    set!(
-        "sanitize",
-        serde_json::to_value(&config.sanitize).unwrap_or(serde_json::json!({}))
-    );
-
-    // ── inbox ──
-    set!("inbox", {
-        "enabled": config.inbox.enabled,
-        "directory": config.inbox.directory,
-        "poll_interval_secs": config.inbox.poll_interval_secs,
-        "default_agent": config.inbox.default_agent,
-    });
-
-    // ── telemetry (otlp_endpoint may carry credentials in URL; keep host/port only) ──
-    set!("telemetry", {
-        "enabled": config.telemetry.enabled,
-        "otlp_endpoint": redact_url_credentials(&config.telemetry.otlp_endpoint),
-        "service_name": config.telemetry.service_name,
-        "sample_rate": config.telemetry.sample_rate,
-        "prometheus_enabled": config.telemetry.prometheus_enabled,
-        "auto_start_observability_stack": config.telemetry.auto_start_observability_stack,
-        "emit_caller_trace_headers": config.telemetry.emit_caller_trace_headers,
-    });
-
-    // ── prompt_intelligence ──
-    set!("prompt_intelligence", {
-        "enabled": config.prompt_intelligence.enabled,
-        "hash_prompts": config.prompt_intelligence.hash_prompts,
-        "max_versions_per_agent": config.prompt_intelligence.max_versions_per_agent,
-    });
-
-    // ── rate_limit ──
-    set!("rate_limit", {
-        "api_requests_per_minute": config.rate_limit.api_requests_per_minute,
-        "retry_after_secs": config.rate_limit.retry_after_secs,
-        "max_ws_per_ip": config.rate_limit.max_ws_per_ip,
-        "ws_messages_per_minute": config.rate_limit.ws_messages_per_minute,
-        "ws_terminal_messages_per_minute": config.rate_limit.ws_terminal_messages_per_minute,
-        "ws_idle_timeout_secs": config.rate_limit.ws_idle_timeout_secs,
-        "ws_debounce_ms": config.rate_limit.ws_debounce_ms,
-        "ws_debounce_chars": config.rate_limit.ws_debounce_chars,
-        "auth_rate_limit_per_ip": config.rate_limit.auth_rate_limit_per_ip,
-    });
-
-    // ── tool_invoke ──
-    set!("tool_invoke", {
-        "enabled": config.tool_invoke.enabled,
-        "allowlist": config.tool_invoke.allowlist,
-    });
-
-    // ── parallel_tools ──
-    set!("parallel_tools", {
-        "enabled": config.parallel_tools.enabled,
-        "max_concurrent": config.parallel_tools.max_concurrent,
-        "mcp_default_safety": config.parallel_tools.mcp_default_safety,
-        "mcp_readonly_allowlist": config.parallel_tools.mcp_readonly_allowlist,
-    });
-
-    // ── tool_results ──
-    set!("tool_results", {
-        "spill_threshold_bytes": config.tool_results.spill_threshold_bytes,
-        "max_artifact_bytes": config.tool_results.max_artifact_bytes,
-        "max_bytes_per_turn": config.tool_results.max_bytes_per_turn,
-        "history_fold_after_turns": config.tool_results.history_fold_after_turns,
-        "fold_min_batch_size": config.tool_results.fold_min_batch_size,
-        "artifact_max_age_days": config.tool_results.artifact_max_age_days,
-    });
-
-    // ── compaction ──
-    set!("compaction", {
-        "threshold_messages": config.compaction.threshold_messages,
-        "keep_recent": config.compaction.keep_recent,
-        "max_summary_tokens": config.compaction.max_summary_tokens,
-        "token_threshold_ratio": config.compaction.token_threshold_ratio,
-        "max_chunk_chars": config.compaction.max_chunk_chars,
-        "max_retries": config.compaction.max_retries,
-    });
-
-    // ── azure_openai (endpoint URL may identify a tenant; keep as-is, deployment is non-secret) ──
-    set!("azure_openai", {
-        "endpoint": config.azure_openai.endpoint,
-        "api_version": config.azure_openai.api_version,
-        "deployment": config.azure_openai.deployment,
-    });
-
-    // ── proxy (URLs may carry user:pass — strip credentials before exposing) ──
-    set!("proxy", {
-        "http_proxy": config.proxy.http_proxy.as_deref().map(librefang_types::config::redact_proxy_url),
-        "https_proxy": config.proxy.https_proxy.as_deref().map(librefang_types::config::redact_proxy_url),
-        "no_proxy": config.proxy.no_proxy,
-    });
-
-    // ── taint_rules: pass-through (rule names + actions; no secrets) ──
-    set!(
-        "taint_rules",
-        serde_json::to_value(&config.taint_rules).unwrap_or(serde_json::json!([]))
-    );
-
-    // ── sidecar_channels (already redacted above — env_keys only, no values) ──
-    set!("sidecar_channels", sidecar_channels);
-
-    // ── Provider URL/region/timeout maps (#4678): non-secret, pass-through ──
-    set!(
-        "provider_request_timeout_secs",
-        config.provider_request_timeout_secs
-    );
-    // Note: `provider_urls`, `provider_proxy_urls`, `provider_regions`, and
-    // `provider_api_keys` are already inserted above. `tool_timeouts`:
-    set!("tool_timeouts", config.tool_timeouts);
-
     Json(serde_json::Value::Object(out))
-}
-
-/// Strip embedded `user:pass@` credentials from a URL, keeping host/port.
-///
-/// Used for telemetry / OTLP endpoints that may legitimately contain a
-/// basic-auth tuple in the URL. Returns the input unchanged when no `@`
-/// follows the scheme — i.e. when there is nothing to redact.
-fn redact_url_credentials(url: &str) -> String {
-    if let Some(scheme_end) = url.find("://") {
-        let after_scheme = &url[scheme_end + 3..];
-        if let Some(at_pos) = after_scheme.find('@') {
-            let host_and_rest = &after_scheme[at_pos..]; // includes '@'
-            return format!("{}://***{}", &url[..scheme_end], host_and_rest);
-        }
-    }
-    url.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,8 +1467,8 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
 )]
 pub async fn migrate_detect() -> impl IntoResponse {
     // Check OpenClaw first
-    if let Some(path) = librefang_import::openclaw::detect_openclaw_home() {
-        let scan = librefang_import::openclaw::scan_openclaw_workspace(&path);
+    if let Some(path) = librefang_migrate::openclaw::detect_openclaw_home() {
+        let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
         return (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1738,47 +1507,6 @@ pub async fn migrate_detect() -> impl IntoResponse {
     )
 }
 
-/// Known framework source directories under the user's OS home, used as the
-/// migration source allow-list. Legacy OpenClaw aliases are included so the
-/// existing `~/.clawdbot` / `~/.moldbot` / `~/.moltbot` layouts still import.
-const MIGRATE_SOURCE_DIR_NAMES: &[&str] = &[
-    ".openclaw",
-    ".clawdbot",
-    ".moldbot",
-    ".moltbot",
-    ".openfang",
-    ".langchain",
-    ".autogpt",
-];
-
-/// Build the containment allow-list for a migration *source* path: the
-/// librefang home plus any known framework source directory that actually
-/// exists under the OS home.
-///
-/// #5577 confined both source and target to the librefang home, which
-/// regressed the documented "migrate from `~/.openclaw`" flow — the source
-/// dirs are siblings of `~/.librefang`, not descendants, so a real
-/// `source_dir: "~/.openclaw"` was rejected. Only *existing* directories are
-/// added: `validate_path_containment` rejects a non-canonicalizable root with
-/// a 500, so a missing `~/.autogpt` must never enter the list. Migration
-/// targets are deliberately NOT widened by this list — writes stay confined
-/// to the librefang home.
-fn migrate_source_roots(
-    librefang_home: &std::path::Path,
-    os_home: Option<&std::path::Path>,
-) -> Vec<std::path::PathBuf> {
-    let mut roots = vec![librefang_home.to_path_buf()];
-    if let Some(home) = os_home {
-        for name in MIGRATE_SOURCE_DIR_NAMES {
-            let dir = home.join(name);
-            if dir.is_dir() {
-                roots.push(dir);
-            }
-        }
-    }
-    roots
-}
-
 /// POST /api/migrate/scan — Scan a specific directory for OpenClaw workspace.
 #[utoipa::path(
     post,
@@ -1788,33 +1516,12 @@ fn migrate_source_roots(
         (status = 200, description = "Scan directory for migratable workspace", body = crate::types::JsonObject)
     )
 )]
-pub async fn migrate_scan(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<MigrateScanRequest>,
-) -> impl IntoResponse {
-    // SECURITY: same containment policy as `run_migrate` below. Without it,
-    // the 200-vs-400 `Directory not found` branch is a `.exists()` oracle
-    // for any path readable as the daemon UID — see
-    // `docs/issues/migrate-arbitrary-paths.md`. The probe path is the
-    // sibling of the write primitive `run_migrate` patches; both endpoints
-    // share the same audit-cited threat model and must share the same
-    // allowlist: the librefang home plus the known framework source dirs
-    // that exist under the OS home (see `migrate_source_roots`).
-    let home_dir = state.kernel.home_dir().to_path_buf();
-    let source_roots = migrate_source_roots(&home_dir, dirs::home_dir().as_deref());
-    let allowed_roots: Vec<&std::path::Path> = source_roots.iter().map(|p| p.as_path()).collect();
-
-    let path = match crate::validation::validate_path_containment(
-        "path",
-        std::path::Path::new(req.path.trim()),
-        &allowed_roots,
-        true, // scan target must already exist
-    ) {
-        Ok(p) => p,
-        Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
-    };
-
-    let scan = librefang_import::openclaw::scan_openclaw_workspace(&path);
+pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
+    let path = std::path::PathBuf::from(&req.path);
+    if !path.exists() {
+        return ApiErrorResponse::bad_request("Directory not found").into_json_tuple();
+    }
+    let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
     (StatusCode::OK, Json(serde_json::json!(scan)))
 }
 
@@ -1832,10 +1539,10 @@ pub async fn run_migrate(
     Json(req): Json<MigrateRequest>,
 ) -> impl IntoResponse {
     let source = match req.source.as_str() {
-        "openclaw" => librefang_import::MigrateSource::OpenClaw,
-        "langchain" => librefang_import::MigrateSource::LangChain,
-        "autogpt" => librefang_import::MigrateSource::AutoGpt,
-        "openfang" => librefang_import::MigrateSource::OpenFang,
+        "openclaw" => librefang_migrate::MigrateSource::OpenClaw,
+        "langchain" => librefang_migrate::MigrateSource::LangChain,
+        "autogpt" => librefang_migrate::MigrateSource::AutoGpt,
+        "openfang" => librefang_migrate::MigrateSource::OpenFang,
         other => {
             return ApiErrorResponse::bad_request(format!(
                 "Unknown source: {other}. Use 'openclaw', 'openfang', 'langchain', or 'autogpt'"
@@ -1844,57 +1551,20 @@ pub async fn run_migrate(
         }
     };
 
-    // SECURITY: source_dir and target_dir must canonicalize to a descendant
-    // of an allowed root. Without this check, Admin can probe arbitrary
-    // filesystem paths via the 200-vs-400 oracle and write under
-    // attacker-chosen target directories — see
-    // `docs/issues/migrate-arbitrary-paths.md`. Admin is dev/ops, not the
-    // trust ceiling; a leaked Admin token MUST NOT become a daemon-UID
-    // write primitive.
-    //
-    // The source allow-list is the librefang home plus the known framework
-    // source dirs under the OS home (the documented `~/.openclaw` etc. are
-    // siblings of `~/.librefang`, not descendants — #5577 confined both to
-    // the librefang home and regressed migrate-from-OpenClaw). The target
-    // allow-list stays the librefang home only: reads may come from a source
-    // dir, but writes never leave the librefang home.
-    let home_dir = state.kernel.home_dir().to_path_buf();
-    let source_roots = migrate_source_roots(&home_dir, dirs::home_dir().as_deref());
-    let source_allowed: Vec<&std::path::Path> = source_roots.iter().map(|p| p.as_path()).collect();
-    let target_allowed: Vec<&std::path::Path> = vec![home_dir.as_path()];
-
-    let source_dir = match crate::validation::validate_path_containment(
-        "source_dir",
-        std::path::Path::new(req.source_dir.trim()),
-        &source_allowed,
-        true, // source must already exist
-    ) {
-        Ok(p) => p,
-        Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
-    };
-
     let target_dir = if req.target_dir.trim().is_empty() {
-        home_dir.clone()
+        state.kernel.home_dir().to_path_buf()
     } else {
-        match crate::validation::validate_path_containment(
-            "target_dir",
-            std::path::Path::new(req.target_dir.trim()),
-            &target_allowed,
-            false, // target may not exist yet — migration creates it
-        ) {
-            Ok(p) => p,
-            Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
-        }
+        std::path::PathBuf::from(req.target_dir.trim())
     };
 
-    let options = librefang_import::MigrateOptions {
+    let options = librefang_migrate::MigrateOptions {
         source,
-        source_dir,
+        source_dir: std::path::PathBuf::from(req.source_dir.trim()),
         target_dir,
         dry_run: req.dry_run,
     };
 
-    match librefang_import::run_migration(&options) {
+    match librefang_migrate::run_migration(&options) {
         Ok(report) => {
             // Migrate writes agent manifests under `<target>/agents/<name>/`
             // (legacy schema). Relocate them into the canonical
@@ -1942,7 +1612,7 @@ pub async fn run_migrate(
                 })),
             )
         }
-        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal(format!("Migration failed: {e}")).into_json_tuple(),
     }
 }
 
@@ -1973,7 +1643,7 @@ pub async fn config_reload(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_kernel::audit::AuditAction::ConfigChange,
+        librefang_runtime::audit::AuditAction::ConfigChange,
         "config reload requested via API",
         "pending",
         user_id,
@@ -1984,7 +1654,10 @@ pub async fn config_reload(
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
             // restart adapters from the new config.
-            if plan.hot_actions.contains(&HotAction::ReloadChannels) {
+            if plan
+                .hot_actions
+                .contains(&librefang_kernel::config_reload::HotAction::ReloadChannels)
+            {
                 match crate::channel_bridge::reload_channels_from_disk(&state).await {
                     Ok(names) => {
                         tracing::info!(
@@ -2122,7 +1795,11 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     //     Carries `{ select?, number_select?, min?, max?, step?, placeholder? }`.
     //
     // Replaces a 245-line hand-authored schema (issue #3048 follow-up).
-    let catalog = state.kernel.model_catalog_ref().load();
+    let catalog = state
+        .kernel
+        .model_catalog_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let provider_options: Vec<String> = catalog
         .list_providers()
         .iter()
@@ -2164,28 +1841,11 @@ pub fn ui_sections_overlay() -> serde_json::Value {
             "fields": [
                 "api_listen", "api_key", "log_level", "network_enabled", "mode",
                 "language", "usage_footer", "stable_prefix_mode", "prompt_caching",
-                "max_cron_jobs", "agent_max_iterations", "workspaces_dir",
-                // Newly surfaced root-level scalars (#4678).
-                "update_channel", "max_history_messages", "max_upload_size_bytes",
-                "max_concurrent_bg_llm", "max_agent_call_depth", "max_request_body_bytes",
-                "workflow_stale_timeout_minutes", "workflow_default_total_timeout_secs",
-                "tool_timeout_secs",
-                "local_probe_interval_secs", "require_auth_for_reads",
-                "external_auth_proxy",
-                "dashboard_user", "log_dir", "data_dir", "home_dir",
-                "cors_origin", "trust_forwarded_for",
-                "cron_session_max_tokens", "cron_session_max_messages",
-                "cron_session_warn_fraction", "cron_session_warn_total_tokens",
-                // Cron session compaction (#3693) — keep alongside the
-                // other cron_session_* knobs so the dashboard renders them
-                // as one cohesive cluster.
-                "cron_session_compaction_mode", "cron_session_compaction_keep_recent",
-                "strict_config"
+                "max_cron_jobs", "agent_max_iterations", "workspaces_dir"
             ]
         },
         {"key": "default_model", "struct_field": "default_model", "hot_reloadable": true},
         {"key": "memory", "struct_field": "memory"},
-        {"key": "memory_wiki", "struct_field": "memory_wiki"},
         {"key": "proactive_memory", "struct_field": "proactive_memory"},
         {"key": "auto_dream", "struct_field": "auto_dream"},
         {"key": "web", "struct_field": "web"},
@@ -2214,48 +1874,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "thinking", "struct_field": "thinking"},
         {"key": "pairing", "struct_field": "pairing"},
         {"key": "broadcast", "struct_field": "broadcast"},
-        {"key": "auto_reply", "struct_field": "auto_reply"},
-        // ── Newly exposed sub-struct sections (#4678) ──
-        {"key": "llm", "struct_field": "llm"},
-        {"key": "skills", "struct_field": "skills"},
-        {"key": "triggers", "struct_field": "triggers"},
-        {"key": "notification", "struct_field": "notification"},
-        {"key": "task_board", "struct_field": "task_board"},
-        {"key": "tool_policy", "struct_field": "tool_policy"},
-        {"key": "context_engine", "struct_field": "context_engine"},
-        {"key": "audit", "struct_field": "audit"},
-        {"key": "health_check", "struct_field": "health_check"},
-        {"key": "heartbeat", "struct_field": "heartbeat"},
-        {"key": "plugins", "struct_field": "plugins"},
-        {"key": "registry", "struct_field": "registry"},
-        {"key": "privacy", "struct_field": "privacy"},
-        {"key": "sanitize", "struct_field": "sanitize"},
-        {"key": "inbox", "struct_field": "inbox"},
-        {"key": "telemetry", "struct_field": "telemetry"},
-        {"key": "prompt_intelligence", "struct_field": "prompt_intelligence"},
-        {"key": "rate_limit", "struct_field": "rate_limit"},
-        {"key": "tool_invoke", "struct_field": "tool_invoke"},
-        {"key": "parallel_tools", "struct_field": "parallel_tools"},
-        {"key": "tool_results", "struct_field": "tool_results"},
-        {"key": "compaction", "struct_field": "compaction"},
-        {"key": "gateway_compression", "struct_field": "gateway_compression"},
-        {"key": "prompt_cache", "struct_field": "prompt_cache"},
-        {"key": "azure_openai", "struct_field": "azure_openai"},
-        {"key": "proxy", "struct_field": "proxy"},
-        // Tool-exec backend selection (local / docker / daytona / ssh).
-        {"key": "tool_exec", "struct_field": "tool_exec"},
-        // ── Newly exposed collection-typed sections (#4678) ──
-        {"key": "taint_rules", "struct_field": "taint_rules"},
-        {"key": "fallback_providers", "struct_field": "fallback_providers"},
-        {"key": "credential_pools", "struct_field": "credential_pools"},
-        {"key": "sidecar_channels", "struct_field": "sidecar_channels"},
-        {"key": "provider_urls", "struct_field": "provider_urls"},
-        {"key": "provider_proxy_urls", "struct_field": "provider_proxy_urls"},
-        {"key": "provider_regions", "struct_field": "provider_regions"},
-        {"key": "provider_request_timeout_secs", "struct_field": "provider_request_timeout_secs"},
-        {"key": "tool_timeouts", "struct_field": "tool_timeouts"},
-        // Background autonomous-loop executor knobs (#5168).
-        {"key": "background", "struct_field": "background"}
+        {"key": "auto_reply", "struct_field": "auto_reply"}
     ])
 }
 
@@ -2349,47 +1968,7 @@ pub fn ui_options_overlay(
         "/extensions/health_check_interval_secs": {"min": 5, "max": 3600, "step": 1},
 
         // ── terminal ──
-        "/terminal/max_windows": {"min": 1, "max": 64, "step": 1},
-
-        // ── rate_limit ──
-        "/rate_limit/api_requests_per_minute": {"min": 0, "max": 100_000, "step": 100},
-        "/rate_limit/retry_after_secs": {"min": 1, "max": 3600, "step": 1},
-        "/rate_limit/max_ws_per_ip": {"min": 1, "max": 100, "step": 1},
-
-        // ── triggers ──
-        "/triggers/cooldown_secs": {"min": 0, "max": 3600, "step": 1},
-        "/triggers/max_per_event": {"min": 1, "max": 1000, "step": 1},
-        "/triggers/max_depth": {"min": 1, "max": 50, "step": 1},
-
-        // ── compaction ──
-        "/compaction/threshold_messages": {"min": 5, "max": 1000, "step": 1},
-        "/compaction/keep_recent": {"min": 1, "max": 100, "step": 1},
-        "/compaction/max_summary_tokens": {"min": 100, "max": 16_000, "step": 100},
-        "/compaction/token_threshold_ratio": {"min": 0, "max": 1, "step": 0.05},
-
-        // ── registry ──
-        "/registry/cache_ttl_secs": {"min": 60, "max": 604_800, "step": 60},
-
-        // ── health_check ──
-        "/health_check/health_check_interval_secs": {"min": 5, "max": 3600, "step": 1},
-
-        // ── heartbeat ──
-        "/heartbeat/check_interval_secs": {"min": 5, "max": 3600, "step": 1},
-
-        // ── inbox ──
-        "/inbox/poll_interval_secs": {"min": 1, "max": 600, "step": 1},
-
-        // ── audit ──
-        "/audit/retention_days": {"min": 1, "max": 3650, "step": 1},
-
-        // ── telemetry ──
-        "/telemetry/sample_rate": {"min": 0, "max": 1, "step": 0.01},
-
-        // ── parallel_tools ──
-        "/parallel_tools/max_concurrent": {"min": 1, "max": 64, "step": 1},
-
-        // ── tool_results ──
-        "/tool_results/spill_threshold_bytes": {"min": 1024, "max": 10_485_760, "step": 1024}
+        "/terminal/max_windows": {"min": 1, "max": 64, "step": 1}
     })
 }
 
@@ -2405,7 +1984,6 @@ pub fn ui_options_overlay(
     post,
     path = "/api/config/set",
     tag = "system",
-    request_body(content = crate::types::JsonObject, description = "`{ \"path\": \"section.key\", \"value\": ... }`"),
     responses(
         (status = 200, description = "Set a single config value and persist", body = crate::types::JsonObject)
     )
@@ -2645,7 +2223,8 @@ pub async fn config_set(
     // out-of-range value would be flagged here even though reload
     // would silently fix it.
     parsed_config.clamp_bounds();
-    if let Err(errors) = validate_config_for_reload(&parsed_config) {
+    if let Err(errors) = librefang_kernel::config_reload::validate_config_for_reload(&parsed_config)
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -2702,7 +2281,7 @@ pub async fn config_set(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_kernel::audit::AuditAction::ConfigChange,
+        librefang_runtime::audit::AuditAction::ConfigChange,
         format!("config set: {path}"),
         "completed",
         user_id,
@@ -2739,62 +2318,6 @@ fn is_writable_config_path(path: &str) -> bool {
         "approval.auto_approve_autonomous",
         "approval.auto_approve",
         "approval.totp_grace_period_secs",
-        // ── Newly user-tunable root-level scalars (#4678) ──
-        // Update channel + size / depth caps; default model / mode flags;
-        // localisation. Deliberately excludes `api_key`, `dashboard_pass*`,
-        // `dashboard_user`, `cors_origin`, `trust_forwarded_for`,
-        // `network_enabled`, `api_listen`, `trusted_*`, `home_dir`, `data_dir`,
-        // `log_dir`, `cron_session_*`, and `require_auth_for_reads` — those
-        // are infrastructure / auth knobs that need a deliberate file edit.
-        "update_channel",
-        "max_upload_size_bytes",
-        "max_concurrent_bg_llm",
-        "max_agent_call_depth",
-        "max_request_body_bytes",
-        "workflow_stale_timeout_minutes",
-        "tool_timeout_secs",
-        "local_probe_interval_secs",
-        "prompt_caching",
-        "stable_prefix_mode",
-        "usage_footer",
-        "language",
-        "mode",
-        "agent_max_iterations",
-        "max_cron_jobs",
-        // ── Collection-typed sections, primitive-valued only (#4678) ──
-        // The dashboard's StringMapEditor / NumberMapEditor saves the
-        // entire collection as one JSON value posted at the section's
-        // bare path. Restricted to BTreeMap<String, String|u64> sections
-        // because their value type is primitive — there is no nested
-        // payload that could carry a credential past the path-string
-        // SCRUB check. Vec<Struct> sections (sidecar_channels,
-        // fallback_providers, taint_rules) are intentionally NOT here:
-        // their items have nested fields (e.g. SidecarChannel.env) that
-        // SCRUB_SUFFIXES — which only inspects the dotted path string —
-        // cannot police inside a wholesale JSON payload.
-        // `sidecar_channels` writes go through the dedicated
-        // `POST /api/channels/sidecar/{name}/configure` endpoint, which
-        // validates against the cached `--describe` schema and splits
-        // secrets vs non-secrets across `secrets.env` and `config.toml`.
-        // `fallback_providers` / `taint_rules` remain edit-on-disk for
-        // now (round-4 review of #4678).
-        "provider_urls",
-        "provider_regions",
-        "provider_proxy_urls",
-        "provider_request_timeout_secs",
-        "tool_timeouts",
-        // ── Round-5 review of #4678 — safe network knobs ──
-        // The whole `network.` prefix was withdrawn (see SECTION_PREFIXES
-        // comment below) because `network.bootstrap_peers` was reachable
-        // as a depth-1 leaf and post-auth flips would redirect DHT
-        // discovery to attacker-controlled peers. The display knobs
-        // listed here have no peer-redirection or auth surface.
-        // Excludes `listen_addresses` (binding 0.0.0.0 post-auth would
-        // expose a previously loopback-only API surface — edit on disk),
-        // and excludes `bootstrap_peers` / `shared_secret`.
-        "network.mdns_enabled",
-        "network.max_peers",
-        "network.max_messages_per_peer_per_minute",
     ];
     if EXACT.contains(&path) {
         return true;
@@ -2813,148 +2336,14 @@ fn is_writable_config_path(path: &str) -> bool {
         "rate_limit.",
         // Queue / concurrency tuning.
         "queue.",
-        // ── Newly user-tunable section prefixes (#4678) ──
-        // Tool invocation / parallelism / result spill / policy.
-        "tool_invoke.",
-        "parallel_tools.",
-        "tool_results.",
-        "tool_policy.",
-        // Per-tool timeout overrides — values are integers (seconds), no secrets.
-        "tool_timeouts.",
-        // Compaction & trigger system tuning.
-        "compaction.",
-        "triggers.",
-        // Registry / inbox / health / heartbeat / notification.
-        "registry.",
-        "inbox.",
-        "health_check.",
-        "heartbeat.",
-        "notification.",
-        // Task board, prompt intelligence, context engine.
-        "task_board.",
-        "prompt_intelligence.",
-        "context_engine.",
-        // Auto-dream scheduler.
-        "auto_dream.",
-        // Media / link / TTS / canvas behaviour.
-        "media.",
-        "links.",
-        "tts.",
-        "canvas.",
-        // Extensions reconnect tuning, session retention.
-        "extensions.",
-        "session.",
-        // Memory tuning.
-        "proactive_memory.",
-        "memory.",
-        // Browser / Docker sandbox / vault tuning. SCRUB_SUFFIXES still
-        // blocks `*.api_key`, `*.password`, `*.bypass`, `*.admin`, `*.owner`.
-        "browser.",
-        "docker.",
-        "vault.",
-        // Pairing & A2A — token_env / shared_secret keys are blocked by SCRUB.
-        "pairing.",
-        "a2a.",
-        // Sanitize / privacy display switches.
-        "sanitize.",
-        "privacy.",
-        // Note: `audit.` and `telemetry.` are intentionally NOT here
-        // (round-4 review of #4678). They expose `audit.anchor_path`
-        // (Merkle tamper-detect target) and `telemetry.otlp_endpoint`
-        // (trace export destination) — neither is acceptable to mutate
-        // post-auth. Display knobs (sample_rate, retention_days) are
-        // available via /api/config but not via /api/config/set; users
-        // edit those on disk where the change leaves a file mtime trail.
-        // Webhook trigger toggles (token / token_env still SCRUB-blocked).
-        "webhook_triggers.",
-        // Auto-reply / broadcast routing.
-        "auto_reply.",
-        "broadcast.",
-        // Provider URL/region/timeout/proxy maps (URLs are public endpoints;
-        // SCRUB-suffix list still blocks any `*.api_key` keys that snuck in).
-        "provider_urls.",
-        "provider_regions.",
-        "provider_proxy_urls.",
-        "provider_request_timeout_secs.",
-        // Vertex AI region + Azure OpenAI configuration knobs (the
-        // SCRUB suffix list still blocks api_key/_env/client_secret
-        // entries embedded in either section).
-        "vertex_ai.",
-        "azure_openai.",
-        // Note: `proxy.` is intentionally NOT here (round-4 review of
-        // #4678). Owner-role posting `proxy.http_proxy` could MITM all
-        // outbound LLM traffic in flight. The proxy URL is a system
-        // boundary that should be edited on disk (file mtime trail).
-        // Default model selection (provider/model/base_url; api_key SCRUB-blocked).
-        "default_model.",
-        // Extended thinking parameters.
-        "thinking.",
-        // Budget caps (USD ceilings, alert threshold, per-hour token cap).
-        "budget.",
-        // Reload mode/debounce.
-        "reload.",
-        // Note: `external_oauth.`, `external_auth.`, `oauth.` are
-        // intentionally NOT here (round-4 review of #4678). They expose
-        // `*.issuer_url`, `*.allowed_domains`, `*.redirect_url`,
-        // `*.require_email_verified`, `*.client_id` — flipping any of
-        // those post-auth lets an Owner-role attacker redirect login,
-        // broaden the email allowlist, or skip email verification
-        // (regression vector for #3703). SCRUB only blocks
-        // `_secret_env` and the new `_env` suffix; non-secret-but-
-        // load-bearing identity fields aren't in SCRUB. Edit on disk.
-        // Terminal access controls.
-        "terminal.",
-        // Note: `network.` is intentionally NOT here (round-5 review of
-        // #4678). `network.bootstrap_peers` was reachable as a depth-1
-        // leaf and is a `Vec<String>`; an Owner-role attacker who flipped
-        // it post-auth could redirect DHT discovery to attacker peers
-        // (parallel threat model to the round-4 removal of `proxy.`
-        // for outbound LLM MITM). Safe display knobs (`mdns_enabled`,
-        // `max_peers`, `max_messages_per_peer_per_minute`) are EXACT-listed
-        // above; everything else stays edit-on-disk.
-        // Approval policy fields are intentionally NOT a section prefix:
-        // the existing EXACT list above covers the safe display knobs
-        // (`auto_approve_autonomous`, `auto_approve`, `totp_grace_period_secs`),
-        // and the test suite asserts that `approval.second_factor` stays
-        // closed — flipping it via the dashboard would let an Owner-role
-        // attacker silently disable 2FA after an API-key leak.
-        // Shell exec policy (timeouts, mode, allowed_env_vars list).
-        "exec_policy.",
-        // LLM auxiliary chains.
-        "llm.",
-        // Plugins / skills tuning.
-        "plugins.",
-        "skills.",
     ];
-    // Section prefixes where the depth-1 leaf (vendor / collection-element)
-    // is itself a struct containing credential-shaped fields that
-    // SCRUB_SUFFIXES cannot police inside a wholesale JSON payload.
-    // Writes against these prefixes must be depth-2 (per-leaf) only —
-    // same defect class round-4 explicitly removed `sidecar_channels` /
-    // `fallback_providers` / `taint_rules` for. Round-5 review of #4678.
-    //
-    // `channels.<vendor>` is `OneOrMany<*Config>` containing
-    // `*_token_env` / `*_secret_env` / etc.; depth-1 wholesale-replacement
-    // would let an Owner-role caller redirect the env-var that resolves
-    // a bot/API token. Depth-2 (`channels.telegram.enabled` etc.) goes
-    // through SCRUB_SUFFIXES which catches the `_env` blanket.
-    const DEPTH_2_ONLY_PREFIXES: &[&str] = &["channels."];
     let in_section = SECTION_PREFIXES.iter().any(|pfx| {
-        if !path.starts_with(pfx) {
-            return false;
-        }
-        let rest = &path[pfx.len()..];
-        if rest.is_empty() {
-            return false;
-        }
-        let segments = rest.split('.').count();
-        if DEPTH_2_ONLY_PREFIXES.contains(pfx) {
-            segments == 2
-        } else {
-            // Single leaf (e.g. "web.search_provider") or one nested level
-            // (e.g. "default_model.provider") — not deeper.
-            segments == 1 || segments == 2
-        }
+        path.starts_with(pfx) && path.len() > pfx.len() && !path[pfx.len()..].contains('.')
+            // Allow a single nested level too (e.g. "channels.telegram.enabled")
+            || path.starts_with(pfx) && {
+                let rest = &path[pfx.len()..];
+                rest.split('.').count() == 2
+            }
     });
     if !in_section {
         return false;
@@ -2972,23 +2361,6 @@ fn is_writable_config_path(path: &str) -> bool {
         ".bypass",
         ".admin",
         ".owner",
-        // Round-4 review of #4678: env-var-name redirects. Codebase
-        // pervasively uses `*_token_env`, `*_password_env`,
-        // `*_secret_env`, `*_client_secret_env`, `*_api_key_env`,
-        // `bot_token_env`, `access_token_env`, `cdp_auth_token_env`.
-        // The original SCRUB only blocked literal `.api_key` etc., so
-        // an attacker could repoint `<section>.api_key_env` at any env
-        // var the daemon has access to and force a credential rotation
-        // through a logged channel. The blanket `_env` suffix catches
-        // every variant the workspace currently uses (verified by grep
-        // against librefang-types/src/config/types.rs).
-        "_env",
-        // OAuth public identity that's safe to *display* but not safe
-        // to mutate (issuer redirect / consent skipping). External
-        // auth sections are mostly off the prefix list now, but defense
-        // in depth in case anything slips through a writable section.
-        ".client_id",
-        ".client_secret",
     ];
     if SCRUB_SUFFIXES.iter().any(|s| path.ends_with(s)) {
         return false;
@@ -3076,83 +2448,7 @@ pub async fn dashboard_snapshot(
     axum::Json(dashboard_snapshot_inner(&state).await)
 }
 
-/// TTL for the [`dashboard_snapshot_inner`] memoization cache.
-///
-/// 900 ms is well below the dashboard's 5 s poll interval (so a polling tab
-/// rebuilds on every tick and the data still feels "live"), but enough to
-/// fold the burst of back-to-back polls that arrive when a user opens
-/// multiple dashboard tabs, switches windows, or the page rapidly remounts
-/// during a route change.
-const DASHBOARD_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_millis(900);
-
-/// Cached aggregated payload for `/api/dashboard/snapshot`.
-///
-/// The payload is wrapped in an `Arc` so cache lookups clone the pointer,
-/// not the (possibly large) JSON tree. The final return type of
-/// [`dashboard_snapshot_inner`] is still `serde_json::Value`, so we pay one
-/// `(*payload).clone()` per cache hit — still 10–100× cheaper than
-/// re-running per-agent manifest enrichment + provider/channel probes +
-/// memory queries.
-struct CachedDashboardSnapshot {
-    generated_at: std::time::Instant,
-    payload: Arc<serde_json::Value>,
-}
-
-/// Process-wide cache for [`dashboard_snapshot_inner`], keyed by
-/// `AppState` pointer identity.
-///
-/// We deliberately do **not** store the cache on `AppState` itself —
-/// adding a field there ripples into `librefang-testing` and every
-/// inline test that constructs an `AppState` literal (5+ call sites).
-/// Keying by `Arc::as_ptr(state) as usize` instead gives every test its
-/// own cache slot for free, while production (one long-lived `AppState`)
-/// gets exactly one slot.
-///
-/// Entries are evicted opportunistically: on each lookup we discard the
-/// caller's expired entry; on each insert we drop any entries older than
-/// 60× the TTL, which is enough to prevent the test process from
-/// accumulating slots over time without paying a global scan on the hot
-/// path.
-static DASHBOARD_SNAPSHOT_CACHE: std::sync::OnceLock<
-    dashmap::DashMap<usize, CachedDashboardSnapshot>,
-> = std::sync::OnceLock::new();
-
-fn dashboard_snapshot_cache() -> &'static dashmap::DashMap<usize, CachedDashboardSnapshot> {
-    DASHBOARD_SNAPSHOT_CACHE.get_or_init(dashmap::DashMap::new)
-}
-
 async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
-    // Fast path: serve the memoized payload if it's still within TTL.
-    // Keyed by the `AppState` Arc pointer so concurrent tests with
-    // distinct kernels don't poison each other's cache.
-    let cache_key = Arc::as_ptr(state) as usize;
-    let cache = dashboard_snapshot_cache();
-    if let Some(entry) = cache.get(&cache_key) {
-        if entry.generated_at.elapsed() < DASHBOARD_SNAPSHOT_TTL {
-            return (*entry.payload).clone();
-        }
-    }
-
-    let payload = dashboard_snapshot_compute(state).await;
-    let payload = Arc::new(payload);
-    cache.insert(
-        cache_key,
-        CachedDashboardSnapshot {
-            generated_at: std::time::Instant::now(),
-            payload: Arc::clone(&payload),
-        },
-    );
-    // Opportunistic prune so test processes that construct many
-    // short-lived `AppState`s don't accumulate dead cache slots
-    // indefinitely. The threshold is 60× TTL so production's single
-    // long-lived state is never pruned, and we only walk the (tiny)
-    // table when we're already taking the write path.
-    let prune_threshold = DASHBOARD_SNAPSHOT_TTL * 60;
-    cache.retain(|_, v| v.generated_at.elapsed() < prune_threshold);
-    (*payload).clone()
-}
-
-async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value {
     // Health (same logic as /api/health)
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -3182,14 +2478,11 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
         .iter()
         .filter(|e| !e.is_hand && matches!(e.state, librefang_types::agent::AgentState::Running))
         .count();
-    // Same fix as `/api/status` above — indexed COUNT instead of
-    // decoding every session blob just to call `.len()`. This is the
-    // dashboard snapshot path (`/api/dashboard/snapshot`), hit on
-    // every 5 s poll, so the cost compounded.
     let session_count = state
         .kernel
         .memory_substrate()
-        .count_sessions()
+        .list_sessions()
+        .map(|s| s.len())
         .unwrap_or(0);
     let cfg = state.kernel.config_snapshot();
     // Runtime stats shared with `/api/status` — the dashboard RuntimePage
@@ -3218,8 +2511,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
     // Agents list — fully enriched (same fields as /api/agents) so AgentsPage
     // can use this snapshot directly instead of polling /api/agents separately.
     let agents: Vec<serde_json::Value> = {
-        let catalog_guard = state.kernel.model_catalog_ref().load();
-        let catalog: Option<&librefang_kernel::model_catalog::ModelCatalog> = Some(&catalog_guard);
+        let catalog = state.kernel.model_catalog_ref().read().ok();
         let dm = {
             let dm_override = state
                 .kernel
@@ -3236,7 +2528,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
             .iter()
             // `e` here is &&Arc<AgentEntry>; deref through the ref + Arc to
             // hand `enrich_agent_json` the `&AgentEntry` it expects.
-            .map(|e| super::agents::enrich_agent_json(e.as_ref(), &dm, catalog, None))
+            .map(|e| super::agents::enrich_agent_json(e.as_ref(), &dm, &catalog, None))
             .collect()
     };
 
@@ -3562,87 +2854,6 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path("network.shared_secret"));
         assert!(!super::is_writable_config_path("migration_state"));
         assert!(!super::is_writable_config_path("nonsense.key"));
-
-        // ── Round-4 review of #4678 ──────────────────────────────────
-        // Sections that are intentionally NOT in SECTION_PREFIXES
-        // because their fields control auth redirect / observability
-        // export / outbound traffic interception. Owner-role still
-        // edits these on disk; the API write path stays closed.
-        assert!(!super::is_writable_config_path("external_auth.issuer_url"));
-        assert!(!super::is_writable_config_path(
-            "external_auth.allowed_domains"
-        ));
-        assert!(!super::is_writable_config_path(
-            "external_auth.redirect_url"
-        ));
-        assert!(!super::is_writable_config_path(
-            "external_auth.require_email_verified"
-        ));
-        assert!(!super::is_writable_config_path("oauth.google_client_id"));
-        assert!(!super::is_writable_config_path("audit.anchor_path"));
-        assert!(!super::is_writable_config_path("audit.retention_days"));
-        assert!(!super::is_writable_config_path("telemetry.otlp_endpoint"));
-        assert!(!super::is_writable_config_path("telemetry.sample_rate"));
-        assert!(!super::is_writable_config_path("proxy.http_proxy"));
-        assert!(!super::is_writable_config_path("proxy.https_proxy"));
-
-        // ── _env / client_id / client_secret SCRUB ────────────────────
-        // The original SCRUB only blocked `.api_key` etc. literally;
-        // the codebase pervasively names env-var-name fields with the
-        // `_env` suffix (bot_token_env, client_secret_env, …). All of
-        // those now reject regardless of which section they're in.
-        assert!(!super::is_writable_config_path(
-            "channels.telegram.bot_token_env"
-        ));
-        assert!(!super::is_writable_config_path("default_model.api_key_env"));
-        assert!(!super::is_writable_config_path(
-            "channels.whatsapp.access_token_env"
-        ));
-        assert!(!super::is_writable_config_path("default_model.client_id"));
-        assert!(!super::is_writable_config_path(
-            "default_model.client_secret"
-        ));
-
-        // ── Collection paths: primitive maps allowed, Vec<Struct> rejected ──
-        // BTreeMap<String, String|u64> sections accept whole-blob writes
-        // because their value type is primitive — no nested credential
-        // surface. Vec<Struct> sections (sidecar_channels,
-        // fallback_providers, taint_rules) reject whole-blob writes:
-        // their items have nested fields (env maps, api_key_env) that
-        // SCRUB can't police inside a wholesale JSON payload.
-        // `sidecar_channels` has its own typed write endpoint
-        // (`POST /api/channels/sidecar/{name}/configure`); the bare
-        // path stays closed here.
-        assert!(super::is_writable_config_path("provider_urls"));
-        assert!(super::is_writable_config_path("provider_regions"));
-        assert!(super::is_writable_config_path(
-            "provider_request_timeout_secs"
-        ));
-        assert!(super::is_writable_config_path("tool_timeouts"));
-        assert!(!super::is_writable_config_path("sidecar_channels"));
-        assert!(!super::is_writable_config_path("fallback_providers"));
-        assert!(!super::is_writable_config_path("taint_rules"));
-
-        // ── Round-5 review of #4678 ──────────────────────────────────
-        // `channels.<vendor>` (depth-1 wholesale-replace) MUST reject;
-        // depth-2 leaves under the same vendor stay open (per-field
-        // toggles via the dashboard).
-        assert!(!super::is_writable_config_path("channels.telegram"));
-        assert!(!super::is_writable_config_path("channels.whatsapp"));
-        assert!(!super::is_writable_config_path("channels.email"));
-        assert!(super::is_writable_config_path("channels.telegram.enabled"));
-        assert!(super::is_writable_config_path("channels.whatsapp.enabled"));
-
-        // `network.bootstrap_peers` MUST reject (DHT MITM via post-auth
-        // peer redirect, threat model parallel to the round-4 removal
-        // of `proxy.http_proxy`). Display knobs stay open via EXACT.
-        assert!(!super::is_writable_config_path("network.bootstrap_peers"));
-        assert!(!super::is_writable_config_path("network.listen_addresses"));
-        assert!(super::is_writable_config_path("network.mdns_enabled"));
-        assert!(super::is_writable_config_path("network.max_peers"));
-        assert!(super::is_writable_config_path(
-            "network.max_messages_per_peer_per_minute"
-        ));
     }
 
     #[test]
@@ -3655,92 +2866,5 @@ searxng = { url = "https://search.example.com" }
         let cfg: KernelConfig = toml::from_str(toml_src)
             .expect("inline-table shape produced by /api/config/set must parse (issue #4016)");
         assert_eq!(cfg.web.searxng.url, "https://search.example.com");
-    }
-}
-
-#[cfg(test)]
-mod migrate_roots_tests {
-    use super::migrate_source_roots;
-    use std::path::Path;
-
-    #[test]
-    fn includes_only_existing_known_source_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let os_home = tmp.path();
-        std::fs::create_dir_all(os_home.join(".openclaw")).unwrap();
-        std::fs::create_dir_all(os_home.join(".langchain")).unwrap();
-        let lf_home = os_home.join(".librefang");
-        std::fs::create_dir_all(&lf_home).unwrap();
-
-        let roots = migrate_source_roots(&lf_home, Some(os_home));
-
-        assert!(roots.contains(&lf_home), "librefang home is always a root");
-        assert!(
-            roots.contains(&os_home.join(".openclaw")),
-            "existing source dir must be included"
-        );
-        assert!(
-            roots.contains(&os_home.join(".langchain")),
-            "existing source dir must be included"
-        );
-        // A non-existent root must NOT be added: validate_path_containment
-        // returns a 500 on a root it cannot canonicalize.
-        assert!(!roots.contains(&os_home.join(".autogpt")));
-        assert!(!roots.contains(&os_home.join(".openfang")));
-    }
-
-    #[test]
-    fn no_os_home_yields_librefang_home_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lf_home = tmp.path().join(".librefang");
-        std::fs::create_dir_all(&lf_home).unwrap();
-        assert_eq!(migrate_source_roots(&lf_home, None), vec![lf_home]);
-    }
-
-    #[test]
-    fn source_under_known_root_passes_but_target_stays_confined() {
-        // Reproduces the #5577 regression: a source under `~/.openclaw` must be
-        // accepted again, while writes (target) stay confined to the librefang
-        // home.
-        let tmp = tempfile::tempdir().unwrap();
-        let os_home = tmp.path();
-        let openclaw = os_home.join(".openclaw");
-        std::fs::create_dir_all(&openclaw).unwrap();
-        let lf_home = os_home.join(".librefang");
-        std::fs::create_dir_all(&lf_home).unwrap();
-
-        let source_roots = migrate_source_roots(&lf_home, Some(os_home));
-        let source_allowed: Vec<&Path> = source_roots.iter().map(|p| p.as_path()).collect();
-
-        // source_dir under ~/.openclaw is accepted (the regression case).
-        assert!(crate::validation::validate_path_containment(
-            "source_dir",
-            &openclaw,
-            &source_allowed,
-            true,
-        )
-        .is_ok());
-
-        // A sibling dir NOT on the allow-list is still rejected (containment held).
-        let outside = os_home.join(".evil");
-        std::fs::create_dir_all(&outside).unwrap();
-        assert!(crate::validation::validate_path_containment(
-            "source_dir",
-            &outside,
-            &source_allowed,
-            true,
-        )
-        .is_err());
-
-        // Target writes stay confined to the librefang home: `~/.openclaw` is a
-        // valid *source* root but must NOT be a valid *target* root.
-        let target_allowed: Vec<&Path> = vec![lf_home.as_path()];
-        assert!(crate::validation::validate_path_containment(
-            "target_dir",
-            &openclaw,
-            &target_allowed,
-            false,
-        )
-        .is_err());
     }
 }

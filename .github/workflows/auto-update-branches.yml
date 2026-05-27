@@ -2,7 +2,9 @@ name: Auto Update PR Branches
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # every 6 hours — primary trigger; catches failing PRs
+    - cron: '0 */6 * * *'  # every 6 hours — safety net for stragglers
+  push:
+    branches: [main]       # re-evaluate open PRs immediately after every main update
   workflow_dispatch:
 
 permissions:

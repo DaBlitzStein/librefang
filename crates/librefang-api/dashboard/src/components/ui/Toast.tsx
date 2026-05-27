@@ -17,8 +17,6 @@ const TOAST_ICONS: Record<"success" | "error" | "info", React.ReactNode> = {
   info: <AlertCircle className="h-4 w-4 shrink-0" />,
 };
 
-const MAX_TOASTS = 5;
-
 export function ToastContainer() {
   const toasts = useUIStore((s) => s.toasts);
   const removeToast = useUIStore((s) => s.removeToast);
@@ -30,7 +28,7 @@ export function ToastContainer() {
       aria-atomic="false"
     >
       <AnimatePresence>
-        {toasts.slice(-MAX_TOASTS).map((toast) => (
+        {toasts.map((toast) => (
           <ToastItem key={toast.id} id={toast.id} message={toast.message} type={toast.type} removeToast={removeToast} />
         ))}
       </AnimatePresence>
@@ -65,7 +63,7 @@ const ToastItem = memo(function ToastItem({ id, message, type, removeToast }: { 
       <button
         onClick={onDismiss}
         className="ml-2 opacity-60 hover:opacity-100 transition-opacity"
-        aria-label={t("common.close", { defaultValue: "Close" })}
+        aria-label={t("common.close")}
       >
         <X className="h-3.5 w-3.5" />
       </button>

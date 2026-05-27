@@ -9,9 +9,8 @@ import {
   useUsageDaily,
   useModelPerformance,
   useBudgetStatus,
-  useProviderBudgets,
 } from "../lib/queries/analytics";
-import { useUpdateBudget, useUpdateProviderBudget } from "../lib/mutations/analytics";
+import { useUpdateBudget } from "../lib/mutations/analytics";
 
 vi.mock("../lib/queries/analytics", () => ({
   useUsageSummary: vi.fn(),
@@ -20,12 +19,10 @@ vi.mock("../lib/queries/analytics", () => ({
   useUsageDaily: vi.fn(),
   useModelPerformance: vi.fn(),
   useBudgetStatus: vi.fn(),
-  useProviderBudgets: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/analytics", () => ({
   useUpdateBudget: vi.fn(),
-  useUpdateProviderBudget: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -59,9 +56,7 @@ const useUsageByModelMock = useUsageByModel as unknown as ReturnType<typeof vi.f
 const useUsageDailyMock = useUsageDaily as unknown as ReturnType<typeof vi.fn>;
 const useModelPerformanceMock = useModelPerformance as unknown as ReturnType<typeof vi.fn>;
 const useBudgetStatusMock = useBudgetStatus as unknown as ReturnType<typeof vi.fn>;
-const useProviderBudgetsMock = useProviderBudgets as unknown as ReturnType<typeof vi.fn>;
 const useUpdateBudgetMock = useUpdateBudget as unknown as ReturnType<typeof vi.fn>;
-const useUpdateProviderBudgetMock = useUpdateProviderBudget as unknown as ReturnType<typeof vi.fn>;
 
 interface QueryShape<T> {
   data: T;
@@ -89,7 +84,6 @@ function setLoadingState(): void {
   useUsageDailyMock.mockReturnValue(makeQuery(undefined, { isLoading: true }));
   useModelPerformanceMock.mockReturnValue(makeQuery(undefined, { isLoading: true }));
   useBudgetStatusMock.mockReturnValue(makeQuery(undefined));
-  useProviderBudgetsMock.mockReturnValue(makeQuery(undefined, { isLoading: true }));
 }
 
 function setLoadedEmptyState(): void {
@@ -106,19 +100,11 @@ function setLoadedEmptyState(): void {
   useUsageDailyMock.mockReturnValue(makeQuery({ days: [], today_cost_usd: 0 }));
   useModelPerformanceMock.mockReturnValue(makeQuery([]));
   useBudgetStatusMock.mockReturnValue(makeQuery({}));
-  useProviderBudgetsMock.mockReturnValue(
-    makeQuery({ providers: [], alert_threshold: 0.8 }),
-  );
 }
 
 function setMutationDefault(mutate = vi.fn()): ReturnType<typeof vi.fn> {
   useUpdateBudgetMock.mockReturnValue({
     mutate,
-    isPending: false,
-    isSuccess: false,
-  });
-  useUpdateProviderBudgetMock.mockReturnValue({
-    mutate: vi.fn(),
     isPending: false,
     isSuccess: false,
   });
@@ -195,9 +181,6 @@ describe("AnalyticsPage", () => {
     useUsageDailyMock.mockReturnValue(makeQuery({ days: [], today_cost_usd: 0 }));
     useModelPerformanceMock.mockReturnValue(makeQuery([]));
     useBudgetStatusMock.mockReturnValue(makeQuery({}));
-    useProviderBudgetsMock.mockReturnValue(
-      makeQuery({ providers: [], alert_threshold: 0.8 }),
-    );
 
     renderPage();
 
@@ -283,9 +266,6 @@ describe("AnalyticsPage", () => {
     useUsageDailyMock.mockReturnValue(makeQuery({ days: [], today_cost_usd: 0 }, { refetch: refetches.daily }));
     useModelPerformanceMock.mockReturnValue(makeQuery([], { refetch: refetches.perf }));
     useBudgetStatusMock.mockReturnValue(makeQuery({}, { refetch: refetches.budget }));
-    useProviderBudgetsMock.mockReturnValue(
-      makeQuery({ providers: [], alert_threshold: 0.8 }),
-    );
 
     renderPage();
 

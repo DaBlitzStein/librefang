@@ -1,6 +1,6 @@
 import { formatCost as formatCostUtil } from "../lib/format";
 import type { ModelItem, ModelOverrides } from "../api";
-import { FormEvent, memo, useCallback, useEffect, useId, useReducer, useRef, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useModels, useModelOverrides } from "../lib/queries/models";
 import { useAddCustomModel, useRemoveCustomModel, useUpdateModelOverrides, useDeleteModelOverrides } from "../lib/mutations/models";
@@ -45,145 +45,24 @@ const formatCtx = (tokens?: number) => {
   return String(tokens);
 };
 
-// ── Add-form reducer (MD4) ──────────────────────────────────────
-
-type AddFormState = {
-  id: string;
-  provider: string;
-  displayName: string;
-  contextWindow: number;
-  maxOutput: number;
-  inputCost: number;
-  outputCost: number;
-  tools: boolean;
-  vision: boolean;
-  streaming: boolean;
-};
-
-type AddFormAction =
-  | { type: "SET_FIELD"; field: keyof AddFormState; value: AddFormState[keyof AddFormState] }
-  | { type: "RESET" };
-
-const addFormInitial: AddFormState = {
-  id: "",
-  provider: "",
-  displayName: "",
-  contextWindow: 128000,
-  maxOutput: 8192,
-  inputCost: 0,
-  outputCost: 0,
-  tools: true,
-  vision: false,
-  streaming: true,
-};
-
-function addFormReducer(state: AddFormState, action: AddFormAction): AddFormState {
-  switch (action.type) {
-    case "SET_FIELD":
-      return { ...state, [action.field]: action.value };
-    case "RESET":
-      return addFormInitial;
-    default:
-      return state;
-  }
-}
-
-// ── Settings-form reducer (MD5/MD6/MD7) ────────────────────────
-
-// Tri-state capability override (refs #4745). `default` means "use the
-// catalog/provider value"; `on` / `off` force the capability regardless of
-// what the catalog declares. Maps to ModelOverrides on the wire as:
-//   default → field absent (undefined)
-//   on      → true
-//   off     → false
-type CapOverride = "default" | "on" | "off";
-
-type SettingsState = {
-  modelType: "chat" | "speech" | "embedding";
-  temperature: number;
-  tempEnabled: boolean;
-  topP: number;
-  topPEnabled: boolean;
-  maxTokens: number;
-  maxTokensEnabled: boolean;
-  freqPenalty: number;
-  freqEnabled: boolean;
-  presPenalty: number;
-  presEnabled: boolean;
-  reasoningEffort: string;
-  useMaxCompletionTokens: boolean;
-  noSystemRole: boolean;
-  forceMaxTokens: boolean;
-  toolsOverride: CapOverride;
-  visionOverride: CapOverride;
-  streamingOverride: CapOverride;
-  thinkingOverride: CapOverride;
-};
-
-type SettingsAction =
-  | { type: "SET_FIELD"; field: keyof SettingsState; value: SettingsState[keyof SettingsState] }
-  | { type: "HYDRATE"; payload: Partial<SettingsState> };
-
-const settingsInitial: SettingsState = {
-  modelType: "chat",
-  temperature: 0.7,
-  tempEnabled: false,
-  topP: 1.0,
-  topPEnabled: false,
-  maxTokens: 4096,
-  maxTokensEnabled: false,
-  freqPenalty: 0.0,
-  freqEnabled: false,
-  presPenalty: 0.0,
-  presEnabled: false,
-  reasoningEffort: "",
-  useMaxCompletionTokens: false,
-  noSystemRole: false,
-  forceMaxTokens: false,
-  toolsOverride: "default",
-  visionOverride: "default",
-  streamingOverride: "default",
-  thinkingOverride: "default",
-};
-
-function boolToOverride(v: boolean | undefined | null): CapOverride {
-  if (v === true) return "on";
-  if (v === false) return "off";
-  return "default";
-}
-
-function overrideToBool(v: CapOverride): boolean | undefined {
-  if (v === "on") return true;
-  if (v === "off") return false;
-  return undefined;
-}
-
-function settingsReducer(state: SettingsState, action: SettingsAction): SettingsState {
-  switch (action.type) {
-    case "SET_FIELD":
-      return { ...state, [action.field]: action.value };
-    case "HYDRATE":
-      return { ...state, ...action.payload };
-    default:
-      return state;
-  }
-}
-
-// ── ModelCard (MD2: memo, MD3: stable callback signatures) ──────
+// ── ModelCard ─────────────────────────────────────────────────────
 
 type CardProps = {
   m: ModelItem;
   hidden: boolean;
-  onOpen: (m: ModelItem) => void;
-  onSettings: (m: ModelItem) => void;
-  onToggleHidden: (m: ModelItem) => void;
-  onDelete: (id: string) => void;
+  onOpen: () => void;
+  onSettings: () => void;
+  onToggleHidden: () => void;
+  onDelete: () => void;
   pendingDelete: boolean;
 };
 
-const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onToggleHidden, onDelete, pendingDelete }: CardProps) {
+function ModelCard({ m, hidden, onOpen, onSettings, onToggleHidden, onDelete, pendingDelete }: CardProps) {
   const { t } = useTranslation();
   const isCustom = m.tier === "custom";
+  // Treat as free only when both costs are explicitly declared as 0 in the
+  // catalog. `undefined` means "unknown" (e.g. local-model entries that don't
+  // ship pricing) and must NOT render as the green Free badge.
   const free = m.input_cost_per_m === 0 && m.output_cost_per_m === 0;
 
   const formatCost = (cost?: number) => {
@@ -197,11 +76,11 @@ const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onTog
       role="button"
       tabIndex={0}
       aria-label={m.display_name || m.id}
-      onClick={() => onOpen(m)}
+      onClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onOpen(m);
+          onOpen();
         }
       }}
       className={`group relative flex flex-col gap-2.5 p-4 rounded-2xl border bg-surface hover:bg-main/40 hover:border-brand/40 focus-visible:outline-none focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/30 transition-colors cursor-pointer min-h-[124px] ${
@@ -267,18 +146,18 @@ const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onTog
         {/* Hover-revealed actions */}
         <div className="ml-auto flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
           <button type="button" title={t("models.settings_title")}
-            onClick={(e) => { e.stopPropagation(); onSettings(m); }}
+            onClick={(e) => { e.stopPropagation(); onSettings(); }}
             className="flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:bg-main hover:text-text transition-colors">
             <Settings className="w-3 h-3" />
           </button>
           <button type="button" title={hidden ? t("models.unhide_model") : t("models.hide_model")}
-            onClick={(e) => { e.stopPropagation(); onToggleHidden(m); }}
+            onClick={(e) => { e.stopPropagation(); onToggleHidden(); }}
             className="flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:bg-main hover:text-text transition-colors">
             {hidden ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
           </button>
           {isCustom && (
             <button type="button" title={t("models.delete_model")}
-              onClick={(e) => { e.stopPropagation(); onDelete(m.id); }}
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
               className={`flex items-center justify-center w-6 h-6 rounded-md transition-colors ${
                 pendingDelete ? "bg-error/15 text-error" : "text-text-dim hover:bg-error/10 hover:text-error"
               }`}>
@@ -289,7 +168,7 @@ const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onTog
       </div>
     </div>
   );
-});
+}
 
 // ── ModelDetailBody ───────────────────────────────────────────────
 // Body rendered inside the global PushDrawer when a card is opened.
@@ -338,11 +217,11 @@ function ModelDetailBody({
         </div>
         <div>
           <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_input")}</div>
-          <span className="font-mono">{formatCostUtil(m.input_cost_per_m ?? 0)} / M</span>
+          <span className="font-mono">${m.input_cost_per_m ?? 0} / M</span>
         </div>
         <div>
           <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_output")}</div>
-          <span className="font-mono">{formatCostUtil(m.output_cost_per_m ?? 0)} / M</span>
+          <span className="font-mono">${m.output_cost_per_m ?? 0} / M</span>
         </div>
         <div>
           <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.max_output")}</div>
@@ -388,9 +267,6 @@ function ModelDetailBody({
 
 export function ModelsPage() {
   const { t } = useTranslation();
-  // Stable prefix so each <label htmlFor> resolves to a unique <input id>
-  // for screen readers / label-click focus (#5140).
-  const fieldId = useId();
   const addToast = useUIStore((s) => s.addToast);
   const [search, setSearch] = useState("");
   const [tierFilter, setTierFilter] = useState<string>("all");
@@ -408,35 +284,68 @@ export function ModelsPage() {
   const [settingsModel, setSettingsModel] = useState<ModelItem | null>(null);
   const [detailModel, setDetailModel] = useState<ModelItem | null>(null);
 
-  const [form, dispatchForm] = useReducer(addFormReducer, addFormInitial);
+  const [formId, setFormId] = useState("");
+  const [formProvider, setFormProvider] = useState("");
+  const [formDisplayName, setFormDisplayName] = useState("");
+  const [formContextWindow, setFormContextWindow] = useState(128000);
+  const [formMaxOutput, setFormMaxOutput] = useState(8192);
+  const [formInputCost, setFormInputCost] = useState(0);
+  const [formOutputCost, setFormOutputCost] = useState(0);
+  const [formTools, setFormTools] = useState(true);
+  const [formVision, setFormVision] = useState(false);
+  const [formStreaming, setFormStreaming] = useState(true);
 
   const modelsQuery = useModels();
   const addMut = useAddCustomModel();
   const deleteMut = useRemoveCustomModel();
 
-  const resetForm = useCallback(() => {
+  const resetForm = () => {
     setShowAdd(false);
-    dispatchForm({ type: "RESET" });
-  }, []);
+    setFormId("");
+    setFormProvider("");
+    setFormDisplayName("");
+    setFormContextWindow(128000);
+    setFormMaxOutput(8192);
+    setFormInputCost(0);
+    setFormOutputCost(0);
+    setFormTools(true);
+    setFormVision(false);
+    setFormStreaming(true);
+  };
 
   const handleAdd = async (e: FormEvent) => {
     e.preventDefault();
-    if (!form.id.trim() || !form.provider.trim()) return;
+    if (!formId.trim() || !formProvider.trim()) return;
     try {
       await addMut.mutateAsync({
-        id: form.id.trim(),
-        provider: form.provider.trim(),
-        display_name: form.displayName.trim() || undefined,
-        context_window: form.contextWindow,
-        max_output_tokens: form.maxOutput,
-        input_cost_per_m: form.inputCost,
-        output_cost_per_m: form.outputCost,
-        supports_tools: form.tools,
-        supports_vision: form.vision,
-        supports_streaming: form.streaming,
+        id: formId.trim(),
+        provider: formProvider.trim(),
+        display_name: formDisplayName.trim() || undefined,
+        context_window: formContextWindow,
+        max_output_tokens: formMaxOutput,
+        input_cost_per_m: formInputCost,
+        output_cost_per_m: formOutputCost,
+        supports_tools: formTools,
+        supports_vision: formVision,
+        supports_streaming: formStreaming,
       });
       addToast(t("models.model_added"), "success");
       resetForm();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
+    setConfirmDeleteId(null);
+    try {
+      const model = allModels.find(m => m.id === id);
+      const key = model ? modelKey(model) : null;
+      await deleteMut.mutateAsync(id);
+      addToast(t("models.model_deleted"), "success");
+      if (key && hiddenModelKeys.includes(key)) unhideModelAction(key);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       addToast(msg || t("common.error"), "error");
@@ -492,6 +401,7 @@ export function ModelsPage() {
 
   const hiddenCount = useMemo(() => allModels.filter(m => hiddenSet.has(modelKey(m))).length, [allModels, hiddenSet]);
 
+  // Always group by provider — no toggle, sticky headers do the work.
   const grouped = useMemo(() => {
     const map = new Map<string, ModelItem[]>();
     for (const m of filtered) {
@@ -502,7 +412,7 @@ export function ModelsPage() {
     return new Map([...map.entries()].sort(([a], [b]) => a.localeCompare(b)));
   }, [filtered]);
 
-  const toggleHidden = useCallback((m: ModelItem) => {
+  const toggleHidden = (m: ModelItem) => {
     const key = modelKey(m);
     if (hiddenSet.has(key)) {
       unhideModelAction(key);
@@ -511,32 +421,7 @@ export function ModelsPage() {
       hideModelAction(key);
       addToast(t("models.model_hidden"), "success");
     }
-  }, [hiddenSet, unhideModelAction, hideModelAction, addToast, t]);
-
-  const handleCardOpen = useCallback((m: ModelItem) => setDetailModel(m), []);
-  const handleCardSettings = useCallback((m: ModelItem) => setSettingsModel(m), []);
-
-  const allModelsRef = useRef(allModels);
-  allModelsRef.current = allModels;
-  const hiddenModelKeysRef = useRef(hiddenModelKeys);
-  hiddenModelKeysRef.current = hiddenModelKeys;
-  const confirmDeleteIdRef = useRef(confirmDeleteId);
-  confirmDeleteIdRef.current = confirmDeleteId;
-
-  const handleDelete = useCallback(async (id: string) => {
-    if (confirmDeleteIdRef.current !== id) { setConfirmDeleteId(id); return; }
-    setConfirmDeleteId(null);
-    try {
-      const model = allModelsRef.current.find(m => m.id === id);
-      const key = model ? modelKey(model) : null;
-      await deleteMut.mutateAsync(id);
-      addToast(t("models.model_deleted"), "success");
-      if (key && hiddenModelKeysRef.current.includes(key)) unhideModelAction(key);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      addToast(msg || t("common.error"), "error");
-    }
-  }, [deleteMut, addToast, t, unhideModelAction]);
+  };
 
   const detailHidden = detailModel ? hiddenSet.has(modelKey(detailModel)) : false;
 
@@ -646,10 +531,10 @@ export function ModelsPage() {
                       key={`${m.provider}:${m.id}`}
                       m={m}
                       hidden={hiddenSet.has(modelKey(m))}
-                      onOpen={handleCardOpen}
-                      onSettings={handleCardSettings}
-                      onToggleHidden={toggleHidden}
-                      onDelete={handleDelete}
+                      onOpen={() => setDetailModel(m)}
+                      onSettings={() => setSettingsModel(m)}
+                      onToggleHidden={() => toggleHidden(m)}
+                      onDelete={() => handleDelete(m.id)}
                       pendingDelete={confirmDeleteId === m.id}
                     />
                   ))}
@@ -689,41 +574,41 @@ export function ModelsPage() {
         <form onSubmit={handleAdd} className="p-5 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="sm:col-span-2">
-              <label htmlFor={`${fieldId}-model-id`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_id")} *</label>
-              <input id={`${fieldId}-model-id`} value={form.id} onChange={e => dispatchForm({ type: "SET_FIELD", field: "id", value: e.target.value })} placeholder={t("models.model_id_placeholder")} className={inputClass} required />
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_id")} *</label>
+              <input value={formId} onChange={e => setFormId(e.target.value)} placeholder={t("models.model_id_placeholder")} className={inputClass} required />
             </div>
             <div>
-              <label htmlFor={`${fieldId}-provider`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.provider")} *</label>
-              <input id={`${fieldId}-provider`} value={form.provider} onChange={e => dispatchForm({ type: "SET_FIELD", field: "provider", value: e.target.value })} placeholder={t("models.provider_placeholder")} className={inputClass} required />
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.provider")} *</label>
+              <input value={formProvider} onChange={e => setFormProvider(e.target.value)} placeholder={t("models.provider_placeholder")} className={inputClass} required />
             </div>
             <div>
-              <label htmlFor={`${fieldId}-display-name`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.display_name")}</label>
-              <input id={`${fieldId}-display-name`} value={form.displayName} onChange={e => dispatchForm({ type: "SET_FIELD", field: "displayName", value: e.target.value })} placeholder={t("models.display_name_placeholder")} className={inputClass} />
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.display_name")}</label>
+              <input value={formDisplayName} onChange={e => setFormDisplayName(e.target.value)} placeholder={t("models.display_name_placeholder")} className={inputClass} />
             </div>
             <div>
-              <label htmlFor={`${fieldId}-context-window`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.context_window")}</label>
-              <input id={`${fieldId}-context-window`} type="number" value={form.contextWindow} onChange={e => dispatchForm({ type: "SET_FIELD", field: "contextWindow", value: +e.target.value })} className={inputClass} />
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.context_window")}</label>
+              <input type="number" value={formContextWindow} onChange={e => setFormContextWindow(+e.target.value)} className={inputClass} />
             </div>
             <div>
-              <label htmlFor={`${fieldId}-max-output`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.max_output")}</label>
-              <input id={`${fieldId}-max-output`} type="number" value={form.maxOutput} onChange={e => dispatchForm({ type: "SET_FIELD", field: "maxOutput", value: +e.target.value })} className={inputClass} />
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.max_output")}</label>
+              <input type="number" value={formMaxOutput} onChange={e => setFormMaxOutput(+e.target.value)} className={inputClass} />
             </div>
             <div>
-              <label htmlFor={`${fieldId}-input-cost`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.input_cost")}</label>
-              <input id={`${fieldId}-input-cost`} type="number" step="0.01" value={form.inputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "inputCost", value: +e.target.value })} className={inputClass} />
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.input_cost")}</label>
+              <input type="number" step="0.01" value={formInputCost} onChange={e => setFormInputCost(+e.target.value)} className={inputClass} />
             </div>
             <div>
-              <label htmlFor={`${fieldId}-output-cost`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.output_cost")}</label>
-              <input id={`${fieldId}-output-cost`} type="number" step="0.01" value={form.outputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "outputCost", value: +e.target.value })} className={inputClass} />
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.output_cost")}</label>
+              <input type="number" step="0.01" value={formOutputCost} onChange={e => setFormOutputCost(+e.target.value)} className={inputClass} />
             </div>
           </div>
           <div className="flex flex-wrap gap-3">
             {([
-              ["tools", form.tools, "tools", t("models.supports_tools")] as const,
-              ["vision", form.vision, "vision", t("models.supports_vision")] as const,
-              ["streaming", form.streaming, "streaming", t("models.supports_streaming")] as const,
-            ]).map(([key, val, field, label]) => (
-              <button key={key} type="button" onClick={() => dispatchForm({ type: "SET_FIELD", field, value: !val })}
+              ["tools", formTools, setFormTools, t("models.supports_tools")] as const,
+              ["vision", formVision, setFormVision, t("models.supports_vision")] as const,
+              ["streaming", formStreaming, setFormStreaming, t("models.supports_streaming")] as const,
+            ]).map(([key, val, setter, label]) => (
+              <button key={key} type="button" onClick={() => setter(!val)}
                 className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-bold transition-colors ${
                   val ? "border-success bg-success/10 text-success" : "border-border-subtle text-text-dim"
                 }`}>
@@ -736,7 +621,7 @@ export function ModelsPage() {
             <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(addMut.error as Error)?.message}</div>
           )}
           <div className="flex gap-2 pt-2">
-            <Button type="submit" variant="primary" className="flex-1" disabled={addMut.isPending || !form.id.trim() || !form.provider.trim()}>
+            <Button type="submit" variant="primary" className="flex-1" disabled={addMut.isPending || !formId.trim() || !formProvider.trim()}>
               {addMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
               {t("models.add_model")}
             </Button>
@@ -748,7 +633,6 @@ export function ModelsPage() {
       {/* Model Settings Modal */}
       {settingsModel && (
         <ModelSettingsModal
-          key={`${settingsModel.provider}:${settingsModel.id}`}
           model={settingsModel}
           onClose={() => setSettingsModel(null)}
           onSaved={() => {
@@ -798,56 +682,53 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
 
   const [saving, setSaving] = useState(false);
 
-  const [state, dispatch] = useReducer(settingsReducer, settingsInitial);
-  const stateRef = useRef(state);
-  stateRef.current = state;
-  const hydratedRef = useRef(false);
+  const [modelType, setModelType] = useState<"chat" | "speech" | "embedding">("chat");
+  const [temperature, setTemperature] = useState(0.7);
+  const [tempEnabled, setTempEnabled] = useState(false);
+  const [topP, setTopP] = useState(1.0);
+  const [topPEnabled, setTopPEnabled] = useState(false);
+  const [maxTokens, setMaxTokens] = useState(4096);
+  const [maxTokensEnabled, setMaxTokensEnabled] = useState(false);
+  const [freqPenalty, setFreqPenalty] = useState(0.0);
+  const [freqEnabled, setFreqEnabled] = useState(false);
+  const [presPenalty, setPresPenalty] = useState(0.0);
+  const [presEnabled, setPresEnabled] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<string>("");
+  const [useMaxCompletionTokens, setUseMaxCompletionTokens] = useState(false);
+  const [noSystemRole, setNoSystemRole] = useState(false);
+  const [forceMaxTokens, setForceMaxTokens] = useState(false);
+  const [overridesLoaded, setOverridesLoaded] = useState(false);
 
+  // Load existing overrides from query
   useEffect(() => {
-    if (hydratedRef.current) return;
     const o = overridesQuery.data;
-    if (!o) return;
-    const payload: Partial<SettingsState> = {};
-    if (o.model_type) payload.modelType = o.model_type;
-    if (o.temperature != null) { payload.temperature = o.temperature; payload.tempEnabled = true; }
-    if (o.top_p != null) { payload.topP = o.top_p; payload.topPEnabled = true; }
-    if (o.max_tokens != null) { payload.maxTokens = o.max_tokens; payload.maxTokensEnabled = true; }
-    if (o.frequency_penalty != null) { payload.freqPenalty = o.frequency_penalty; payload.freqEnabled = true; }
-    if (o.presence_penalty != null) { payload.presPenalty = o.presence_penalty; payload.presEnabled = true; }
-    if (o.reasoning_effort) payload.reasoningEffort = o.reasoning_effort;
-    if (o.use_max_completion_tokens != null) payload.useMaxCompletionTokens = o.use_max_completion_tokens;
-    if (o.no_system_role != null) payload.noSystemRole = o.no_system_role;
-    if (o.force_max_tokens != null) payload.forceMaxTokens = o.force_max_tokens;
-    payload.toolsOverride = boolToOverride(o.supports_tools);
-    payload.visionOverride = boolToOverride(o.supports_vision);
-    payload.streamingOverride = boolToOverride(o.supports_streaming);
-    payload.thinkingOverride = boolToOverride(o.supports_thinking);
-    dispatch({ type: "HYDRATE", payload });
-    hydratedRef.current = true;
-  }, [overridesQuery.data]);
+    if (!o || overridesLoaded) return;
+    if (o.model_type) setModelType(o.model_type);
+    if (o.temperature != null) { setTemperature(o.temperature); setTempEnabled(true); }
+    if (o.top_p != null) { setTopP(o.top_p); setTopPEnabled(true); }
+    if (o.max_tokens != null) { setMaxTokens(o.max_tokens); setMaxTokensEnabled(true); }
+    if (o.frequency_penalty != null) { setFreqPenalty(o.frequency_penalty); setFreqEnabled(true); }
+    if (o.presence_penalty != null) { setPresPenalty(o.presence_penalty); setPresEnabled(true); }
+    if (o.reasoning_effort) setReasoningEffort(o.reasoning_effort);
+    if (o.use_max_completion_tokens != null) setUseMaxCompletionTokens(o.use_max_completion_tokens);
+    if (o.no_system_role != null) setNoSystemRole(o.no_system_role);
+    if (o.force_max_tokens != null) setForceMaxTokens(o.force_max_tokens);
+    setOverridesLoaded(true);
+  }, [overridesQuery.data, overridesLoaded]);
 
   const handleSave = useCallback(async () => {
-    const s = stateRef.current;
     setSaving(true);
     const overrides: ModelOverrides = {};
-    if (s.modelType !== "chat") overrides.model_type = s.modelType;
-    if (s.tempEnabled) overrides.temperature = s.temperature;
-    if (s.topPEnabled) overrides.top_p = s.topP;
-    if (s.maxTokensEnabled) overrides.max_tokens = s.maxTokens;
-    if (s.freqEnabled) overrides.frequency_penalty = s.freqPenalty;
-    if (s.presEnabled) overrides.presence_penalty = s.presPenalty;
-    if (s.reasoningEffort) overrides.reasoning_effort = s.reasoningEffort;
-    if (s.useMaxCompletionTokens) overrides.use_max_completion_tokens = true;
-    if (s.noSystemRole) overrides.no_system_role = true;
-    if (s.forceMaxTokens) overrides.force_max_tokens = true;
-    const tools = overrideToBool(s.toolsOverride);
-    if (tools !== undefined) overrides.supports_tools = tools;
-    const vision = overrideToBool(s.visionOverride);
-    if (vision !== undefined) overrides.supports_vision = vision;
-    const streaming = overrideToBool(s.streamingOverride);
-    if (streaming !== undefined) overrides.supports_streaming = streaming;
-    const thinking = overrideToBool(s.thinkingOverride);
-    if (thinking !== undefined) overrides.supports_thinking = thinking;
+    if (modelType !== "chat") overrides.model_type = modelType;
+    if (tempEnabled) overrides.temperature = temperature;
+    if (topPEnabled) overrides.top_p = topP;
+    if (maxTokensEnabled) overrides.max_tokens = maxTokens;
+    if (freqEnabled) overrides.frequency_penalty = freqPenalty;
+    if (presEnabled) overrides.presence_penalty = presPenalty;
+    if (reasoningEffort) overrides.reasoning_effort = reasoningEffort;
+    if (useMaxCompletionTokens) overrides.use_max_completion_tokens = true;
+    if (noSystemRole) overrides.no_system_role = true;
+    if (forceMaxTokens) overrides.force_max_tokens = true;
     try {
       await updateMut.mutateAsync({ modelKey: overrideKey, overrides });
       onSaved();
@@ -858,7 +739,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     } finally {
       setSaving(false);
     }
-  }, [overrideKey, updateMut, onSaved, onClose, onError]);
+  }, [overrideKey, modelType, temperature, tempEnabled, topP, topPEnabled, maxTokens, maxTokensEnabled, freqPenalty, freqEnabled, presPenalty, presEnabled, reasoningEffort, useMaxCompletionTokens, noSystemRole, forceMaxTokens, onSaved, onClose, onError, updateMut]);
 
   const handleReset = useCallback(async () => {
     try {
@@ -898,9 +779,9 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_type")}</label>
           <div className="flex gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5">
             {(["chat", "speech", "embedding"] as const).map((mt) => (
-              <button key={mt} type="button" onClick={() => dispatch({ type: "SET_FIELD", field: "modelType", value: mt })}
+              <button key={mt} type="button" onClick={() => setModelType(mt)}
                 className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                  state.modelType === mt ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
+                  modelType === mt ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
                 }`}>
                 {t(`models.type_${mt}`)}
               </button>
@@ -908,49 +789,21 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           </div>
         </div>
 
-        {/* Capabilities — refs #4745: editable per-model overrides.
-            Each capability has a tri-state segmented control:
-              Auto   = use catalog/provider default (no override stored)
-              On     = force capability on regardless of catalog
-              Off    = force capability off regardless of catalog
-            Useful when the provider's `capabilities` field is wrong, missing,
-            or non-standard. The "Auto" segment shows the catalog default in
-            parens so the user can see what they'd revert to. */}
+        {/* Capabilities */}
         <div className="space-y-1.5">
           <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.capabilities")}</label>
-          <p className="text-[11px] text-text-dim leading-snug">{t("models.capabilities_override_hint")}</p>
-          <div className="space-y-1.5">
-            {/* Auto label uses raw catalog default, not the post-override `supports_*` (refs #4745). */}
+          <div className="flex flex-wrap gap-2">
             {([
-              ["tools", state.toolsOverride, model.capabilities_catalog?.supports_tools ?? model.supports_tools, Wrench, "toolsOverride"] as const,
-              ["vision", state.visionOverride, model.capabilities_catalog?.supports_vision ?? model.supports_vision, Eye, "visionOverride"] as const,
-              ["streaming", state.streamingOverride, model.capabilities_catalog?.supports_streaming ?? model.supports_streaming, Zap, "streamingOverride"] as const,
-              ["thinking", state.thinkingOverride, model.capabilities_catalog?.supports_thinking ?? model.supports_thinking, Brain, "thinkingOverride"] as const,
-            ]).map(([key, current, catalogDefault, Icon, field]) => (
-              <div key={key} className="flex items-center gap-3">
-                <span className="flex items-center gap-1.5 text-xs font-bold text-text min-w-[6.5rem]">
-                  <Icon className="w-3.5 h-3.5" />
-                  {t(`models.supports_${key}`)}
-                </span>
-                <div className="flex flex-1 gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5">
-                  {(["default", "on", "off"] as const).map((opt) => {
-                    const label = opt === "default"
-                      ? `${t("models.cap_auto")} (${catalogDefault ? t("models.cap_on") : t("models.cap_off")})`
-                      : opt === "on" ? t("models.cap_force_on") : t("models.cap_force_off");
-                    return (
-                      <button
-                        key={opt}
-                        type="button"
-                        onClick={() => dispatch({ type: "SET_FIELD", field, value: opt })}
-                        className={`flex-1 px-2 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${
-                          current === opt ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
-                        }`}>
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+              ["vision", model.supports_vision, Eye] as const,
+              ["tools", model.supports_tools, Wrench] as const,
+              ["thinking", model.supports_thinking, Brain] as const,
+            ]).map(([key, supported, Icon]) => (
+              <span key={key} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold ${
+                supported ? "border-success/30 bg-success/10 text-success" : "border-border-subtle text-text-dim/40"
+              }`}>
+                <Icon className="w-3.5 h-3.5" />
+                {t(`models.supports_${key}`)}
+              </span>
             ))}
           </div>
         </div>
@@ -971,47 +824,47 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
 
           <SliderInput
             label={t("models.temperature")}
-            value={state.temperature} onChange={(v) => dispatch({ type: "SET_FIELD", field: "temperature", value: v })}
+            value={temperature} onChange={setTemperature}
             min={0} max={2} step={0.01}
-            enabled={state.tempEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "tempEnabled", value: v })}
+            enabled={tempEnabled} onToggle={setTempEnabled}
           />
 
           <SliderInput
             label={t("models.top_p")}
-            value={state.topP} onChange={(v) => dispatch({ type: "SET_FIELD", field: "topP", value: v })}
+            value={topP} onChange={setTopP}
             min={0} max={1} step={0.01}
-            enabled={state.topPEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "topPEnabled", value: v })}
+            enabled={topPEnabled} onToggle={setTopPEnabled}
           />
 
           <SliderInput
             label={t("models.max_tokens_param")}
-            value={state.maxTokens} onChange={(v) => dispatch({ type: "SET_FIELD", field: "maxTokens", value: Math.round(v) })}
+            value={maxTokens} onChange={(v) => setMaxTokens(Math.round(v))}
             min={256} max={1048576} step={256}
-            enabled={state.maxTokensEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "maxTokensEnabled", value: v })}
+            enabled={maxTokensEnabled} onToggle={setMaxTokensEnabled}
             ticks={[256, 32768, 131072, 1048576]}
             formatTick={(v) => v >= 1048576 ? "1M" : v >= 1024 ? `${Math.round(v/1024)}K` : String(v)}
           />
 
           <SliderInput
             label={t("models.frequency_penalty")}
-            value={state.freqPenalty} onChange={(v) => dispatch({ type: "SET_FIELD", field: "freqPenalty", value: v })}
+            value={freqPenalty} onChange={setFreqPenalty}
             min={-2} max={2} step={0.01}
-            enabled={state.freqEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "freqEnabled", value: v })}
+            enabled={freqEnabled} onToggle={setFreqEnabled}
             ticks={[-2, 0, 2]}
           />
 
           <SliderInput
             label={t("models.presence_penalty")}
-            value={state.presPenalty} onChange={(v) => dispatch({ type: "SET_FIELD", field: "presPenalty", value: v })}
+            value={presPenalty} onChange={setPresPenalty}
             min={-2} max={2} step={0.01}
-            enabled={state.presEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "presEnabled", value: v })}
+            enabled={presEnabled} onToggle={setPresEnabled}
             ticks={[-2, 0, 2]}
           />
 
           {/* Reasoning Effort */}
           <div className="space-y-1.5">
             <label className="text-xs font-bold text-text-dim">{t("models.reasoning_effort")}</label>
-            <select value={state.reasoningEffort} onChange={(e) => dispatch({ type: "SET_FIELD", field: "reasoningEffort", value: e.target.value })}
+            <select value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value)}
               className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-brand">
               <option value="">—</option>
               <option value="low">{t("models.effort_low")}</option>
@@ -1024,9 +877,9 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
         {/* Flags */}
         <div className="space-y-1">
           <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.flags")}</label>
-          <SettingsToggle value={state.useMaxCompletionTokens} onChange={(v) => dispatch({ type: "SET_FIELD", field: "useMaxCompletionTokens", value: v })} label={t("models.use_max_completion_tokens")} />
-          <SettingsToggle value={state.noSystemRole} onChange={(v) => dispatch({ type: "SET_FIELD", field: "noSystemRole", value: v })} label={t("models.no_system_role")} />
-          <SettingsToggle value={state.forceMaxTokens} onChange={(v) => dispatch({ type: "SET_FIELD", field: "forceMaxTokens", value: v })} label={t("models.force_max_tokens")} />
+          <SettingsToggle value={useMaxCompletionTokens} onChange={setUseMaxCompletionTokens} label={t("models.use_max_completion_tokens")} />
+          <SettingsToggle value={noSystemRole} onChange={setNoSystemRole} label={t("models.no_system_role")} />
+          <SettingsToggle value={forceMaxTokens} onChange={setForceMaxTokens} label={t("models.force_max_tokens")} />
         </div>
 
         {/* Actions */}

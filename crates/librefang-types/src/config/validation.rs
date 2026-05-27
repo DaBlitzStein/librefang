@@ -29,22 +29,6 @@ const MANUAL_TOP_LEVEL_ALIASES: &[&str] = &[
     "approval_policy", // alias for approval
 ];
 
-/// Nested aliases honoured by `#[serde(alias = …)]` on fields of nested
-/// config structs. Each entry is a `(dotted_path, alias)` pair where
-/// `dotted_path` is the section that owns the aliased field (e.g.
-/// `"terminal"` for `TerminalConfig`) and `alias` is the legacy name still
-/// accepted on the wire.
-///
-/// schemars (0.8) drops `serde(alias)` declarations when generating the
-/// JSON Schema, so strict-mode rejected the legacy name even though serde
-/// would happily deserialise it (#5129). Keep this list in sync with the
-/// `alias = "…"` attributes on nested struct fields in `types.rs`.
-const MANUAL_NESTED_ALIASES: &[(&str, &str)] = &[
-    // TerminalConfig.require_proxy_headers was renamed from
-    // `trust_proxy_headers`; the old name stays accepted via serde(alias).
-    ("terminal", "trust_proxy_headers"),
-];
-
 /// Cached allowlists derived once from the schemars-emitted JSON Schema
 /// for `KernelConfig`. Built on first use and reused for the rest of the
 /// process.
@@ -99,16 +83,6 @@ fn build_allowlists() -> DerivedAllowlists {
                 &mut nested,
                 &mut HashSet::new(),
             );
-        }
-    }
-    // Add `#[serde(alias)]` declarations that schemars dropped (#5129).
-    // Only insert into paths the schema actually surfaced — that way a
-    // stale entry in `MANUAL_NESTED_ALIASES` (e.g. a section that was
-    // later removed) doesn't silently widen the allowlist.
-    for (path, alias) in MANUAL_NESTED_ALIASES {
-        if let Some(entry) = nested.get_mut(*path) {
-            let leaked: &'static str = Box::leak((*alias).to_string().into_boxed_str());
-            entry.insert(leaked);
         }
     }
 
@@ -251,57 +225,6 @@ impl KernelConfig {
         unknown
     }
 
-    /// Detect `[agents.<name>.<override_key>]` blocks placed in
-    /// `config.toml` (#5476).
-    ///
-    /// `KernelConfig` has no `agents` field — per-agent overrides for
-    /// `proactive_memory`, `skill_workshop`, and `compaction` live in
-    /// each agent's own `agent.toml` (or the `[agents.<name>]` section
-    /// of a `HAND.toml`), not in `config.toml`. The original #4870
-    /// issue body proposed the `config.toml` syntax in error, and the
-    /// kernel silently accepted-and-ignored the block (the unknown
-    /// top-level `agents` key was warned about generically, but the
-    /// warning did not point at the correct surface). Operators
-    /// following the published syntax got a silent no-op.
-    ///
-    /// This helper walks the raw TOML for `[agents.<name>.<key>]`
-    /// sub-tables and returns one `(agent_name, override_key)` pair
-    /// per occurrence, sorted deterministically, so the caller can
-    /// emit a targeted warning that names the correct location. Only
-    /// the keys that are *actually* `agent.toml`-only overrides are
-    /// flagged — generic typos under `[agents]` fall through to the
-    /// existing unknown-top-level warning.
-    pub fn detect_misplaced_per_agent_overrides(raw: &toml::Value) -> Vec<(String, String)> {
-        // Keep this list in sync with the fields on `AgentManifest`
-        // that the kernel honours as per-agent overrides of a global
-        // `KernelConfig` section. Adding a new override here is a
-        // one-line update — the warning text below auto-includes it.
-        const PER_AGENT_OVERRIDE_KEYS: &[&str] =
-            &["proactive_memory", "skill_workshop", "compaction"];
-
-        let Some(agents_tbl) = raw
-            .as_table()
-            .and_then(|t| t.get("agents"))
-            .and_then(|v| v.as_table())
-        else {
-            return Vec::new();
-        };
-
-        let mut found = Vec::new();
-        for (agent_name, agent_value) in agents_tbl {
-            let Some(agent_tbl) = agent_value.as_table() else {
-                continue;
-            };
-            for key in PER_AGENT_OVERRIDE_KEYS {
-                if agent_tbl.contains_key(*key) {
-                    found.push((agent_name.clone(), (*key).to_string()));
-                }
-            }
-        }
-        found.sort();
-        found
-    }
-
     /// Validate the configuration, returning a list of warnings.
     ///
     /// Checks for common misconfigurations such as missing API keys for
@@ -310,33 +233,440 @@ impl KernelConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
-        // env-var presence is now validated inside the sidecar process.
-        // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
-        // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-        // email migrated to a sidecar (librefang.sidecar.adapters.email);
-        // env-var presence is now validated inside the sidecar process.
-        // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
-        // env-var presence is now validated inside the sidecar process.
-        // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
-        // env-var presence is now validated inside the sidecar process.
-        // google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
-        // env-var presence is now validated inside the sidecar process.
+        for tg in self.channels.telegram.iter() {
+            if std::env::var(&tg.bot_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Telegram configured but {} is not set",
+                    tg.bot_token_env
+                ));
+            }
+        }
+        for dc in self.channels.discord.iter() {
+            if std::env::var(&dc.bot_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Discord configured but {} is not set",
+                    dc.bot_token_env
+                ));
+            }
+        }
+        for sl in self.channels.slack.iter() {
+            if std::env::var(&sl.app_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Slack configured but {} is not set",
+                    sl.app_token_env
+                ));
+            }
+            if std::env::var(&sl.bot_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Slack configured but {} is not set",
+                    sl.bot_token_env
+                ));
+            }
+        }
+        for wa in self.channels.whatsapp.iter() {
+            if std::env::var(&wa.access_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "WhatsApp configured but {} is not set",
+                    wa.access_token_env
+                ));
+            }
+        }
+        for mx in self.channels.matrix.iter() {
+            if std::env::var(&mx.access_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Matrix configured but {} is not set",
+                    mx.access_token_env
+                ));
+            }
+        }
+        for em in self.channels.email.iter() {
+            if std::env::var(&em.password_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Email configured but {} is not set",
+                    em.password_env
+                ));
+            }
+        }
+        for t in self.channels.teams.iter() {
+            if std::env::var(&t.app_password_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Teams configured but {} is not set",
+                    t.app_password_env
+                ));
+            }
+        }
+        for m in self.channels.mattermost.iter() {
+            if std::env::var(&m.token_env).unwrap_or_default().is_empty() {
+                warnings.push(format!(
+                    "Mattermost configured but {} is not set",
+                    m.token_env
+                ));
+            }
+        }
+        for z in self.channels.zulip.iter() {
+            if std::env::var(&z.api_key_env).unwrap_or_default().is_empty() {
+                warnings.push(format!("Zulip configured but {} is not set", z.api_key_env));
+            }
+        }
+        for tw in self.channels.twitch.iter() {
+            if std::env::var(&tw.oauth_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Twitch configured but {} is not set",
+                    tw.oauth_token_env
+                ));
+            }
+        }
+        for rc in self.channels.rocketchat.iter() {
+            if std::env::var(&rc.token_env).unwrap_or_default().is_empty() {
+                warnings.push(format!(
+                    "Rocket.Chat configured but {} is not set",
+                    rc.token_env
+                ));
+            }
+        }
+        for gc in self.channels.google_chat.iter() {
+            let has_env = !std::env::var(&gc.service_account_env)
+                .unwrap_or_default()
+                .is_empty();
+            let has_key_path = gc
+                .service_account_key_path
+                .as_ref()
+                .is_some_and(|p| !p.is_empty());
+            if !has_env && !has_key_path {
+                warnings.push(format!(
+                    "Google Chat configured but neither {} nor service_account_key_path is set",
+                    gc.service_account_env
+                ));
+            }
+        }
+        for x in self.channels.xmpp.iter() {
+            if std::env::var(&x.password_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!("XMPP configured but {} is not set", x.password_env));
+            }
+        }
         // Wave 3 channels
-        // line migrated to a sidecar (librefang.sidecar.adapters.line);
-        // env-var presence is now validated inside the sidecar process.
-        // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
-        // env-var presence is now validated inside the sidecar process.
+        for ln in self.channels.line.iter() {
+            if std::env::var(&ln.access_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "LINE configured but {} is not set",
+                    ln.access_token_env
+                ));
+            }
+        }
+        for vb in self.channels.viber.iter() {
+            if std::env::var(&vb.auth_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Viber configured but {} is not set",
+                    vb.auth_token_env
+                ));
+            }
+        }
+        for ms in self.channels.messenger.iter() {
+            if std::env::var(&ms.page_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Messenger configured but {} is not set",
+                    ms.page_token_env
+                ));
+            }
+        }
+        for rd in self.channels.reddit.iter() {
+            if std::env::var(&rd.client_secret_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Reddit configured but {} is not set",
+                    rd.client_secret_env
+                ));
+            }
+        }
+        for md in self.channels.mastodon.iter() {
+            if std::env::var(&md.access_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Mastodon configured but {} is not set",
+                    md.access_token_env
+                ));
+            }
+        }
+        for bs in self.channels.bluesky.iter() {
+            if std::env::var(&bs.app_password_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Bluesky configured but {} is not set",
+                    bs.app_password_env
+                ));
+            }
+        }
+        for fs in self.channels.feishu.iter() {
+            if std::env::var(&fs.app_secret_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Feishu configured but {} is not set",
+                    fs.app_secret_env
+                ));
+            }
+        }
+        for rv in self.channels.revolt.iter() {
+            if std::env::var(&rv.bot_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Revolt configured but {} is not set",
+                    rv.bot_token_env
+                ));
+            }
+        }
         // Wave 4 channels
-        // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
-        // env-var presence is now validated inside the sidecar process.
+        for nc in self.channels.nextcloud.iter() {
+            if std::env::var(&nc.token_env).unwrap_or_default().is_empty() {
+                warnings.push(format!(
+                    "Nextcloud configured but {} is not set",
+                    nc.token_env
+                ));
+            }
+        }
+        for gd in self.channels.guilded.iter() {
+            if std::env::var(&gd.bot_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Guilded configured but {} is not set",
+                    gd.bot_token_env
+                ));
+            }
+        }
+        for kb in self.channels.keybase.iter() {
+            if std::env::var(&kb.paperkey_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Keybase configured but {} is not set",
+                    kb.paperkey_env
+                ));
+            }
+        }
+        for tm in self.channels.threema.iter() {
+            if std::env::var(&tm.secret_env).unwrap_or_default().is_empty() {
+                warnings.push(format!(
+                    "Threema configured but {} is not set",
+                    tm.secret_env
+                ));
+            }
+        }
+        for ns in self.channels.nostr.iter() {
+            if std::env::var(&ns.private_key_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Nostr configured but {} is not set",
+                    ns.private_key_env
+                ));
+            }
+        }
+        for wx in self.channels.webex.iter() {
+            if std::env::var(&wx.bot_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Webex configured but {} is not set",
+                    wx.bot_token_env
+                ));
+            }
+        }
+        for pb in self.channels.pumble.iter() {
+            if std::env::var(&pb.bot_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Pumble configured but {} is not set",
+                    pb.bot_token_env
+                ));
+            }
+        }
+        for fl in self.channels.flock.iter() {
+            if std::env::var(&fl.bot_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Flock configured but {} is not set",
+                    fl.bot_token_env
+                ));
+            }
+        }
+        for tw in self.channels.twist.iter() {
+            if std::env::var(&tw.token_env).unwrap_or_default().is_empty() {
+                warnings.push(format!("Twist configured but {} is not set", tw.token_env));
+            }
+        }
         // Wave 5 channels
-        // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
-        // env-var presence is now validated inside the sidecar process.
-        // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
-        // env-var presence + deliver_only-needs-target are now validated
-        // inside the sidecar process at startup (fail-closed `SystemExit(2)`
-        // when WEBHOOK_DELIVER_ONLY=1 but WEBHOOK_DELIVER is empty).
+        for mb in self.channels.mumble.iter() {
+            if std::env::var(&mb.password_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Mumble configured but {} is not set",
+                    mb.password_env
+                ));
+            }
+        }
+        for dt in self.channels.dingtalk.iter() {
+            use super::DingTalkReceiveMode;
+            match dt.receive_mode {
+                DingTalkReceiveMode::Stream => {
+                    if std::env::var(&dt.app_key_env)
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        warnings.push(format!(
+                            "DingTalk stream mode configured but {} is not set",
+                            dt.app_key_env
+                        ));
+                    }
+                    if std::env::var(&dt.app_secret_env)
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        warnings.push(format!(
+                            "DingTalk stream mode configured but {} is not set",
+                            dt.app_secret_env
+                        ));
+                    }
+                }
+                DingTalkReceiveMode::Webhook => {
+                    if std::env::var(&dt.access_token_env)
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        warnings.push(format!(
+                            "DingTalk configured but {} is not set",
+                            dt.access_token_env
+                        ));
+                    }
+                }
+            }
+        }
+        for dc in self.channels.discourse.iter() {
+            if std::env::var(&dc.api_key_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Discourse configured but {} is not set",
+                    dc.api_key_env
+                ));
+            }
+        }
+        for gt in self.channels.gitter.iter() {
+            if std::env::var(&gt.token_env).unwrap_or_default().is_empty() {
+                warnings.push(format!("Gitter configured but {} is not set", gt.token_env));
+            }
+        }
+        for nf in self.channels.ntfy.iter() {
+            if !nf.token_env.is_empty()
+                && std::env::var(&nf.token_env).unwrap_or_default().is_empty()
+            {
+                warnings.push(format!("ntfy configured but {} is not set", nf.token_env));
+            }
+        }
+        for gf in self.channels.gotify.iter() {
+            if std::env::var(&gf.app_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "Gotify configured but {} is not set",
+                    gf.app_token_env
+                ));
+            }
+        }
+        for wh in self.channels.webhook.iter() {
+            if std::env::var(&wh.secret_env).unwrap_or_default().is_empty() {
+                warnings.push(format!(
+                    "Webhook configured but {} is not set",
+                    wh.secret_env
+                ));
+            }
+            if wh.deliver_only {
+                match wh.deliver.as_deref() {
+                    None => warnings.push(format!(
+                        "Webhook (port {}) has deliver_only = true but no deliver channel is configured — \
+                         set deliver = \"<channel>\" (e.g. \"telegram\")",
+                        wh.listen_port
+                    )),
+                    Some("log") => warnings.push(format!(
+                        "Webhook (port {}) has deliver_only = true but deliver = \"log\" is not a valid \
+                         delivery channel — use a real channel name (e.g. \"telegram\")",
+                        wh.listen_port
+                    )),
+                    Some(_) => {}
+                }
+            }
+        }
+        for li in self.channels.linkedin.iter() {
+            if std::env::var(&li.access_token_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "LinkedIn configured but {} is not set",
+                    li.access_token_env
+                ));
+            }
+        }
 
         // Web search provider validation
         match self.web.search_provider {
@@ -563,25 +893,6 @@ impl KernelConfig {
                      access (not read). Likely a typo: did you mean to add \
                      `writable_namespaces = [\"...\"]`?",
                     user.name,
-                ));
-            }
-        }
-
-        // #5138: `cron_session_max_messages` above the substrate's hard
-        // persistence ceiling can never actually keep that many messages
-        // across daemon restarts — `save_session` truncates the tail
-        // beyond MAX_PERSISTED_SESSION_MESSAGES regardless of the cron cap.
-        // Surface the discrepancy at config load instead of letting the
-        // operator silently lose context.
-        if let Some(n) = self.cron_session_max_messages {
-            if n > super::MAX_PERSISTED_SESSION_MESSAGES {
-                warnings.push(format!(
-                    "cron_session_max_messages = {n} exceeds the substrate \
-                     persistence ceiling of {} messages per session; history \
-                     beyond {} is silently truncated on save and will not \
-                     survive a daemon restart (#5138)",
-                    super::MAX_PERSISTED_SESSION_MESSAGES,
-                    super::MAX_PERSISTED_SESSION_MESSAGES,
                 ));
             }
         }

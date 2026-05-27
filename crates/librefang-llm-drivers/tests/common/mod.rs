@@ -13,7 +13,6 @@ use wiremock::{MockServer, Request, ResponseTemplate};
 use librefang_llm_drivers::backoff;
 use librefang_llm_drivers::drivers::anthropic::AnthropicDriver;
 use librefang_llm_drivers::drivers::gemini::GeminiDriver;
-use librefang_llm_drivers::drivers::ollama::OllamaDriver;
 use librefang_llm_drivers::drivers::openai::OpenAIDriver;
 use librefang_llm_drivers::shared_rate_guard;
 
@@ -61,12 +60,6 @@ pub fn mock_gemini_driver(server: &MockServer) -> GeminiDriver {
     )
 }
 
-pub fn mock_ollama_driver(server: &MockServer) -> OllamaDriver {
-    // Empty key matches the default Ollama localhost flow; tunnelled
-    // setups are exercised with an explicit key in dedicated tests.
-    OllamaDriver::with_proxy_and_timeout(String::new(), server.uri(), None, Some(5))
-}
-
 pub fn simple_request(model: &str) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
@@ -78,14 +71,10 @@ pub fn simple_request(model: &str) -> CompletionRequest {
         thinking: None,
         prompt_caching: false,
         cache_ttl: None,
-        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
-        session_id: None,
-        step_id: None,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
     }
 }
 
@@ -110,14 +99,10 @@ pub fn request_with_tools(model: &str) -> CompletionRequest {
         thinking: None,
         prompt_caching: false,
         cache_ttl: None,
-        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
-        session_id: None,
-        step_id: None,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
     }
 }
 
@@ -132,14 +117,10 @@ pub fn request_with_temperature(model: &str, temp: f32) -> CompletionRequest {
         thinking: None,
         prompt_caching: false,
         cache_ttl: None,
-        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
-        session_id: None,
-        step_id: None,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
     }
 }
 
@@ -154,14 +135,10 @@ pub fn o_series_request() -> CompletionRequest {
         thinking: None,
         prompt_caching: false,
         cache_ttl: None,
-        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
-        session_id: None,
-        step_id: None,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
     }
 }
 

@@ -14,8 +14,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::kernel_handle::prelude::*;
-use librefang_kernel::tool_runner::{builtin_tool_definitions, execute_tool};
+use librefang_runtime::kernel_handle::prelude::*;
+use librefang_runtime::tool_runner::{builtin_tool_definitions, execute_tool};
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
 
@@ -39,10 +39,6 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route(
             "/sessions/{id}/label",
             axum::routing::put(set_session_label),
-        )
-        .route(
-            "/sessions/{id}/model",
-            axum::routing::patch(patch_session_model),
         )
         .route(
             "/agents/{id}/sessions/by-label/{label}",
@@ -244,7 +240,7 @@ pub async fn invoke_tool(
     let workspace_root = cfg.effective_workspaces_dir();
     let exec_policy = cfg.exec_policy.clone();
     let docker_config = cfg.docker.clone();
-    let kernel: Arc<dyn KernelHandle> = state.kernel.clone();
+    let kernel: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
 
     let result = execute_tool(
         "rest-api",
@@ -269,7 +265,6 @@ pub async fn invoke_tool(
         Some(state.kernel.process_registry()),
         None, // sender_id
         None, // channel
-        None, // chat_id (REST bridge has no conversation context)
         None, // checkpoint_manager — snapshotting is wired into agent loops
         None, // interrupt — no session to cancel
         None, // session_id
@@ -292,7 +287,7 @@ pub async fn invoke_tool(
     };
     state.kernel.audit().record(
         audit_caller,
-        librefang_kernel::audit::AuditAction::ToolInvoke,
+        librefang_runtime::audit::AuditAction::ToolInvoke,
         &name,
         audit_outcome,
     );
@@ -440,7 +435,6 @@ pub async fn get_session(
                     "messages": session.messages,
                     "context_window_tokens": session.context_window_tokens,
                     "label": session.label,
-                    "model_override": session.model_override,
                     "created_at": created_at,
                     "active": active,
                 })),
@@ -473,13 +467,7 @@ pub async fn delete_session(
         }
     };
 
-    // Route through the kernel orchestrator (rather than calling
-    // `memory_substrate().delete_session(...)` directly) so the per-session
-    // `file_read_tracker` bucket is reclaimed at the same time. Calling the
-    // substrate directly leaked one tracker entry per ever-deleted session
-    // for the daemon's lifetime — context-compression GC never runs on a
-    // dead session.
-    match state.kernel.delete_session(session_id) {
+    match state.kernel.memory_substrate().delete_session(session_id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
@@ -529,134 +517,6 @@ pub async fn set_session_label(
                 "status": "updated",
                 "session_id": id,
                 "label": label,
-            })),
-        ),
-        Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
-                .into_json_tuple()
-        }
-    }
-}
-
-/// PATCH /api/sessions/:id/model — Set or clear a per-session model override (#4898).
-///
-/// Body: `{"model_override": "provider/model"}` to pin, or `{"model_override": null}`
-/// to clear and restore the agent manifest default.
-///
-/// The `model_override` string is validated before persistence:
-/// - Empty strings are rejected (400).
-/// - `"provider/"` (trailing slash, empty model) is rejected (400).
-/// - `"/model"` (leading slash, empty provider) is rejected (400).
-/// - Qualified identifiers like `"meta-llama/Llama-3.3-70B"` are accepted.
-#[utoipa::path(
-    patch,
-    path = "/api/sessions/{id}/model",
-    tag = "sessions",
-    params(("id" = String, Path, description = "Session ID")),
-    request_body = crate::types::JsonObject,
-    responses(
-        (status = 200, description = "Model override updated", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid session ID or model override format"),
-        (status = 404, description = "Session not found"),
-    )
-)]
-pub async fn patch_session_model(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let session_id = match id.parse::<uuid::Uuid>() {
-        Ok(u) => librefang_types::agent::SessionId(u),
-        Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
-                .into_json_tuple();
-        }
-    };
-
-    // `model_override` key present with a string value → set override.
-    // `model_override` key present with null → clear override.
-    // Key absent → 400 (explicit opt-in required).
-    let model_override: Option<&str> = match req.get("model_override") {
-        None => {
-            return ApiErrorResponse::bad_request(t.t_args(
-                "api-error-generic",
-                &[("error", "missing field: model_override")],
-            ))
-            .into_json_tuple();
-        }
-        Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(s)) => Some(s.as_str()),
-        Some(other) => {
-            return ApiErrorResponse::bad_request(t.t_args(
-                "api-error-generic",
-                &[(
-                    "error",
-                    &format!("model_override must be a string or null, got {other}"),
-                )],
-            ))
-            .into_json_tuple();
-        }
-    };
-
-    // Validate the format before touching the DB.
-    // Rules (mirrors apply_session_model_override_to_manifest in agent_loop):
-    //   - empty string → reject
-    //   - "provider/model" form: both sides must be non-empty
-    //   - "model-only" form (no '/') → accepted; provider stays as manifest default
-    //   - qualified IDs like "meta-llama/Llama-3.3-70B" use splitn(2,'/') so only the
-    //     first '/' is treated as a separator.
-    if let Some(s) = model_override {
-        let err: Option<&str> = if s.is_empty() {
-            Some("model_override must not be empty")
-        } else {
-            let mut parts = s.splitn(2, '/');
-            let first = parts.next().unwrap_or("");
-            if let Some(rest) = parts.next() {
-                if first.is_empty() {
-                    Some("model_override provider must not be empty (got '/model' form)")
-                } else if rest.is_empty() {
-                    Some("model_override model must not be empty (got 'provider/' form)")
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-        if let Some(msg) = err {
-            return ApiErrorResponse::bad_request(t.t_args("api-error-generic", &[("error", msg)]))
-                .into_json_tuple();
-        }
-    }
-
-    // Verify session exists before writing.
-    match state.kernel.memory_substrate().get_session(session_id) {
-        Ok(None) => {
-            return ApiErrorResponse::not_found(t.t("api-error-session-not-found"))
-                .into_json_tuple();
-        }
-        Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-generic", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple();
-        }
-        Ok(Some(_)) => {}
-    }
-
-    match state
-        .kernel
-        .memory_substrate()
-        .set_session_model_override(session_id, model_override)
-    {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "updated",
-                "session_id": id,
-                "model_override": model_override,
             })),
         ),
         Err(e) => {

@@ -1,14 +1,15 @@
 import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
-import { memo, useId, useMemo, useState, useCallback, useEffect, useReducer } from "react";
+import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
-import { useCredentialPools, useProviders, useProviderStatus } from "../lib/queries/providers";
-import type { CredentialPoolStatus, CredentialPoolKeySnapshot } from "../api";
+import { useProviders, useProviderStatus } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
-import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent } from "../lib/mutations/providers";
+import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -25,7 +26,7 @@ import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
   Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
-  Check, ChevronLeft, RotateCcw
+  Check, ChevronLeft
 } from "lucide-react";
 
 function getErrorMessage(e: unknown): string | null {
@@ -104,12 +105,12 @@ type FilterStatus = "all" | "reachable" | "unreachable";
 
 // ── SetDefaultModelSection — model picker + "set as default" in config modal ──
 
-function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
+function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }: {
   providerId: string;
   currentDefault?: string;
   onSetDefault: (id: string, model?: string) => Promise<void>;
+  t: TFunction;
 }) {
-  const { t } = useTranslation();
   const [selectedModel, setSelectedModel] = useState("");
   const [setting, setSetting] = useState(false);
   const isDefault = currentDefault === providerId;
@@ -186,6 +187,8 @@ function useProviderConfig(
   setUrlMutation: ReturnType<typeof useMutation<unknown, unknown, { id: string; baseUrl: string; proxyUrl?: string }>>,
   addToast: (msg: string, type?: "success" | "error" | "info") => void,
   t: TFunction,
+  activeTab: string,
+  setActiveTab: (tab: "configured" | "unconfigured") => void,
 ) {
   const [state, setState] = useState<ProviderConfigState>({
     provider: null, keyInput: "", urlInput: "", proxyInput: "", hasStoredKey: false,
@@ -226,13 +229,14 @@ function useProviderConfig(
         });
       }
       setState(s => ({ ...s, provider: null }));
+      if (activeTab === "unconfigured") setActiveTab("configured");
       addToast(t("providers.key_saved"), "success");
     } catch (e: unknown) {
       setState(s => ({ ...s, error: getErrorMessage(e) }));
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, setKeyMutation, setUrlMutation, addToast, t]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, setKeyMutation, setUrlMutation, addToast, t, activeTab, setActiveTab]);
 
   const removeKey = useCallback(async () => {
     if (!state.provider) return;
@@ -298,10 +302,10 @@ interface ProviderCardProps {
   onViewDetails: (provider: ProviderItem) => void;
   onConfigure: (provider: ProviderItem) => void;
   onDelete: (provider: ProviderItem) => void;
+  t: (key: string) => string;
 }
 
-const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onConfigure, onDelete }: ProviderCardProps) {
-  const { t } = useTranslation();
+function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onConfigure, onDelete, t }: ProviderCardProps) {
   const isConfigured = isProviderAvailable(p.auth_status);
   const isCli = isCliProvider(p);
 
@@ -567,17 +571,17 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
       </div>
     </Card>
   );
-});
+}
 
 // ── Details Modal ────────────────────────────────────────────────
 
-function DetailsModal({ provider, onClose, onTest, pendingId }: {
+function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   provider: ProviderItem;
   onClose: () => void;
   onTest: (id: string) => void;
   pendingId: string | null;
+  t: TFunction;
 }) {
-  const { t } = useTranslation();
   const isConfigured = isProviderAvailable(provider.auth_status);
   const authBadge = getAuthBadge(provider.auth_status);
 
@@ -607,7 +611,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId }: {
           <div className="p-4 rounded-xl bg-main/30">
             <p className="text-[10px] font-black uppercase tracking-wider text-text-dim/70 mb-1">{t("providers.latency")}</p>
             <p className={`text-2xl font-black ${getLatencyColor(provider.latency_ms)}`}>
-              {provider.latency_ms != null ? `${provider.latency_ms}ms` : "-"}
+              {provider.latency_ms ? `${provider.latency_ms}ms` : "-"}
             </p>
           </div>
         </div>
@@ -702,11 +706,11 @@ function DetailsModal({ provider, onClose, onTest, pendingId }: {
 
 // ── Filter Chips ─────────────────────────────────────────────────
 
-function FilterChips({ activeFilter, onChange }: {
+function FilterChips({ activeFilter, onChange, t }: {
   activeFilter: FilterStatus;
   onChange: (filter: FilterStatus) => void;
+  t: (key: string) => string;
 }) {
-  const { t } = useTranslation();
   const filters: { value: FilterStatus; label: string; icon: React.ReactNode }[] = [
     { value: "all", label: t("providers.filter_all"), icon: <Filter className="w-3 h-3" /> },
     { value: "reachable", label: t("providers.filter_reachable"), icon: <CheckCircle2 className="w-3 h-3 text-success" /> },
@@ -1041,182 +1045,24 @@ function CreateProviderWizard({
   );
 }
 
-// ── Filter/Sort reducer (P8) ─────────────────────────────────────
-
-type FilterState = {
-  search: string;
-  filterStatus: FilterStatus;
-  sortField: SortField;
-  sortOrder: SortOrder;
-};
-
-type FilterAction =
-  | { type: "SEARCH"; value: string }
-  | { type: "FILTER"; status: FilterStatus }
-  | { type: "SORT"; field: SortField };
-
-function filterReducer(state: FilterState, action: FilterAction): FilterState {
-  switch (action.type) {
-    case "SEARCH":
-      return { ...state, search: action.value };
-    case "FILTER":
-      return { ...state, filterStatus: action.status };
-    case "SORT":
-      return {
-        ...state,
-        sortField: action.field,
-        sortOrder: state.sortField === action.field
-          ? (state.sortOrder === "asc" ? "desc" : "asc")
-          : "desc",
-      };
-    default:
-      return state;
-  }
-}
-
-const initialFilterState: FilterState = {
-  search: "",
-  filterStatus: "all",
-  sortField: "name",
-  sortOrder: "asc",
-};
-
-// ── Credential Pools section (#4965) ────────────────────────────────────────
-
-function strategyLabel(s: CredentialPoolStatus["strategy"]): string {
-  switch (s) {
-    case "fill_first":
-      return "fill first";
-    case "round_robin":
-      return "round robin";
-    case "least_used":
-      return "least used";
-    case "random":
-      return "random";
-  }
-}
-
-function formatCooldown(secs: number): string {
-  if (secs >= 3600) {
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    return m === 0 ? `${h}h` : `${h}h ${m}m`;
-  }
-  if (secs >= 60) {
-    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
-  }
-  return `${secs}s`;
-}
-
-function CredentialKeyRow({ cred }: { cred: CredentialPoolKeySnapshot }) {
-  const cooldown = cred.cooldown_remaining_secs;
-  let statusBadge: React.ReactNode;
-  if (cred.is_exhausted) {
-    if (cooldown === "permanent") {
-      statusBadge = <Badge variant="error">invalid</Badge>;
-    } else if (typeof cooldown === "number") {
-      statusBadge = (
-        <Badge variant="warning">
-          cooldown {formatCooldown(cooldown)}
-        </Badge>
-      );
-    } else {
-      statusBadge = <Badge variant="warning">exhausted</Badge>;
-    }
-  } else {
-    statusBadge = <Badge variant="success">healthy</Badge>;
-  }
-  const label = cred.label?.trim() || "key";
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-border-subtle bg-surface px-3 py-2 text-xs">
-      <div className="flex items-center gap-2 min-w-0">
-        <span className="font-bold text-text-main truncate">{label}</span>
-        <span className="font-mono text-text-dim">{cred.key_hint}</span>
-        <span className="text-text-dim">priority {cred.priority}</span>
-      </div>
-      <div className="flex items-center gap-3 shrink-0">
-        <span className="text-text-dim">{cred.request_count.toLocaleString()} reqs</span>
-        {statusBadge}
-      </div>
-    </div>
-  );
-}
-
-function CredentialPoolCard({ pool }: { pool: CredentialPoolStatus }) {
-  return (
-    <Card className="p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Key className="w-4 h-4 text-text-dim" />
-          <span className="font-bold text-text-main">{pool.provider}</span>
-          <Badge variant="info">{strategyLabel(pool.strategy)}</Badge>
-        </div>
-        <span className="text-xs text-text-dim">
-          {pool.available_count} / {pool.total_count} available
-        </span>
-      </div>
-      <div className="flex flex-col gap-1.5">
-        {pool.credentials.map((c, idx) => (
-          <CredentialKeyRow key={`${pool.provider}-${idx}-${c.key_hint}`} cred={c} />
-        ))}
-      </div>
-    </Card>
-  );
-}
-
-function CredentialPoolsSection() {
-  const { data, isLoading, error } = useCredentialPools();
-
-  // Hide the section entirely when no pools are configured — it's a niche
-  // feature and the empty state would just add visual noise to the
-  // Providers page for the 99% of users who don't use it.
-  if (isLoading) return null;
-  if (error) return null;
-  if (!data || data.length === 0) return null;
-
-  return (
-    <Card className="p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Key className="w-4 h-4 text-blue-500" />
-          <h3 className="text-sm font-bold text-text-main">Credential pools</h3>
-          <Badge variant="info">{data.length}</Badge>
-        </div>
-        <span className="text-[10px] text-text-dim font-mono">
-          configure in config.toml `[[credential_pools]]`
-        </span>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {data.map((p) => (
-          <CredentialPoolCard key={p.provider} pool={p} />
-        ))}
-      </div>
-    </Card>
-  );
-}
-
 // ── Main Page ────────────────────────────────────────────────────
+
+type TabType = "configured" | "unconfigured";
 
 export function ProvidersPage() {
   const { t } = useTranslation();
-  // Stable prefix for the config modal's <label htmlFor> / <input id>
-  // pairs so screen readers announce each field (#5140).
-  const cfgFieldId = useId();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
-  const [filterState, dispatch] = useReducer(filterReducer, initialFilterState);
-  const { search, sortField, sortOrder, filterStatus } = filterState;
+  const [activeTab, setActiveTab] = useState<TabType>("configured");
+  const [search, setSearch] = useState("");
+  const [sortField, setSortField] = useState<SortField>("name");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const [filterStatus, setFilterStatus] = useState<FilterStatus>("all");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailsProvider, setDetailsProvider] = useState<ProviderItem | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
-  // The picker drawer holds the catalog of unconfigured providers, mirroring
-  // ChannelsPage. Default view shows only configured providers so the page
-  // stays focused on what's actually wired up; the configure-flow surface
-  // for new providers lives behind the Add picker.
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerSearch, setPickerSearch] = useState("");
-  useCreateShortcut(() => { setPickerSearch(""); setPickerOpen(true); });
+  useCreateShortcut(() => setShowCreateForm(true));
   const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<ProviderItem | null>(null);
   const addToast = useUIStore((s) => s.addToast);
 
@@ -1225,7 +1071,6 @@ export function ProvidersPage() {
   const testMutation = useTestProvider();
   const setKeyMutation = useSetProviderKey();
   const deleteKeyMutation = useDeleteProviderKey();
-  const enableProviderMutation = useEnableProvider();
   const setUrlMutation = useSetProviderUrl();
   const defaultProviderMutation = useSetDefaultProvider();
   const createRegistryContentMutation = useCreateRegistryContent();
@@ -1237,32 +1082,24 @@ export function ProvidersPage() {
     setUrlMutation,
     addToast,
     t,
+    activeTab,
+    setActiveTab,
   );
 
   const providers = providersQuery.data ?? [];
   const currentDefaultProvider = statusQuery.data?.default_provider ?? "";
   const configuredCount = useMemo(() => providers.filter(p => isProviderAvailable(p.auth_status)).length, [providers]);
+  const unconfiguredCount = useMemo(() => providers.filter(p => !isProviderAvailable(p.auth_status)).length, [providers]);
 
-  useEffect(() => {
-    if (!providersQuery.data) return;
-    setDetailsProvider(prev => {
-      if (!prev) return prev;
-      const updated = providersQuery.data.find(p => p.id === prev.id);
-      return updated ?? prev;
-    });
-  }, [providersQuery.data]);
-
-  // Configured providers are the main page content. Filter/sort applies
-  // to those only; the unconfigured catalog lives behind the Add picker.
   const filteredProviders = useMemo(
     () => [...providers]
       .filter(p => {
-        if (!isProviderAvailable(p.auth_status)) return false;
+        const tabMatch = activeTab === "configured" ? isProviderAvailable(p.auth_status) : !isProviderAvailable(p.auth_status);
         const searchMatch = !search || (p.display_name || p.id).toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
         let statusMatch = true;
         if (filterStatus === "reachable") statusMatch = p.reachable === true;
         else if (filterStatus === "unreachable") statusMatch = p.reachable === false;
-        return searchMatch && statusMatch;
+        return tabMatch && searchMatch && statusMatch;
       })
       .sort((a, b) => {
         const aCli = isCliProvider(a) ? 1 : 0;
@@ -1274,51 +1111,21 @@ export function ProvidersPage() {
         else if (sortField === "latency") cmp = (a.latency_ms ?? 0) - (b.latency_ms ?? 0);
         return sortOrder === "asc" ? cmp : -cmp;
       }),
-    [providers, search, filterStatus, sortField, sortOrder],
+    [providers, activeTab, search, filterStatus, sortField, sortOrder],
   );
 
-  // Catalog of unconfigured providers, surfaced in the Add picker.
-  const pickerProviders = useMemo(
-    () => [...providers]
-      .filter(p => !isProviderAvailable(p.auth_status))
-      .filter(p => !pickerSearch
-        || (p.display_name || p.id).toLowerCase().includes(pickerSearch.toLowerCase())
-        || p.id.toLowerCase().includes(pickerSearch.toLowerCase()))
-      .sort((a, b) => (a.display_name || a.id).localeCompare(b.display_name || b.id)),
-    [providers, pickerSearch],
-  );
+  const handleTabChange = (tab: TabType) => { setActiveTab(tab); setSelectedIds(new Set()); setFilterStatus("all"); };
+  const handleSearch = (value: string) => { setSearch(value); setSelectedIds(new Set()); };
+  const handleFilterChange = (filter: FilterStatus) => { setFilterStatus(filter); setSelectedIds(new Set()); };
 
-  const openPicker = () => { setPickerSearch(""); setPickerOpen(true); };
-  const handlePick = (p: ProviderItem) => {
-    setPickerOpen(false);
-    config.open(p);
+  const handleSort = (field: SortField) => {
+    if (sortField === field) setSortOrder(sortOrder === "asc" ? "desc" : "asc");
+    else { setSortField(field); setSortOrder("desc"); }
   };
-  // CLI-shape providers (`claude-code`, `codex-cli`, `gemini-cli`,
-  // `qwen-code`) have no key or URL to set, so `set_provider_key` /
-  // `set_provider_url` — which un-suppress as a side effect — never run
-  // for them. The Re-enable button on suppressed picker entries calls
-  // `POST /api/providers/{id}/enable` directly so the provider returns
-  // to the configured grid in one click. For non-CLI suppressed
-  // providers this is also the preferred path when the user is happy
-  // with the prior URL/key and only wants to revert the suppress.
-  const handleReenable = useCallback(async (p: ProviderItem) => {
-    try {
-      await enableProviderMutation.mutateAsync(p.id);
-      setPickerOpen(false);
-      addToast(t("providers.reenabled", { defaultValue: "Provider re-enabled" }), "success");
-    } catch (e) {
-      addToast(getErrorMessage(e) || t("common.error"), "error");
-    }
-  }, [enableProviderMutation, addToast, t]);
 
-  const handleSearch = (value: string) => { dispatch({ type: "SEARCH", value }); setSelectedIds(new Set()); };
-  const handleFilterChange = (filter: FilterStatus) => { dispatch({ type: "FILTER", status: filter }); setSelectedIds(new Set()); };
-
-  const handleSort = (field: SortField) => { dispatch({ type: "SORT", field }); };
-
-  const handleSelect = useCallback((id: string, checked: boolean) => {
+  const handleSelect = (id: string, checked: boolean) => {
     setSelectedIds(prev => { const next = new Set(prev); if (checked) next.add(id); else next.delete(id); return next; });
-  }, []);
+  };
 
   const handleSelectAll = () => {
     if (selectedIds.size === filteredProviders.length) setSelectedIds(new Set());
@@ -1327,40 +1134,20 @@ export function ProvidersPage() {
 
   const handleBatchTest = async () => {
     const ids = Array.from(selectedIds);
-    if (ids.length === 0) return;
     setTestingIds(new Set(ids));
-    let successCount = 0;
-    let failCount = 0;
-    const CONCURRENCY = 4;
-    const queue = [...ids];
-    const worker = async () => {
-      while (queue.length > 0) {
-        const id = queue.shift()!;
-        try {
-          const result = await testMutation.mutateAsync(id);
-          if (result.status === "error") failCount++;
-          else successCount++;
-        } catch {
-          failCount++;
-        } finally {
-          setTestingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
-        }
+    await Promise.all(ids.map(async (id) => {
+      try {
+        await testMutation.mutateAsync(id);
+      } catch {
+        // continue
+      } finally {
+        setTestingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, () => worker()));
-    if (failCount === 0) {
-      addToast(t("common.success"), "success");
-    } else if (successCount === 0) {
-      addToast(t("providers.batch_test_all_failed", { defaultValue: "All tests failed" }), "error");
-    } else {
-      addToast(
-        t("providers.batch_test_partial", { defaultValue: `${successCount} passed, ${failCount} failed` }),
-        "error",
-      );
-    }
+    }));
+    addToast(t("common.success"), "success");
   };
 
-  const handleTest = useCallback(async (id: string) => {
+  const handleTest = async (id: string) => {
     setPendingId(id);
     try {
       const result = await testMutation.mutateAsync(id);
@@ -1371,16 +1158,16 @@ export function ProvidersPage() {
     } finally {
       setPendingId(null);
     }
-  }, [testMutation, addToast, t]);
+  };
 
-  const handleSetDefault = useCallback(async (id: string, model?: string) => {
+  const handleSetDefault = async (id: string, model?: string) => {
     try {
       await defaultProviderMutation.mutateAsync({ id, model });
       addToast(t("providers.default_set"), "success");
     } catch (e: unknown) {
       addToast(getErrorMessage(e) || t("common.error"), "error");
     }
-  }, [defaultProviderMutation, addToast, t]);
+  };
 
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmProvider) return;
@@ -1408,7 +1195,6 @@ export function ProvidersPage() {
     || (config.provider?.key_required !== false
         && !config.hasStoredKey
         && !config.keyInput.trim());
-  const configAuthBadge = config.provider ? getAuthBadge(config.provider.auth_status) : null;
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -1422,16 +1208,7 @@ export function ProvidersPage() {
         helpText={t("providers.help")}
         actions={
           <div className="flex items-center gap-2">
-            {/* Always enabled: even with every catalog provider configured,
-                the picker still exposes "Create custom provider" — disabling
-                would strand mouse users away from the wizard. */}
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={openPicker}
-              leftIcon={<Plus className="w-3.5 h-3.5" />}
-              title={t("providers.add") + " (n)"}
-            >
+            <Button variant="primary" size="sm" onClick={() => setShowCreateForm(true)} leftIcon={<Plus className="w-3.5 h-3.5" />} title={t("providers.add") + " (n)"}>
               <span>{t("providers.add")}</span>
               <kbd className="hidden sm:inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[8px] font-mono font-semibold ml-1.5">n</kbd>
             </Button>
@@ -1442,18 +1219,13 @@ export function ProvidersPage() {
         }
       />
 
-      {/* Credential pools (#4965) — visible only when at least one pool is
-          configured in config.toml. Read-only here; mutations live in the
-          `librefang auth pool …` CLI. */}
-      <CredentialPoolsSection />
-
       {/* Search & Controls */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="flex-1">
           <Input value={search} onChange={(e) => handleSearch(e.target.value)} placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
-              <button onClick={() => dispatch({ type: "SEARCH", value: "" })} className="hover:text-text-main" aria-label={t("common.clear_search")}>
+              <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search")}>
                 <X className="w-3 h-3" />
               </button>
             )} />
@@ -1481,56 +1253,58 @@ export function ProvidersPage() {
         </div>
       </div>
 
-      {/* Filter & batch — hidden when there's nothing to filter, so the
-          empty-state CTA below isn't crowded by reachable/unreachable
-          chips that have no targets. */}
-      {configuredCount > 0 && (
-        <div className="flex items-center justify-between gap-3 flex-wrap overflow-x-auto">
-          <FilterChips activeFilter={filterStatus} onChange={handleFilterChange} />
-
-          {selectedIds.size > 0 && (
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold text-text-dim">{selectedIds.size} selected</span>
-              <Button variant="secondary" size="sm" onClick={handleBatchTest} leftIcon={<Zap className="w-3 h-3" />}>
-                {t("providers.batch_test")}
-              </Button>
-            </div>
-          )}
+      {/* Tabs & Filter */}
+      <div className="flex items-center justify-between gap-3 flex-wrap overflow-x-auto">
+        <div role="tablist" aria-label={t("providers.title", { defaultValue: "Providers" })} className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
+          <button
+            id="providers-tab-configured"
+            role="tab"
+            aria-selected={activeTab === "configured"}
+            aria-controls="providers-panel"
+            tabIndex={activeTab === "configured" ? 0 : -1}
+            onClick={() => handleTabChange("configured")}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "configured" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"}`}>
+            <CheckCircle2 className="w-4 h-4" />
+            {t("providers.configured")}
+            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "configured" ? "bg-success/20 text-success" : "bg-border-subtle text-text-dim"}`}>{configuredCount}</span>
+          </button>
+          <button
+            id="providers-tab-unconfigured"
+            role="tab"
+            aria-selected={activeTab === "unconfigured"}
+            aria-controls="providers-panel"
+            tabIndex={activeTab === "unconfigured" ? 0 : -1}
+            onClick={() => handleTabChange("unconfigured")}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"}`}>
+            <XCircle className="w-4 h-4" />
+            {t("providers.unconfigured")}
+            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "unconfigured" ? "bg-brand/20 text-brand" : "bg-border-subtle text-text-dim"}`}>{unconfiguredCount}</span>
+          </button>
         </div>
-      )}
 
-      <div className="flex flex-col gap-4">
+        {activeTab === "configured" && <FilterChips activeFilter={filterStatus} onChange={handleFilterChange} t={t} />}
+
+        {selectedIds.size > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-text-dim">{selectedIds.size} selected</span>
+            <Button variant="secondary" size="sm" onClick={handleBatchTest} leftIcon={<Zap className="w-3 h-3" />}>
+              {t("providers.batch_test")}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      <AnimatePresence mode="wait">
+      <motion.div key={activeTab} id="providers-panel" role="tabpanel" aria-labelledby={`providers-tab-${activeTab}`} variants={tabContent} initial="initial" animate="animate" exit="exit" className="flex flex-col gap-4">
       {providersQuery.isLoading ? (
         <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : providers.length === 0 ? (
         <EmptyState title={t("common.no_data")} icon={<Server className="h-6 w-6" />} />
-      ) : configuredCount === 0 ? (
-        // No providers configured yet — surface the picker as a primary
-        // CTA instead of an empty list. Mirrors the ChannelsPage empty
-        // state.
-        <Card padding="lg" className="flex flex-col items-center text-center gap-4 py-10">
-          <div className="w-12 h-12 rounded-xl bg-brand/10 border border-brand/30 grid place-items-center text-brand">
-            <Server className="h-6 w-6" />
-          </div>
-          <div className="max-w-md space-y-2">
-            <h2 className="text-base font-bold text-text-main">
-              {t("providers.empty_title", { defaultValue: "No providers configured yet" })}
-            </h2>
-            <p className="text-sm text-text-dim leading-relaxed">
-              {t("providers.empty_body", {
-                defaultValue: "Connect OpenAI, Anthropic, Gemini, Groq, or any other LLM provider so agents can route prompts and consume models.",
-              })}
-            </p>
-          </div>
-          <Button variant="primary" size="md" onClick={openPicker} leftIcon={<Plus className="h-4 w-4" />}>
-            {t("providers.connect_first", { defaultValue: "Connect a provider" })}
-          </Button>
-        </Card>
       ) : filteredProviders.length === 0 ? (
         <EmptyState
-          title={search || filterStatus !== "all" ? t("providers.no_results") : t("providers.no_configured")}
+          title={search || filterStatus !== "all" ? t("providers.no_results") : (activeTab === "configured" ? t("providers.no_configured") : t("providers.no_unconfigured"))}
           icon={<Search className="h-6 w-6" />}
         />
       ) : (
@@ -1559,12 +1333,14 @@ export function ProvidersPage() {
                 onViewDetails={setDetailsProvider}
                 onConfigure={config.open}
                 onDelete={setDeleteConfirmProvider}
+                t={t}
               />
             ))}
           </div>
         </>
       )}
-      </div>
+      </motion.div>
+      </AnimatePresence>
 
       {/* Details Modal */}
       {detailsProvider && (
@@ -1573,6 +1349,7 @@ export function ProvidersPage() {
           onClose={() => setDetailsProvider(null)}
           onTest={handleTest}
           pendingId={pendingId}
+          t={t}
         />
       )}
 
@@ -1588,23 +1365,23 @@ export function ProvidersPage() {
                 <p className="text-sm font-bold">{config.provider.display_name || config.provider.id}</p>
                 <p className="text-[10px] text-text-dim font-mono">{config.provider.id}</p>
               </div>
-              <Badge variant={configAuthBadge!.variant} className="ml-auto">
-                {configAuthBadge!.label}
+              <Badge variant={getAuthBadge(config.provider.auth_status).variant} className="ml-auto">
+                {getAuthBadge(config.provider.auth_status).label}
               </Badge>
             </div>
 
             {config.provider.key_required !== false && (
               <div>
-                <label htmlFor={`${cfgFieldId}-api-key`} className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
-                <input id={`${cfgFieldId}-api-key`} type="password" value={config.keyInput} onChange={e => config.setKeyInput(e.target.value)}
+                <label className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
+                <input type="password" value={config.keyInput} onChange={e => config.setKeyInput(e.target.value)}
                   placeholder={config.hasStoredKey ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
                   className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
               </div>
             )}
 
             <div>
-              <label htmlFor={`${cfgFieldId}-base-url`} className="text-[10px] font-bold text-text-dim uppercase">Base URL <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
-              <input id={`${cfgFieldId}-base-url`} type="text" value={config.urlInput} onChange={e => config.setUrlInput(e.target.value)}
+              <label className="text-[10px] font-bold text-text-dim uppercase">Base URL <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
+              <input type="text" value={config.urlInput} onChange={e => config.setUrlInput(e.target.value)}
                 placeholder="https://api.example.com/v1"
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
               <p className="mt-1 text-[10px] text-text-dim/60 leading-snug">
@@ -1616,8 +1393,8 @@ export function ProvidersPage() {
             </div>
 
             <div>
-              <label htmlFor={`${cfgFieldId}-proxy-url`} className="text-[10px] font-bold text-text-dim uppercase">{t("providers.proxy_url")} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
-              <input id={`${cfgFieldId}-proxy-url`} type="text" value={config.proxyInput} onChange={e => config.setProxyInput(e.target.value)}
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.proxy_url")} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
+              <input type="text" value={config.proxyInput} onChange={e => config.setProxyInput(e.target.value)}
                 placeholder={t("providers.proxy_url_placeholder")}
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
             </div>
@@ -1659,6 +1436,7 @@ export function ProvidersPage() {
                 providerId={config.provider.id}
                 currentDefault={statusQuery.data?.default_provider}
                 onSetDefault={handleSetDefault}
+                t={t}
               />
             )}
           </div>
@@ -1700,112 +1478,17 @@ export function ProvidersPage() {
         <CreateProviderWizard
           onSubmit={async (values) => {
             // Hook invalidates providerKeys.all + modelKeys.lists() on
-            // success, so the page refetches without an explicit refetch()
-            // call here.
+            // success, so the configured tab refetches without an explicit
+            // refetch() call here.
             await createRegistryContentMutation.mutateAsync({
               contentType: "provider",
               values,
             });
             setShowCreateForm(false);
+            setActiveTab("configured");
           }}
           onCancel={() => setShowCreateForm(false)}
         />
-      </DrawerPanel>
-
-      {/* Add-provider picker — shows the catalog of unconfigured providers.
-          Click one to open the configure drawer; the "Create custom provider"
-          footer button drops back to the existing wizard. */}
-      <DrawerPanel
-        isOpen={pickerOpen}
-        onClose={() => setPickerOpen(false)}
-        title={t("providers.picker_title", { defaultValue: "Add provider" })}
-        size="lg"
-      >
-        <div className="flex flex-col gap-4 p-5">
-          <Input
-            value={pickerSearch}
-            onChange={(e) => setPickerSearch(e.target.value)}
-            placeholder={t("common.search")}
-            leftIcon={<Search className="w-4 h-4" />}
-            rightIcon={pickerSearch && (
-              <button
-                onClick={() => setPickerSearch("")}
-                className="hover:text-text-main"
-                aria-label={t("common.clear_search", { defaultValue: "Clear search" })}
-              >
-                <X className="w-3 h-3" />
-              </button>
-            )}
-          />
-          {pickerProviders.length === 0 ? (
-            <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-              {pickerSearch
-                ? t("providers.no_results")
-                : t("providers.all_configured", { defaultValue: "All available providers are already configured." })}
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {pickerProviders.map((p) => {
-                // Suppressed entries collapsed into the picker by
-                // `DELETE /api/providers/{id}/key` get a one-click
-                // Re-enable instead of opening the configure drawer —
-                // CLI providers have no key/URL to set, and even for
-                // local HTTP providers the prior URL is usually still
-                // what the user wants. Non-suppressed entries keep the
-                // existing "open configure drawer" flow.
-                const suppressed = p.suppressed === true;
-                const onClick = suppressed
-                  ? () => handleReenable(p)
-                  : () => handlePick(p);
-                const reenabling =
-                  suppressed
-                  && enableProviderMutation.isPending
-                  && enableProviderMutation.variables === p.id;
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={onClick}
-                    disabled={reenabling}
-                    className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-border-subtle bg-main/40 hover:border-brand/40 hover:bg-main/60 transition-colors text-left disabled:opacity-60"
-                  >
-                    <div className={`w-9 h-9 rounded-lg grid place-items-center shrink-0 ${suppressed ? "bg-warning/10 border border-warning/20 text-warning" : "bg-brand/10 border border-brand/20 text-brand"}`}>
-                      {getProviderIcon(p.id)}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="font-mono text-[13px] font-medium text-text-main truncate">
-                        {p.display_name || p.id}
-                      </div>
-                      <div className="font-mono text-[10.5px] text-text-dim/80 truncate">
-                        {p.id}
-                      </div>
-                    </div>
-                    {suppressed ? (
-                      <span className="flex items-center gap-1 text-[10px] font-bold uppercase text-warning shrink-0">
-                        {reenabling
-                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          : <RotateCcw className="w-3.5 h-3.5" />}
-                        {t("providers.reenable", { defaultValue: "Re-enable" })}
-                      </span>
-                    ) : (
-                      <ChevronRight className="w-4 h-4 text-text-dim shrink-0" />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          <div className="border-t border-border-subtle pt-3 mt-1">
-            <Button
-              variant="secondary"
-              className="w-full"
-              onClick={() => { setPickerOpen(false); setShowCreateForm(true); }}
-              leftIcon={<Plus className="w-3.5 h-3.5" />}
-            >
-              {t("providers.create_custom", { defaultValue: "Create custom provider" })}
-            </Button>
-          </div>
-        </div>
       </DrawerPanel>
     </div>
   );

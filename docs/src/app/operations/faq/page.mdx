@@ -141,7 +141,7 @@ LibreFang supports 44 channel adapters:
 
 - **Core**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
 - **Enterprise**: Microsoft Teams, Google Chat, Webex, Feishu
-- **Social**: LINE, Mastodon, Bluesky
+- **Social**: LINE, Viber, Facebook Messenger, Mastodon, Bluesky
 
 ### Q: How to configure Telegram Bot?
 
@@ -257,20 +257,11 @@ librefang doctor
 
 ### Q: Channel connection failed?
 
-Channels run as out-of-process sidecar adapters — inspect the
-sidecar's own stdout log for the failure reason.
-
 ```bash
-# Confirm the sidecar is listed and shows the token+configured state
-librefang channel list
+# Test channel
+librefang channel test telegram
 
-# Hot-reload channels (re-spawns the sidecar) after fixing config
-librefang channel reload
-
-# Tail the sidecar's own log
-librefang logs --filter sidecar/telegram --tail 50
-
-# Spot-check the upstream platform directly (Telegram example)
+# Check Bot Token
 curl -X POST "https://api.telegram.org/bot<TOKEN>/getMe"
 ```
 

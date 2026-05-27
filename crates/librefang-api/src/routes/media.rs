@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::media::{MediaDriverCache, MediaError};
+use librefang_runtime::media::{MediaDriverCache, MediaError};
 use librefang_types::media::{
     MediaCapability, MediaImageRequest, MediaMusicRequest, MediaTtsRequest, MediaVideoRequest,
 };
@@ -30,7 +30,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 // ── Known media providers (mirrors MEDIA_PROVIDER_ORDER in runtime) ─────
 
 /// Known media provider names, in preference order.
-/// Keep in sync with `librefang_kernel::media::MEDIA_PROVIDER_ORDER`.
+/// Keep in sync with `librefang_runtime::media::MEDIA_PROVIDER_ORDER`.
 const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -56,7 +56,6 @@ fn media_error_response(err: MediaError) -> ApiErrorResponse {
         code: Some(code.to_string()),
         r#type: None,
         details: None,
-        request_id: None,
         status,
     }
 }
@@ -66,7 +65,7 @@ fn resolve_driver(
     cache: &MediaDriverCache,
     provider: &Option<String>,
     capability: MediaCapability,
-) -> Result<Arc<dyn librefang_kernel::media::MediaDriver>, MediaError> {
+) -> Result<Arc<dyn librefang_runtime::media::MediaDriver>, MediaError> {
     if let Some(ref name) = provider {
         cache.get_or_create(name, None)
     } else {
@@ -227,7 +226,7 @@ pub async fn synthesize_speech(
             "sample_rate": result.sample_rate,
         }))
         .into_response(),
-        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
+        Err(e) => ApiErrorResponse::internal(format!("Failed to save audio: {e}")).into_response(),
     }
 }
 
@@ -370,7 +369,7 @@ pub async fn generate_music(
             "sample_rate": result.sample_rate,
         }))
         .into_response(),
-        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
+        Err(e) => ApiErrorResponse::internal(format!("Failed to save audio: {e}")).into_response(),
     }
 }
 
@@ -421,12 +420,13 @@ pub async fn transcribe_audio(
         .channels
         .effective_file_download_dir();
     if let Err(e) = std::fs::create_dir_all(&upload_dir) {
-        return ApiErrorResponse::internal_scrub(e).into_response();
+        return ApiErrorResponse::internal(format!("Failed to create upload dir: {e}"))
+            .into_response();
     }
     let file_id = uuid::Uuid::new_v4().to_string();
     let file_path = upload_dir.join(&file_id);
     if let Err(e) = std::fs::write(&file_path, &body) {
-        return ApiErrorResponse::internal_scrub(e).into_response();
+        return ApiErrorResponse::internal(format!("Failed to write audio: {e}")).into_response();
     }
 
     let attachment = librefang_types::media::MediaAttachment {
@@ -451,7 +451,7 @@ pub async fn transcribe_audio(
         }
         Err(e) => {
             let _ = std::fs::remove_file(&file_path);
-            ApiErrorResponse::internal_scrub(e).into_response()
+            ApiErrorResponse::internal(format!("Transcription failed: {e}")).into_response()
         }
     }
 }

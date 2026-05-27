@@ -1,5 +1,4 @@
 import { formatCost } from "../lib/format";
-import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
@@ -19,24 +18,13 @@ import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
-import {
-  deriveDropdownActiveSessionId,
-  pickSessionDropdownLabel,
-  shouldAutoPinResolvedSession,
-} from "../lib/sessionSelector";
-import {
-  chatSessionCacheKey,
-  deleteCachedChatMessages,
-  getCachedChatMessages,
-  setCachedChatMessages,
-} from "../lib/chatSessionCache";
 import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
-import { ToolCallsPanel } from "../components/ui/ToolCallsPanel";
+import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
@@ -362,29 +350,13 @@ function useWebSocket(
 // previously-viewed session's messages whenever the user switched sessions on
 // the same agent, because the cache hit on a fresh mount didn't consult the
 // requested sessionId.
-const cacheKey = chatSessionCacheKey;
-const cacheGet = getCachedChatMessages<ChatMessage>;
-const cacheSet = setCachedChatMessages<ChatMessage>;
+const sessionCache = new Map<string, ChatMessage[]>();
+const cacheKey = (agentId: string, sessionId: string | null): string =>
+  `${agentId}:${sessionId ?? ""}`;
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(
-  agentId: string | null,
-  agents: AgentItem[] = [],
-  sessionVersion = 0,
-  onModelSwitch?: () => void,
-  onClearError?: (message: string) => void,
-  sessionId: string | null = null,
-  onNewSession?: (sessionId: string) => void,
-  // Issue #5199-B: distinct from `onNewSession`. Fired when the server
-  // reports a session_id for a previously-unpinned connection (first
-  // message of a bare `?agentId=` chat) so the URL can be pinned WITHOUT
-  // wiping the just-rendered response. `onNewSession` semantically means
-  // "start over" (used by /new) and bumps sessionVersion to force a
-  // reload; auto-pin must NOT — it's the same session continuing, only
-  // the URL needs to catch up.
-  onAutoPinSession?: (sessionId: string) => void,
-) {
+function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null, onNewSession?: (sessionId: string) => void) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
   const sendAgentMessageMutation = useSendAgentMessage();
@@ -394,8 +366,6 @@ function useChatMessages(
   // because the load is gated on `sessionVersion` and `sessionCache`.
   const queryClient = useQueryClient();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [compactedSummary, setCompactedSummary] = useState<string | null>(null);
-  const [isCompacting, setIsCompacting] = useState(false);
   // Per-agent loading state. A single shared `isLoading` would freeze the
   // ChatInput on every agent while one of them is streaming (#2322). Keyed
   // by agentId so switching away from a busy agent unblocks the new one,
@@ -484,8 +454,8 @@ function useChatMessages(
       // next view anyway).
       const sid = id === currentAgentRef.current ? currentSessionRef.current : null;
       const key = cacheKey(id, sid);
-      const current = cacheGet(key) ?? [];
-      cacheSet(key, updater(current));
+      const current = sessionCache.get(key) ?? [];
+      sessionCache.set(key, updater(current));
     }
   }, []);
 
@@ -519,31 +489,6 @@ function useChatMessages(
     rafHandleRef.current.set(msgId, handle);
   }, [flushStreamingContent]);
 
-  const thinkingBufferRef = useRef<Map<string, string>>(new Map());
-  const thinkingRafHandleRef = useRef<Map<string, number>>(new Map());
-
-  const flushThinkingContent = useCallback((agentId: string, msgId: string) => {
-    const buffered = thinkingBufferRef.current.get(msgId);
-    if (buffered === undefined) return;
-    thinkingBufferRef.current.delete(msgId);
-    thinkingRafHandleRef.current.delete(msgId);
-    updateAgentMessages(agentId, prev => {
-      const idx = prev.findIndex(m => m.id === msgId);
-      if (idx === -1) return prev;
-      const next = prev.slice();
-      next[idx] = { ...next[idx], thinking: buffered, thinkingCollapsed: next[idx].thinkingCollapsed ?? false };
-      return next;
-    });
-  }, [updateAgentMessages]);
-
-  const scheduleThinkingFlush = useCallback((agentId: string, msgId: string) => {
-    if (thinkingRafHandleRef.current.has(msgId)) return;
-    const handle = requestAnimationFrame(() => {
-      flushThinkingContent(agentId, msgId);
-    });
-    thinkingRafHandleRef.current.set(msgId, handle);
-  }, [flushThinkingContent]);
-
   // Save current messages to cache when switching away. The cleanup must
   // read the LATEST messages at unmount/agent-swap time, so we keep a
   // ref that tracks messages and only fire the save effect on agentId
@@ -562,7 +507,7 @@ function useChatMessages(
     const ownedSessionId = sessionId;
 
     return () => {
-      cacheSet(cacheKey(ownedAgentId, ownedSessionId), messagesRef.current);
+      sessionCache.set(cacheKey(ownedAgentId, ownedSessionId), messagesRef.current);
     };
   }, [agentId, sessionId]);
 
@@ -573,46 +518,39 @@ function useChatMessages(
 
     const key = cacheKey(agentId, sessionId);
     if (sessionVersion === 0) {
-      const cached = cacheGet(key);
+      const cached = sessionCache.get(key);
       if (cached) {
         setMessages(cached);
         return;
       }
     } else {
-      deleteCachedChatMessages(key);
+      sessionCache.delete(key);
     }
 
     setMessages([]);
-    setCompactedSummary(null);
     const loadId = agentId;
     setAgentLoading(loadId, true);
     queryClient
       .fetchQuery(agentQueries.session(loadId, sessionId))
       .then(session => {
-        if (loadId === currentAgentRef.current && sessionId === currentSessionRef.current) {
-          setCompactedSummary(session.compacted_summary ?? null);
-        }
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
-            // The agent-scoped session endpoint (which this page uses)
-            // flattens `MessageContent::Blocks` server-side: visible text
-            // joins via `\n`, thinking is surfaced through a separate
-            // `thinking` field, tool_use lands in `tools`, and images in
-            // `images`. So `msg.content` is always a string here. The
-            // `extractAssistantHistoryParts` helper in `lib/chat.ts`
-            // exists for the raw-blocks endpoint (`/api/sessions/{id}`,
-            // unused on this page).
-            const text = typeof msg.content === "string" ? msg.content : "";
-            const thinking = msg.thinking ?? "";
+            let content: string;
+            if (typeof msg.content === "string") {
+              content = msg.content;
+            } else if (Array.isArray(msg.content)) {
+              // Extract only text blocks — skip tool_use/tool_result
+              content = (msg.content as Array<Record<string, unknown>>)
+                .filter((b) => b.type === "text" && typeof b.text === "string")
+                .map((b) => b.text as string)
+                .join("\n");
+            } else {
+              content = msg.content == null ? "" : String(msg.content);
+            }
 
             const hasTools = msg.tools && msg.tools.length > 0;
             const hasImages = msg.images && msg.images.length > 0;
-            const hasThinking = thinking.trim().length > 0;
-            // Drop messages with no displayable content. Thinking counts:
-            // a turn that produced only reasoning (no visible text or tools)
-            // should still render as an assistant turn with the collapsible
-            // thinking drawer, otherwise reload silently loses it.
-            if (!text.trim() && !hasTools && !hasImages && !hasThinking) return [];
+            if (!content.trim() && !hasTools && !hasImages) return [];
 
             return [{
               id: `hist-${idx}`,
@@ -621,7 +559,7 @@ function useChatMessages(
                 : msg.role === "System"
                   ? "system"
                   : "assistant",
-              content: text,
+              content,
               // Use the real server-side timestamp when available so
               // resumed sessions render the original send time instead of
               // the page-load time. Fall back to `now` only for messages
@@ -633,20 +571,13 @@ function useChatMessages(
                 filename: img.filename,
                 content_type: img.content_type,
               })),
-              thinking: hasThinking ? thinking : undefined,
-              // Collapsed by default on history reload — long sessions with
-              // many reasoning turns would otherwise be a wall of text. Live
-              // streaming keeps its expanded default so the user can watch
-              // reasoning happen in real time. `|| undefined` keeps the
-              // field absent when there's nothing to collapse.
-              thinkingCollapsed: hasThinking || undefined,
             }];
           });
           // Refresh the cache unconditionally — the data is still correct
           // for loadId. Only touch live React state when the user is still
           // viewing loadId; otherwise a slow A load resolving after the
           // user has swapped to B would overwrite B's displayed messages.
-          cacheSet(cacheKey(loadId, sessionId), historical);
+          sessionCache.set(cacheKey(loadId, sessionId), historical);
           if (loadId === currentAgentRef.current && sessionId === currentSessionRef.current) {
             setMessages(historical);
           }
@@ -675,7 +606,7 @@ function useChatMessages(
     }
     try {
       await clearAgentHistory(agentId);
-      deleteCachedChatMessages(cacheKey(agentId, sessionId));
+      sessionCache.delete(cacheKey(agentId, sessionId));
       if (prevAgentRef.current === agentId) {
         messagesRef.current = [];
       }
@@ -757,37 +688,6 @@ function useChatMessages(
           const handleCmdResponse = (event: MessageEvent) => {
             try {
               const data = JSON.parse(event.data as string);
-              // Compact command uses a two-phase ack/result protocol.
-              if (cmd === "compact") {
-                if (data.type === "compaction:started") {
-                  // Ack received — reset watchdog and show inline state.
-                  if (timer) clearTimeout(timer);
-                  setIsCompacting(true);
-                  setMessages(prev => [...prev,
-                    { id: makeMessageId("sys"), role: "system" as const, content: data.message || "Compaction started…", timestamp: new Date() },
-                  ]);
-                  // Compaction can take longer than 30s — give it 5 minutes.
-                  timer = setTimeout(() => { ctrl.abort(); }, 5 * 60_000);
-                  return;
-                }
-                if (data.type === "compaction:complete" || data.type === "compaction:error") {
-                  finalize();
-                  setIsCompacting(false);
-                  const responseText = data.message || data.content || "";
-                  setMessages(prev => [...prev,
-                    { id: makeMessageId("sys"), role: "system" as const, content: responseText, timestamp: new Date() },
-                  ]);
-                  if (data.type === "compaction:complete" && agentId) {
-                    // Refresh session to pick up the new compacted_summary field.
-                    queryClient
-                      .fetchQuery(agentQueries.session(agentId, sessionId))
-                      .then(session => { setCompactedSummary(session.compacted_summary ?? null); })
-                      .catch(() => {/* non-fatal */});
-                  }
-                  return;
-                }
-                return;
-              }
               if (data.type === "command_result" || data.type === "error") {
                 finalize();
                 const responseText = data.message || data.content || "";
@@ -821,10 +721,10 @@ function useChatMessages(
             pendingCommandsRef.current.delete(ctrl);
             if (!settled) {
               // We got aborted before the response landed — either the
-              // watchdog expired or the WS dropped. Ensure compacting
-              // indicator is cleared.
+              // 30s timer expired or the WS dropped. Either way the user
+              // needs a visible "command lost" hint so the silent no-op
+              // doesn't repeat.
               settled = true;
-              if (cmd === "compact") setIsCompacting(false);
               setMessages(prev => [...prev,
                 { id: makeMessageId("sys"), role: "system" as const, content: t("chat.command_timeout"), timestamp: new Date() }
               ]);
@@ -885,12 +785,7 @@ function useChatMessages(
           },
         });
         const fullContent = response.response || "";
-        // Reify the response patch as a pure mapper so the cache seed
-        // below sees the same fields the live state update enqueues.
-        // Same pattern as the WS `response` handler (issue #5199-B);
-        // without it the post-nav load effect would refetch from the
-        // server instead of taking the just-rendered cache hit.
-        const applyResponsePatch = (msgs: ChatMessage[]) => msgs.map(m =>
+        updateAgentMessages(sendAgentId, prev => prev.map(m =>
           m.id === botMsg.id
             ? {
                 ...m, content: fullContent, isStreaming: false,
@@ -902,36 +797,12 @@ function useChatMessages(
                 thinkingCollapsed: m.thinkingCollapsed ?? true,
               }
             : m
-        );
-        updateAgentMessages(sendAgentId, applyResponsePatch);
+        ));
         if (response.memories_saved?.length) {
           const agentName = agents.find(a => a.id === sendAgentId)?.name;
           response.memories_saved.forEach((mem: string) => {
             addSkillOutput({ skillName: "memory", agentId: sendAgentId, agentName, content: mem });
           });
-        }
-        // Issue #5199 — HTTP fallback parity with the WS `response` path.
-        // The server returns `session_id` in the body only when the
-        // request omitted `session_id` (mirrors ws.rs's
-        // `explicit_session.is_none()` branch). Without this branch a
-        // first send before WS connects — or any send that takes the
-        // WS-drop fallback timer — would leave the URL on bare
-        // `?agentId=` even though the kernel persisted to a concrete
-        // session, leaving the chat bookmarkable into a different
-        // canonical session after a daemon restart. See the matching
-        // comment block in the WS handler for the cache-seed rationale.
-        const autoPinArgs = {
-          sendAgentId,
-          currentAgentId: currentAgentRef.current,
-          currentSessionId: currentSessionRef.current,
-          urlSessionId: sessionId,
-          resolvedSessionId: response.session_id,
-        };
-        if (shouldAutoPinResolvedSession(autoPinArgs)) {
-          const newSid = autoPinArgs.resolvedSessionId;
-          const nextMessages = applyResponsePatch(messagesRef.current);
-          cacheSet(cacheKey(sendAgentId, newSid), nextMessages);
-          onAutoPinSession?.(newSid);
         }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : "Unknown error";
@@ -1007,22 +878,21 @@ function useChatMessages(
               scheduleStreamingFlush(sendAgentId, botMsg.id);
             } else if (data.type === "thinking_delta") {
               const chunk = data.content || "";
-              const tPrev = thinkingBufferRef.current.get(botMsg.id);
-              if (tPrev === undefined) {
-                const currentThinking = (messagesRef.current.find(m => m.id === botMsg.id)?.thinking) ?? "";
-                thinkingBufferRef.current.set(botMsg.id, currentThinking + chunk);
-              } else {
-                thinkingBufferRef.current.set(botMsg.id, tPrev + chunk);
-              }
-              scheduleThinkingFlush(sendAgentId, botMsg.id);
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
+                m.id === botMsg.id
+                  ? {
+                      ...m,
+                      thinking: (m.thinking ?? "") + chunk,
+                      thinkingCollapsed: m.thinkingCollapsed ?? false,
+                    }
+                  : m
+              ));
             } else if (data.type === "typing") {
               if (data.state === "stop") {
+                // Flush any buffered streaming content before marking done
                 const rafHandle = rafHandleRef.current.get(botMsg.id);
                 if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
                 flushStreamingContent(sendAgentId, botMsg.id);
-                const tRaf = thinkingRafHandleRef.current.get(botMsg.id);
-                if (tRaf !== undefined) cancelAnimationFrame(tRaf);
-                flushThinkingContent(sendAgentId, botMsg.id);
                 updateAgentMessages(sendAgentId, prev => prev.map(m =>
                   m.id === botMsg.id ? { ...m, isStreaming: false } : m
                 ));
@@ -1073,14 +943,11 @@ function useChatMessages(
                 addSkillOutput({ skillName: entry.tool, agentId: sendAgentId, content: entry.content });
               }
             } else if (data.type === "silent_complete") {
+              // Cancel any pending RAF flush — message is being removed
               const rafHandle = rafHandleRef.current.get(botMsg.id);
               if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
               streamingBufferRef.current.delete(botMsg.id);
               rafHandleRef.current.delete(botMsg.id);
-              const tRaf = thinkingRafHandleRef.current.get(botMsg.id);
-              if (tRaf !== undefined) cancelAnimationFrame(tRaf);
-              thinkingBufferRef.current.delete(botMsg.id);
-              thinkingRafHandleRef.current.delete(botMsg.id);
               updateAgentMessages(sendAgentId, prev => prev.filter(m => m.id !== botMsg.id));
               finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
@@ -1089,9 +956,6 @@ function useChatMessages(
               const rafHandle = rafHandleRef.current.get(botMsg.id);
               if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
               flushStreamingContent(sendAgentId, botMsg.id);
-              const tRaf = thinkingRafHandleRef.current.get(botMsg.id);
-              if (tRaf !== undefined) cancelAnimationFrame(tRaf);
-              flushThinkingContent(sendAgentId, botMsg.id);
               const error = data.content || "WebSocket error";
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
@@ -1113,21 +977,13 @@ function useChatMessages(
                 if (!turn.responded) { cleanup(); sendViaHttp(); }
               }, 30_000);
             } else if (data.type === "response") {
+              // Cancel any pending RAF flush — the final response supersedes
+              // any buffered streaming content.
               const rafHandle = rafHandleRef.current.get(botMsg.id);
               if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
               streamingBufferRef.current.delete(botMsg.id);
               rafHandleRef.current.delete(botMsg.id);
-              const tRaf = thinkingRafHandleRef.current.get(botMsg.id);
-              if (tRaf !== undefined) cancelAnimationFrame(tRaf);
-              thinkingBufferRef.current.delete(botMsg.id);
-              thinkingRafHandleRef.current.delete(botMsg.id);
-              // Reify the response patch as a pure mapper so the same
-              // transform feeds both the live React state update and the
-              // pre-navigation cache seed (issue #5199-B). Without a
-              // shared mapper the cache snapshot would diverge from what
-              // setMessages enqueues, since messagesRef hasn't picked up
-              // the update yet at this point in the event-loop tick.
-              const applyResponsePatch = (msgs: ChatMessage[]) => msgs.map(m =>
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id
                   ? {
                       ...m, content: data.content || m.content, isStreaming: false,
@@ -1139,40 +995,7 @@ function useChatMessages(
                       thinkingCollapsed: m.thinkingCollapsed ?? true,
                     }
                   : m
-              );
-              updateAgentMessages(sendAgentId, applyResponsePatch);
-              // Issue #5199-B: when the connection was not pinned to a
-              // specific session (?sessionId= absent), the server includes
-              // the resolved session id in the response so the URL can be
-              // updated. Pinning makes the chat bookmarkable and ensures
-              // a daemon restart does not silently switch context.
-              //
-              // Before navigating, copy the just-patched messages into
-              // the cache under the NEW (agent, sessionId) key so the
-              // post-nav load effect takes a cache hit instead of wiping
-              // the response and refetching from the server.  Without
-              // this seed, the URL change cascades into:
-              //   urlSessionId(null→new) → useChatMessages.sessionId
-              //   change → load effect re-runs with sessionVersion=0,
-              //   sees no cached entry for the new key, setMessages([])
-              //   then refetches — visible flicker.
-              // Auto-pin gate is shared with the HTTP fallback path so
-              // a future refactor cannot drift the two transports apart;
-              // see `shouldAutoPinResolvedSession` for the full guard
-              // breakdown (issue #5199 — Codex round-2 review).
-              const autoPinArgs = {
-                sendAgentId,
-                currentAgentId: currentAgentRef.current,
-                currentSessionId: currentSessionRef.current,
-                urlSessionId: sessionId,
-                resolvedSessionId: data.session_id,
-              };
-              if (shouldAutoPinResolvedSession(autoPinArgs)) {
-                const newSid = autoPinArgs.resolvedSessionId;
-                const nextMessages = applyResponsePatch(messagesRef.current);
-                cacheSet(cacheKey(sendAgentId, newSid), nextMessages);
-                onAutoPinSession?.(newSid);
-              }
+              ));
               finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
             }
@@ -1222,7 +1045,7 @@ function useChatMessages(
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory, scheduleStreamingFlush, flushStreamingContent, scheduleThinkingFlush, flushThinkingContent]);
+  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory, scheduleStreamingFlush, flushStreamingContent]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
@@ -1260,7 +1083,7 @@ function useChatMessages(
     }
   }, [agentId, updateAgentMessages, finishTurnIfCurrent, stopAgentMutation]);
 
-  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce, compactedSummary, isCompacting };
+  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce };
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
@@ -1337,35 +1160,28 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             <button
               type="button"
               onClick={() => setThinkingExpanded((v) => !v)}
-              aria-expanded={thinkingExpanded}
-              aria-controls={`thinking-block-${message.id}`}
               className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border-subtle bg-surface text-[10px] font-medium text-text-dim hover:text-text hover:border-border transition-colors"
             >
-              <Brain className="h-3 w-3" aria-hidden="true" />
+              <Brain className="h-3 w-3" />
               <span>{t("chat.thinking_label")}</span>
               <ChevronDown
                 className={`h-3 w-3 transition-transform ${thinkingExpanded ? "rotate-180" : ""}`}
-                aria-hidden="true"
               />
             </button>
             {thinkingExpanded && (
-              <div
-                id={`thinking-block-${message.id}`}
-                role="region"
-                aria-label={t("chat.thinking_label")}
-                className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim break-words prose-sm"
-              >
+              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim break-words prose-sm">
                 <MarkdownContent>{message.thinking ?? ""}</MarkdownContent>
               </div>
             )}
           </div>
         )}
 
-        {/* Tool calls — one pill per message bubble that opens a Modal
-            listing every call in this turn (input/result for each). */}
+        {/* Tool calls — rendered above text for assistant messages */}
         {!isUser && message.tools && message.tools.length > 0 && (
-          <div className="w-full mb-1.5">
-            <ToolCallsPanel tools={message.tools} />
+          <div className="w-full mb-1">
+            {message.tools.map((tool, i) => (
+              <ToolCallCard key={tool._call_id ?? `${tool.name}-${i}`} tool={tool} />
+            ))}
           </div>
         )}
 
@@ -1385,7 +1201,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
                     key={img.file_id}
                     href={src}
                     target="_blank"
-                    rel="noopener noreferrer"
+                    rel="noreferrer noopener"
                     className="block rounded-lg overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors max-w-[240px]"
                   >
                     <img
@@ -1402,7 +1218,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
                   key={img.file_id}
                   href={src}
                   target="_blank"
-                  rel="noopener noreferrer"
+                  rel="noreferrer noopener"
                   className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border-subtle bg-surface text-[11px] text-text hover:border-brand/40 transition-colors max-w-[220px]"
                 >
                   <FileText className="h-3 w-3 text-text-dim shrink-0" />
@@ -1636,22 +1452,6 @@ const ATTACHMENT_ACCEPT = [
   ...TEXT_LIKE_EXTENSIONS,
 ].join(",");
 
-const isImageMime = (mime: string) => mime.startsWith("image/");
-const isPdfMime = (mime: string) => mime === PDF_MIME;
-const isTextLikeMime = (mime: string) => {
-  if (mime.startsWith("text/")) return true;
-  return TEXT_LIKE_MIMES.includes(mime);
-};
-const hasTextLikeExtension = (filename: string) => {
-  const lower = filename.toLowerCase();
-  return TEXT_LIKE_EXTENSIONS.some(ext => lower.endsWith(ext));
-};
-const isSupportedFile = (file: File) =>
-  isImageMime(file.type)
-  || isPdfMime(file.type)
-  || isTextLikeMime(file.type)
-  || hasTextLikeExtension(file.name);
-
 interface PendingAttachment {
   /** Stable client id used to track this entry across upload state changes. */
   localId: string;
@@ -1664,40 +1464,6 @@ interface PendingAttachment {
   /** Set on `status === "ready"`; absent until the server returns. */
   fileId?: string;
   errorMessage?: string;
-}
-
-// Collapsed banner surfacing the LLM-generated compaction summary above kept
-// messages. Click-to-expand reveals the full summary text; collapsed by default
-// because it can be long and the kept messages are what the user cares about.
-function CompactionSummaryBanner({ summary, isCompacting }: { summary: string | null; isCompacting: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  if (isCompacting) {
-    return (
-      <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-brand/10 border border-brand/20 text-xs text-brand font-medium">
-        <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
-        <span>Compacting session…</span>
-      </div>
-    );
-  }
-  if (!summary) return null;
-  return (
-    <div className="rounded-xl border border-border-subtle bg-surface-raised overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setExpanded(v => !v)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-text-dim hover:text-text transition-colors text-left"
-      >
-        <Brain className="h-3.5 w-3.5 shrink-0" />
-        <span className="flex-1">Session summary (older messages compacted)</span>
-        <ChevronDown className={`h-3.5 w-3.5 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
-      </button>
-      {expanded && (
-        <div className="px-3 pb-3 pt-0 text-xs text-text-dim whitespace-pre-wrap border-t border-border-subtle">
-          {summary}
-        </div>
-      )}
-    </div>
-  );
 }
 
 // Input box - with shortcut hints
@@ -1787,6 +1553,25 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
 
   // ─────────────────────────────────────────────────────────────────────────
   // ── Attachment upload pipeline ────────────────────────────────────────────
+
+  const isImageMime = (mime: string) => mime.startsWith("image/");
+  const isPdfMime = (mime: string) => mime === PDF_MIME;
+  const isTextLikeMime = (mime: string) => {
+    if (mime.startsWith("text/")) return true;
+    return TEXT_LIKE_MIMES.includes(mime);
+  };
+  const hasTextLikeExtension = (filename: string) => {
+    const lower = filename.toLowerCase();
+    return TEXT_LIKE_EXTENSIONS.some(ext => lower.endsWith(ext));
+  };
+  // Browsers often leave `file.type` empty for code files (e.g. `.rs`),
+  // so we fall back to extension matching — matching the backend's
+  // `is_text_like_attachment` logic.
+  const isSupportedFile = (file: File) =>
+    isImageMime(file.type)
+    || isPdfMime(file.type)
+    || isTextLikeMime(file.type)
+    || hasTextLikeExtension(file.name);
 
   const enqueueFiles = useCallback((files: File[]) => {
     if (!agentId || files.length === 0) return;
@@ -1961,11 +1746,11 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   }, [message]);
 
   const effectiveDisabled = disabled || !!authMissing;
-  // Both the textarea and the send button unlock on `typing:stop` (`disabled`
-  // and `inputDisabled` both track `isStreaming`). The `response` frame still
-  // arrives later and attaches `memories_saved` to the correct message via its
-  // keyed `updateAgentMessages` call — the send-button gate does not need to
-  // wait for it.
+  // Textarea only locked while the agent is actively streaming text. Once the
+  // model emits `typing:stop` the user can start composing the next message
+  // even while background post-processing (memory save) is still running —
+  // the send button stays gated on `effectiveDisabled` until the `response`
+  // event arrives with final tokens/cost.
   const textareaDisabled = (inputDisabled ?? disabled) || !!authMissing;
 
   return (
@@ -2513,23 +2298,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               <Clock className="h-3 w-3" />
               <span className="hidden sm:inline truncate max-w-[100px]">
                 {(() => {
-                  // Issue #5199-C: `activeSessionId` is undefined when the
-                  // URL is unpinned (`?agentId=` only). In that case the
-                  // connection rides the canonical pointer; we cannot
-                  // know which session row matches it before the first
-                  // response, so showing one as "active" would mislead.
-                  // Show an explicit "unpinned" hint instead of the
-                  // generic "Session" placeholder so users see the
-                  // ambiguity rather than mistake it for selection state.
-                  //
-                  // The label-picking branch (active session resolved) is
-                  // factored out into `pickSessionDropdownLabel` so the
-                  // contract (active row label > short id prefix > null)
-                  // is unit-testable next to deriveDropdownActiveSessionId.
-                  if (!activeSessionId) {
-                    return t("chat.session_unpinned", { defaultValue: "Unpinned" });
-                  }
-                  return pickSessionDropdownLabel(activeSessionId, sessions) ?? t("chat.session");
+                  const active = sessions.find(s => s.session_id === activeSessionId);
+                  return active?.label || activeSessionId?.slice(0, 8) || t("chat.session");
                 })()}
               </span>
               <ChevronDown className={`h-3 w-3 transition-transform ${sessionOpen ? "rotate-180" : ""}`} />
@@ -2744,8 +2514,6 @@ export function ChatPage() {
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current); }, []);
   // Message windowing: render only the last N messages to avoid DOM bloat in
   // long sessions. The user can load earlier messages with the button above.
   const [visibleCount, setVisibleCount] = useState(50);
@@ -2789,8 +2557,7 @@ export function ChatPage() {
   const handleCopy = useCallback(async (messageId: string, content: string) => {
     if (await copyToClipboard(content)) {
       setCopiedMessageId(messageId);
-      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-      copiedTimerRef.current = setTimeout(() => setCopiedMessageId(null), 1500);
+      setTimeout(() => setCopiedMessageId(null), 1500);
     } else {
       addToast(t("common.copy_failed"), "error");
     }
@@ -2838,10 +2605,12 @@ export function ChatPage() {
   }, [selectedAgentId, tts.stop]);
 
   const [showHandAgents, setShowHandAgents] = useState<boolean>(() => {
-    return safeStorageGet("librefang.chat.show_hand_agents") === "1";
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("librefang.chat.show_hand_agents") === "1";
   });
   useEffect(() => {
-    safeStorageSet(
+    if (typeof window === "undefined") return;
+    localStorage.setItem(
       "librefang.chat.show_hand_agents",
       showHandAgents ? "1" : "0",
     );
@@ -2899,26 +2668,7 @@ export function ChatPage() {
     void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
   }, [selectedAgentId, navigate, queryClient]);
 
-  // Issue #5199-B: auto-pin URL after the first message of an unpinned
-  // (`?agentId=` only) chat.  Distinct from `handleBackendNewSession`:
-  //   - replaces history (no Back-button trail through bare-agent URLs)
-  //   - does NOT bump sessionVersion — the messages we just rendered
-  //     belong to this very session; bumping would wipe and refetch.
-  //     The WS response handler seeds the cache under the new key
-  //     before this fires, so the load effect takes a cache hit.
-  //   - still invalidates the sessions list so a brand-new session
-  //     surfaces in the dropdown immediately.
-  const handleAutoPinSession = useCallback((newSessionId: string) => {
-    if (!selectedAgentId) return;
-    navigate({
-      to: "/chat",
-      search: { agentId: selectedAgentId, sessionId: newSessionId },
-      replace: true,
-    });
-    void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
-  }, [selectedAgentId, navigate, queryClient]);
-
-  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce, compactedSummary, isCompacting } = useChatMessages(
+  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce } = useChatMessages(
     selectedAgentId || null,
     agents,
     sessionVersion,
@@ -2926,7 +2676,6 @@ export function ChatPage() {
     (message) => addToast(message, "error"),
     urlSessionId,
     handleBackendNewSession,
-    handleAutoPinSession,
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final
@@ -3024,30 +2773,17 @@ export function ChatPage() {
     // the dropdown still highlights something rather than going blank.
     return (newest ?? sessions[0]).session_id;
   }, [sessionsQuery.data]);
-  // `activeSessionId` is the session that the connection is *known* to be
-  // bound to — set only when the URL carries an explicit ?sessionId=.  When
-  // the connection rides the canonical pointer (unpinned), we do not know
-  // which session the next message will land in until the server confirms it,
-  // so showing any session as "active" in the dropdown would be misleading.
-  // After the first message in an unpinned chat, the server emits session_id
-  // in the response and handleBackendNewSession pins the URL, at which point
-  // this becomes non-null and the highlight is correct.
-  const activeSessionId = deriveDropdownActiveSessionId(urlSessionId);
-  // Best-effort resolved session id, used only for features that need *some*
-  // session reference (SSE attach viewer) but do not imply a UI "active"
-  // guarantee.  Falls back to the most-recently-created session when the URL
-  // is not yet pinned.
-  const resolvedSessionId = urlSessionId ?? fallbackSessionId;
+  const activeSessionId = urlSessionId ?? fallbackSessionId;
 
   // Multi-attach SSE viewer (issue #3078). Opt-in behind ?attach=1 — the
   // server-side route ships in a separate PR; until that lands the hook
   // silently no-ops on the 404 it returns. We watch a session that another
   // client (CLI, desktop, second browser tab) may already be driving over
   // its own /message/stream connection.
-  const attachEnabled = search?.attach === "1" && !!selectedAgentId && !!resolvedSessionId;
+  const attachEnabled = search?.attach === "1" && !!selectedAgentId && !!activeSessionId;
   const sessionStream = useSessionStream(
     attachEnabled ? selectedAgentId : null,
-    attachEnabled ? resolvedSessionId ?? null : null,
+    attachEnabled ? activeSessionId ?? null : null,
   );
 
   // Sidebar clicks update the URL — no switch_agent_session POST. Each tab's
@@ -3133,10 +2869,7 @@ export function ChatPage() {
     agent: AgentItem,
     role?: string,
     isCoordinator?: boolean,
-  ) => {
-    const displayName =
-      role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name });
-    return (
+  ) => (
     <button
       key={agent.id}
       onClick={() => selectAgent(agent.id)}
@@ -3151,7 +2884,7 @@ export function ChatPage() {
         : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-brand"
         : "bg-main text-text-dim/40"
       }`}>
-        {displayName.charAt(0).toUpperCase()}
+        {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
         {(agent.state || "").toLowerCase() === "running" ? (
           <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
         ) : (
@@ -3160,11 +2893,8 @@ export function ChatPage() {
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <p
-            title={displayName}
-            className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}
-          >
-            {displayName}
+          <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>
+            {role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
           </p>
           {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
           {agent.auth_status === "configured_cli" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
@@ -3172,25 +2902,18 @@ export function ChatPage() {
           {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning shrink-0" />}
         </div>
         {isCoordinator ? (
-          <p
-            title={t("chat.hand_coordinator", { defaultValue: "coordinator" })}
-            className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}
-          >
+          <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
             {t("chat.hand_coordinator", { defaultValue: "coordinator" })}
           </p>
         ) : (
-          <p
-            title={agent.model_provider || t("common.unknown")}
-            className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}
-          >
+          <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
             {agent.model_provider || t("common.unknown")}
           </p>
         )}
       </div>
       <ArrowRight className={`h-4 w-4 shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
     </button>
-    );
-  };
+  );
 
   return (
     <div className="flex h-[calc(100dvh-180px)] lg:h-[calc(100vh-140px)] flex-col min-h-0">
@@ -3436,7 +3159,6 @@ export function ChatPage() {
                     {t("chat.load_earlier_messages", { count: messages.length - visibleCount, defaultValue: `Load ${messages.length - visibleCount} earlier messages` })}
                   </button>
                 )}
-                <CompactionSummaryBanner summary={compactedSummary} isCompacting={isCompacting} />
                 {messages.slice(-visibleCount).map(msg => (
                   <MessageBubble
                     key={msg.id}
@@ -3470,7 +3192,7 @@ export function ChatPage() {
               onSend={sendMessage}
               onStop={stopMessage}
               isStreaming={isStreaming}
-              disabled={isStreaming}
+              disabled={isLoading}
               inputDisabled={isStreaming}
               placeholder={isStreaming ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}

@@ -34,10 +34,8 @@ export {
   getUsageDaily,
   getUsageByModelPerformance,
   getBudgetStatus,
-  getProviderBudgets,
   // channels & comms
   listChannels,
-  getChannelQr,
   getCommsTopology,
   listCommsEvents,
   // config & registry
@@ -77,8 +75,6 @@ export {
   getModelOverrides,
   // providers
   listProviders,
-  // credential pools (#4965)
-  listCredentialPools,
   // network / peers / a2a
   getNetworkStatus,
   listPeers,
@@ -100,9 +96,6 @@ export {
   listSkills,
   getSkillDetail,
   getSupportingFile,
-  // skill workshop pending review (#3328)
-  listPendingCandidates,
-  getPendingCandidate,
   clawhubBrowse,
   clawhubSearch,
   clawhubGetSkill,
@@ -121,25 +114,17 @@ export {
   listWorkflowRuns,
   getWorkflowRun,
   listWorkflowTemplates,
-  // workflows — HITL operator-step (#4977)
-  inspectOperatorPause,
-  listPendingOperatorRuns,
   // terminal
   getTerminalHealth,
   listTerminalWindows,
   // auto-dream
   getAutoDreamStatus,
-  // tools
-  listTools,
-  getAgentTools,
-  getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
   // runtime
   getStatus,
   getQueueStatus,
-  getHealth,
   getHealthDetail,
   getSecurityStatus,
   listBackups,
@@ -161,19 +146,9 @@ export {
 } from "../../api";
 
 export type {
-  // per-provider budget (#5650)
-  ProviderBudgetRow,
-  ProviderBudgetSnapshot,
-  ProviderBudgetPayload,
   UserBudgetResponse,
   UserBudgetWindow,
   UserBudgetPayload,
-  ListSessionsResult,
-  SidecarSaveResult,
-  // workflows — HITL operator-step (#4977)
-  OperatorPause,
-  OperatorActionVerb,
-  OperatorActionDescriptor,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -192,13 +167,10 @@ export {
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
   clearHandAgentRuntimeConfig,
-  resetAgentSession,
-  updateAgentTools,
   createAgentSession,
   switchAgentSession,
   deleteSession,
   setSessionLabel,
-  setSessionModelOverride,
   deletePromptVersion,
   activatePromptVersion,
   createPromptVersion,
@@ -210,10 +182,10 @@ export {
   resolveApproval,
   // analytics
   updateBudget,
-  updateProviderBudget,
   // channels & comms
+  configureChannel,
+  testChannel,
   reloadChannels,
-  saveSidecarConfig,
   sendCommsMessage,
   postCommsTask,
   // attachments
@@ -267,7 +239,6 @@ export {
   testProvider,
   setProviderKey,
   deleteProviderKey,
-  enableProvider,
   setProviderUrl,
   setDefaultProvider,
   // network / a2a
@@ -286,11 +257,6 @@ export {
   createTrigger,
   updateTrigger,
   deleteTrigger,
-  // cron jobs (per-agent scheduler entries)
-  createCronJob,
-  updateCronJob,
-  deleteCronJob,
-  toggleCronJob,
   // skills
   createSkill,
   reloadSkills,
@@ -302,9 +268,6 @@ export {
   evolveRemoveFile,
   installSkill,
   uninstallSkill,
-  // skill workshop pending review (#3328)
-  approvePendingCandidate,
-  rejectPendingCandidate,
   clawhubInstall,
   clawhubCnInstall,
   skillhubInstall,
@@ -316,8 +279,6 @@ export {
   updateWorkflow,
   instantiateTemplate,
   saveWorkflowAsTemplate,
-  // workflows — HITL operator-step resolution (#4977)
-  resolveOperatorStep,
   // terminal
   createTerminalWindow,
   renameTerminalWindow,
@@ -352,14 +313,9 @@ export type {
   AutoDreamStatusName,
   AutoDreamTriggerOutcome,
   AutoDreamTurn,
-  CronActionSpec,
-  CronDeliverySpec,
   CronDeliveryTarget,
   CronDeliveryTargetType,
   CronJobItem,
-  CronScheduleSpec,
-  CreateCronJobPayload,
-  UpdateCronJobPayload,
   HandDefinitionItem,
   HandInstanceItem,
   HandSessionMessage,

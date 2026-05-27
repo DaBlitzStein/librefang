@@ -23,7 +23,7 @@ See `CLAUDE.md` for the full agent contract (worktree rules, hooks, integration 
 | `librefang-kernel` | Agent registry, scheduling, orchestration, event bus, metering |
 | `librefang-runtime` | Agent loop, LLM drivers, tools, MCP client, context engine, A2A |
 | `librefang-api` | HTTP/WebSocket server, routes, middleware, dashboard |
-| `librefang-channels` | Channel-bridge infra: sidecar trampoline + shared bridge types (per-channel adapters live as Python sidecars under `sdk/python/librefang/sidecar/adapters/`) |
+| `librefang-channels` | 40+ messaging bridges (Discord, Slack, Telegram, WeCom, …) |
 | `librefang-memory` | History, vector search, knowledge storage |
 | `librefang-wire` | OFP — agent-to-agent P2P |
 | `librefang-skills` | Skill registry, loader, marketplace, WASM sandbox |
@@ -31,7 +31,7 @@ See `CLAUDE.md` for the full agent contract (worktree rules, hooks, integration 
 | `librefang-extensions` | MCP server setup, credential vault, OAuth2 PKCE |
 | `librefang-cli` | CLI binary (ratatui TUI) |
 | `librefang-desktop` | Native desktop app (Tauri 2.0) |
-| `librefang-import` | Import from other agent frameworks |
+| `librefang-migrate` | Import from other agent frameworks |
 | `librefang-telemetry` | OpenTelemetry + Prometheus |
 | `librefang-testing` | Mock kernel, mock LLM, route test utilities |
 | `xtask` | Dev task runner |
@@ -91,60 +91,6 @@ Domain modules under `crates/librefang-api/src/routes/`:
 - Async: `async fn` on tokio. `async-trait` only when a trait method must be async.
 - Tests: `#[cfg(test)]` next to source. Integration helpers in `librefang-testing`.
 - Commits: conventional — `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`.
-
-## AI Agent Collaboration
-
-LibreFang is an open-source project with heavy AI-assistant participation.
-To keep human reviewers in control and avoid noisy / destructive behaviour,
-AI agents working on this repo MUST observe the following boundaries.
-Detailed enforcement (hooks, wait policy, conflict resolution) lives in
-[`CLAUDE.md`](./CLAUDE.md#github-collaboration--wait-policy); this list is
-the single-page summary.
-
-### Boundaries
-- **Don't modify a PR a human maintainer has already reviewed or approved**
-  unless the maintainer asks for the edit. Open a follow-up PR instead.
-- **Don't close a PR or issue you did not open** unless the maintainer
-  directly instructs you to. By default, recommend closure in a
-  comment and let the maintainer act. When directed to close, the close
-  comment must state the substantive reason (review bugs, superseded
-  by, scope mismatch) — see `CLAUDE.md` for the full close-comment
-  contract.
-- **Don't force-push to someone else's branch.** Force-push to your own
-  branch is acceptable only while the PR is still un-reviewed.
-- **Don't bypass git verification flags.** No `--no-verify`, no
-  `--no-gpg-sign`, no skipping `commit-msg` / `pre-push` hooks.
-- **Don't add Claude / AI attribution** to commit messages or PR bodies
-  (`Co-Authored-By: Claude`, `🤖 Generated with …`, etc.). The `commit-msg`
-  hook rejects these.
-- **Don't edit files in the main worktree.** Always work from a linked
-  worktree (`git worktree add`).
-
-### Issue / PR interaction
-- **One PR ↔ one issue** (or one tightly-related cluster). Don't bundle
-  unrelated cleanups; open a separate PR.
-- **At most 2 follow-up comments** on the same issue / PR thread without
-  human input — then stop and wait. Repeated pings are noise.
-- **PR body must list:** substantive changes, how they were verified
-  (integration test names, scoped `cargo` invocations), and any
-  out-of-scope follow-ups left for a future PR.
-
-### CI wait policy
-- **Don't poll status checks for more than ~5 minutes.** CI is slow;
-  busy-waiting wastes turns. Push, report the run URL, and stop.
-- **Don't pre-emptively retry a check before it has failed.**
-- When you are blocked and cannot make progress without investigation,
-  **stop and report** — don't auto-open a follow-up issue, don't silently
-  switch plan.
-- While waiting for review, **don't add reviewers, don't flip
-  `ready-for-review`, don't re-request review** unless a maintainer
-  has set up an explicit convention asking for it.
-
-### Conflict resolution
-- A human maintainer's most recent intent **always wins** over an earlier
-  AI-authored change. When rebasing or resolving merge conflicts, preserve
-  both sides' intent — never silently drop a maintainer's edit because it
-  made the diff smaller.
 
 ## Gotchas
 

@@ -9,21 +9,19 @@
 //! The test exercises the full append → load → context roundtrip via the
 //! crate's public API, which is what the kernel actually calls.
 
+use std::sync::{Arc, Mutex};
+
 use librefang_memory::migration::run_migrations;
 use librefang_memory::session::SessionStore;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::message::MessageContent;
 use librefang_types::message::{Message, Role};
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::Connection;
 
 fn setup() -> SessionStore {
-    let pool = Pool::builder()
-        .max_size(1)
-        .build(SqliteConnectionManager::memory())
-        .expect("build pool");
-    run_migrations(&pool.get().expect("get conn")).expect("run migrations");
-    SessionStore::new(pool)
+    let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    run_migrations(&conn).expect("run migrations");
+    SessionStore::new(Arc::new(Mutex::new(conn)))
 }
 
 fn user_msg(text: &str) -> Message {

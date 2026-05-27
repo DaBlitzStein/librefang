@@ -34,20 +34,6 @@ interface Props<T> {
   className?: string;
   /** Message shown when `rows` is empty. */
   empty?: ReactNode;
-  /** Accessible table caption rendered inside `<table>`. */
-  caption?: string;
-}
-
-function safeCellValue(value: unknown): string {
-  if (value === null || value === undefined) return "—";
-  if (typeof value === "object") {
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return "[complex value]";
-    }
-  }
-  return String(value);
 }
 
 export function ResponsiveTable<T>({
@@ -56,7 +42,6 @@ export function ResponsiveTable<T>({
   rowKey,
   className = "",
   empty,
-  caption,
 }: Props<T>) {
   if (rows.length === 0 && empty) {
     return <div className={className}>{empty}</div>;
@@ -69,13 +54,11 @@ export function ResponsiveTable<T>({
       {/* ── Desktop table (md+) ───────────────────────────── */}
       <div className="hidden md:block overflow-x-auto rounded-xl border border-border-subtle">
         <table className="w-full text-sm">
-          {caption && <caption className="sr-only">{caption}</caption>}
           <thead>
             <tr className="border-b border-border-subtle bg-surface-hover/50">
               {columns.map((col) => (
                 <th
                   key={col.key}
-                  scope="col"
                   className={
                     col.thClass ??
                     "px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-text-dim"
@@ -97,7 +80,7 @@ export function ResponsiveTable<T>({
                     key={col.key}
                     className={col.tdClass ?? "px-4 py-3 text-sm"}
                   >
-                    {col.render ? col.render(row) : safeCellValue((row as Record<string, unknown>)[col.key])}
+                    {col.render ? col.render(row) : String((row as Record<string, unknown>)[col.key] ?? "—")}
                   </td>
                 ))}
               </tr>
@@ -107,11 +90,10 @@ export function ResponsiveTable<T>({
       </div>
 
       {/* ── Mobile cards (< md) ───────────────────────────── */}
-      <div className="md:hidden flex flex-col gap-2" role="list">
+      <div className="md:hidden flex flex-col gap-2">
         {rows.map((row) => (
           <div
             key={rowKey(row)}
-            role="listitem"
             className="rounded-xl border border-border-subtle bg-surface p-3 text-sm space-y-1.5"
           >
             {visibleCols.map((col) => (
@@ -120,7 +102,7 @@ export function ResponsiveTable<T>({
                   {col.label}
                 </span>
                 <span className="flex-1 min-w-0 text-text break-words">
-                  {col.render ? col.render(row) : safeCellValue((row as Record<string, unknown>)[col.key])}
+                  {col.render ? col.render(row) : String((row as Record<string, unknown>)[col.key] ?? "—")}
                 </span>
               </div>
             ))}

@@ -10,15 +10,13 @@ readme = "README.md"
 librefang-types = { path = "../librefang-types" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-http = { path = "../librefang-http" }
+librefang-runtime-oauth = { path = "../librefang-runtime-oauth" }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry-http = { workspace = true }
-tracing-opentelemetry = { workspace = true }
 metrics = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
@@ -26,7 +24,6 @@ uuid = { workspace = true }
 base64 = { workspace = true }
 dashmap = { workspace = true }
 sha2 = { workspace = true }
-hex = { workspace = true }
 zeroize = { workspace = true }
 dirs = { workspace = true }
 rand = { workspace = true }
@@ -35,8 +32,6 @@ rand = { workspace = true }
 serial_test = "3"
 tempfile = { workspace = true }
 wiremock = "0.6"
-opentelemetry_sdk = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

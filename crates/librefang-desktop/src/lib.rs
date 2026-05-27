@@ -26,7 +26,6 @@ mod updater;
 
 use librefang_extensions::dotenv;
 use librefang_kernel::event_bus::recv_event_skipping_lag;
-use librefang_kernel::EventSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::event::{EventPayload, LifecycleEvent, SystemEvent};
 use std::net::IpAddr;
@@ -525,8 +524,6 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                 let _ = window.hide();
                 api.prevent_close();
             }
-            #[cfg(not(desktop))]
-            let _ = (window, event);
         })
         .build(tauri::generate_context!())
         .expect("Failed to build Tauri application")

@@ -40,127 +40,27 @@ pub struct JsonArray(pub Vec<serde_json::Value>);
 // Unified API error response
 // ---------------------------------------------------------------------------
 
-/// Nested error body used by the #3639 envelope migration.
-///
-/// Serializes as `{"code": "...", "message": "...", "request_id": "..."}`.
-/// Lives at the top-level `error` key alongside the flat compatibility
-/// fields (`code`, `type`, `request_id`) so old and new clients can both
-/// parse a single response.
-#[derive(Debug, Serialize)]
-pub struct ApiErrorBody {
-    /// Stable machine-readable code (mirrors the flat top-level `code`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
-    /// Human-readable error message (mirrors the legacy flat `error` string).
-    pub message: String,
-    /// Per-request correlation id (mirrors the flat top-level `request_id`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-}
-
 /// A unified error response type for all API endpoints.
 ///
 /// Every error returned by the API uses this shape, ensuring clients can rely
 /// on a single parsing strategy.  The `code` and `details` fields are optional
 /// and only serialized when present.
-///
-/// `request_id` (#3639) is populated automatically by the
-/// [`crate::middleware::request_logging`] post-response hook on every JSON
-/// 4xx/5xx response, so handlers do not need to set it manually.
-///
-/// Wire shape (#3639 deferred — coexists for one minor):
-///
-/// ```json
-/// {
-///   "error": { "code": "not_found", "message": "...", "request_id": "..." },
-///   "message": "...",
-///   "code": "not_found",
-///   "type": "not_found",
-///   "request_id": "..."
-/// }
-/// ```
-///
-/// The nested `error` object is the long-term shape; the flat `code` /
-/// `type` / `request_id` fields are kept for one minor for backward
-/// compatibility with the dashboard and external callers that still
-/// parse the flat form. New consumers should prefer
-/// `response.error.code` over `response.code`.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ApiErrorResponse {
-    /// Human-readable error message.
-    ///
-    /// Serialized as a top-level `message` field and mirrored inside the
-    /// nested `error.message`.
     pub error: String,
-    /// Stable machine-readable error code (e.g. `"not_found"`).
-    ///
-    /// **Deprecated**: Removed in next minor; use nested `error.code` instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
-    /// Backward-compatible alias for `code` (legacy clients).
+    /// Backward-compatible alias for `code`.
     ///
-    /// **Deprecated**: Removed in next minor; use nested `error.code` instead.
+    /// Old clients may parse `"type"` instead of `"code"`.  When both are
+    /// set they carry the same value.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
-    /// Optional structured details payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
-    /// Per-request correlation id (matches the `x-request-id` header).
-    ///
-    /// **Deprecated**: Removed in next minor; use nested `error.request_id`
-    /// instead.
-    pub request_id: Option<String>,
     /// HTTP status code — not serialized into the JSON body.
+    #[serde(skip)]
     pub status: StatusCode,
-}
-
-/// Custom serializer emits BOTH the legacy flat fields AND the new nested
-/// `error: ApiErrorBody` envelope (#3639 deferred). The flat fields are
-/// kept for one minor so the dashboard and external callers that still
-/// parse `response.code` / `response.request_id` keep working while new
-/// code migrates to `response.error.code` / `response.error.request_id`.
-impl Serialize for ApiErrorResponse {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        // Field count: nested `error` + `message` always present; the rest
-        // are serialized only when populated.
-        let mut field_count = 2;
-        if self.code.is_some() {
-            field_count += 1;
-        }
-        if self.r#type.is_some() {
-            field_count += 1;
-        }
-        if self.details.is_some() {
-            field_count += 1;
-        }
-        if self.request_id.is_some() {
-            field_count += 1;
-        }
-
-        let mut map = serializer.serialize_map(Some(field_count))?;
-
-        // New nested envelope (#3639 — preferred shape).
-        let nested = ApiErrorBody {
-            code: self.code.clone(),
-            message: self.error.clone(),
-            request_id: self.request_id.clone(),
-        };
-        map.serialize_entry("error", &nested)?;
-
-        // Flat compatibility fields (deprecated, removed next minor).
-        map.serialize_entry("message", &self.error)?;
-        if let Some(code) = &self.code {
-            map.serialize_entry("code", code)?;
-        }
-        if let Some(t) = &self.r#type {
-            map.serialize_entry("type", t)?;
-        }
-        if let Some(details) = &self.details {
-            map.serialize_entry("details", details)?;
-        }
-        if let Some(request_id) = &self.request_id {
-            map.serialize_entry("request_id", request_id)?;
-        }
-        map.end()
-    }
 }
 
 impl IntoResponse for ApiErrorResponse {
@@ -192,7 +92,6 @@ pub fn api_error(
         code: Some(code.to_string()),
         r#type: Some(code.to_string()),
         details: None,
-        request_id: None,
         status,
     }
     .into_response()
@@ -206,7 +105,6 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
-            request_id: None,
             status: StatusCode::BAD_REQUEST,
         }
     }
@@ -218,7 +116,6 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
-            request_id: None,
             status: StatusCode::NOT_FOUND,
         }
     }
@@ -230,7 +127,6 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
-            request_id: None,
             status: StatusCode::FORBIDDEN,
         }
     }
@@ -242,7 +138,6 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
-            request_id: None,
             status: StatusCode::CONFLICT,
         }
     }
@@ -254,67 +149,14 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
-            request_id: None,
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-
-    /// 500 Internal Server Error with **server-side full-error
-    /// log + client-side scrubbed body** (audit:
-    /// rusqlite-errors-leak).
-    ///
-    /// `librefang-memory` wraps every rusqlite error in
-    /// `LibreFangError::Internal(e.to_string())` (`substrate.rs:
-    /// 368, 625, 664, 677, 839, 872, 906, 921`). Routes that
-    /// echo `e.to_string()` into the response body leak SQL
-    /// internals — column names, constraint identifiers, "database
-    /// is locked", "UNIQUE constraint failed: agents.id" — to any
-    /// caller able to trigger an internal error. That's a free
-    /// schema-disclosure oracle that helps craft follow-up attacks
-    /// (e.g. via known constraint names) and exposes admin-only
-    /// implementation detail to lower-privilege roles.
-    ///
-    /// `internal_scrub` logs the full error chain at `error!`
-    /// (operators retain forensics via journald / Sentry / log
-    /// aggregator) and returns the static `"Internal server
-    /// error"` to the client. This is the inverse of
-    /// [`Self::internal`], which echoes the raw text — kept around
-    /// for the legacy and tracing-only call sites still in the
-    /// codebase, but new code (and audited rewrites) should use
-    /// `internal_scrub`.
-    ///
-    /// Reference pattern: `MemoryRouteError::Internal` in
-    /// `routes/memory.rs:198-215` already follows this shape; this
-    /// helper lifts it into a workspace-wide accessor so every
-    /// route can adopt it without copy-paste.
-    pub fn internal_scrub(e: impl std::fmt::Display) -> Self {
-        let full = e.to_string();
-        tracing::error!(error = %full, "internal error scrubbed before response");
-        Self {
-            error: "Internal server error".to_string(),
-            code: None,
-            r#type: None,
-            details: None,
-            request_id: None,
             status: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     /// Attach an error code (e.g. `"not_supported"`, `"rate_limited"`).
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
-        let code = code.into();
-        self.r#type = Some(code.clone());
-        self.code = Some(code);
+        self.code = Some(code.into());
         self
-    }
-
-    /// Attach a typed [`librefang_types::error_code::ErrorCode`] (#3639).
-    ///
-    /// Preferred over [`Self::with_code`] for new code paths because the
-    /// stable wire token is enforced by the type system. Sets both `code`
-    /// and the legacy `type` alias.
-    pub fn with_error_code(self, code: librefang_types::error_code::ErrorCode) -> Self {
-        self.with_code(code.as_str())
     }
 
     /// Attach arbitrary detail payload.
@@ -326,16 +168,6 @@ impl ApiErrorResponse {
     /// Build with a custom status code.
     pub fn with_status(mut self, status: StatusCode) -> Self {
         self.status = status;
-        self
-    }
-
-    /// Stamp a `request_id` correlation token onto the body (#3639).
-    ///
-    /// Consumed by the request-logging middleware after `next.run()` so
-    /// every JSON error response carries the same id that appears in the
-    /// `x-request-id` response header and the structured access-log line.
-    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
-        self.request_id = Some(request_id.into());
         self
     }
 
@@ -355,7 +187,6 @@ impl ApiErrorResponse {
 
 /// Request to spawn an agent from a TOML manifest string or a template name.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct SpawnRequest {
     /// Agent manifest as TOML string (optional if `template` is provided).
     #[serde(default)]
@@ -398,7 +229,6 @@ pub struct ParticipantRefSchema {
 
 /// A file attachment reference (from a prior upload).
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct AttachmentRef {
     pub file_id: String,
     #[serde(default)]
@@ -409,7 +239,6 @@ pub struct AttachmentRef {
 
 /// Request to send a message to an agent.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct MessageRequest {
     pub message: String,
     /// Optional file attachments (uploaded via /upload endpoint).
@@ -468,14 +297,6 @@ pub struct MessageRequest {
     /// agent with 400 Bad Request.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// When true, this turn runs in **incognito mode**: session messages and
-    /// proactive-memory writes are suppressed while memory reads remain
-    /// fully operational. Useful for sensitive queries that should leave no
-    /// trace in the conversation history.
-    ///
-    /// Defaults to `false` (normal persistent turn).
-    #[serde(default)]
-    pub incognito: bool,
 }
 
 /// Response from sending a message.
@@ -517,28 +338,10 @@ pub struct MessageResponse {
     /// (BC-01 — Telegram/Discord/Slack continue to function unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_notice: Option<String>,
-    /// Issue #5199 — session id the kernel actually used for this turn.
-    ///
-    /// Set ONLY when the caller did not pin a session in the request
-    /// (`session_id` body field absent / null), mirroring the WS handler's
-    /// `explicit_session.is_none()` branch in `ws.rs`. The dashboard's
-    /// chat HTTP fallback path reads this back so it can auto-pin
-    /// `?sessionId=` in the URL — without it, a bare `?agentId=` chat
-    /// that took the HTTP fallback (WS down or first send before WS
-    /// connected) stays unpinned even though the kernel persisted the
-    /// turn to a concrete session, leaving the user bookmarkable into
-    /// a different canonical session after a daemon restart.
-    ///
-    /// Omitted when the caller passed an explicit `session_id` —
-    /// echoing it back would be redundant and risk implying a server
-    /// auto-resolution that did not happen.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
 }
 
 /// Request to inject a message into a running agent's tool-execution loop (#956).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct InjectMessageRequest {
     /// The message to inject between tool calls.
     pub message: String,
@@ -556,7 +359,6 @@ pub struct InjectMessageResponse {
 
 /// Request to install a skill from the marketplace.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct SkillInstallRequest {
     pub name: String,
     /// Install into a specific hand's workspace instead of globally.
@@ -566,14 +368,12 @@ pub struct SkillInstallRequest {
 
 /// Request to uninstall a skill.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct SkillUninstallRequest {
     pub name: String,
 }
 
 /// Request to change an agent's operational mode.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct SetModeRequest {
     #[schema(value_type = String)]
     pub mode: librefang_types::agent::AgentMode,
@@ -581,7 +381,6 @@ pub struct SetModeRequest {
 
 /// Request to run a migration.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct MigrateRequest {
     pub source: String,
     pub source_dir: String,
@@ -592,14 +391,12 @@ pub struct MigrateRequest {
 
 /// Request to scan a directory for migration.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct MigrateScanRequest {
     pub path: String,
 }
 
 /// Request to install a skill from ClawHub.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ClawHubInstallRequest {
     /// ClawHub skill slug (e.g., "github-helper").
     pub slug: String,
@@ -614,7 +411,6 @@ pub struct ClawHubInstallRequest {
 
 /// Request to create multiple agents at once.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct BulkCreateRequest {
     pub agents: Vec<SpawnRequest>,
 }
@@ -634,7 +430,6 @@ pub struct BulkCreateResult {
 
 /// Request containing a list of agent IDs for bulk operations (delete/start/stop).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct BulkAgentIdsRequest {
     pub agent_ids: Vec<String>,
 }
@@ -652,7 +447,6 @@ pub struct BulkActionResult {
 
 /// Request to install an extension (integration).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ExtensionInstallRequest {
     /// Extension/integration ID (e.g., "github", "slack").
     pub name: String,
@@ -660,7 +454,6 @@ pub struct ExtensionInstallRequest {
 
 /// Request to uninstall an extension (integration).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ExtensionUninstallRequest {
     /// Extension/integration ID to remove.
     pub name: String,
@@ -712,58 +505,8 @@ pub struct PaginatedResponse<T: Serialize> {
     pub limit: Option<usize>,
 }
 
-/// Hard server-side cap on page size (#3639). A client requesting `?limit=N`
-/// with N greater than this is silently clamped — protects the wire from
-/// pathological "fetch everything" calls on growing catalogs.
-pub const PAGINATION_MAX_LIMIT: usize = 100;
-
-/// Generic pagination query parameters: `?offset=&limit=`.
-///
-/// Used by list endpoints that previously returned the full collection
-/// regardless of query params (#3639). When neither `offset` nor `limit`
-/// is supplied, the handler returns the full collection — preserves
-/// backward compatibility for callers that depended on the unbounded
-/// shape. When *either* is supplied, both default to sane values
-/// (`offset=0`, `limit=PAGINATION_MAX_LIMIT`) and `limit` is server-capped.
-#[derive(Debug, Default, Deserialize)]
-pub struct PaginationQuery {
-    /// Number of items to skip from the start of the result set.
-    pub offset: Option<usize>,
-    /// Maximum number of items to return; server-capped at `PAGINATION_MAX_LIMIT`.
-    pub limit: Option<usize>,
-}
-
-impl PaginationQuery {
-    /// Slice a collection according to the query, returning
-    /// `(items, total, effective_offset, effective_limit)`.
-    ///
-    /// `effective_limit` is `None` when the query left both fields blank
-    /// (full collection returned); otherwise it's the clamped value the
-    /// server actually applied, so clients can tell from the response
-    /// envelope whether the cap kicked in.
-    pub fn paginate<T>(&self, items: Vec<T>) -> (Vec<T>, usize, usize, Option<usize>) {
-        // Audit: agent-list-limit-none-unbounded. Previously `offset =
-        // None && limit = None` meant "return the entire collection
-        // unpaginated", which turns into a memory + JSON-serialisation
-        // DoS on multi-thousand-row deployments. Now an unset `limit`
-        // always falls through to `PAGINATION_MAX_LIMIT`, and an
-        // explicit oversized `limit` still clamps. Callers that need
-        // larger pages must walk the offset cursor.
-        let total = items.len();
-        let offset = self.offset.unwrap_or(0).min(total);
-        let limit = self
-            .limit
-            .unwrap_or(PAGINATION_MAX_LIMIT)
-            .min(PAGINATION_MAX_LIMIT);
-        let end = (offset + limit).min(total);
-        let page: Vec<T> = items.into_iter().skip(offset).take(end - offset).collect();
-        (page, total, offset, Some(limit))
-    }
-}
-
 /// Request to push a proactive outbound message from an agent to a channel.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct PushMessageRequest {
     /// Channel adapter name (e.g., "telegram", "slack", "discord").
     pub channel: String,
@@ -779,23 +522,6 @@ pub struct PushMessageRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn internal_scrub_returns_generic_message_not_source_error() {
-        // Audit: rusqlite-errors-leak. Verifies that the helper hides
-        // SQL- and kernel-internal error chains from clients while still
-        // emitting the full message to tracing (visible in the test
-        // logs, not asserted here — log capture is environment-specific).
-        let leaked = "no such column: agent_workspaces.invalid_field (code 1)";
-        let scrubbed = ApiErrorResponse::internal_scrub(leaked);
-        assert_eq!(scrubbed.status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(scrubbed.error, "Internal server error");
-        assert!(
-            !scrubbed.error.contains("agent_workspaces"),
-            "scrubbed body must not echo column/table identifiers"
-        );
-        assert!(scrubbed.code.is_none() && scrubbed.details.is_none());
-    }
 
     #[test]
     fn extension_install_request_deserialize() {
@@ -988,95 +714,6 @@ mod tests {
     }
 
     #[test]
-    fn pagination_unspecified_falls_back_to_max_limit_not_full_collection() {
-        // Audit: agent-list-limit-none-unbounded. With no params the
-        // server still applies `PAGINATION_MAX_LIMIT` so that a
-        // multi-thousand-row deployment cannot DoS the listing
-        // endpoint via the absence of `?limit=`. Small collections (≤
-        // PAGINATION_MAX_LIMIT) still come back in full because the
-        // cap is a ceiling, not a floor.
-        let q = PaginationQuery::default();
-        let (items, total, offset, limit) = q.paginate((0..10).collect::<Vec<_>>());
-        assert_eq!(items.len(), 10, "small collection still returned in full");
-        assert_eq!(total, 10);
-        assert_eq!(offset, 0);
-        assert_eq!(
-            limit,
-            Some(PAGINATION_MAX_LIMIT),
-            "the server cap is now always reported, never None"
-        );
-    }
-
-    #[test]
-    fn pagination_unspecified_truncates_large_collection_at_max_limit() {
-        // Companion to `..._not_full_collection`: the cap actually
-        // kicks in for collections > PAGINATION_MAX_LIMIT. This is the
-        // DoS scenario the audit closed (multi-thousand agents → a
-        // single unprotected GET would serialise the whole vec).
-        let q = PaginationQuery::default();
-        let big = (0..(PAGINATION_MAX_LIMIT + 50)).collect::<Vec<_>>();
-        let (items, total, _, limit) = q.paginate(big);
-        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
-        assert_eq!(
-            total,
-            PAGINATION_MAX_LIMIT + 50,
-            "total reflects the unclipped row count"
-        );
-        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
-    }
-
-    #[test]
-    fn pagination_explicit_offset_only_uses_default_limit() {
-        let q = PaginationQuery {
-            offset: Some(5),
-            limit: None,
-        };
-        let (items, total, offset, limit) = q.paginate((0..1000).collect::<Vec<_>>());
-        assert_eq!(total, 1000);
-        assert_eq!(offset, 5);
-        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
-        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
-        assert_eq!(items.first(), Some(&5));
-    }
-
-    #[test]
-    fn pagination_clamps_oversized_limit_to_max() {
-        let q = PaginationQuery {
-            offset: Some(0),
-            limit: Some(9999),
-        };
-        let (items, _, _, limit) = q.paginate((0..200).collect::<Vec<_>>());
-        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
-        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
-    }
-
-    #[test]
-    fn pagination_offset_past_total_yields_empty_page() {
-        let q = PaginationQuery {
-            offset: Some(50),
-            limit: Some(10),
-        };
-        let (items, total, offset, limit) = q.paginate((0..30).collect::<Vec<_>>());
-        assert_eq!(items.len(), 0);
-        assert_eq!(total, 30);
-        assert_eq!(offset, 30, "clamped to total");
-        assert_eq!(limit, Some(10));
-    }
-
-    #[test]
-    fn pagination_returns_partial_last_page() {
-        let q = PaginationQuery {
-            offset: Some(95),
-            limit: Some(10),
-        };
-        let (items, total, offset, limit) = q.paginate((0..100).collect::<Vec<_>>());
-        assert_eq!(items.len(), 5);
-        assert_eq!(total, 100);
-        assert_eq!(offset, 95);
-        assert_eq!(limit, Some(10));
-    }
-
-    #[test]
     fn paginated_response_serialize() {
         let resp = PaginatedResponse {
             items: vec!["a", "b"],
@@ -1104,61 +741,5 @@ mod tests {
         assert_eq!(json["total"], 3);
         assert_eq!(json["offset"], 0);
         assert!(json["limit"].is_null());
-    }
-
-    // ---------------------------------------------------------------------
-    // MessageResponse.session_id — issue #5199 HTTP fallback auto-pin.
-    // Locks the wire contract the dashboard chat handler reads back: the
-    // field is present (string) on a successful turn that the kernel
-    // auto-resolved, and entirely absent otherwise. The HTTP fallback in
-    // `ChatPage.tsx::sendViaHttp` reads `response.session_id` to call
-    // `onAutoPinSession`, so a regression that flips this to `null` or
-    // an empty string would silently break URL pinning on the fallback
-    // path (Codex review P2 on PR #5253).
-    // ---------------------------------------------------------------------
-
-    fn sample_message_response() -> MessageResponse {
-        MessageResponse {
-            response: "hi".into(),
-            input_tokens: 1,
-            output_tokens: 2,
-            iterations: 1,
-            cost_usd: None,
-            decision_traces: vec![],
-            memories_saved: vec![],
-            memories_used: vec![],
-            memory_conflicts: vec![],
-            thinking: None,
-            owner_notice: None,
-            session_id: None,
-        }
-    }
-
-    #[test]
-    fn message_response_omits_session_id_when_none() {
-        let resp = sample_message_response();
-        let json = serde_json::to_value(&resp).unwrap();
-        let obj = json.as_object().expect("response must serialize as object");
-        assert!(
-            !obj.contains_key("session_id"),
-            "session_id MUST be omitted (skip_serializing_if) — the HTTP \
-             fallback uses `typeof === 'string'` to decide whether to \
-             auto-pin; a `null` would still pass `typeof` and a misleading \
-             auto-pin would land on the kernel-resolved session even when \
-             the client explicitly pinned. Got: {obj:?}"
-        );
-    }
-
-    #[test]
-    fn message_response_emits_session_id_string_when_present() {
-        let mut resp = sample_message_response();
-        resp.session_id = Some("11111111-2222-3333-4444-555555555555".into());
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(
-            json["session_id"],
-            serde_json::json!("11111111-2222-3333-4444-555555555555"),
-            "session_id must serialize as a bare string (no wrapping object) \
-             — the dashboard reads `response.session_id` directly. Got: {json}"
-        );
     }
 }

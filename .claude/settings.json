@@ -41,7 +41,8 @@
     ],
     "deny": [
       "Bash(cargo build:*)",
-      "Bash(cargo run:*)"
+      "Bash(cargo run:*)",
+      "Bash(cargo install:*)"
     ]
   },
   "hooks": {

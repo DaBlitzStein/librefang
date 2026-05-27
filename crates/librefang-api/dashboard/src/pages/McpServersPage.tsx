@@ -1,9 +1,9 @@
 import React, { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
-import { safeUrl } from "../lib/safeUrl";
 import {
   type McpServerConfigured, type McpServerConnected, type McpTransport,
   type McpCatalogEntry,
@@ -514,13 +514,14 @@ function ServerCard({
   conn,
   onAuthSuccess,
   onViewDetail,
+  t,
 }: {
   server: McpServerConfigured;
   conn?: McpServerConnected;
   onAuthSuccess?: () => void;
   onViewDetail: () => void;
+  t: TFunction;
 }) {
-  const { t } = useTranslation();
   const isConnected = conn?.connected ?? false;
   const toolsCount = conn?.tools_count ?? 0;
   const transportType = useMemo(() => getTransportType(server), [server]);
@@ -679,12 +680,12 @@ function ServerDetailBody({
       </div>
 
       {/* Tabs */}
-      <div role="tablist" aria-label={t("mcp.detail_tabs_label", { defaultValue: "Server details" })} className="flex border-b border-border-subtle px-5 bg-main/20">
+      <div className="flex border-b border-border-subtle px-5 bg-main/20">
         {([
           { id: "tools" as const, label: t("mcp.tab_tools", { defaultValue: "Tools" }), icon: Wrench, count: conn?.tools_count ?? 0 },
           { id: "logs" as const, label: t("mcp.tab_logs", { defaultValue: "Logs" }), icon: FileText },
           { id: "config" as const, label: t("mcp.tab_config", { defaultValue: "Config" }), icon: Settings },
-        ] as const).map((td, _i, arr) => {
+        ]).map((td) => {
           const active = tab === td.id;
           const Icon = td.icon;
           return (
@@ -692,18 +693,7 @@ function ServerDetailBody({
               key={td.id}
               role="tab"
               aria-selected={active}
-              tabIndex={active ? 0 : -1}
               onClick={() => setTab(td.id)}
-              onKeyDown={(e: React.KeyboardEvent) => {
-                if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-                  e.preventDefault();
-                  const delta = e.key === "ArrowRight" ? 1 : -1;
-                  const curIdx = arr.findIndex((a) => a.id === tab);
-                  const nextIdx = (curIdx + delta + arr.length) % arr.length;
-                  setTab(arr[nextIdx].id);
-                  (e.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[nextIdx] as HTMLElement)?.focus();
-                }
-              }}
               className={`inline-flex items-center gap-2 px-3 py-2.5 text-[12.5px] border-b-2 transition-colors ${
                 active
                   ? "border-brand font-semibold"
@@ -712,7 +702,7 @@ function ServerDetailBody({
             >
               <Icon className="w-3.5 h-3.5" />
               {td.label}
-              {"count" in td && (
+              {td.count !== undefined && (
                 <span
                   className={`font-mono text-[10px] px-1.5 py-px rounded-full ${
                     active ? "bg-brand/15 text-brand" : "bg-text-dim/10 text-text-dim"
@@ -727,14 +717,14 @@ function ServerDetailBody({
       </div>
 
       {/* Tab body */}
-      <div role="tabpanel" className="flex-1 overflow-y-auto p-5">
+      <div className="flex-1 overflow-y-auto p-5">
         {tab === "tools" && (
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-4">
-              <Mini label={t("mcp.tools_count", { defaultValue: "Tools" })} value={String(conn?.tools_count ?? 0)} />
-              <Mini label={t("mcp.connected", { defaultValue: "Connected" })} value={isConnected ? "true" : "false"} tone={isConnected ? "ok" : "bad"} />
-              <Mini label={t("mcp.auth_state", { defaultValue: "Auth" })} value={authStateStr} />
-              <Mini label={t("mcp.timeout_secs", { defaultValue: "Timeout" })} value={String(server.timeout_secs ?? 30)} />
+              <Mini label="tools_count" value={String(conn?.tools_count ?? 0)} />
+              <Mini label="connected" value={isConnected ? "true" : "false"} tone={isConnected ? "ok" : "bad"} />
+              <Mini label="auth_state" value={authStateStr} />
+              <Mini label="timeout_secs" value={String(server.timeout_secs ?? 30)} />
             </div>
 
             {tools.length === 0 ? (
@@ -882,13 +872,14 @@ function CatalogCard({
   alreadyAdded,
   onViewDetail,
   onInstall,
+  t,
 }: {
   tpl: McpCatalogEntry;
   alreadyAdded: boolean;
   onViewDetail: () => void;
   onInstall: () => void;
+  t: TFunction;
 }) {
-  const { t } = useTranslation();
   const reqEnvCount = (tpl.required_env ?? []).length;
   return (
     <Card
@@ -1001,12 +992,13 @@ function CatalogInstallWizard({
   template,
   onClose,
   onSuccess,
+  t,
 }: {
   template: McpCatalogEntry;
   onClose: () => void;
   onSuccess: () => void;
+  t: TFunction;
 }) {
-  const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const addMutation = useAddMcpServer();
   const [step, setStep] = useState<WizardStep>("permissions");
@@ -1150,26 +1142,17 @@ function CatalogInstallWizard({
                       {e.label && (
                         <span className="text-text-dim truncate flex-1">{e.label}</span>
                       )}
-                      {(() => {
-                        // MCP catalog entries are server-controlled, so
-                        // `get_url` is untrusted input. A malicious
-                        // catalogue could ship `javascript:` /
-                        // `data:text/html,…` and have the dashboard
-                        // render a clickable JS bomb. Gate on
-                        // `safeUrl` (audit: rel-noopener-mixed).
-                        const safe = safeUrl(e.get_url);
-                        return safe ? (
-                          <a
-                            href={safe}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-brand hover:underline shrink-0"
-                            aria-label={t("mcp.wizard.get_credential", { defaultValue: "Get credential" })}
-                          >
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                        ) : null;
-                      })()}
+                      {e.get_url && (
+                        <a
+                          href={e.get_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-brand hover:underline shrink-0"
+                          aria-label={t("mcp.wizard.get_credential", { defaultValue: "Get credential" })}
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1209,19 +1192,16 @@ function CatalogInstallWizard({
                   >
                     {e.label || e.name}
                   </label>
-                  {(() => {
-                    const safe = safeUrl(e.get_url);
-                    return safe ? (
-                      <a
-                        href={safe}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-brand hover:underline"
-                      >
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    ) : null;
-                  })()}
+                  {e.get_url && (
+                    <a
+                      href={e.get_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-brand hover:underline"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
                 </div>
                 {e.help && <span className="text-[10px] text-text-dim/70">{e.help}</span>}
                 <input
@@ -1554,20 +1534,8 @@ export function McpServersPage() {
       />
 
       {/* Tab switcher */}
-      <div
-        role="tablist"
-        aria-label={t("mcp.tabs_label", { defaultValue: "Server views" })}
-        className="flex gap-1 rounded-xl border border-border-subtle bg-surface p-1"
-        onKeyDown={(e) => {
-          if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-            e.preventDefault();
-            setTab((prev) => prev === "servers" ? "catalog" : "servers");
-          }
-        }}
-      >
+      <div className="flex gap-1 rounded-xl border border-border-subtle bg-surface p-1">
         <button
-          role="tab"
-          aria-selected={tab === "servers"}
           onClick={() => setTab("servers")}
           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
             tab === "servers" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
@@ -1582,8 +1550,6 @@ export function McpServersPage() {
           )}
         </button>
         <button
-          role="tab"
-          aria-selected={tab === "catalog"}
           onClick={() => setTab("catalog")}
           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
             tab === "catalog" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
@@ -1595,7 +1561,7 @@ export function McpServersPage() {
       </div>
 
       <AnimatePresence mode="wait">
-      <motion.div key={tab} role="tabpanel" variants={tabContent} initial="initial" animate="animate" exit="exit" className="space-y-4">
+      <motion.div key={tab} variants={tabContent} initial="initial" animate="animate" exit="exit" className="space-y-4">
       {tab === "servers" && (
         <>
           {/* Search + filter toolbar */}
@@ -1688,6 +1654,7 @@ export function McpServersPage() {
                     server={server}
                     conn={connectedMap.get(id)}
                     onViewDetail={() => setDetailsServer(server)}
+                    t={t}
                   />
                 );
               })}
@@ -1739,6 +1706,7 @@ export function McpServersPage() {
                     alreadyAdded={alreadyAdded}
                     onViewDetail={() => setDetailsCatalog(tpl)}
                     onInstall={() => setInstallingTemplate(tpl)}
+                    t={t}
                   />
                 );
               })}
@@ -1894,6 +1862,7 @@ export function McpServersPage() {
             template={installingTemplate}
             onClose={() => setInstallingTemplate(null)}
             onSuccess={() => setTab("servers")}
+            t={t}
           />
         )}
       </DrawerPanel>
@@ -2001,14 +1970,11 @@ export function McpServersPage() {
                         <Key className="w-3 h-3 text-text-dim/60 shrink-0" />
                         <code className="font-mono text-[11px] font-bold text-text-main">{e.name}</code>
                         {e.label && <span className="text-[10px] text-text-dim truncate flex-1">{e.label}</span>}
-                        {(() => {
-                          const safe = safeUrl(e.get_url);
-                          return safe ? (
-                            <a href={safe} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline shrink-0" aria-label="Get key">
-                              <ExternalLink className="h-3 w-3" />
-                            </a>
-                          ) : null;
-                        })()}
+                        {e.get_url && (
+                          <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline shrink-0" aria-label="Get key">
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
                       </div>
                     ))}
                   </div>

@@ -234,53 +234,110 @@ fn looks_like_tool_call_object(text: &str) -> bool {
 }
 
 // Feature-gated adapter imports
-// email migrated to a sidecar (librefang.sidecar.adapters.email);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// signal migrated to a sidecar (librefang.sidecar.adapters.signal);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// teams migrated to a sidecar (librefang.sidecar.adapters.teams);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
-// see SIDECAR_CATALOG in routes/channels.rs.
+#[cfg(feature = "channel-discord")]
+use librefang_channels::discord::DiscordAdapter;
+#[cfg(feature = "channel-email")]
+use librefang_channels::email::EmailAdapter;
+#[cfg(feature = "channel-google-chat")]
+use librefang_channels::google_chat::GoogleChatAdapter;
+#[cfg(feature = "channel-irc")]
+use librefang_channels::irc::IrcAdapter;
+#[cfg(feature = "channel-matrix")]
+use librefang_channels::matrix::MatrixAdapter;
+#[cfg(feature = "channel-mattermost")]
+use librefang_channels::mattermost::MattermostAdapter;
+#[cfg(feature = "channel-rocketchat")]
+use librefang_channels::rocketchat::RocketChatAdapter;
+#[cfg(feature = "channel-signal")]
+use librefang_channels::signal::SignalAdapter;
+#[cfg(feature = "channel-slack")]
+use librefang_channels::slack::SlackAdapter;
+#[cfg(feature = "channel-teams")]
+use librefang_channels::teams::TeamsAdapter;
+#[cfg(feature = "channel-telegram")]
+use librefang_channels::telegram::TelegramAdapter;
+#[cfg(feature = "channel-twitch")]
+use librefang_channels::twitch::TwitchAdapter;
+#[cfg(feature = "channel-voice")]
+use librefang_channels::voice::VoiceAdapter;
+#[cfg(feature = "channel-webhook")]
+use librefang_channels::webhook::WebhookAdapter;
+#[cfg(feature = "channel-whatsapp")]
+use librefang_channels::whatsapp::WhatsAppAdapter;
+#[cfg(feature = "channel-xmpp")]
+use librefang_channels::xmpp::XmppAdapter;
+#[cfg(feature = "channel-zulip")]
+use librefang_channels::zulip::ZulipAdapter;
 // Wave 3
-// line migrated to a sidecar (librefang.sidecar.adapters.line); see
-// SIDECAR_CATALOG in routes/channels.rs.
-// feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// Wave 4 — webex migrated to a sidecar
-// (librefang.sidecar.adapters.webex); see SIDECAR_CATALOG in
-// routes/channels.rs.
+#[cfg(feature = "channel-bluesky")]
+use librefang_channels::bluesky::BlueskyAdapter;
+#[cfg(feature = "channel-feishu")]
+use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
+#[cfg(feature = "channel-line")]
+use librefang_channels::line::LineAdapter;
+#[cfg(feature = "channel-mastodon")]
+use librefang_channels::mastodon::MastodonAdapter;
+#[cfg(feature = "channel-messenger")]
+use librefang_channels::messenger::MessengerAdapter;
+#[cfg(feature = "channel-reddit")]
+use librefang_channels::reddit::RedditAdapter;
+#[cfg(feature = "channel-revolt")]
+use librefang_channels::revolt::RevoltAdapter;
+#[cfg(feature = "channel-viber")]
+use librefang_channels::viber::ViberAdapter;
+// Wave 4
+#[cfg(feature = "channel-flock")]
+use librefang_channels::flock::FlockAdapter;
+#[cfg(feature = "channel-guilded")]
+use librefang_channels::guilded::GuildedAdapter;
+#[cfg(feature = "channel-keybase")]
+use librefang_channels::keybase::KeybaseAdapter;
+#[cfg(feature = "channel-nextcloud")]
+use librefang_channels::nextcloud::NextcloudAdapter;
+#[cfg(feature = "channel-nostr")]
+use librefang_channels::nostr::NostrAdapter;
+#[cfg(feature = "channel-pumble")]
+use librefang_channels::pumble::PumbleAdapter;
+#[cfg(feature = "channel-threema")]
+use librefang_channels::threema::ThreemaAdapter;
+#[cfg(feature = "channel-twist")]
+use librefang_channels::twist::TwistAdapter;
+#[cfg(feature = "channel-webex")]
+use librefang_channels::webex::WebexAdapter;
 // Wave 5
-// dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// qq migrated to a sidecar (librefang.sidecar.adapters.qq);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
-// see SIDECAR_CATALOG in routes/channels.rs.
-// wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
-// see SIDECAR_CATALOG in routes/channels.rs.
+#[cfg(feature = "channel-dingtalk")]
+use librefang_channels::dingtalk::DingTalkAdapter;
+#[cfg(feature = "channel-discourse")]
+use librefang_channels::discourse::DiscourseAdapter;
+#[cfg(feature = "channel-gitter")]
+use librefang_channels::gitter::GitterAdapter;
+#[cfg(feature = "channel-gotify")]
+use librefang_channels::gotify::GotifyAdapter;
+#[cfg(feature = "channel-linkedin")]
+use librefang_channels::linkedin::LinkedInAdapter;
+#[cfg(feature = "channel-mumble")]
+use librefang_channels::mumble::MumbleAdapter;
+#[cfg(feature = "channel-ntfy")]
+use librefang_channels::ntfy::NtfyAdapter;
+#[cfg(feature = "channel-qq")]
+use librefang_channels::qq::QqAdapter;
+#[cfg(feature = "channel-wechat")]
+use librefang_channels::wechat::WeChatAdapter;
+#[cfg(feature = "channel-wecom")]
+use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
-use librefang_kernel::auth::Action as KernelAction;
-use librefang_kernel::config::load_config as kernel_load_config;
-use librefang_kernel::llm_driver::StreamEvent;
-use librefang_kernel::DeliveryTracker;
-use librefang_kernel::KernelApi;
-use librefang_types::agent::{AgentId, ResetScope, SessionId};
+use librefang_kernel::LibreFangKernel;
+use librefang_runtime::llm_driver::StreamEvent;
+use librefang_types::agent::AgentId;
 use std::sync::Arc;
+#[cfg(feature = "channel-telegram")]
+use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use librefang_kernel::str_utils::safe_truncate_str;
+use librefang_runtime::str_utils::safe_truncate_str;
 
 /// Convert a snake_case / kebab-case / dotted tool ID into a human-readable
 /// display name. Used in progress lines so users see "Web Search" instead of
@@ -318,7 +375,7 @@ fn tr_progress_failed(language: &str) -> &'static str {
 fn start_stream_text_bridge<E>(
     event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        Result<librefang_kernel::agent_loop::AgentLoopResult, E>,
+        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
@@ -351,7 +408,7 @@ where
 fn start_stream_text_bridge_with_status<E>(
     mut event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        Result<librefang_kernel::agent_loop::AgentLoopResult, E>,
+        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
@@ -402,7 +459,8 @@ where
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
                         } else if looks_like_tool_call(&iter_buf) {
                             warn!("Streaming bridge: filtered leaked tool call text at ContentComplete (len={})", iter_buf.len());
-                        } else if librefang_kernel::silent_response::is_silent_response(&iter_buf) {
+                        } else if librefang_runtime::silent_response::is_silent_response(&iter_buf)
+                        {
                             debug!(
                                 "Streaming bridge: suppressed NO_REPLY sentinel at ContentComplete"
                             );
@@ -477,7 +535,7 @@ where
                     "Streaming bridge: filtered leaked tool call text in final flush (len={})",
                     iter_buf.len()
                 );
-            } else if librefang_kernel::silent_response::is_silent_response(&iter_buf) {
+            } else if librefang_runtime::silent_response::is_silent_response(&iter_buf) {
                 debug!("Streaming bridge: suppressed NO_REPLY sentinel in final flush");
             } else {
                 let _ = tx.send(iter_buf).await;
@@ -487,17 +545,6 @@ where
 
     tokio::spawn(async move {
         let (error_msg, status): (Option<String>, Result<(), String>) = match kernel_handle.await {
-            Err(e) if e.is_cancelled() => {
-                // Intentional: cancelled (superseded) turns report Err status so
-                // bridge consumers apply AgentPhase::Error + record_delivery(success=false).
-                // A superseded turn is one whose kernel handle was aborted because a newer
-                // message arrived for the same (agent, session) — see messaging.rs rapid-dispatch
-                // race. Treating this as a delivery failure is pre-existing behaviour; a future
-                // follow-up could teach the bridge to skip lifecycle/record_delivery on
-                // cancellation specifically.
-                warn!("Streaming kernel task was cancelled: {e}");
-                (None, Err("kernel task cancelled".to_string()))
-            }
             Err(e) => {
                 error!("Streaming kernel task panicked: {e}");
                 (
@@ -512,7 +559,7 @@ where
                 let err_str = e.to_string();
                 error!("Streaming kernel task returned error: {err_str}");
                 let is_timeout =
-                    err_str.contains(librefang_kernel::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER);
+                    err_str.contains(librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER);
                 let user_msg = if is_timeout {
                     Some(
                         "\n\n---\n[Task timed out. The output above may be incomplete.]"
@@ -571,16 +618,8 @@ where
         }
         // Drop error_tx so rx will close once bridge_handle also finishes.
         drop(error_tx);
-        // Note: bridge_handle can be cancelled independently of kernel_handle
-        // (e.g. tokio runtime shutdown). In that scenario the kernel may have
-        // completed Ok, but the streaming text bridge was chopped mid-flush,
-        // potentially losing the final buffered chunk. status_tx still carries
-        // the kernel's actual result, so lifecycle/record_delivery remain correct;
-        // only the in-flight text stream may be truncated. Pre-existing behaviour.
-        match bridge_handle.await {
-            Err(e) if e.is_cancelled() => warn!("Streaming bridge task was cancelled: {e}"),
-            Err(e) => error!("Streaming bridge task panicked: {e}"),
-            Ok(()) => {}
+        if let Err(e) = bridge_handle.await {
+            error!("Streaming bridge task panicked: {e}");
         }
         // Report kernel terminal status to any caller that opted in. Sent
         // last so awaiters can be sure the text channel has fully drained.
@@ -592,43 +631,8 @@ where
 
 /// Wraps `LibreFangKernel` to implement `ChannelBridgeHandle`.
 pub struct KernelBridgeAdapter {
-    kernel: Arc<dyn KernelApi>,
+    kernel: Arc<LibreFangKernel>,
     started_at: Instant,
-}
-
-/// Compose the message returned to a channel user when `/approve <id>`
-/// or `/reject <id>` found no live pending request.
-///
-/// Distinguishes two cases by checking the recent audit log:
-/// - **Already-resolved**: a recent audit entry's `request_id` starts
-///   with `id_prefix`. The user is double-clicking the inline keyboard
-///   OR following up with a slash command after the button click —
-///   harmless, ack idempotently with the original decision.
-/// - **Truly unknown**: no audit entry matches either. Keep the
-///   original "No pending approval matching" message so a real
-///   typo / stale id still surfaces as a real not-found.
-///
-/// Hoisted out as a free function so it can be unit-tested against a
-/// constructed `ApprovalManager` without going through the full
-/// `KernelApi` mocks the rest of `resolve_approval_text` requires.
-fn resolve_no_pending_message(
-    approvals: &librefang_kernel::approval::ApprovalManager,
-    id_prefix: &str,
-) -> String {
-    // Audit log is sorted DESC by `decided_at`; cap the scan to a small
-    // recent window since duplicate-click races are sub-second. 64 is
-    // generous and bounds the SQL cost.
-    let recent = approvals.query_audit(64, 0, None, None);
-    if let Some(entry) = recent.iter().find(|e| e.request_id.starts_with(id_prefix)) {
-        let short = &entry.request_id[..8.min(entry.request_id.len())];
-        let actor = entry.decided_by.as_deref().unwrap_or("(unknown)");
-        format!(
-            "Approval [{short}] already resolved ({} by {actor}).",
-            entry.decision
-        )
-    } else {
-        format!("No pending approval matching '{id_prefix}'.")
-    }
 }
 
 #[async_trait]
@@ -700,7 +704,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let language = self.kernel.config_snapshot().language.clone();
         let (event_rx, kernel_handle) = self
             .kernel
-            .clone()
             .send_message_streaming_with_routing(agent_id, message, None)
             .await
             .map_err(|e| format!("{e}"))?;
@@ -728,13 +731,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let language = self.kernel.config_snapshot().language.clone();
         let (event_rx, kernel_handle) = self
             .kernel
-            .clone()
-            .send_message_streaming_with_sender_context_and_routing(
-                agent_id,
-                message,
-                None,
-                sender.clone(),
-            )
+            .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
             .await
             .map_err(|e| format!("{e}"))?;
         Ok(start_stream_text_bridge(
@@ -767,13 +764,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let language = self.kernel.config_snapshot().language.clone();
         let (event_rx, kernel_handle) = self
             .kernel
-            .clone()
-            .send_message_streaming_with_sender_context_and_routing(
-                agent_id,
-                message,
-                None,
-                sender.clone(),
-            )
+            .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
             .await
             .map_err(|e| format!("{e}"))?;
         Ok(start_stream_text_bridge_with_status(
@@ -793,7 +784,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Result<String, String> {
         let result = self
             .kernel
-            .send_message_with_sender_context(agent_id, message, sender.clone())
+            .send_message_with_sender_context(agent_id, message, sender)
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
@@ -824,7 +815,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
         let result = self
             .kernel
-            .send_message_with_blocks_and_sender(agent_id, &text, blocks, sender.clone())
+            .send_message_with_blocks_and_sender(agent_id, &text, blocks, sender)
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
@@ -838,11 +829,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         &self,
         agent_id: AgentId,
         message: &str,
-        sender: Option<&librefang_channels::types::SenderContext>,
     ) -> Result<String, String> {
         let result = self
             .kernel
-            .send_message_ephemeral(agent_id, message, sender)
+            .send_message_ephemeral(agent_id, message)
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
@@ -893,7 +883,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
         let agent_id = self
             .kernel
-            .spawn_agent_typed(manifest)
+            .spawn_agent(manifest)
             .map_err(|e| format!("Failed to spawn agent: {e}"))?;
 
         Ok(agent_id)
@@ -954,7 +944,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_text(&self) -> String {
-        let catalog = self.kernel.model_catalog_ref().load();
+        let catalog = self
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let available = catalog.available_models();
         if available.is_empty() {
             return "No models available. Configure API keys to enable providers.".to_string();
@@ -992,7 +986,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_providers_interactive(&self) -> Vec<(String, String, bool)> {
-        let catalog = self.kernel.model_catalog_ref().load();
+        let catalog = self
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         catalog
             .list_providers()
             .iter()
@@ -1002,7 +1000,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_by_provider(&self, provider_id: &str) -> Vec<(String, String)> {
-        let catalog = self.kernel.model_catalog_ref().load();
+        let catalog = self
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         catalog
             .models_by_provider(provider_id)
             .into_iter()
@@ -1011,7 +1013,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_providers_text(&self) -> String {
-        let catalog = self.kernel.model_catalog_ref().load();
+        let catalog = self
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let mut msg = "Providers:\n".to_string();
         for p in catalog.list_providers() {
             let status = match p.auth_status {
@@ -1152,15 +1158,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         Some((entry.id, entry.name.clone(), inherit))
                     }
                 },
-                |agent_id, message, session_mode_override| {
+                |agent_id, message| {
                     let k = kernel.clone();
                     async move {
                         let result = k
-                            .send_message_with_session_mode(
-                                agent_id,
-                                &message,
-                                session_mode_override,
-                            )
+                            .send_message(agent_id, &message)
                             .await
                             .map_err(|e| format!("{e}"))?;
                         Ok((
@@ -1230,21 +1232,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
 
         let trigger_id =
-            match self
-                .kernel
+            self.kernel
                 .trigger_engine()
-                .register(agent.id, pattern, prompt.to_string(), 0)
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    // Per-agent cap exceeded (audit:
-                    // trigger-engine-no-per-agent-cap). Surface as a
-                    // human-readable line back to the channel sender so
-                    // they know the bridge isn't broken — they hit the
-                    // ceiling.
-                    return format!("Trigger registration refused: {e}");
-                }
-            };
+                .register(agent.id, pattern, prompt.to_string(), 0);
         let id_str = trigger_id.0.to_string();
         let id_short = safe_truncate_str(&id_str, 8);
         format!("Trigger created [{id_short}] for agent '{agent_name}'.")
@@ -1441,11 +1431,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 match resolved {
                                     Some(wf_id) => {
                                         let input_text = input.clone().unwrap_or_default();
-                                        match self
-                                            .kernel
-                                            .run_workflow_typed(wf_id, input_text)
-                                            .await
-                                        {
+                                        match self.kernel.run_workflow(wf_id, input_text).await {
                                             Ok((_run_id, output)) => {
                                                 format!(
                                                     "Job [{id_short}] workflow ran:\n{}",
@@ -1515,15 +1501,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .filter(|r| r.id.to_string().starts_with(id_prefix))
             .collect();
         match matched.len() {
-            // No pending match. Two sub-cases worth distinguishing for
-            // Telegram / Slack UX: a user double-tapping the inline
-            // `[Approve]` button (or button + slash command) produces a
-            // SECOND `/approve <id>` shortly after the FIRST resolved
-            // the request. Pre-fix that returned "No pending approval
-            // matching" which reads as an error. Check the audit log —
-            // if a recent entry's request_id starts with this prefix,
-            // it's the already-resolved duplicate, ack it idempotently.
-            0 => resolve_no_pending_message(self.kernel.approvals(), id_prefix),
+            0 => format!("No pending approval matching '{id_prefix}'."),
             1 => {
                 let req = matched[0];
                 let decision = if approve {
@@ -1678,68 +1656,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn reset_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .reset_session(agent_id, ResetScope::Agent)
-            .await
+            .reset_session(agent_id)
             .map_err(|e| format!("{e}"))?;
         Ok("Session reset. Chat history cleared.".to_string())
     }
 
     async fn reboot_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .reboot_session(agent_id, ResetScope::Agent)
-            .await
+            .reboot_session(agent_id)
             .map_err(|e| format!("{e}"))?;
         Ok("Session rebooted. Context cleared.".to_string())
     }
 
     async fn compact_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .compact_agent_session(agent_id, true)
-            .await
-            .map_err(|e| format!("{e}"))
-    }
-
-    async fn reset_channel_session(
-        &self,
-        agent_id: AgentId,
-        channel: &str,
-        chat_id: Option<&str>,
-    ) -> Result<String, String> {
-        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        self.kernel
-            .reset_session(agent_id, ResetScope::Session(sid))
-            .await
-            .map_err(|e| format!("{e}"))?;
-        Ok(format!(
-            "Session reset for this {channel} chat. Other surfaces untouched."
-        ))
-    }
-
-    async fn reboot_channel_session(
-        &self,
-        agent_id: AgentId,
-        channel: &str,
-        chat_id: Option<&str>,
-    ) -> Result<String, String> {
-        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        self.kernel
-            .reboot_session(agent_id, ResetScope::Session(sid))
-            .await
-            .map_err(|e| format!("{e}"))?;
-        Ok(format!(
-            "Session rebooted for this {channel} chat. Other surfaces untouched."
-        ))
-    }
-
-    async fn compact_channel_session(
-        &self,
-        agent_id: AgentId,
-        channel: &str,
-        chat_id: Option<&str>,
-    ) -> Result<String, String> {
-        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        self.kernel
-            .compact_agent_session_with_id(agent_id, Some(sid), true)
+            .compact_agent_session(agent_id)
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -1908,23 +1839,142 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn channel_overrides(
         &self,
-        _channel_type: &str,
-        _account_id: Option<&str>,
+        channel_type: &str,
+        account_id: Option<&str>,
     ) -> Option<librefang_types::config::ChannelOverrides> {
-        // Per-channel `ChannelOverrides` only ever lived on the
-        // in-process `[channels.<name>]` configs, alongside an
-        // alias-merging side effect that pushed the default agent's
-        // routing aliases onto `group_trigger_patterns` (#2292).
-        // Sidecars have no equivalent per-instance override slot,
-        // and the alias-merging happens elsewhere now (via
-        // `agent_channel_overrides`, below, which reads the
-        // agent.toml). With every channel sidecar-migrated this
-        // method has nothing to return.
-        //
-        // The trait method stays — callers in the bridge still
-        // invoke it through the `KernelApi` interface, and the
-        // `None` short-circuits the per-channel override merge.
-        None
+        let cfg = self.kernel.config_ref();
+        let channels = &cfg.channels;
+
+        /// Look up channel overrides and default_agent from the matching
+        /// channel config entry. Prefers the entry whose `account_id` matches;
+        /// falls back to the first entry when no account_id is provided.
+        macro_rules! find_channel_info {
+            ($field:ident) => {{
+                let entry = if let Some(aid) = account_id {
+                    channels
+                        .$field
+                        .iter()
+                        .find(|c| c.account_id.as_deref() == Some(aid))
+                } else {
+                    channels.$field.first()
+                };
+                (
+                    entry.map(|c| c.overrides.clone()),
+                    entry.and_then(|c| c.default_agent.clone()),
+                )
+            }};
+        }
+
+        let (mut overrides, default_agent_name) = match channel_type {
+            // Telegram has the `message_coalesce_window_ms` alias (#4145)
+            // that feeds into `overrides.message_debounce_ms`; resolve via
+            // `effective_overrides()` rather than cloning `overrides` raw.
+            "telegram" => {
+                let entry = if let Some(aid) = account_id {
+                    channels
+                        .telegram
+                        .iter()
+                        .find(|c| c.account_id.as_deref() == Some(aid))
+                } else {
+                    channels.telegram.first()
+                };
+                (
+                    entry.map(|c| c.effective_overrides()),
+                    entry.and_then(|c| c.default_agent.clone()),
+                )
+            }
+            "discord" => find_channel_info!(discord),
+            "slack" => find_channel_info!(slack),
+            "whatsapp" => find_channel_info!(whatsapp),
+            "signal" => find_channel_info!(signal),
+            "matrix" => find_channel_info!(matrix),
+            "email" => find_channel_info!(email),
+            "teams" => find_channel_info!(teams),
+            "mattermost" => find_channel_info!(mattermost),
+            "irc" => find_channel_info!(irc),
+            "google_chat" => find_channel_info!(google_chat),
+            "twitch" => find_channel_info!(twitch),
+            "rocketchat" => find_channel_info!(rocketchat),
+            "zulip" => find_channel_info!(zulip),
+            "xmpp" => find_channel_info!(xmpp),
+            // Wave 3
+            "line" => find_channel_info!(line),
+            "viber" => find_channel_info!(viber),
+            "messenger" => find_channel_info!(messenger),
+            "reddit" => find_channel_info!(reddit),
+            "mastodon" => find_channel_info!(mastodon),
+            "bluesky" => find_channel_info!(bluesky),
+            "feishu" => find_channel_info!(feishu),
+            "revolt" => find_channel_info!(revolt),
+            // Wave 4
+            "nextcloud" => find_channel_info!(nextcloud),
+            "guilded" => find_channel_info!(guilded),
+            "keybase" => find_channel_info!(keybase),
+            "threema" => find_channel_info!(threema),
+            "nostr" => find_channel_info!(nostr),
+            "webex" => find_channel_info!(webex),
+            "pumble" => find_channel_info!(pumble),
+            "flock" => find_channel_info!(flock),
+            "twist" => find_channel_info!(twist),
+            // Wave 5
+            "mumble" => find_channel_info!(mumble),
+            "dingtalk" => find_channel_info!(dingtalk),
+            "discourse" => find_channel_info!(discourse),
+            "gitter" => find_channel_info!(gitter),
+            "ntfy" => find_channel_info!(ntfy),
+            "gotify" => find_channel_info!(gotify),
+            "webhook" => find_channel_info!(webhook),
+            "voice" => find_channel_info!(voice),
+            "linkedin" => find_channel_info!(linkedin),
+            "wechat" => find_channel_info!(wechat),
+            "wecom" => find_channel_info!(wecom),
+            _ => (None, None),
+        };
+
+        // Merge the default agent's routing aliases into group_trigger_patterns
+        // so aliases trigger the bot in group chats without needing a formal
+        // @mention. Issue #2292.
+        if let (Some(ref mut ov), Some(agent_name)) = (&mut overrides, default_agent_name) {
+            if let Some(entry) = self.kernel.agent_registry().find_by_name(&agent_name) {
+                if let Some(routing) = entry.manifest.metadata.get("routing") {
+                    let aliases: Vec<String> = routing
+                        .get("aliases")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    let weak: Vec<String> = routing
+                        .get("weak_aliases")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    for alias in aliases.into_iter().chain(weak) {
+                        if !alias.is_empty() {
+                            let escaped_alias: String = alias
+                                .chars()
+                                .flat_map(|c| {
+                                    if ".+*?^$()[]{}|\\".contains(c) {
+                                        vec!['\\', c]
+                                    } else {
+                                        vec![c]
+                                    }
+                                })
+                                .collect();
+                            // Use \b word boundaries only for ASCII aliases;
+                            // CJK and other non-ASCII aliases use plain substring
+                            // matching since \b is ASCII-only in Rust's regex.
+                            let escaped = if escaped_alias.is_ascii() {
+                                format!("(?i)\\b{}\\b", escaped_alias)
+                            } else {
+                                format!("(?i){}", escaped_alias)
+                            };
+                            if !ov.group_trigger_patterns.iter().any(|p| p == &escaped) {
+                                ov.group_trigger_patterns.push(escaped);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        overrides
     }
 
     async fn agent_channel_overrides(
@@ -1954,11 +2004,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .ok_or_else(|| "Unrecognized user. Contact an admin to get access.".to_string())?;
 
         let auth_action = match action {
-            "chat" => KernelAction::ChatWithAgent,
-            "spawn" => KernelAction::SpawnAgent,
-            "kill" => KernelAction::KillAgent,
-            "install_skill" => KernelAction::InstallSkill,
-            _ => KernelAction::ChatWithAgent,
+            "chat" => librefang_kernel::auth::Action::ChatWithAgent,
+            "spawn" => librefang_kernel::auth::Action::SpawnAgent,
+            "kill" => librefang_kernel::auth::Action::KillAgent,
+            "install_skill" => librefang_kernel::auth::Action::InstallSkill,
+            _ => librefang_kernel::auth::Action::ChatWithAgent,
         };
 
         self.kernel
@@ -1977,9 +2027,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         thread_id: Option<&str>,
     ) {
         let receipt = if success {
-            DeliveryTracker::sent_receipt(channel, recipient)
+            librefang_kernel::DeliveryTracker::sent_receipt(channel, recipient)
         } else {
-            DeliveryTracker::failed_receipt(channel, recipient, error.unwrap_or("Unknown error"))
+            librefang_kernel::DeliveryTracker::failed_receipt(
+                channel,
+                recipient,
+                error.unwrap_or("Unknown error"),
+            )
         };
         self.kernel.delivery().record(agent_id, receipt);
 
@@ -2116,10 +2170,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         message: &str,
         thread_id: Option<&str>,
     ) -> Result<String, String> {
+        use librefang_runtime::kernel_handle::prelude::*;
         self.kernel
             .send_channel_message(channel_type, recipient, message, thread_id, None)
             .await
-            .map_err(|e| e.to_string())
     }
 
     fn channels_download_dir(&self) -> Option<std::path::PathBuf> {
@@ -2133,49 +2187,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     fn channels_download_max_bytes(&self) -> Option<u64> {
         Some(self.kernel.config_ref().channels.file_download_max_bytes)
-    }
-
-    /// Auto-transcribe inbound channel audio (#4975).
-    ///
-    /// Honors the kernel `[media] audio_transcription` flag (default OFF) —
-    /// returns `Ok(None)` when disabled so the bridge falls back to the
-    /// raw-path block. When enabled, materializes a `MediaAttachment` over the
-    /// already-downloaded file and dispatches to `MediaEngine::transcribe_audio`.
-    /// Errors propagate as `Err(reason)` so the bridge can render a
-    /// `[Transcription failed: …]` note instead of dropping the message.
-    async fn transcribe_inbound_audio(
-        &self,
-        path: &std::path::Path,
-        mime_type: &str,
-    ) -> Result<Option<String>, String> {
-        // Default-OFF respect — exit immediately when the operator hasn't
-        // opted in. Cheap config snapshot, no allocations on the cold path.
-        if !self.kernel.config_ref().media.audio_transcription {
-            return Ok(None);
-        }
-
-        // Probe size + reject unsupported MIME bases at the validation
-        // layer (mirrors `/api/uploads` / `/media/transcribe` semantics).
-        // We use `tokio::fs` rather than blocking `std::fs` because this
-        // method is called from inside the channel dispatch task.
-        let size_bytes = match tokio::fs::metadata(path).await {
-            Ok(m) => m.len(),
-            Err(e) => return Err(format!("stat saved audio failed: {e}")),
-        };
-
-        let attachment = librefang_types::media::MediaAttachment {
-            media_type: librefang_types::media::MediaType::Audio,
-            mime_type: mime_type.to_string(),
-            source: librefang_types::media::MediaSource::FilePath {
-                path: path.to_string_lossy().into_owned(),
-            },
-            size_bytes,
-        };
-
-        match self.kernel.media().transcribe_audio(&attachment).await {
-            Ok(result) => Ok(Some(result.description)),
-            Err(reason) => Err(reason),
-        }
     }
 }
 
@@ -2228,46 +2239,6 @@ fn read_token(env_var: &str, adapter_name: &str) -> Option<String> {
     }
 }
 
-/// Apply a per-channel `proxy = "…"` override to an adapter that
-/// exposes a `with_proxy(Option<&str>) -> Result<Self, …>` builder
-/// (#4795). On `ChannelProxyError`, log the redacted URL with the
-/// reason and return `None` so the caller skips spawning that adapter
-/// — better than booting with the wrong proxy silently.
-///
-/// The closure shape keeps this generic across all four wired
-/// adapters (`Telegram`, `Discord`, `Slack`, `Mattermost`) without
-/// dragging a trait bound through `librefang-channels`.
-#[allow(dead_code)]
-fn apply_channel_proxy<A>(
-    adapter: A,
-    proxy: Option<&str>,
-    adapter_name: &str,
-    apply: impl FnOnce(A, Option<&str>) -> Result<A, librefang_channels::http_client::ChannelProxyError>,
-) -> Option<A> {
-    match apply(adapter, proxy) {
-        Ok(a) => Some(a),
-        Err(e) => {
-            // The raw error string already echoes the bad value
-            // verbatim; redact it for the channel-bridge log so we
-            // never put `user:pass@…` in operator logs even on the
-            // error path.
-            let redacted = proxy
-                .map(librefang_types::config::redact_proxy_url)
-                .unwrap_or_default();
-            warn!(
-                adapter = adapter_name,
-                proxy = redacted.as_str(),
-                "channel proxy override rejected: {e}; skipping adapter"
-            );
-            None
-        }
-    }
-}
-
-// email migrated to a sidecar (librefang.sidecar.adapters.email);
-// EmailCredentials + resolve_email_credentials removed alongside the
-// in-process adapter. See SIDECAR_CATALOG in routes/channels.rs.
-
 /// Start the channel bridge for all configured channels based on kernel config.
 ///
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
@@ -2278,7 +2249,7 @@ fn apply_channel_proxy<A>(
 /// (Feishu, Teams, DingTalk, etc.) and should be mounted under `/channels`
 /// on the main API server.
 pub async fn start_channel_bridge(
-    kernel: Arc<dyn KernelApi>,
+    kernel: Arc<LibreFangKernel>,
 ) -> (Option<BridgeManager>, axum::Router) {
     let channels = kernel.config_ref().channels.clone();
     let (bridge, _names, webhook_router) =
@@ -2289,169 +2260,82 @@ pub async fn start_channel_bridge(
 /// Start channels from an explicit `ChannelsConfig` (used by hot-reload).
 ///
 /// Returns `(Option<BridgeManager>, Vec<started_channel_names>, webhook_router)`.
-/// Re-dispatch a single journaled message after crash-recovery or after a
-/// rate-limit / overload window has elapsed.
-///
-/// Routes through `handle.send_message`, then delivers any response back to
-/// the originating channel adapter, and updates the journal status with
-/// [`MessageJournal::record_outcome`] (which itself routes the entry to
-/// `Completed` / `Deferred` / `Failed`). Re-dispatch failures that hit a
-/// fresh rate-limit get re-deferred — they do NOT count against the retry
-/// budget. Hard failures DO count (3-strike cap).
-async fn redispatch_journal_entry(
-    entry: &librefang_channels::message_journal::JournalEntry,
-    handle: &Arc<dyn ChannelBridgeHandle>,
-    kernel: &Arc<dyn KernelApi>,
-    journal: Option<&librefang_channels::message_journal::MessageJournal>,
-) {
-    use librefang_channels::message_journal::JournalStatus;
-
-    let age_secs = (chrono::Utc::now() - entry.received_at).num_seconds();
-    let was_in_flight = entry.status == JournalStatus::Processing;
-    let is_deferred_retry = entry.status == JournalStatus::Deferred;
-    info!(
-        id = %entry.message_id,
-        channel = %entry.channel,
-        sender = %entry.sender_name,
-        age_secs,
-        was_in_flight,
-        is_deferred_retry,
-        "Re-dispatching journaled message"
-    );
-
-    // Resolve target agent: prefer the journaled name, fall back to the
-    // first registered agent (preserves the pre-existing crash-recovery
-    // contract — better to deliver to the wrong agent than to lose the
-    // message entirely).
-    let agent_id = if let Some(ref name) = entry.agent_name {
-        handle.find_agent_by_name(name).await.ok().flatten()
-    } else {
-        None
-    };
-    let agent_id = match agent_id {
-        Some(id) => id,
-        None => match kernel.agent_registry().list().first().map(|e| e.id) {
-            Some(id) => id,
-            None => {
-                warn!(id = %entry.message_id, "No agents available for re-dispatch");
-                return;
-            }
-        },
-    };
-
-    // Atomically claim the entry by flipping it to Processing before the
-    // slow LLM call. Without CAS, a second ticker tick that fires while
-    // send_message is still in flight would observe the original Deferred
-    // status and dispatch the same entry concurrently — double LLM bill,
-    // double user-facing reply. Two concurrent recovery snapshots (the
-    // boot-time `recoverable_entries` sweep and the periodic
-    // `due_deferred_entries` ticker) hit the same race, so the claim has
-    // to be CAS, not unconditional `update_status`.
-    if let Some(j) = journal {
-        if !j.claim(&entry.message_id).await {
-            info!(
-                id = %entry.message_id,
-                "Skip re-dispatch: claim already won by another snapshot"
-            );
-            return;
-        }
-    }
-
-    // Prefix tells the agent why this message is arriving late so it can
-    // adjust its response (e.g., not re-do work it already completed).
-    let prefix = if is_deferred_retry {
-        format!(
-            "[RETRY: this message hit a provider rate-limit / overload {age_secs}s ago and the \
-             quota window has now elapsed. Process it now if still relevant.]\n\n"
-        )
-    } else if was_in_flight {
-        format!(
-            "[RECOVERY: this message was being processed {age_secs}s ago when the \
-             system restarted. It may have been partially handled — check your \
-             session context before re-doing work. If you already responded, \
-             reply with NO_REPLY.]\n\n"
-        )
-    } else {
-        format!(
-            "[RECOVERY: this message was received {age_secs}s ago but processing \
-             never started. Please process it now.]\n\n"
-        )
-    };
-    let msg = format!("{prefix}{}", entry.content);
-
-    match handle.send_message(agent_id, &msg).await {
-        Ok(response) => {
-            info!(id = %entry.message_id, "Re-dispatched journaled message");
-            if !response.is_empty() {
-                const DELIVERY_DELAYS: &[u64] = &[5, 10, 15];
-                let mut delivered = false;
-                for delay in DELIVERY_DELAYS {
-                    if let Some(adapter) = kernel.channel_adapters_ref().get(&entry.channel) {
-                        let user = librefang_channels::types::ChannelUser {
-                            platform_id: entry.sender_id.clone(),
-                            display_name: entry.sender_name.clone(),
-                            librefang_user: None,
-                        };
-                        let content =
-                            librefang_channels::types::ChannelContent::Text(response.clone());
-                        match adapter.send(&user, content).await {
-                            Ok(()) => {
-                                delivered = true;
-                                break;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    id = %entry.message_id,
-                                    error = %e,
-                                    "Re-dispatch delivery failed, retrying in {delay}s"
-                                );
-                            }
-                        }
-                    } else {
-                        warn!(
-                            id = %entry.message_id,
-                            channel = %entry.channel,
-                            "Adapter not ready, retrying in {delay}s"
-                        );
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
-                }
-                if !delivered {
-                    warn!(
-                        id = %entry.message_id,
-                        "Could not deliver re-dispatched response after retries"
-                    );
-                }
-            }
-            if let Some(j) = journal {
-                j.record_outcome(&entry.message_id, true, None).await;
-            }
-        }
-        Err(e) => {
-            let err_str = e.to_string();
-            warn!(id = %entry.message_id, error = %err_str, "Re-dispatch failed");
-            if let Some(j) = journal {
-                // Routes to Deferred again if the failure carries a fresh
-                // rate-limit marker — otherwise to Failed (counts against
-                // the 3-strike retry cap).
-                j.record_outcome(&entry.message_id, false, Some(err_str))
-                    .await;
-            }
-        }
-    }
-}
-
 pub async fn start_channel_bridge_with_config(
-    kernel: Arc<dyn KernelApi>,
-    _config: &librefang_types::config::ChannelsConfig,
+    kernel: Arc<LibreFangKernel>,
+    config: &librefang_types::config::ChannelsConfig,
 ) -> (Option<BridgeManager>, Vec<String>, axum::Router) {
-    // Every channel adapter is now a sidecar; `_config` (the
-    // `[channels]` block from `KernelConfig`) is kept on the
-    // signature for callers that still pass it (hot-reload, etc.)
-    // but is no longer consulted — adapter construction lives in
-    // the sidecar loop below.
-    let sidecar_cfg = kernel.config_ref();
-    if sidecar_cfg.sidecar_channels.is_empty() {
+    // Check which channels have config — only consider enabled features
+    #[allow(unused_mut)]
+    let mut has_any = false;
+
+    // Emit warnings for configured-but-disabled channels, track enabled ones
+    macro_rules! check_channel {
+        ($field:ident, $feature:literal, $name:expr) => {
+            #[cfg(feature = $feature)]
+            if config.$field.is_some() {
+                has_any = true;
+            }
+            #[cfg(not(feature = $feature))]
+            if config.$field.is_some() {
+                warn!(
+                    "{} channel configured but '{}' feature is not enabled — skipping",
+                    $name, $feature
+                );
+            }
+        };
+    }
+
+    check_channel!(telegram, "channel-telegram", "Telegram");
+    check_channel!(discord, "channel-discord", "Discord");
+    check_channel!(slack, "channel-slack", "Slack");
+    check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
+    check_channel!(signal, "channel-signal", "Signal");
+    check_channel!(matrix, "channel-matrix", "Matrix");
+    check_channel!(email, "channel-email", "Email");
+    check_channel!(teams, "channel-teams", "Teams");
+    check_channel!(mattermost, "channel-mattermost", "Mattermost");
+    check_channel!(irc, "channel-irc", "IRC");
+    check_channel!(google_chat, "channel-google-chat", "Google Chat");
+    check_channel!(twitch, "channel-twitch", "Twitch");
+    check_channel!(rocketchat, "channel-rocketchat", "Rocket.Chat");
+    check_channel!(zulip, "channel-zulip", "Zulip");
+    check_channel!(xmpp, "channel-xmpp", "XMPP");
+    check_channel!(line, "channel-line", "LINE");
+    check_channel!(viber, "channel-viber", "Viber");
+    check_channel!(messenger, "channel-messenger", "Messenger");
+    check_channel!(reddit, "channel-reddit", "Reddit");
+    check_channel!(mastodon, "channel-mastodon", "Mastodon");
+    check_channel!(bluesky, "channel-bluesky", "Bluesky");
+    check_channel!(feishu, "channel-feishu", "Feishu");
+    check_channel!(revolt, "channel-revolt", "Revolt");
+    check_channel!(wechat, "channel-wechat", "WeChat");
+    check_channel!(wecom, "channel-wecom", "WeCom");
+    check_channel!(nextcloud, "channel-nextcloud", "Nextcloud");
+    check_channel!(guilded, "channel-guilded", "Guilded");
+    check_channel!(keybase, "channel-keybase", "Keybase");
+    check_channel!(threema, "channel-threema", "Threema");
+    check_channel!(nostr, "channel-nostr", "Nostr");
+    check_channel!(webex, "channel-webex", "Webex");
+    check_channel!(pumble, "channel-pumble", "Pumble");
+    check_channel!(flock, "channel-flock", "Flock");
+    check_channel!(twist, "channel-twist", "Twist");
+    check_channel!(mumble, "channel-mumble", "Mumble");
+    check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
+    check_channel!(qq, "channel-qq", "QQ");
+    check_channel!(discourse, "channel-discourse", "Discourse");
+    check_channel!(gitter, "channel-gitter", "Gitter");
+    check_channel!(ntfy, "channel-ntfy", "ntfy");
+    check_channel!(gotify, "channel-gotify", "Gotify");
+    check_channel!(webhook, "channel-webhook", "Webhook");
+    check_channel!(voice, "channel-voice", "Voice");
+    check_channel!(linkedin, "channel-linkedin", "LinkedIn");
+
+    // Sidecar channels (always available, not feature-gated)
+    if !kernel.config_ref().sidecar_channels.is_empty() {
+        has_any = true;
+    }
+
+    if !has_any {
         return (None, Vec::new(), axum::Router::new());
     }
 
@@ -2460,45 +2344,1060 @@ pub async fn start_channel_bridge_with_config(
         started_at: Instant::now(),
     };
 
-    // (adapter, default_agent_name, account_id) — `account_id` is
-    // always None because `SidecarChannelConfig` carries no such
-    // field (sidecars surface their own per-instance id via env
-    // vars like `TEAMS_ACCOUNT_ID`). The triple stays for the
-    // downstream router-population loop's signature.
-    #[allow(clippy::type_complexity)]
+    // Collect all adapters to start: (adapter, default_agent_name, account_id)
+    #[allow(unused_mut, clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
 
+    // Telegram
+    #[cfg(feature = "channel-telegram")]
+    for tg_config in config.telegram.iter() {
+        if let Some(token) = read_token(&tg_config.bot_token_env, "Telegram") {
+            let poll_interval = Duration::from_secs(tg_config.poll_interval_secs);
+            let adapter = Arc::new(
+                TelegramAdapter::new(
+                    token,
+                    tg_config.allowed_users.clone(),
+                    poll_interval,
+                    tg_config.api_url.clone(),
+                )
+                .with_account_id(tg_config.account_id.clone())
+                .with_thread_routes(tg_config.thread_routes.clone())
+                .with_backoff(
+                    tg_config.initial_backoff_secs,
+                    tg_config.max_backoff_secs,
+                    tg_config.long_poll_timeout_secs,
+                )
+                .with_clear_done_reaction(tg_config.overrides.clear_done_reaction),
+            );
+            adapters.push((
+                adapter,
+                tg_config.default_agent.clone(),
+                tg_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Discord
+    #[cfg(feature = "channel-discord")]
+    for dc_config in config.discord.iter() {
+        if let Some(token) = read_token(&dc_config.bot_token_env, "Discord") {
+            let adapter = Arc::new(
+                DiscordAdapter::new(
+                    token,
+                    dc_config.allowed_guilds.clone(),
+                    dc_config.allowed_users.clone(),
+                    dc_config.ignore_bots,
+                    dc_config.mention_patterns.clone(),
+                    dc_config.intents,
+                )
+                .with_account_id(dc_config.account_id.clone())
+                .with_backoff(dc_config.initial_backoff_secs, dc_config.max_backoff_secs),
+            );
+            adapters.push((
+                adapter,
+                dc_config.default_agent.clone(),
+                dc_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Slack
+    #[cfg(feature = "channel-slack")]
+    for sl_config in config.slack.iter() {
+        if let Some(app_token) = read_token(&sl_config.app_token_env, "Slack (app)") {
+            if let Some(bot_token) = read_token(&sl_config.bot_token_env, "Slack (bot)") {
+                let adapter = Arc::new(
+                    SlackAdapter::new(app_token, bot_token, sl_config.allowed_channels.clone())
+                        .with_account_id(sl_config.account_id.clone())
+                        .with_force_flat_replies(sl_config.force_flat_replies.unwrap_or(false))
+                        .with_unfurl_links(sl_config.unfurl_links)
+                        .with_backoff(sl_config.initial_backoff_secs, sl_config.max_backoff_secs),
+                );
+                adapters.push((
+                    adapter,
+                    sl_config.default_agent.clone(),
+                    sl_config.account_id.clone(),
+                ));
+            }
+        }
+    }
+
+    // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
+    #[cfg(feature = "channel-whatsapp")]
+    for wa_config in config.whatsapp.iter() {
+        let cloud_token = read_token(&wa_config.access_token_env, "WhatsApp");
+        let gateway_url = std::env::var(&wa_config.gateway_url_env)
+            .ok()
+            .filter(|u| !u.is_empty());
+
+        if cloud_token.is_some() || gateway_url.is_some() {
+            let token = cloud_token.unwrap_or_default();
+            let verify_token =
+                read_token(&wa_config.verify_token_env, "WhatsApp (verify)").unwrap_or_default();
+            let adapter = Arc::new(
+                WhatsAppAdapter::new(
+                    wa_config.phone_number_id.clone(),
+                    token,
+                    verify_token,
+                    wa_config.webhook_port,
+                    wa_config.allowed_users.clone(),
+                )
+                .with_gateway(gateway_url)
+                .with_account_id(wa_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                wa_config.default_agent.clone(),
+                wa_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Signal
+    #[cfg(feature = "channel-signal")]
+    for sig_config in config.signal.iter() {
+        if !sig_config.phone_number.is_empty() {
+            match SignalAdapter::with_options(
+                sig_config.api_url.clone(),
+                sig_config.phone_number.clone(),
+                sig_config.allowed_users.clone(),
+                sig_config.api_key.clone(),
+                sig_config.allow_local,
+            ) {
+                Ok(signal_adapter) => {
+                    let adapter = Arc::new(
+                        signal_adapter
+                            .with_account_id(sig_config.account_id.clone())
+                            .with_poll_interval(sig_config.poll_interval_secs),
+                    );
+                    adapters.push((
+                        adapter,
+                        sig_config.default_agent.clone(),
+                        sig_config.account_id.clone(),
+                    ));
+                }
+                Err(e) => {
+                    warn!("Signal channel disabled: {e}");
+                }
+            }
+        } else {
+            warn!("Signal configured but phone_number is empty, skipping");
+        }
+    }
+
+    // Matrix
+    #[cfg(feature = "channel-matrix")]
+    for mx_config in config.matrix.iter() {
+        if let Some(token) = read_token(&mx_config.access_token_env, "Matrix") {
+            let adapter = Arc::new(
+                MatrixAdapter::new(
+                    mx_config.homeserver_url.clone(),
+                    mx_config.user_id.clone(),
+                    token,
+                    mx_config.allowed_rooms.clone(),
+                    mx_config.auto_accept_invites,
+                )
+                .with_account_id(mx_config.account_id.clone())
+                .with_backoff(mx_config.initial_backoff_secs, mx_config.max_backoff_secs),
+            );
+            adapters.push((
+                adapter,
+                mx_config.default_agent.clone(),
+                mx_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Email
+    #[cfg(feature = "channel-email")]
+    for em_config in config.email.iter() {
+        if let Some(password) = read_token(&em_config.password_env, "Email") {
+            let adapter = Arc::new(
+                EmailAdapter::new(
+                    em_config.imap_host.clone(),
+                    em_config.imap_port,
+                    em_config.smtp_host.clone(),
+                    em_config.smtp_port,
+                    em_config.username.clone(),
+                    password,
+                    em_config.poll_interval_secs,
+                    em_config.folders.clone(),
+                    em_config.allowed_senders.clone(),
+                )
+                .with_account_id(em_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                em_config.default_agent.clone(),
+                em_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Teams
+    #[cfg(feature = "channel-teams")]
+    for tm_config in config.teams.iter() {
+        if let Some(password) = read_token(&tm_config.app_password_env, "Teams") {
+            let security_token =
+                read_token(&tm_config.security_token_env, "Teams (security_token)")
+                    .unwrap_or_default();
+            // Default-deny: unsigned webhooks let anyone forge Teams activities.
+            // Also reject when the token is present but cannot be base64-decoded
+            // or decodes to empty bytes — TeamsAdapter::new would otherwise
+            // silently fall back to security_token_key=None and skip
+            // signature verification at the webhook handler.
+            if tm_config.signature_required {
+                use base64::Engine;
+                let decoded = if security_token.is_empty() {
+                    Err("missing".to_string())
+                } else {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(security_token.as_bytes())
+                        .map_err(|e| format!("invalid base64: {e}"))
+                        .and_then(|b| {
+                            if b.is_empty() {
+                                Err("decodes to empty key".to_string())
+                            } else {
+                                Ok(b)
+                            }
+                        })
+                };
+                if let Err(reason) = decoded {
+                    tracing::error!(
+                        "Teams adapter for app_id={} refused: signature_required=true \
+                         but security_token_env '{}' is {reason}. Set the env var to a \
+                         valid base64-encoded outgoing-webhook token, or explicitly \
+                         set signature_required=false (NOT recommended).",
+                        tm_config.app_id,
+                        tm_config.security_token_env
+                    );
+                    continue;
+                }
+            }
+            let adapter = Arc::new(
+                TeamsAdapter::new(
+                    tm_config.app_id.clone(),
+                    password,
+                    security_token,
+                    tm_config.webhook_port,
+                    tm_config.allowed_tenants.clone(),
+                )
+                .with_account_id(tm_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                tm_config.default_agent.clone(),
+                tm_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Mattermost
+    #[cfg(feature = "channel-mattermost")]
+    for mm_config in config.mattermost.iter() {
+        if let Some(token) = read_token(&mm_config.token_env, "Mattermost") {
+            let adapter = Arc::new(
+                MattermostAdapter::new(
+                    mm_config.server_url.clone(),
+                    token,
+                    mm_config.allowed_channels.clone(),
+                )
+                .with_account_id(mm_config.account_id.clone())
+                .with_backoff(mm_config.initial_backoff_secs, mm_config.max_backoff_secs),
+            );
+            adapters.push((
+                adapter,
+                mm_config.default_agent.clone(),
+                mm_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // IRC
+    #[cfg(feature = "channel-irc")]
+    for irc_config in config.irc.iter() {
+        if !irc_config.server.is_empty() {
+            let password = irc_config
+                .password_env
+                .as_ref()
+                .and_then(|env| read_token(env, "IRC"));
+            let adapter = Arc::new(
+                IrcAdapter::new(
+                    irc_config.server.clone(),
+                    irc_config.port,
+                    irc_config.nick.clone(),
+                    password,
+                    irc_config.channels.clone(),
+                    irc_config.use_tls,
+                )
+                .with_account_id(irc_config.account_id.clone())
+                .with_backoff(irc_config.initial_backoff_secs, irc_config.max_backoff_secs),
+            );
+            adapters.push((
+                adapter,
+                irc_config.default_agent.clone(),
+                irc_config.account_id.clone(),
+            ));
+        } else {
+            warn!("IRC configured but server is empty, skipping");
+        }
+    }
+
+    // Google Chat
+    #[cfg(feature = "channel-google-chat")]
+    for gc_config in config.google_chat.iter() {
+        // Try service_account_key_path first, then fall back to env var
+        let key = gc_config
+            .service_account_key_path
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .and_then(|path| match std::fs::read_to_string(path) {
+                Ok(contents) => Some(contents),
+                Err(e) => {
+                    warn!("Google Chat: failed to read service account key from {path}: {e}");
+                    None
+                }
+            })
+            .or_else(|| read_token(&gc_config.service_account_env, "Google Chat"));
+        if let Some(key) = key {
+            let adapter = Arc::new(
+                GoogleChatAdapter::new(key, gc_config.space_ids.clone(), gc_config.webhook_port)
+                    .with_account_id(gc_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                gc_config.default_agent.clone(),
+                gc_config.account_id.clone(),
+            ));
+        } else {
+            warn!("Google Chat configured but no credentials found (neither service_account_key_path nor {} env var), skipping", gc_config.service_account_env);
+        }
+    }
+
+    // Twitch
+    #[cfg(feature = "channel-twitch")]
+    for tw_config in config.twitch.iter() {
+        if let Some(token) = read_token(&tw_config.oauth_token_env, "Twitch") {
+            let adapter = Arc::new(
+                TwitchAdapter::new(token, tw_config.channels.clone(), tw_config.nick.clone())
+                    .with_account_id(tw_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                tw_config.default_agent.clone(),
+                tw_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Rocket.Chat
+    #[cfg(feature = "channel-rocketchat")]
+    for rc_config in config.rocketchat.iter() {
+        if let Some(token) = read_token(&rc_config.token_env, "Rocket.Chat") {
+            let adapter = Arc::new(
+                RocketChatAdapter::new(
+                    rc_config.server_url.clone(),
+                    token,
+                    rc_config.user_id.clone(),
+                    rc_config.allowed_channels.clone(),
+                )
+                .with_account_id(rc_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                rc_config.default_agent.clone(),
+                rc_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Zulip
+    #[cfg(feature = "channel-zulip")]
+    for z_config in config.zulip.iter() {
+        if let Some(api_key) = read_token(&z_config.api_key_env, "Zulip") {
+            let adapter = Arc::new(
+                ZulipAdapter::new(
+                    z_config.server_url.clone(),
+                    z_config.bot_email.clone(),
+                    api_key,
+                    z_config.streams.clone(),
+                )
+                .with_account_id(z_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                z_config.default_agent.clone(),
+                z_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // XMPP
+    #[cfg(feature = "channel-xmpp")]
+    for x_config in config.xmpp.iter() {
+        if let Some(password) = read_token(&x_config.password_env, "XMPP") {
+            let adapter = Arc::new(
+                XmppAdapter::new(
+                    x_config.jid.clone(),
+                    password,
+                    x_config.server.clone(),
+                    x_config.port,
+                    x_config.rooms.clone(),
+                )
+                .with_account_id(x_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                x_config.default_agent.clone(),
+                x_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // ── Wave 3 ──────────────────────────────────────────────────
+
+    // LINE
+    #[cfg(feature = "channel-line")]
+    for ln_config in config.line.iter() {
+        if let Some(secret) = read_token(&ln_config.channel_secret_env, "LINE (secret)") {
+            if let Some(token) = read_token(&ln_config.access_token_env, "LINE (token)") {
+                let adapter = Arc::new(
+                    LineAdapter::new(secret, token, ln_config.webhook_port)
+                        .with_account_id(ln_config.account_id.clone()),
+                );
+                adapters.push((
+                    adapter,
+                    ln_config.default_agent.clone(),
+                    ln_config.account_id.clone(),
+                ));
+            }
+        }
+    }
+
+    // Viber
+    #[cfg(feature = "channel-viber")]
+    for vb_config in config.viber.iter() {
+        if let Some(token) = read_token(&vb_config.auth_token_env, "Viber") {
+            let adapter = Arc::new(
+                ViberAdapter::new(token, vb_config.webhook_url.clone(), vb_config.webhook_port)
+                    .with_account_id(vb_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                vb_config.default_agent.clone(),
+                vb_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Facebook Messenger
+    #[cfg(feature = "channel-messenger")]
+    for ms_config in config.messenger.iter() {
+        if let Some(page_token) = read_token(&ms_config.page_token_env, "Messenger (page)") {
+            let verify_token =
+                read_token(&ms_config.verify_token_env, "Messenger (verify)").unwrap_or_default();
+            let app_secret =
+                read_token(&ms_config.app_secret_env, "Messenger (app_secret)").unwrap_or_default();
+            let adapter = Arc::new(
+                MessengerAdapter::new(page_token, verify_token, app_secret, ms_config.webhook_port)
+                    .with_account_id(ms_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                ms_config.default_agent.clone(),
+                ms_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Reddit
+    #[cfg(feature = "channel-reddit")]
+    for rd_config in config.reddit.iter() {
+        if let Some(secret) = read_token(&rd_config.client_secret_env, "Reddit (secret)") {
+            if let Some(password) = read_token(&rd_config.password_env, "Reddit (password)") {
+                let adapter = Arc::new(
+                    RedditAdapter::new(
+                        rd_config.client_id.clone(),
+                        secret,
+                        rd_config.username.clone(),
+                        password,
+                        rd_config.subreddits.clone(),
+                    )
+                    .with_account_id(rd_config.account_id.clone()),
+                );
+                adapters.push((
+                    adapter,
+                    rd_config.default_agent.clone(),
+                    rd_config.account_id.clone(),
+                ));
+            }
+        }
+    }
+
+    // Mastodon
+    #[cfg(feature = "channel-mastodon")]
+    for md_config in config.mastodon.iter() {
+        if let Some(token) = read_token(&md_config.access_token_env, "Mastodon") {
+            let adapter = Arc::new(
+                MastodonAdapter::new(md_config.instance_url.clone(), token)
+                    .with_account_id(md_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                md_config.default_agent.clone(),
+                md_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Bluesky
+    #[cfg(feature = "channel-bluesky")]
+    for bs_config in config.bluesky.iter() {
+        if let Some(password) = read_token(&bs_config.app_password_env, "Bluesky") {
+            let adapter = Arc::new(
+                BlueskyAdapter::new(bs_config.identifier.clone(), password)
+                    .with_account_id(bs_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                bs_config.default_agent.clone(),
+                bs_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Feishu/Lark (unified adapter)
+    #[cfg(feature = "channel-feishu")]
+    for fs_config in config.feishu.iter() {
+        let region = match fs_config.region.as_str() {
+            "intl" | "lark" => FeishuRegion::Intl,
+            _ => FeishuRegion::Cn,
+        };
+        let receive_mode = match fs_config.receive_mode.as_str() {
+            "webhook" => FeishuReceiveMode::Webhook,
+            _ => FeishuReceiveMode::Websocket,
+        };
+        let label = region.label();
+        if let Some(secret) = read_token(&fs_config.app_secret_env, label) {
+            let adapter = Arc::new(
+                FeishuAdapter::new(
+                    fs_config.app_id.clone(),
+                    secret,
+                    fs_config.webhook_port,
+                    region,
+                    receive_mode,
+                )
+                .with_account_id(fs_config.account_id.clone())
+                .with_verification(
+                    fs_config.verification_token.clone(),
+                    fs_config.encrypt_key.clone(),
+                ),
+            );
+            adapters.push((
+                adapter,
+                fs_config.default_agent.clone(),
+                fs_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Revolt
+    #[cfg(feature = "channel-revolt")]
+    for rv_config in config.revolt.iter() {
+        if let Some(token) = read_token(&rv_config.bot_token_env, "Revolt") {
+            let mut adapter = RevoltAdapter::with_urls(
+                token,
+                rv_config.api_url.clone(),
+                rv_config.ws_url.clone(),
+            )
+            .with_account_id(rv_config.account_id.clone());
+            if !rv_config.allowed_channels.is_empty() {
+                adapter.set_allowed_channels(rv_config.allowed_channels.clone());
+            }
+            adapters.push((
+                Arc::new(adapter),
+                rv_config.default_agent.clone(),
+                rv_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // WeChat (personal account via iLink)
+    // Only start when a bot token is available — without a token the adapter
+    // would block on QR login which stalls the entire server startup.
+    // Users obtain a token via the dashboard QR flow, which saves it to
+    // secrets.env; on next restart the adapter will start normally.
+    #[cfg(feature = "channel-wechat")]
+    for wx_config in config.wechat.iter() {
+        let bot_token = read_token(&wx_config.bot_token_env, "WeChat");
+        if bot_token.is_none() {
+            warn!("WeChat: no bot token available — skipping adapter start (use dashboard QR login to obtain one)");
+            continue;
+        }
+        let adapter = Arc::new(
+            WeChatAdapter::new(bot_token, wx_config.allowed_users.clone())
+                .with_account_id(wx_config.account_id.clone())
+                .with_backoff(wx_config.initial_backoff_secs, wx_config.max_backoff_secs),
+        );
+        adapters.push((
+            adapter,
+            wx_config.default_agent.clone(),
+            wx_config.account_id.clone(),
+        ));
+    }
+
+    // WeCom intelligent bot (WebSocket or callback mode)
+    #[cfg(feature = "channel-wecom")]
+    for wc_config in config.wecom.iter() {
+        if let Some(secret) = read_token(&wc_config.secret_env, "WeCom Bot") {
+            use librefang_types::config::WeComMode;
+            let adapter: Arc<WeComAdapter> = match wc_config.mode {
+                WeComMode::Websocket => Arc::new(
+                    WeComAdapter::new(wc_config.bot_id.clone(), secret)
+                        .with_account_id(wc_config.account_id.clone()),
+                ),
+                WeComMode::Callback => {
+                    let token = wc_config
+                        .token_env
+                        .as_ref()
+                        .and_then(|env| std::env::var(env).ok());
+                    let encoding_aes_key = wc_config
+                        .encoding_aes_key_env
+                        .as_ref()
+                        .and_then(|env| std::env::var(env).ok());
+                    Arc::new(
+                        WeComAdapter::new_callback(
+                            wc_config.bot_id.clone(),
+                            secret,
+                            wc_config.webhook_port,
+                            token,
+                            encoding_aes_key,
+                        )
+                        .with_account_id(wc_config.account_id.clone()),
+                    )
+                }
+            };
+            adapters.push((
+                adapter,
+                wc_config.default_agent.clone(),
+                wc_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // ── Wave 4 ──────────────────────────────────────────────────
+
+    // Nextcloud Talk
+    #[cfg(feature = "channel-nextcloud")]
+    for nc_config in config.nextcloud.iter() {
+        if let Some(token) = read_token(&nc_config.token_env, "Nextcloud") {
+            let adapter = Arc::new(
+                NextcloudAdapter::new(
+                    nc_config.server_url.clone(),
+                    token,
+                    nc_config.allowed_rooms.clone(),
+                )
+                .with_account_id(nc_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                nc_config.default_agent.clone(),
+                nc_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Guilded
+    #[cfg(feature = "channel-guilded")]
+    for gd_config in config.guilded.iter() {
+        if let Some(token) = read_token(&gd_config.bot_token_env, "Guilded") {
+            let adapter = Arc::new(
+                GuildedAdapter::new(token, gd_config.server_ids.clone())
+                    .with_account_id(gd_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                gd_config.default_agent.clone(),
+                gd_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Keybase
+    #[cfg(feature = "channel-keybase")]
+    for kb_config in config.keybase.iter() {
+        if let Some(paperkey) = read_token(&kb_config.paperkey_env, "Keybase") {
+            let adapter = Arc::new(
+                KeybaseAdapter::new(
+                    kb_config.username.clone(),
+                    paperkey,
+                    kb_config.allowed_teams.clone(),
+                )
+                .with_account_id(kb_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                kb_config.default_agent.clone(),
+                kb_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Threema
+    #[cfg(feature = "channel-threema")]
+    for tm_config in config.threema.iter() {
+        if let Some(secret) = read_token(&tm_config.secret_env, "Threema") {
+            let adapter = Arc::new(
+                ThreemaAdapter::new(tm_config.threema_id.clone(), secret, tm_config.webhook_port)
+                    .with_account_id(tm_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                tm_config.default_agent.clone(),
+                tm_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Nostr
+    #[cfg(feature = "channel-nostr")]
+    for ns_config in config.nostr.iter() {
+        if let Some(key) = read_token(&ns_config.private_key_env, "Nostr") {
+            let adapter = Arc::new(
+                NostrAdapter::new(key, ns_config.relays.clone())
+                    .with_account_id(ns_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                ns_config.default_agent.clone(),
+                ns_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Webex
+    #[cfg(feature = "channel-webex")]
+    for wx_config in config.webex.iter() {
+        if let Some(token) = read_token(&wx_config.bot_token_env, "Webex") {
+            let adapter = Arc::new(
+                WebexAdapter::new(token, wx_config.allowed_rooms.clone())
+                    .with_account_id(wx_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                wx_config.default_agent.clone(),
+                wx_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Pumble
+    #[cfg(feature = "channel-pumble")]
+    for pb_config in config.pumble.iter() {
+        if let Some(token) = read_token(&pb_config.bot_token_env, "Pumble") {
+            let adapter = Arc::new(
+                PumbleAdapter::new(token, pb_config.webhook_port)
+                    .with_account_id(pb_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                pb_config.default_agent.clone(),
+                pb_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Flock
+    #[cfg(feature = "channel-flock")]
+    for fl_config in config.flock.iter() {
+        if let Some(token) = read_token(&fl_config.bot_token_env, "Flock") {
+            let adapter = Arc::new(
+                FlockAdapter::new(token, fl_config.webhook_port)
+                    .with_account_id(fl_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                fl_config.default_agent.clone(),
+                fl_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Twist
+    #[cfg(feature = "channel-twist")]
+    for tw_config in config.twist.iter() {
+        if let Some(token) = read_token(&tw_config.token_env, "Twist") {
+            let adapter = Arc::new(
+                TwistAdapter::new(
+                    token,
+                    tw_config.workspace_id.clone(),
+                    tw_config.allowed_channels.clone(),
+                )
+                .with_account_id(tw_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                tw_config.default_agent.clone(),
+                tw_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // ── Wave 5 ──────────────────────────────────────────────────
+
+    // Mumble
+    #[cfg(feature = "channel-mumble")]
+    for mb_config in config.mumble.iter() {
+        if let Some(password) = read_token(&mb_config.password_env, "Mumble") {
+            let adapter = Arc::new(
+                MumbleAdapter::new(
+                    mb_config.host.clone(),
+                    mb_config.port,
+                    password,
+                    mb_config.username.clone(),
+                    mb_config.channel.clone(),
+                )
+                .with_account_id(mb_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                mb_config.default_agent.clone(),
+                mb_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // DingTalk
+    #[cfg(feature = "channel-dingtalk")]
+    for dt_config in config.dingtalk.iter() {
+        use librefang_types::config::DingTalkReceiveMode;
+        match dt_config.receive_mode {
+            DingTalkReceiveMode::Stream => {
+                if let Some(client_id) = read_token(&dt_config.app_key_env, "DingTalk (app_key)") {
+                    let client_secret =
+                        match read_token(&dt_config.app_secret_env, "DingTalk (app_secret)") {
+                            Some(s) if !s.is_empty() => s,
+                            _ => {
+                                warn!("DingTalk stream mode requires app_secret; skipping adapter");
+                                continue;
+                            }
+                        };
+                    let adapter = Arc::new(
+                        DingTalkAdapter::new_stream(client_id, client_secret)
+                            .with_account_id(dt_config.account_id.clone()),
+                    );
+                    adapters.push((
+                        adapter,
+                        dt_config.default_agent.clone(),
+                        dt_config.account_id.clone(),
+                    ));
+                }
+            }
+            DingTalkReceiveMode::Webhook => {
+                if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
+                    // #3441: refuse to register a webhook adapter with an empty
+                    // signing secret.  An empty secret would still reject all
+                    // verifications (HMAC of an empty key fails the equality
+                    // check), but this is loud rather than silent — a misconfig
+                    // here means every inbound message is dropped, and the
+                    // operator should know at boot.
+                    let secret = match read_token(&dt_config.secret_env, "DingTalk (secret)") {
+                        Some(s) if !s.is_empty() => s,
+                        _ => {
+                            tracing::error!(
+                                env = %dt_config.secret_env,
+                                "DingTalk webhook adapter requires a non-empty signing secret \
+                                 (env var unset or empty); refusing to register adapter \
+                                 (default-deny). Set the env var or switch receive_mode \
+                                 to \"stream\".",
+                            );
+                            continue;
+                        }
+                    };
+                    let adapter = Arc::new(
+                        DingTalkAdapter::new(token, secret, dt_config.webhook_port)
+                            .with_account_id(dt_config.account_id.clone()),
+                    );
+                    adapters.push((
+                        adapter,
+                        dt_config.default_agent.clone(),
+                        dt_config.account_id.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // QQ
+    #[cfg(feature = "channel-qq")]
+    for qq_config in config.qq.iter() {
+        if let Some(secret) = read_token(&qq_config.app_secret_env, "QQ") {
+            let adapter = Arc::new(
+                QqAdapter::new(
+                    qq_config.app_id.clone(),
+                    secret,
+                    qq_config.allowed_users.clone(),
+                )
+                .with_account_id(qq_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                qq_config.default_agent.clone(),
+                qq_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Discourse
+    #[cfg(feature = "channel-discourse")]
+    for dc_config in config.discourse.iter() {
+        if let Some(api_key) = read_token(&dc_config.api_key_env, "Discourse") {
+            let adapter = Arc::new(
+                DiscourseAdapter::new(
+                    dc_config.base_url.clone(),
+                    api_key,
+                    dc_config.api_username.clone(),
+                    dc_config.categories.clone(),
+                )
+                .with_account_id(dc_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                dc_config.default_agent.clone(),
+                dc_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Gitter
+    #[cfg(feature = "channel-gitter")]
+    for gt_config in config.gitter.iter() {
+        if let Some(token) = read_token(&gt_config.token_env, "Gitter") {
+            let adapter = Arc::new(
+                GitterAdapter::new(token, gt_config.room_id.clone())
+                    .with_account_id(gt_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                gt_config.default_agent.clone(),
+                gt_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // ntfy
+    #[cfg(feature = "channel-ntfy")]
+    for nf_config in config.ntfy.iter() {
+        let token = if nf_config.token_env.is_empty() {
+            String::new()
+        } else {
+            read_token(&nf_config.token_env, "ntfy").unwrap_or_default()
+        };
+        let adapter = Arc::new(
+            NtfyAdapter::new(nf_config.server_url.clone(), nf_config.topic.clone(), token)
+                .with_account_id(nf_config.account_id.clone()),
+        );
+        adapters.push((
+            adapter,
+            nf_config.default_agent.clone(),
+            nf_config.account_id.clone(),
+        ));
+    }
+
+    // Gotify
+    #[cfg(feature = "channel-gotify")]
+    for gf_config in config.gotify.iter() {
+        if let Some(app_token) = read_token(&gf_config.app_token_env, "Gotify (app)") {
+            let client_token =
+                read_token(&gf_config.client_token_env, "Gotify (client)").unwrap_or_default();
+            let adapter = Arc::new(
+                GotifyAdapter::new(gf_config.server_url.clone(), app_token, client_token)
+                    .with_account_id(gf_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                gf_config.default_agent.clone(),
+                gf_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Webhook
+    #[cfg(feature = "channel-webhook")]
+    for wh_config in config.webhook.iter() {
+        if let Some(secret) = read_token(&wh_config.secret_env, "Webhook") {
+            match WebhookAdapter::new(
+                secret,
+                wh_config.listen_port,
+                wh_config.callback_url.clone(),
+            ) {
+                Ok(wa) => {
+                    let adapter = Arc::new(
+                        wa.with_account_id(wh_config.account_id.clone())
+                            .with_deliver_only(wh_config.deliver_only, wh_config.deliver.clone()),
+                    );
+                    adapters.push((
+                        adapter,
+                        wh_config.default_agent.clone(),
+                        wh_config.account_id.clone(),
+                    ));
+                }
+                Err(e) => {
+                    tracing::error!("Webhook adapter rejected by SSRF guard: {e}");
+                }
+            }
+        }
+    }
+
+    // Voice (WebSocket + STT/TTS)
+    #[cfg(feature = "channel-voice")]
+    for voice_config in config.voice.iter() {
+        if let Some(api_key) = read_token(&voice_config.api_key_env, "Voice") {
+            let adapter = Arc::new(
+                VoiceAdapter::new(
+                    voice_config.listen_port,
+                    api_key,
+                    voice_config.stt_url.clone(),
+                    voice_config.tts_url.clone(),
+                    voice_config.tts_voice.clone(),
+                    voice_config.buffer_threshold,
+                )
+                .with_account_id(voice_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                voice_config.default_agent.clone(),
+                voice_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // LinkedIn
+    #[cfg(feature = "channel-linkedin")]
+    for li_config in config.linkedin.iter() {
+        if let Some(token) = read_token(&li_config.access_token_env, "LinkedIn") {
+            let adapter = Arc::new(
+                LinkedInAdapter::new(token, li_config.organization_id.clone())
+                    .with_account_id(li_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                li_config.default_agent.clone(),
+                li_config.account_id.clone(),
+            ));
+        }
+    }
+
     // ── Sidecar channel adapters ───────────────────────────────
-    // Re-init path: this loop runs on every channel-bridge cycle, not just
-    // daemon boot. After config changes that produce `HotAction::ReloadChannels`
-    // (see `librefang_kernel::config_reload`), the dispatch in
-    // `kernel/config_reload_ops.rs::246-256` clears `mesh.channel_adapters`;
-    // the owning handler (`routes/channels.rs::configure_channel`,
-    // `configure_sidecar_channel`, `reload_channels`, … or the 30s disk
-    // watcher in `server.rs`) follows up with
-    // `channel_bridge::reload_channels_from_disk(&state)` which re-enters
-    // `start_channel_bridge_with_config` and so re-executes this loop —
-    // picking up any newly-added [[sidecar_channels]] entry. Saves without
-    // that handler-side follow-up will silently fail to spawn the sidecar
-    // (the supervisor map stays empty); audit any new save endpoint that
-    // touches `sidecar_channels` for this pattern.
+    let sidecar_cfg = kernel.config_ref();
     for sidecar_config in &sidecar_cfg.sidecar_channels {
         info!(
             name = %sidecar_config.name,
             command = %sidecar_config.command,
             "Registering sidecar channel adapter"
         );
-        let adapter = Arc::new(SidecarAdapter::new(
-            sidecar_config,
-            kernel.home_dir().to_path_buf(),
-        ));
-        // #5294 — propagate `default_agent` from the sidecar config so the
-        // router-population loop below seeds `AgentRouter.channel_defaults`
-        // for this channel. Without this, sidecar adapters fall through to
-        // the non-deterministic "first available agent" branch in
-        // `resolve_or_fallback`, silently routing traffic to whichever agent
-        // happens to be first in the registry iteration order.
-        adapters.push((adapter, sidecar_config.default_agent.clone(), None));
+        let adapter = Arc::new(SidecarAdapter::new(sidecar_config));
+        adapters.push((adapter, None, None));
     }
 
     if adapters.is_empty() {
@@ -2583,80 +3482,139 @@ pub async fn start_channel_bridge_with_config(
         warn!("Could not open message journal — crash recovery disabled");
     }
 
-    // Recover messages that were in-flight during last shutdown/crash AND
-    // any deferred entries whose retry deadline has already passed
-    // (rate-limit window reset while the daemon was down).
-    let initial_recoverable = match manager.journal() {
-        Some(j) => j.recoverable_entries().await,
-        None => Vec::new(),
-    };
-    if !initial_recoverable.is_empty() {
-        info!(
-            count = initial_recoverable.len(),
-            "Recovering messages from journal (in-flight + due-deferred)"
-        );
+    // Recover messages that were in-flight during last shutdown/crash
+    let pending = manager.recover_pending().await;
+    if !pending.is_empty() {
         let handle = bridge_handle.clone();
         let kernel_for_recovery = kernel.clone();
         let recovery_journal = manager.journal().cloned();
-        let mut shutdown_recv = manager.shutdown_signal();
-        let recovery_task = tokio::spawn(async move {
-            tokio::select! {
-                _ = async {
-                    // Wait for adapters to boot before re-dispatch.
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    for entry in &initial_recoverable {
-                        redispatch_journal_entry(
-                            entry,
-                            &handle,
-                            &kernel_for_recovery,
-                            recovery_journal.as_ref(),
-                        )
-                        .await;
-                    }
-                } => {}
-                _ = shutdown_recv.changed() => {}
-            }
-        });
-        manager.track_task(recovery_task);
-    }
+        tokio::spawn(async move {
+            // Wait for adapters to initialize before sending responses.
+            // Retry with increasing delays: 5s, 10s, 15s.
+            const RECOVERY_DELAYS: &[u64] = &[5, 10, 15];
 
-    // Periodic ticker: every 60s, re-dispatch any Deferred entries whose
-    // retry deadline has passed since the last sweep. This is what makes
-    // the journal recover from rate-limit windows that elapse WHILE the
-    // daemon is running. Tied to the BridgeManager's lifecycle via
-    // `track_task` so a hot-reload cancels the old ticker before
-    // spawning a new one — otherwise N reloads = N tickers reading the
-    // same JSONL through N independent in-memory views, leading to
-    // double-dispatch on the same `message_id`.
-    if let Some(j) = manager.journal().cloned() {
-        let handle = bridge_handle.clone();
-        let kernel_for_retry = kernel.clone();
-        let mut shutdown_recv = manager.shutdown_signal();
-        let retry_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            // Skip the first immediate tick — initial-recovery already
-            // covers anything due at boot.
-            interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let due = j.due_deferred_entries().await;
-                        if due.is_empty() {
+            // First delay: let adapters boot
+            tokio::time::sleep(std::time::Duration::from_secs(RECOVERY_DELAYS[0])).await;
+
+            for entry in &pending {
+                let age_secs = (chrono::Utc::now() - entry.received_at).num_seconds();
+                let was_in_flight =
+                    entry.status == librefang_channels::message_journal::JournalStatus::Processing;
+                info!(
+                    id = %entry.message_id,
+                    channel = %entry.channel,
+                    sender = %entry.sender_name,
+                    age_secs,
+                    was_in_flight,
+                    "Re-dispatching recovered message"
+                );
+                let agent_id = if let Some(ref name) = entry.agent_name {
+                    handle.find_agent_by_name(name).await.ok().flatten()
+                } else {
+                    None
+                };
+                let agent_id = match agent_id {
+                    Some(id) => id,
+                    None => match kernel_for_recovery
+                        .agent_registry()
+                        .list()
+                        .first()
+                        .map(|e| e.id)
+                    {
+                        Some(id) => id,
+                        None => {
+                            warn!(id = %entry.message_id, "No agents available for recovery");
                             continue;
                         }
-                        info!(
-                            count = due.len(),
-                            "Retry ticker re-dispatching deferred entries (quota window elapsed)"
-                        );
-                        for entry in &due {
-                            redispatch_journal_entry(entry, &handle, &kernel_for_retry, Some(&j)).await;
+                    },
+                };
+                // Differentiate prefix: if the task was already in-flight, the
+                // agent may have partially processed it. Tell it so.
+                let prefix = if was_in_flight {
+                    format!(
+                        "[RECOVERY: this message was being processed {age_secs}s ago when the \
+                         system restarted. It may have been partially handled — check your \
+                         session context before re-doing work. If you already responded, \
+                         reply with NO_REPLY.]\n\n"
+                    )
+                } else {
+                    format!(
+                        "[RECOVERY: this message was received {age_secs}s ago but processing \
+                         never started. Please process it now.]\n\n"
+                    )
+                };
+                let msg = format!("{prefix}{}", entry.content);
+                match handle.send_message(agent_id, &msg).await {
+                    Ok(response) => {
+                        info!(id = %entry.message_id, "Recovered message processed");
+                        if !response.is_empty() {
+                            // Retry delivery with backoff if adapter isn't ready yet
+                            let mut delivered = false;
+                            for delay in RECOVERY_DELAYS {
+                                if let Some(adapter) = kernel_for_recovery
+                                    .channel_adapters_ref()
+                                    .get(&entry.channel)
+                                {
+                                    let user = librefang_channels::types::ChannelUser {
+                                        platform_id: entry.sender_id.clone(),
+                                        display_name: entry.sender_name.clone(),
+                                        librefang_user: None,
+                                    };
+                                    let content = librefang_channels::types::ChannelContent::Text(
+                                        response.clone(),
+                                    );
+                                    match adapter.send(&user, content).await {
+                                        Ok(()) => {
+                                            delivered = true;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                id = %entry.message_id,
+                                                error = %e,
+                                                "Recovery delivery failed, retrying in {delay}s"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    warn!(
+                                        id = %entry.message_id,
+                                        channel = %entry.channel,
+                                        "Adapter not ready, retrying in {delay}s"
+                                    );
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
+                            }
+                            if !delivered {
+                                warn!(
+                                    id = %entry.message_id,
+                                    "Could not deliver recovery response after retries"
+                                );
+                            }
+                        }
+                        if let Some(ref j) = recovery_journal {
+                            j.update_status(
+                                &entry.message_id,
+                                librefang_channels::message_journal::JournalStatus::Completed,
+                                None,
+                            )
+                            .await;
                         }
                     }
-                    _ = shutdown_recv.changed() => break,
+                    Err(e) => {
+                        warn!(id = %entry.message_id, error = %e, "Recovery re-dispatch failed");
+                        if let Some(ref j) = recovery_journal {
+                            j.update_status(
+                                &entry.message_id,
+                                librefang_channels::message_journal::JournalStatus::Failed,
+                                Some(e.to_string()),
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
         });
-        manager.track_task(retry_task);
     }
 
     let mut started_names = Vec::new();
@@ -2714,13 +3672,6 @@ pub async fn start_channel_bridge_with_config(
     if started_names.is_empty() {
         (None, Vec::new(), webhook_router)
     } else {
-        // Forward `ApprovalRequested` kernel events to channel adapters so
-        // human approvers see a prompt in their configured chat instead of
-        // having to poll the dashboard (#4875). Started after the adapter
-        // registration loop so the listener captures the live `self.adapters`
-        // set; lifetime is tied to BridgeManager::shutdown_tx, so hot-reload
-        // cancels it together with the rest of the bridge tasks.
-        manager.start_approval_listener().await;
         (Some(manager), started_names, webhook_router)
     }
 }
@@ -2732,52 +3683,64 @@ pub async fn start_channel_bridge_with_config(
 pub async fn reload_channels_from_disk(
     state: &crate::routes::AppState,
 ) -> Result<Vec<String>, String> {
-    // Stop existing bridge. Swap it out atomically so concurrent readers see
-    // None immediately, then tear down the old instance.
-    //
-    // #5142: `Arc::try_unwrap` only yields `&mut` when no other strong ref
-    // exists — but `routes/agents.rs::push_message` does
-    // `state.bridge_manager.load_full()` and holds the Arc across an `.await`
-    // on `push_message`, so on a busy channel `try_unwrap` returns `Err` and
-    // (pre-#5142) the graceful `stop()` was skipped entirely, leaking the old
-    // bridge's tokio tasks until the strong count happened to hit 1. We now
-    // ALWAYS call `abort()` (which only needs `&self`: fires the watch
-    // shutdown signal + aborts every tracked task handle). When we *did* get
-    // exclusive ownership we additionally run the graceful `stop()` for its
-    // clean join + per-adapter async cleanup.
+    // Stop existing bridge
     {
-        let old = state.bridge_manager.swap(std::sync::Arc::new(None));
-        match std::sync::Arc::try_unwrap(old) {
-            Ok(Some(mut b)) => b.stop().await,
-            Ok(None) => {}
-            Err(still_shared) => {
-                if let Some(b) = still_shared.as_ref() {
-                    b.abort();
-                }
-            }
+        let mut guard = state.bridge_manager.lock().await;
+        if let Some(ref mut bridge) = *guard {
+            bridge.stop().await;
         }
+        *guard = None;
     }
 
     // Re-read secrets.env so new API tokens are available in std::env.
-    // Shared with the boot path (#4701) — see `crate::secrets_env` for the
-    // parser + spawn_blocking-guarded mutation.
-    let n = crate::secrets_env::load_into_process_async(state.kernel.home_dir()).await;
-    if n > 0 {
-        info!("Reloaded secrets.env for channel hot-reload ({n} vars)");
+    // `std::env::set_var` is not thread-safe inside an async context; push the
+    // mutation onto a blocking thread where no other tokio worker is racing.
+    let secrets_path = state.kernel.home_dir().join("secrets.env");
+    if secrets_path.exists() {
+        let secrets_path_clone = secrets_path.clone();
+        let set_result = tokio::task::spawn_blocking(move || {
+            if let Ok(content) = std::fs::read_to_string(&secrets_path_clone) {
+                let mut count = 0usize;
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+                    if let Some(eq_pos) = trimmed.find('=') {
+                        let key = trimmed[..eq_pos].trim();
+                        let mut value = trimmed[eq_pos + 1..].trim().to_string();
+                        if !key.is_empty() {
+                            // Strip matching quotes
+                            if ((value.starts_with('"') && value.ends_with('"'))
+                                || (value.starts_with('\'') && value.ends_with('\'')))
+                                && value.len() >= 2
+                            {
+                                value = value[1..value.len() - 1].to_string();
+                            }
+                            // Always overwrite — the file is the source of truth after dashboard edits
+                            // SAFETY: running on a dedicated blocking thread; no concurrent env
+                            // reads happen here because spawn_blocking serialises the mutation.
+                            unsafe { std::env::set_var(key, &value) };
+                            count += 1;
+                        }
+                    }
+                }
+                count
+            } else {
+                0
+            }
+        })
+        .await;
+        match set_result {
+            Ok(n) if n > 0 => info!("Reloaded secrets.env for channel hot-reload ({n} vars)"),
+            Ok(_) => {}
+            Err(e) => warn!("spawn_blocking for secrets.env reload failed: {e}"),
+        }
     }
 
     // Re-read config from disk
     let config_path = state.kernel.home_dir().join("config.toml");
-    let fresh_config = match kernel_load_config(Some(&config_path)) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "Channel hot-reload: config file cannot be loaded; keeping current channel config"
-            );
-            return Err(e);
-        }
-    };
+    let fresh_config = librefang_kernel::config::load_config(Some(&config_path));
 
     // Update the live channels config so list_channels() reflects reality
     *state.channels_config.write().await = fresh_config.channels.clone();
@@ -2786,8 +3749,8 @@ pub async fn reload_channels_from_disk(
     let (new_bridge, started, webhook_router) =
         start_channel_bridge_with_config(state.kernel.clone(), &fresh_config.channels).await;
 
-    // Store the new bridge atomically.
-    state.bridge_manager.store(std::sync::Arc::new(new_bridge));
+    // Store the new bridge
+    *state.bridge_manager.lock().await = new_bridge;
 
     // Swap the webhook router so new routes take effect on the shared server
     *state.webhook_router.write().await = Arc::new(webhook_router);
@@ -2804,48 +3767,6 @@ pub async fn reload_channels_from_disk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use librefang_kernel::event_bus::EventBus;
-
-    // ── resolve_no_pending_message ───────────────────────────────
-    //
-    // Telegram / Slack: a user double-tapping the `[Approve]` inline
-    // keyboard (or button + slash command in quick succession)
-    // produces a SECOND `/approve <id>` shortly after the first one
-    // resolved the request. Pre-fix that branch returned "No pending
-    // approval matching '<id>'" which reads as an error. The fixed
-    // helper detects the audit-log hit and acks idempotently.
-
-    fn fresh_approval_manager() -> librefang_kernel::approval::ApprovalManager {
-        // In-memory `ApprovalManager` without a persistent audit DB —
-        // `query_audit` returns `Vec::new()` for that path, which is
-        // exactly the "no audit hit" branch we want to exercise. The
-        // happy-resolved-path is covered by `kernel::approval`'s own
-        // unit suite (`test_request_approval_approve` et al), which
-        // wires up the SQLite-backed audit log end-to-end.
-        let policy = librefang_types::approval::ApprovalPolicy::default();
-        librefang_kernel::approval::ApprovalManager::new(policy)
-    }
-
-    #[test]
-    fn resolve_no_pending_message_falls_back_to_not_found_without_audit_hit() {
-        let mgr = fresh_approval_manager();
-        let msg = resolve_no_pending_message(&mgr, "deadbeef");
-        assert!(
-            msg.contains("No pending approval matching 'deadbeef'"),
-            "no-audit-hit branch must surface the not-found message verbatim, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn resolve_no_pending_message_handles_empty_prefix_safely() {
-        // Defensive: an empty `id_prefix` would `starts_with("")`
-        // match every audit row. Without an audit DB it should still
-        // gracefully report not-found rather than panic / surface
-        // unrelated approvals.
-        let mgr = fresh_approval_manager();
-        let msg = resolve_no_pending_message(&mgr, "");
-        assert!(msg.contains("No pending approval matching"));
-    }
 
     #[test]
     fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
@@ -3307,7 +4228,7 @@ mod tests {
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>(
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
                 LibreFangError::Internal("rate limit hit".to_string()),
             )
         });
@@ -3350,7 +4271,7 @@ mod tests {
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>(
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
                 LibreFangError::Internal("some internal failure".to_string()),
             )
         });
@@ -3398,9 +4319,9 @@ mod tests {
             // the timeout marker constant.
             let err = format!(
                 "agent loop timed out: {}",
-                librefang_kernel::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
+                librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
             );
-            Err::<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>(
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
                 LibreFangError::Internal(err),
             )
         });
@@ -3425,48 +4346,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stream_bridge_cancelled_reports_err_status() {
-        use librefang_types::error::LibreFangError;
-
-        let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async {
-            futures::future::pending::<
-                Result<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>,
-            >()
-            .await
-        });
-        kernel_handle.abort();
-
-        let (mut rx, status_rx) =
-            start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true, "en");
-
-        let mut received = String::new();
-        while let Some(chunk) = rx.recv().await {
-            received.push_str(&chunk);
-        }
-        assert!(
-            received.is_empty(),
-            "Cancelled task must not produce user-facing text, got: {received:?}"
-        );
-
-        let status = status_rx.await.expect("status oneshot dropped");
-        assert!(
-            status.is_err(),
-            "Cancelled task must report Err status, got: {status:?}"
-        );
-        assert!(
-            status.as_ref().unwrap_err().contains("cancelled"),
-            "Error string must mention cancellation, got: {status:?}"
-        );
-    }
-
-    #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        // All previously in-process channels (google_chat, webhook,
-        // …) migrated to sidecars. With no `[[sidecar_channels]]`
-        // configured either, the bridge must skip.
-        assert!(config.sidecar_channels.is_empty());
+        assert!(config.channels.telegram.is_none());
+        assert!(config.channels.discord.is_none());
+        assert!(config.channels.slack.is_none());
+        assert!(config.channels.whatsapp.is_none());
+        assert!(config.channels.signal.is_none());
+        assert!(config.channels.matrix.is_none());
+        assert!(config.channels.email.is_none());
+        assert!(config.channels.teams.is_none());
+        assert!(config.channels.mattermost.is_none());
+        assert!(config.channels.irc.is_none());
+        assert!(config.channels.google_chat.is_none());
+        assert!(config.channels.twitch.is_none());
+        assert!(config.channels.rocketchat.is_none());
+        assert!(config.channels.zulip.is_none());
+        assert!(config.channels.xmpp.is_none());
+        // Wave 3
+        assert!(config.channels.line.is_none());
+        assert!(config.channels.viber.is_none());
+        assert!(config.channels.messenger.is_none());
+        assert!(config.channels.reddit.is_none());
+        assert!(config.channels.mastodon.is_none());
+        assert!(config.channels.bluesky.is_none());
+        assert!(config.channels.feishu.is_none());
+        assert!(config.channels.revolt.is_none());
+        // Wave 4
+        assert!(config.channels.nextcloud.is_none());
+        assert!(config.channels.guilded.is_none());
+        assert!(config.channels.keybase.is_none());
+        assert!(config.channels.threema.is_none());
+        assert!(config.channels.nostr.is_none());
+        assert!(config.channels.webex.is_none());
+        assert!(config.channels.pumble.is_none());
+        assert!(config.channels.flock.is_none());
+        assert!(config.channels.twist.is_none());
+        // Wave 5
+        assert!(config.channels.mumble.is_none());
+        assert!(config.channels.dingtalk.is_none());
+        assert!(config.channels.discourse.is_none());
+        assert!(config.channels.gitter.is_none());
+        assert!(config.channels.ntfy.is_none());
+        assert!(config.channels.gotify.is_none());
+        assert!(config.channels.webhook.is_none());
+        assert!(config.channels.linkedin.is_none());
     }
 
     #[test]
@@ -3570,57 +4494,11 @@ mod tests {
     /// the assertion in `event_bus::tests::record_consumer_lag_increments_dropped_count`.
     #[test]
     fn test_event_bus_record_consumer_lag_increments_dropped_count() {
-        let bus = EventBus::new();
+        let bus = librefang_kernel::event_bus::EventBus::new();
         assert_eq!(bus.dropped_count(), 0);
         bus.record_consumer_lag(5, "test-context");
         assert_eq!(bus.dropped_count(), 5);
         bus.record_consumer_lag(3, "test-context");
         assert_eq!(bus.dropped_count(), 8);
     }
-
-    /// `SessionId::for_sender_scope` is the SINGLE source of truth for the
-    /// channel-scope formula and is called by both ends of the round-trip
-    /// (the channel-bridge reset helpers and the four kernel inbound
-    /// resolvers — `kernel/messaging.rs::send_message_full`,
-    /// `kernel/agent_execution.rs`, `kernel/mod.rs::resolve_dispatch_session_id`).
-    /// This test pins its output: empty `chat_id` collapses to channel-only
-    /// (matching `build_sender_context`'s empty-platform-id case), and the
-    /// `format!("{ch}:{cid}")` joiner matches what the inline formulas
-    /// produced before extraction. If these inputs ever produce different
-    /// sids than the legacy formula did, channel `/new` will delete a
-    /// different sid than the one the next inbound message resolves to,
-    /// silently regressing #4868.
-    #[test]
-    fn for_sender_scope_matches_legacy_inline_formula() {
-        use librefang_types::agent::SessionId;
-        let agent = AgentId(uuid::Uuid::new_v4());
-
-        // Channel + chat — the most common case (Telegram, Slack, Discord).
-        let with_chat = SessionId::for_sender_scope(agent, "telegram", Some("chat-1"));
-        let legacy_with_chat = SessionId::for_channel(agent, "telegram:chat-1");
-        assert_eq!(
-            with_chat, legacy_with_chat,
-            "channel + chat sid must match the legacy inline scope formula (#4868)"
-        );
-
-        // Channel without chat (DM-style adapter that doesn't disambiguate).
-        let dm = SessionId::for_sender_scope(agent, "webhook", None);
-        let legacy_dm = SessionId::for_channel(agent, "webhook");
-        assert_eq!(dm, legacy_dm, "channel-only sid must match (#4868)");
-
-        // Empty chat_id is treated identically to None — same path the
-        // resolver hits when ctx.chat_id is Some("").
-        let empty = SessionId::for_sender_scope(agent, "discord", Some(""));
-        let legacy_empty = SessionId::for_channel(agent, "discord");
-        assert_eq!(
-            empty, legacy_empty,
-            "empty chat_id collapses to channel-only (#4868)"
-        );
-    }
-
-    // empty_shared_password_env_with_single_side_override_skips_adapter
-    // removed alongside resolve_email_credentials when email migrated
-    // to a sidecar (librefang.sidecar.adapters.email). The credential
-    // fallback logic now lives in the Python sidecar and is covered by
-    // tests/test_email_adapter.py::test_imap_specific_username_overrides.
 }

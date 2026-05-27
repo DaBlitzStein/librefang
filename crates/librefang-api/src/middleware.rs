@@ -60,7 +60,7 @@ pub struct AuthState {
     /// middleware can record `PermissionDenied` events when a request is
     /// rejected by the role gate. Wrapped in `Option` because some test
     /// harnesses construct `AuthState` without a kernel attached.
-    pub audit_log: Option<Arc<librefang_kernel::audit::AuditLog>>,
+    pub audit_log: Option<Arc<librefang_runtime::audit::AuditLog>>,
 }
 
 #[derive(Clone)]
@@ -80,7 +80,7 @@ pub struct AuthenticatedApiUser {
     pub role: UserRole,
     /// Same id stored on [`ApiUserAuth`]; downstream handlers read this
     /// from request extensions to pass the caller through to kernel
-    /// `authorize()` calls and into [`librefang_kernel::audit::AuditEntry`].
+    /// `authorize()` calls and into [`librefang_runtime::audit::AuditEntry`].
     pub user_id: UserId,
 }
 
@@ -90,24 +90,6 @@ pub struct AuthenticatedApiUser {
 /// HTTP surface must agree, otherwise an Admin API key can change
 /// configuration / rotate the bearer token / reload the daemon that a
 /// Owner is responsible for.
-/// True when the response log should demote a 4xx from WARN to DEBUG
-/// because the (status, path) pair is a known-noisy false positive,
-/// not a real signal worth alerting on.
-///
-/// Today the only case is **401 on `/api/metrics`**: the endpoint is
-/// auth-gated and `getMetricsText` in the dashboard polls it every
-/// 10 s from `useTelemetryMetrics`. Any client whose bearer expired
-/// (or never had one — Prometheus scrapers, ad-hoc `curl` watchers)
-/// produces a steady WARN stream that drowns out the real auth
-/// signal the blanket-4xx-WARN was designed to surface.
-///
-/// `uri` is the raw `OriginalUri` string (with optional query). The
-/// query is stripped before comparing so `/api/metrics?foo=bar`
-/// still suppresses correctly.
-fn is_noisy_metrics_unauth(status: u16, uri: &str) -> bool {
-    status == 401 && uri.split('?').next().is_some_and(|p| p == "/api/metrics")
-}
-
 fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     // Only non-GET methods are candidates — reads are handled separately.
     if *method == axum::http::Method::GET {
@@ -136,21 +118,6 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
             // cannot fill the registry or stage impersonation attempts (#3483).
             | "/api/a2a/discover"
     ) {
-        return true;
-    }
-    // `POST /api/hands/{hand_id}/install-deps` shells out to a package
-    // manager whose argv is read straight from the HAND.toml an Admin can
-    // write via `/api/registry/content/hand`. Even with the program
-    // allowlist + flag denylist added in `routes::skills::install_hand_deps`,
-    // the endpoint still spawns a process under the daemon UID, which is the
-    // exact privilege Owner controls — restrict to Owner so an Admin role
-    // (which is "config write" by design) cannot turn into "process spawn".
-    // The matching `check-deps` sibling is a read-only readiness probe and
-    // intentionally stays at Admin.
-    if *method == axum::http::Method::POST
-        && path.starts_with("/api/hands/")
-        && path.ends_with("/install-deps")
-    {
         return true;
     }
     // RBAC user-management surface (M6) — every mutating call under
@@ -270,16 +237,6 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 #[derive(Clone, Debug)]
 pub struct RequestLanguage(pub &'static str);
 
-/// Per-request correlation id (#3639).
-///
-/// Inserted into [`Request::extensions_mut`] by [`request_logging`] **before**
-/// the handler runs, so handlers can read the same id that ends up in the
-/// `x-request-id` response header and the structured access-log line. Use
-/// the [`crate::extractors::RequestId`] axum extractor on the handler side
-/// — direct extension access is also supported.
-#[derive(Clone, Debug)]
-pub struct RequestIdExt(pub String);
-
 /// Middleware: parse `Accept-Language` header and store the resolved language
 /// in request extensions for downstream handlers.
 ///
@@ -315,19 +272,11 @@ pub async fn accept_language(mut request: Request<Body>, next: Next) -> Response
 /// field automatically, so a single grep on `request_id=<uuid>` lights up
 /// the full execution path (HTTP → kernel → LLM provider).  This closes
 /// the propagation gap reported in #3775.
-pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response<Body> {
+pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Body> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = request.method().clone();
     let uri = request.uri().path().to_string();
     let start = Instant::now();
-
-    // #3639: stash the id in request extensions BEFORE the handler runs so
-    // the [`crate::extractors::RequestId`] extractor (and any handler that
-    // reads the extension directly) sees the same value that surfaces on
-    // the response header and access-log span.
-    request
-        .extensions_mut()
-        .insert(RequestIdExt(request_id.clone()));
 
     // Span wraps the entire downstream future so any `tracing::instrument`
     // (or manual span) opened inside the handler chain becomes a child of
@@ -347,22 +296,17 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
     let elapsed = start.elapsed();
     let status = response.status().as_u16();
 
-    // Lift handler-resolved identifiers out of the response extensions and
-    // onto the structured access-log line. Closes #3511 — without this,
-    // tracing all requests for a specific agent/session across the kernel
-    // boundary requires `RUST_LOG=debug` and string matching on raw URI
-    // paths.
+    // Lift handler-resolved identifiers (currently `agent_id`) out of the
+    // response extensions and onto the structured access-log line. Closes
+    // #3511 — without this, tracing all requests for a specific agent
+    // across the kernel boundary requires `RUST_LOG=debug` and string
+    // matching on raw URI paths. `session_id` will land in a follow-up PR
+    // once `KernelHandle::send_message` surfaces the resolved `SessionId`.
     let agent_id = response
         .extensions()
         .get::<crate::extensions::AgentIdField>()
         .map(|f| f.0.to_string());
     let agent_id_field = agent_id.as_deref().unwrap_or("");
-
-    let session_id = response
-        .extensions()
-        .get::<crate::extensions::SessionIdField>()
-        .map(|f| f.0.to_string());
-    let session_id_field = session_id.as_deref().unwrap_or("");
 
     // 4xx/5xx elevated so auth storms and server faults surface; GET successes suppressed to avoid poll noise.
     if status >= 500 {
@@ -373,46 +317,18 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
-            session_id = %session_id_field,
             "API request"
         );
     } else if status >= 400 {
-        // The blanket WARN-on-4xx surfaces auth storms and real client
-        // bugs — but it also surfaces a known-noisy false positive:
-        // unauthenticated polls of `/api/metrics`. The dashboard's
-        // TelemetryPage refetches every 10s, and any client whose
-        // bearer token expired (or who never logged in — Prometheus
-        // scrapers, ad-hoc `curl` watchers) hammers a steady WARN
-        // stream that drowns out the real auth signal we want to see.
-        //
-        // Demote that specific case to DEBUG. The endpoint returns
-        // operational telemetry (uptime, agent counts, token usage —
-        // see `routes/config.rs::prometheus_metrics`), so a 401 here
-        // is "you don't have the token", not "you're attacking us".
-        // Genuinely interesting 4xx on other paths still WARNs.
-        if is_noisy_metrics_unauth(status, &uri) {
-            debug!(
-                request_id = %request_id,
-                method = %method,
-                path = %uri,
-                status = status,
-                latency_ms = elapsed.as_millis() as u64,
-                agent_id = %agent_id_field,
-                session_id = %session_id_field,
-                "API request"
-            );
-        } else {
-            warn!(
-                request_id = %request_id,
-                method = %method,
-                path = %uri,
-                status = status,
-                latency_ms = elapsed.as_millis() as u64,
-                agent_id = %agent_id_field,
-                session_id = %session_id_field,
-                "API request"
-            );
-        }
+        warn!(
+            request_id = %request_id,
+            method = %method,
+            path = %uri,
+            status = status,
+            latency_ms = elapsed.as_millis() as u64,
+            agent_id = %agent_id_field,
+            "API request"
+        );
     } else if method == axum::http::Method::GET {
         debug!(
             request_id = %request_id,
@@ -421,7 +337,6 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
-            session_id = %session_id_field,
             "API request"
         );
     } else {
@@ -432,260 +347,22 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
-            session_id = %session_id_field,
             "API request"
         );
     }
 
     metrics::record_http_request(&uri, method.as_str(), status, elapsed);
 
-    // Inject the request ID into the response header (always).
+    // Inject the request ID into the response
     if let Ok(header_val) = request_id.parse() {
         response.headers_mut().insert(REQUEST_ID_HEADER, header_val);
-    }
-
-    // #3639: stamp `request_id` (and a default `code` when missing) onto
-    // every JSON 4xx/5xx response body so clients can correlate errors
-    // with logs / support tickets without parsing the response header.
-    // No-op for non-error responses, non-JSON bodies, and bodies that the
-    // handler already populated with a `request_id`.
-    if status >= 400 {
-        response = normalize_json_error_body(response, &request_id).await;
     }
 
     response
 }
 
-/// Treat any `application/json` 4xx/5xx response with a `{"error": ...}`
-/// body as the canonical error envelope and stamp `request_id` (#3639) plus
-/// a default machine-readable `code` derived from the HTTP status when the
-/// handler didn't already supply one. This centralises the contract so the
-/// dozens of remaining `Json(json!({"error": "..."}))` sites in route
-/// modules surface a uniform shape without per-site edits.
-///
-/// Bodies that fail to parse as a JSON object, or that are not JSON at all,
-/// pass through untouched.
-async fn normalize_json_error_body(response: Response<Body>, request_id: &str) -> Response<Body> {
-    // Only touch JSON responses — leaving binary, HTML, plain-text, and
-    // streaming bodies (SSE) alone is essential.
-    let is_json = response
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.starts_with("application/json"));
-    if !is_json {
-        return response;
-    }
-
-    let status_code = response.status();
-    let (mut parts, body) = response.into_parts();
-
-    // Cap how much of the body we'll buffer to avoid OOM if a handler
-    // somehow produced a multi-megabyte error response. 256 KiB is far above
-    // any realistic error envelope. `axum::body::to_bytes` enforces the cap
-    // for us — anything larger is left untouched.
-    const MAX_ERROR_BODY_BYTES: usize = 256 * 1024;
-    let bytes = match axum::body::to_bytes(body, MAX_ERROR_BODY_BYTES).await {
-        Ok(b) => b,
-        // Body too large or transport error — emit empty body to avoid
-        // sending a half-buffered payload, but keep the original headers
-        // so callers still see status + request_id header.
-        Err(_) => return Response::from_parts(parts, Body::empty()),
-    };
-
-    // Try parsing as a JSON object. Anything else (top-level array,
-    // primitive, or invalid JSON) is left untouched.
-    let mut value: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
-        _ => return Response::from_parts(parts, Body::from(bytes)),
-    };
-    let Some(obj) = value.as_object_mut() else {
-        return Response::from_parts(parts, Body::from(bytes));
-    };
-
-    // Only stamp on bodies that look like our error envelope (have an
-    // `"error"` key). Non-error JSON 4xx/5xx (rare but possible — e.g.
-    // structured 422 with a custom shape) is passed through as-is.
-    if !obj.contains_key("error") {
-        return Response::from_parts(parts, Body::from(bytes));
-    }
-
-    let mut mutated = false;
-    let default_code = default_error_code_for_status(status_code);
-
-    if !obj.contains_key("request_id") {
-        obj.insert(
-            "request_id".to_string(),
-            serde_json::Value::String(request_id.to_string()),
-        );
-        mutated = true;
-    }
-    if !obj.contains_key("code") {
-        obj.insert(
-            "code".to_string(),
-            serde_json::Value::String(default_code.to_string()),
-        );
-        // Mirror onto the legacy `type` alias so old clients see the same token.
-        obj.entry("type")
-            .or_insert(serde_json::Value::String(default_code.to_string()));
-        mutated = true;
-    }
-
-    // #3639 deferred — also stamp into the nested `error` object when the
-    // handler emitted the new envelope shape (`error: {code, message,
-    // request_id}`). Ad-hoc `Json(json!({"error": "msg"}))` sites still
-    // emit `error` as a string and are left untouched here; the flat
-    // top-level fields above cover them.
-    if let Some(err_obj) = obj.get_mut("error").and_then(|v| v.as_object_mut()) {
-        if !err_obj.contains_key("request_id") {
-            err_obj.insert(
-                "request_id".to_string(),
-                serde_json::Value::String(request_id.to_string()),
-            );
-            mutated = true;
-        }
-        if !err_obj.contains_key("code") {
-            err_obj.insert(
-                "code".to_string(),
-                serde_json::Value::String(default_code.to_string()),
-            );
-            mutated = true;
-        }
-    }
-
-    if !mutated {
-        return Response::from_parts(parts, Body::from(bytes));
-    }
-
-    // Re-serialize. Failure here is essentially impossible (we just parsed
-    // it), but fall back to the original bytes if it ever does.
-    let new_bytes = match serde_json::to_vec(&value) {
-        Ok(v) => v,
-        Err(_) => return Response::from_parts(parts, Body::from(bytes)),
-    };
-    // Update Content-Length so the framing stays correct.
-    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
-    if let Ok(len_val) = new_bytes.len().to_string().parse() {
-        parts
-            .headers
-            .insert(axum::http::header::CONTENT_LENGTH, len_val);
-    }
-    Response::from_parts(parts, Body::from(new_bytes))
-}
-
-/// Map HTTP status code → default stable error code (#3639).
-///
-/// Only used when the handler didn't already supply a `code`. Values come
-/// from [`librefang_types::error_code::ErrorCode`] so the alphabet stays in
-/// one place.
-fn default_error_code_for_status(status: StatusCode) -> &'static str {
-    use librefang_types::error_code::ErrorCode;
-    match status.as_u16() {
-        400 => ErrorCode::BadRequest.as_str(),
-        401 => ErrorCode::Unauthorized.as_str(),
-        403 => ErrorCode::Forbidden.as_str(),
-        404 => ErrorCode::NotFound.as_str(),
-        409 => ErrorCode::Conflict.as_str(),
-        422 => ErrorCode::InvalidInput.as_str(),
-        429 => ErrorCode::RateLimited.as_str(),
-        503 => ErrorCode::ServiceUnavailable.as_str(),
-        s if s >= 500 => ErrorCode::InternalError.as_str(),
-        _ => ErrorCode::BadRequest.as_str(),
-    }
-}
-
 /// API version headers middleware.
 ///
-/// Maximum JSON nesting depth accepted by the global request-body
-/// guard. Defense-in-depth against deeply-nested
-/// `[[[[…]]]]` payloads that would flow through the `Json<Value>`
-/// extractors and recurse through downstream consumers (Cypher
-/// conversion in memory routes, plugin config validators, etc.).
-/// `serde_json` has no built-in depth cap, and the crate-level
-/// `#![recursion_limit = "256"]` only applies to macro expansion —
-/// it has no effect on runtime JSON deserialization. Audit:
-/// check-json-depth-unused.
-pub const MAX_JSON_BODY_DEPTH: usize = 32;
-
-/// Tower middleware that enforces [`MAX_JSON_BODY_DEPTH`] on every
-/// `application/json` request body before the handler sees it.
-///
-/// Non-JSON bodies pass through untouched. Empty bodies pass
-/// through. A body whose `Content-Type` starts with
-/// `application/json` is buffered (already capped by the global
-/// `RequestBodyLimitLayer`), parsed once via `serde_json`, fed to
-/// `crate::validation::check_json_depth`, and re-attached to the
-/// request before forwarding. Buffering cost is paid only on JSON
-/// requests; the body bytes round-trip with no copy beyond the
-/// single `to_bytes` collect.
-///
-/// Audit: check-json-depth-unused.
-pub async fn enforce_json_body_depth(request: Request<Body>, next: Next) -> Response<Body> {
-    // Cheap pre-check: skip non-JSON content types and bail on
-    // missing Content-Type. The audit only requires the guard for
-    // `application/json` bodies; multipart uploads, plain text, raw
-    // bytes etc. are unaffected.
-    let is_json = request
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| {
-            let lower = s.trim().to_ascii_lowercase();
-            // Match both `application/json` and `application/json;
-            // charset=utf-8` style. Strict prefix check on the
-            // media-type token only; never matches
-            // `application/jsonpatch+json` or other vendor types
-            // (those would need their own deserializer-specific
-            // guards).
-            lower == "application/json"
-                || lower.starts_with("application/json;")
-                || lower.starts_with("application/json ")
-        })
-        .unwrap_or(false);
-    if !is_json {
-        return next.run(request).await;
-    }
-    let (parts, body) = request.into_parts();
-    // `RequestBodyLimitLayer` upstream of this middleware already
-    // caps the body size; the high ceiling here exists so a misordered
-    // layer stack doesn't silently turn this into a memory bomb —
-    // anything past it is rejected with 400 (which also short-circuits
-    // a downstream OOM). 8 MiB matches the highest cap the kernel
-    // currently exposes for `max_request_body_bytes`.
-    const HARD_CEILING_BYTES: usize = 8 * 1024 * 1024;
-    let bytes = match axum::body::to_bytes(body, HARD_CEILING_BYTES).await {
-        Ok(b) => b,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::PAYLOAD_TOO_LARGE)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({"error": "request body too large for JSON depth guard"})
-                        .to_string(),
-                ))
-                .expect("static error response must build");
-        }
-    };
-    // Empty body — nothing to validate; forward untouched.
-    // Malformed JSON (`Err`) — forward as-is. The handler's own
-    // deserializer will return a more specific 400 with the exact
-    // column/offset, which is more useful to the client than a
-    // generic depth-check error.
-    if !bytes.is_empty() {
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            if let Err(e) = crate::validation::check_json_depth(&value, MAX_JSON_BODY_DEPTH) {
-                // `ValidationError::into_response` formats the body
-                // as the standard `ApiErrorResponse` shape; reuse it
-                // so the response matches every other 4xx the API
-                // surface returns.
-                return axum::response::IntoResponse::into_response(e);
-            }
-        }
-    }
-    let request = Request::from_parts(parts, Body::from(bytes));
-    next.run(request).await
-}
-
 /// Adds `X-API-Version` to every response so clients always know which version
 /// they are talking to. When a request targets `/api/v1/...` the header reflects
 /// `v1`; for the unversioned `/api/...` alias it returns the latest version.
@@ -806,16 +483,6 @@ impl PublicRoute {
             match_kind: PublicMatch::Exact,
         }
     }
-    // Kept available (no callers after `github-copilot/oauth/` moved
-    // behind auth in audit `github-copilot-oauth-unauthenticated`) so
-    // a future PublicRoute entry needing both prefix-match AND
-    // any-method semantics doesn't have to re-derive the constructor.
-    // Removing the constant would force the next public-prefix
-    // operator to also rediscover the `PublicMethod::Any +
-    // PublicMatch::Prefix` shape — a small but easy-to-fumble bit of
-    // API design. `prefix_get` exists for the GET-only variant and is
-    // currently the only used `PublicMatch::Prefix` arm.
-    #[allow(dead_code)]
     const fn prefix_any(path: &'static str) -> Self {
         Self {
             method: PublicMethod::Any,
@@ -855,42 +522,10 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     PublicRoute::exact_any("/api/pairing/complete"),
     // Minimal liveness probes
     PublicRoute::exact_any("/api/health"),
-    // NOTE: `/api/health/detail` is intentionally NOT public here. Its
-    // payload includes `panic_count`, `restart_count`, `agent_count`,
-    // embedding / extraction model ids, `config_warnings` from
-    // `KernelConfig::validate()`, budget percentages, and LLM latency —
-    // i.e. operational telemetry that should not be reachable from a
-    // cold probe. The dashboard's `<OfflineBanner />` previously polled
-    // this endpoint pre-auth and #4893 worked around the 401 spam by
-    // exposing the detail payload publicly; the correct fix is for the
-    // banner to poll the genuinely minimal `/api/health` instead, which
-    // is what it does now. The middleware-internal comment block below
-    // (covering the dashboard-read group) has long explained this
-    // contract; this PR restores it (#4868 review).
     PublicRoute::exact_any("/api/version"),
     PublicRoute::exact_any("/api/versions"),
-    // GitHub Copilot OAuth removed from the public-prefix list
-    // (audit: github-copilot-oauth-unauthenticated).
-    //
-    // Pre-fix, both `POST /api/providers/github-copilot/oauth/start`
-    // and `GET /api/providers/github-copilot/oauth/poll/{id}` were
-    // public. A hostile pop-under page in a victim's browser could
-    // POST to `http://localhost:4545/api/providers/.../oauth/start`
-    // (simple POST → no preflight, no Origin check), display the
-    // returned `user_code` + `verification_uri` from the daemon's
-    // device-flow response in attacker-controlled UI (or
-    // social-engineer the user to enter the code at
-    // `github.com/login/device`), then poll until completion. The
-    // poll handler then writes the attacker's GitHub Copilot
-    // access token into `secrets.env` and the daemon environment
-    // (`providers.rs:2220-2236`) — every subsequent outbound LLM
-    // call routes through the attacker's GitHub account, billed
-    // to them and observable by them.
-    //
-    // The dashboard already authenticates before initiating the
-    // device flow; no legitimate unauthenticated caller exists.
-    // Removing the public-prefix entry forces the standard auth
-    // gate to apply.
+    // GitHub Copilot OAuth — prefix, any method
+    PublicRoute::prefix_any("/api/providers/github-copilot/oauth/"),
 ];
 
 /// Routes that are public on **GET only**, regardless of auth config.
@@ -900,21 +535,9 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     // without a bearer token (A2A spec intent). All other /a2a/* paths require
     // auth (Bug #3781).
     PublicRoute::exact_get("/a2a/agents"),
-    // `/api/auth/providers` is intentionally NOT here. Enumerating the
-    // configured identity providers is information-gathering surface that
-    // `require_auth_for_reads` exists to close, so it lives in
-    // `PUBLIC_ROUTES_DASHBOARD_READS` below and is gated by that flag. The
-    // handler returns names-only (id + display_name) to every caller and never
-    // exposes the OAuth scope configuration (see `oauth::auth_providers`).
-    // Auth login: exact for the base endpoint, prefix for the
-    // provider-specific suffix `/api/auth/login/{provider}`. The
-    // unsuffixed `prefix_get("/api/auth/login")` would have matched
-    // any sibling that happened to share the prefix
-    // (`/api/auth/login-status`, `/api/auth/loginhack`, etc.) and
-    // silently leaked it as public — even though no such sibling
-    // exists today (audit: login-prefix-match).
-    PublicRoute::exact_get("/api/auth/login"),
-    PublicRoute::prefix_get("/api/auth/login/"),
+    PublicRoute::exact_get("/api/auth/providers"),
+    // Auth login prefix
+    PublicRoute::prefix_get("/api/auth/login"),
     // Config schema
     PublicRoute::exact_get("/api/config/schema"),
     // Dashboard assets (JS/CSS/fonts) — always public, SPA needs them for login page
@@ -952,26 +575,13 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
 pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
     PublicRoute::exact_get("/api/a2a/agents"),
     PublicRoute::exact_get("/api/agents"),
-    // Provider enumeration: public only in open mode (no `require_auth_for_reads`).
-    // The handler returns names-only (id + display_name) to every caller; the
-    // IdP scope configuration is never exposed through this endpoint.
-    PublicRoute::exact_get("/api/auth/providers"),
     PublicRoute::exact_get("/api/auto-dream/status"),
     PublicRoute::exact_get("/api/budget"),
     PublicRoute::exact_get("/api/budget/agents"),
     PublicRoute::prefix_get("/api/budget/agents/"),
     PublicRoute::exact_get("/api/channels"),
     PublicRoute::exact_get("/api/config"),
-    // SECURITY #5139 (parity with #3367/#3941 for /api/approvals/*):
-    // `/api/cron/` is intentionally absent. `GET /api/cron/jobs` and
-    // `GET /api/cron/jobs/{id}` serialise the FULL `CronJob` — including the
-    // user-authored prompt (`CronAction::AgentTurn.message` /
-    // `SystemEvent.text`) and per-job `session_mode`. Leaving it in the
-    // pre-auth dashboard-read group meant an operator who exposed 4545
-    // remotely without `require_auth_for_reads = true` (the default) handed
-    // every user-authored cron prompt to anyone reachable on the bind. The
-    // dashboard attaches credentials on every request via its api helper, so
-    // gating these reads is not a UX regression.
+    PublicRoute::prefix_get("/api/cron/"),
     PublicRoute::exact_get("/api/hands"),
     PublicRoute::exact_get("/api/hands/active"),
     PublicRoute::prefix_get("/api/hands/"),
@@ -1105,7 +715,7 @@ pub async fn auth(
                         if let Some(ref audit) = auth_state.audit_log {
                             audit.record_with_context(
                                 "system",
-                                librefang_kernel::audit::AuditAction::PermissionDenied,
+                                librefang_runtime::audit::AuditAction::PermissionDenied,
                                 format!("{} {}", method, path),
                                 format!("role={}", user.role),
                                 Some(user.user_id),
@@ -1420,7 +1030,7 @@ pub async fn auth(
                 if let Some(ref audit) = auth_state.audit_log {
                     audit.record_with_context(
                         "system",
-                        librefang_kernel::audit::AuditAction::PermissionDenied,
+                        librefang_runtime::audit::AuditAction::PermissionDenied,
                         format!("{} {}", method, path),
                         format!("role={}", user.role),
                         Some(user.user_id),
@@ -1547,39 +1157,6 @@ mod tests {
     }
 
     #[test]
-    fn is_noisy_metrics_unauth_matches_401_on_metrics_path() {
-        // Bare path.
-        assert!(is_noisy_metrics_unauth(401, "/api/metrics"));
-        // With query string — Prometheus scrapers sometimes append
-        // `?token=…` / `?format=…`; the suppression must still apply.
-        assert!(is_noisy_metrics_unauth(401, "/api/metrics?token=xyz"));
-        assert!(is_noisy_metrics_unauth(401, "/api/metrics?"));
-    }
-
-    #[test]
-    fn is_noisy_metrics_unauth_rejects_other_statuses_and_paths() {
-        // 403 / 404 / 500 etc. on /api/metrics keep WARNing — those
-        // are real operational signals, not auth poll noise.
-        assert!(!is_noisy_metrics_unauth(403, "/api/metrics"));
-        assert!(!is_noisy_metrics_unauth(404, "/api/metrics"));
-        assert!(!is_noisy_metrics_unauth(500, "/api/metrics"));
-        assert!(!is_noisy_metrics_unauth(200, "/api/metrics"));
-        // 401 on other paths must NOT be suppressed — those are the
-        // genuine auth storms the blanket WARN was built to surface.
-        assert!(!is_noisy_metrics_unauth(401, "/api/agents"));
-        assert!(!is_noisy_metrics_unauth(401, "/api/config/reload"));
-        assert!(!is_noisy_metrics_unauth(401, "/api/admin/shutdown"));
-        // Prefix-only matches must not slip through — `/api/metrics2`,
-        // `/api/metrics/foo`, etc. are different endpoints (or future
-        // sub-paths).
-        assert!(!is_noisy_metrics_unauth(401, "/api/metrics2"));
-        assert!(!is_noisy_metrics_unauth(401, "/api/metrics/foo"));
-        // Empty / nonsense paths don't match.
-        assert!(!is_noisy_metrics_unauth(401, ""));
-        assert!(!is_noisy_metrics_unauth(401, "/"));
-    }
-
-    #[test]
     fn test_user_role_admin_cannot_modify_config() {
         // Admin must be blocked from kernel-wide config mutations.
         let post = axum::http::Method::POST;
@@ -1660,43 +1237,6 @@ mod tests {
                 "{role:?} must be allowed to GET /api/approvals/totp/status"
             );
         }
-    }
-
-    // Install-deps spawns a package-manager process under the daemon UID
-    // from argv that Admin can author in HAND.toml. Even with the
-    // skill::install_hand_deps allowlist + flag denylist, this is the
-    // wrong privilege boundary for an Admin role — restrict to Owner.
-    // The matching `check-deps` sibling is read-only and stays at Admin.
-    #[test]
-    fn test_install_hand_deps_is_owner_only() {
-        let post = axum::http::Method::POST;
-        let install = "/api/hands/some-hand/install-deps";
-        for role in [UserRole::Viewer, UserRole::User, UserRole::Admin] {
-            assert!(
-                !user_role_allows_request(role, &post, install),
-                "{role:?} must NOT be allowed to POST {install}"
-            );
-        }
-        assert!(
-            user_role_allows_request(UserRole::Owner, &post, install),
-            "Owner must be allowed to POST {install}"
-        );
-
-        // Sibling readiness probe stays Admin-accessible.
-        let check = "/api/hands/some-hand/check-deps";
-        assert!(
-            user_role_allows_request(UserRole::Admin, &post, check),
-            "Admin must still be allowed to POST {check} (read-only sibling)"
-        );
-
-        // Suffix-only matches must not over-restrict — e.g. a stray
-        // `/install-deps` outside `/api/hands/` (none today, but guard
-        // against future additions tripping the gate).
-        let other = "/api/plugins/foo/install-deps";
-        assert!(
-            user_role_allows_request(UserRole::Admin, &post, other),
-            "Admin must still be allowed to POST plugin install-deps ({other})"
-        );
     }
 
     #[test]
@@ -3000,179 +2540,5 @@ mod tests {
                 "{path} must be auth-gated (returns action_summary)"
             );
         }
-    }
-
-    /// Regression: #5139 — `GET /api/cron/jobs` and
-    /// `GET /api/cron/jobs/{id}` used to be publicly readable via the
-    /// `/api/cron/` prefix in `PUBLIC_ROUTES_DASHBOARD_READS`. Those
-    /// endpoints serialise the FULL `CronJob`, including the user-authored
-    /// prompt (`CronAction::AgentTurn.message` / `SystemEvent.text`) and
-    /// per-job `session_mode`. Same exposure class as the #3367/#3941
-    /// approvals carve-out, so the entire `/api/cron/*` read surface must
-    /// require auth even when `require_auth_for_reads` is off.
-    #[tokio::test]
-    async fn cron_reads_require_auth() {
-        // api_key configured, require_auth_for_reads OFF — the exploitable
-        // default scenario the audit flagged.
-        let auth_state = AuthState {
-            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
-            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            require_auth_for_reads: false,
-            allow_no_auth: false,
-            audit_log: None,
-        };
-
-        let app = Router::new()
-            .route("/api/cron/jobs", get(|| async { "cron jobs + prompts" }))
-            .route(
-                "/api/cron/jobs/{id}",
-                get(|| async { "cron job detail + prompt_template" }),
-            )
-            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
-
-        for path in &["/api/cron/jobs", "/api/cron/jobs/job-abc-123"] {
-            let resp = app
-                .clone()
-                .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::UNAUTHORIZED,
-                "{path} must be auth-gated (leaks user-authored cron prompts)"
-            );
-        }
-    }
-
-    /// `/api/cron/` must not be present in the dashboard-reads allowlist —
-    /// pins the data-level invariant so a future re-add is caught even if
-    /// the routing test above is refactored.
-    #[test]
-    fn cron_prefix_absent_from_dashboard_reads() {
-        assert!(
-            !PUBLIC_ROUTES_DASHBOARD_READS.iter().any(|r| matches!(
-                r.match_kind,
-                PublicMatch::Prefix if r.path == "/api/cron/"
-            )),
-            "/api/cron/ must stay out of PUBLIC_ROUTES_DASHBOARD_READS (#5139)"
-        );
-    }
-
-    /// Audit: check-json-depth-unused. The layer must reject deeply
-    /// nested JSON before the handler sees it, but only when
-    /// `Content-Type: application/json` is set. Other media types
-    /// (multipart, text/plain, raw bytes) must pass through.
-    #[tokio::test]
-    async fn enforce_json_body_depth_rejects_payload_above_max_depth() {
-        // Build a body with depth > MAX_JSON_BODY_DEPTH. Each level
-        // wraps the next in an array so depth = nesting count.
-        let deep_depth = MAX_JSON_BODY_DEPTH + 5;
-        let mut body = String::from("0");
-        for _ in 0..deep_depth {
-            body = format!("[{body}]");
-        }
-
-        let app: Router = Router::new()
-            .route("/echo", axum::routing::post(|| async { "ok" }))
-            .layer(axum::middleware::from_fn(enforce_json_body_depth));
-
-        let req = Request::post("/echo")
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "deeply nested JSON must be rejected at the middleware boundary"
-        );
-    }
-
-    #[tokio::test]
-    async fn enforce_json_body_depth_accepts_payload_at_or_below_max_depth() {
-        // Build a body at exactly MAX_JSON_BODY_DEPTH levels.
-        let mut body = String::from("0");
-        for _ in 0..MAX_JSON_BODY_DEPTH {
-            body = format!("[{body}]");
-        }
-        let app: Router = Router::new()
-            .route("/echo", axum::routing::post(|| async { "ok" }))
-            .layer(axum::middleware::from_fn(enforce_json_body_depth));
-        let req = Request::post("/echo")
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn enforce_json_body_depth_ignores_non_json_content_type() {
-        // The middleware must NOT buffer non-JSON requests. A deeply-
-        // bracketed `text/plain` body that would trigger a depth-
-        // exceeded JSON error must pass through untouched and reach
-        // the handler.
-        let mut body = String::from("x");
-        for _ in 0..(MAX_JSON_BODY_DEPTH + 10) {
-            body = format!("[{body}]");
-        }
-        let app: Router = Router::new()
-            .route("/echo", axum::routing::post(|| async { "ok" }))
-            .layer(axum::middleware::from_fn(enforce_json_body_depth));
-        let req = Request::post("/echo")
-            .header("content-type", "text/plain")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "non-JSON content types must skip the depth guard entirely"
-        );
-    }
-
-    #[tokio::test]
-    async fn enforce_json_body_depth_passes_malformed_json_through_to_handler() {
-        // The middleware should NOT reject a malformed JSON body —
-        // the handler's own deserializer will return a more specific
-        // 4xx with the exact column. This test pins that contract:
-        // the depth guard never observes a value, so it forwards.
-        let app: Router = Router::new()
-            .route("/echo", axum::routing::post(|| async { "ok" }))
-            .layer(axum::middleware::from_fn(enforce_json_body_depth));
-        let req = Request::post("/echo")
-            .header("content-type", "application/json")
-            .body(Body::from("{not valid"))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        // Handler returns 200; the malformed JSON never matters here
-        // because the test handler is `async { "ok" }` — it doesn't
-        // deserialize. The point of this test is that the *middleware*
-        // doesn't short-circuit a 400 on malformed JSON itself.
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    /// Regression for #4860: the inline login page must redirect to `/`
-    /// (the SPA shell) when it was itself served at `/`, `/dashboard`, or
-    /// `/dashboard/`. The router only registers `/` and
-    /// `/dashboard/{*path}`, so redirecting back to `/dashboard` or
-    /// `/dashboard/` after a successful sign-in lands on a 404.
-    #[test]
-    fn login_page_redirects_dashboard_root_to_spa_shell() {
-        let html = super::LOGIN_PAGE_HTML;
-        // Pin the full collapse condition so neither the bare `/dashboard`
-        // case nor the trailing-slash case can be silently dropped — a
-        // substring like `path === '/dashboard'` would also match
-        // `path === '/dashboard/'` and let one half regress unnoticed.
-        assert!(
-            html.contains("path === '/dashboard' || path === '/dashboard/'"),
-            "login page must collapse both /dashboard and /dashboard/ to the SPA shell at /"
-        );
-        assert!(
-            !html.contains("target = '/dashboard/';"),
-            "login page must not redirect to /dashboard/ — that path 404s (#4860)"
-        );
     }
 }

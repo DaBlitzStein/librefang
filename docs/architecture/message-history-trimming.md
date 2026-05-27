@@ -20,7 +20,7 @@ Three pressures push for an upper bound on stored messages:
 
 ## What gets trimmed
 
-`safe_trim_messages` (in `crates/librefang-runtime/src/agent_loop/message.rs`)
+`safe_trim_messages` (in `crates/librefang-runtime/src/agent_loop.rs`)
 operates on two slices on every turn:
 
 - **`session.messages`** — the canonical persisted history. Trimmed
@@ -56,15 +56,13 @@ manifest.max_history_messages       (Some — per-agent override)
   ↓ if None
 kernel_config.max_history_messages  (Some — operator/global override)
   ↓ if None
-DEFAULT_MAX_HISTORY_MESSAGES = 60   (compiled-in fallback)
+DEFAULT_MAX_HISTORY_MESSAGES = 40   (compiled-in fallback)
 ```
 
 Resolution lives in `resolve_max_history(&manifest, &opts)` inside
-`crates/librefang-runtime/src/agent_loop/history.rs`. Values below
-`MIN_HISTORY_MESSAGES = 4` are clamped up with a `warn!` log carrying
-`agent`, `requested`, and `applied`. Values above
-`MAX_HISTORY_MESSAGES = 500` are clamped down with the same log fields.
-Justification for the floor: a single tool-use round-trip is 4 messages
+`agent_loop.rs`. Values below `MIN_HISTORY_MESSAGES = 4` are silently
+clamped up with a `warn!` log carrying `agent`, `requested`, `applied`.
+Justification: a single tool-use round-trip is 4 messages
 (user → assistant tool_use → tool_result → assistant text); caps below
 4 defeat the safe-trim heuristic.
 
@@ -116,13 +114,10 @@ simpler dial. The token cap is currently global and not per-agent.
 
 ## Cross-references
 
-- Constants + config helpers: `crates/librefang-runtime/src/agent_loop/history.rs`
+- Constant + helpers: `crates/librefang-runtime/src/agent_loop.rs`
   (`DEFAULT_MAX_HISTORY_MESSAGES`, `MIN_HISTORY_MESSAGES`,
-  `MAX_HISTORY_MESSAGES`, `resolve_max_history`, `clamp_max_history`)
-- Trim implementation: `crates/librefang-runtime/src/agent_loop/message.rs`
-  (`safe_trim_messages`)
-- Loop wiring: `crates/librefang-runtime/src/agent_loop/mod.rs`
-  (`prepare_llm_messages`)
+  `resolve_max_history`, `clamp_max_history`, `safe_trim_messages`,
+  `prepare_llm_messages`)
 - Kernel wiring: `crates/librefang-kernel/src/kernel/mod.rs` — search
   for `max_history_messages` to find the four `LoopOptions`
   construction sites.
@@ -134,6 +129,3 @@ simpler dial. The token cap is currently global and not per-agent.
 - Repair primitives: `crates/librefang-runtime/src/session_repair.rs`
   (`find_safe_trim_point`, `validate_and_repair`,
   `ensure_starts_with_user`).
-- Reload behaviour: `max_history_messages` is read live and takes effect
-  on the next message (no restart). See the canonical reload reference
-  [`../operations/config-reload.md`](../operations/config-reload.md).

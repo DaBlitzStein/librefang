@@ -1,20 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
-import { generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
-import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
-
-/**
- * Catalog entry for the skill/tool finder (#5049). Both fields are
- * optional so the caller can pass partial data: an unknown skill or
- * tool that the user has typed in still renders as a chip even if the
- * registry doesn't know its description.
- */
-export interface ManifestCatalogEntry {
-  name: string;
-  description?: string;
-}
 
 interface AgentManifestFormProps {
   value: ManifestFormState;
@@ -27,26 +14,6 @@ interface AgentManifestFormProps {
   // contents (e.g. a full `[exec_policy]` table) so the user isn't
   // misled by a default-looking dropdown that hides serialized state.
   extras: ManifestExtras;
-  /**
-   * Installed-skill catalog from `GET /api/skills`. When present, the
-   * "Skills" field renders a fuzzy-find combobox seeded with these
-   * names (#5049); when absent (or empty), the field falls back to the
-   * plain tag-input so users can still type unknown identifiers.
-   */
-  skillCatalog?: ManifestCatalogEntry[];
-  /**
-   * Tool catalog from `GET /api/tools`. Drives the same finder
-   * affordance for the "Tool ID Allowlist" capability field.
-   */
-  toolCatalog?: ManifestCatalogEntry[];
-  /**
-   * Configured MCP servers catalog from `GET /api/mcp/servers`. When
-   * present, the "MCP Servers" field renders a multi-select dropdown
-   * seeded with these names (#5246); when absent the field falls back
-   * to the plain tag input so callers without a catalog still work and
-   * users can reference servers the dashboard doesn't know about yet.
-   */
-  mcpCatalog?: ManifestCatalogEntry[];
 }
 
 export function AgentManifestForm({
@@ -56,9 +23,6 @@ export function AgentManifestForm({
   models,
   invalidFields,
   extras,
-  skillCatalog,
-  toolCatalog,
-  mcpCatalog,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -82,27 +46,6 @@ export function AgentManifestForm({
     [models, value.model.provider],
   );
 
-  // Build {options, meta} pairs for the skill/tool finders (#5049).
-  // The catalog is union-ed with the user's current selection so
-  // entries the registry doesn't know about (e.g. a skill the user
-  // typed in by hand, or one that is staged but not yet installed)
-  // remain visible as chips and selectable in the dropdown.
-  const skillFinder = useMemo(
-    () => mergeCatalog(skillCatalog, value.skills),
-    [skillCatalog, value.skills],
-  );
-  const toolFinder = useMemo(
-    () => mergeCatalog(toolCatalog, value.capabilities.tools),
-    [toolCatalog, value.capabilities.tools],
-  );
-  const mcpFinder = useMemo(
-    () => mergeCatalog(mcpCatalog, value.mcp_servers),
-    [mcpCatalog, value.mcp_servers],
-  );
-
-  const jsonSchemaFormat =
-    value.response_format.mode === "json_schema" ? value.response_format : null;
-
   return (
     <div className="space-y-4">
       <Section title={t("agents.form.basics")}>
@@ -111,7 +54,7 @@ export function AgentManifestForm({
             type="text"
             value={value.name}
             onChange={(e) => update({ name: e.target.value })}
-            placeholder={t("agents.form.name_placeholder")}
+            placeholder="researcher"
             className={inputClass}
             autoFocus
           />
@@ -149,7 +92,7 @@ export function AgentManifestForm({
               type="text"
               value={value.module}
               onChange={(e) => update({ module: e.target.value })}
-              placeholder={t("agents.form.module_placeholder")}
+              placeholder="builtin:chat"
               className={inputClass}
             />
           </Field>
@@ -203,7 +146,7 @@ export function AgentManifestForm({
                 type="text"
                 value={value.model.model}
                 onChange={(e) => updateModel({ model: e.target.value })}
-                placeholder={t("agents.form.model_id_placeholder")}
+                placeholder="gpt-4o"
                 className={inputClass}
               />
             )}
@@ -227,7 +170,7 @@ export function AgentManifestForm({
               max="2"
               value={value.model.temperature}
               onChange={(e) => updateModel({ temperature: e.target.value })}
-              placeholder={t("agents.form.temperature_placeholder")}
+              placeholder="0.7"
               className={inputClass}
             />
           </Field>
@@ -237,7 +180,7 @@ export function AgentManifestForm({
               min="1"
               value={value.model.max_tokens}
               onChange={(e) => updateModel({ max_tokens: e.target.value })}
-              placeholder={t("agents.form.max_tokens_placeholder")}
+              placeholder="4096"
               className={inputClass}
             />
           </Field>
@@ -248,7 +191,7 @@ export function AgentManifestForm({
               type="text"
               value={value.model.api_key_env}
               onChange={(e) => updateModel({ api_key_env: e.target.value })}
-              placeholder={t("agents.form.api_key_env_placeholder")}
+              placeholder="OPENAI_API_KEY"
               className={inputClass}
             />
           </Field>
@@ -257,7 +200,7 @@ export function AgentManifestForm({
               type="text"
               value={value.model.base_url}
               onChange={(e) => updateModel({ base_url: e.target.value })}
-              placeholder={t("agents.form.base_url_placeholder")}
+              placeholder="https://api.openai.com/v1"
               className={inputClass}
             />
           </Field>
@@ -282,7 +225,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_tool_calls_per_minute}
               onChange={(e) => updateResources({ max_tool_calls_per_minute: e.target.value })}
-              placeholder={t("agents.form.tool_calls_per_minute_placeholder")}
+              placeholder="60"
               className={inputClass}
             />
           </Field>
@@ -293,7 +236,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_cost_per_hour_usd}
               onChange={(e) => updateResources({ max_cost_per_hour_usd: e.target.value })}
-              placeholder={t("agents.form.unlimited_placeholder")}
+              placeholder="0 = unlimited"
               className={inputClass}
             />
           </Field>
@@ -304,7 +247,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_cost_per_day_usd}
               onChange={(e) => updateResources({ max_cost_per_day_usd: e.target.value })}
-              placeholder={t("agents.form.unlimited_placeholder")}
+              placeholder="0 = unlimited"
               className={inputClass}
             />
           </Field>
@@ -315,7 +258,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_cost_per_month_usd}
               onChange={(e) => updateResources({ max_cost_per_month_usd: e.target.value })}
-              placeholder={t("agents.form.unlimited_placeholder")}
+              placeholder="0 = unlimited"
               className={inputClass}
             />
           </Field>
@@ -325,7 +268,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_network_bytes_per_hour}
               onChange={(e) => updateResources({ max_network_bytes_per_hour: e.target.value })}
-              placeholder={t("agents.form.network_bytes_placeholder")}
+              placeholder="104857600"
               className={inputClass}
             />
           </Field>
@@ -335,7 +278,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_memory_bytes}
               onChange={(e) => updateResources({ max_memory_bytes: e.target.value })}
-              placeholder={t("agents.form.memory_bytes_placeholder")}
+              placeholder="268435456"
               className={inputClass}
             />
           </Field>
@@ -345,7 +288,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_cpu_time_ms}
               onChange={(e) => updateResources({ max_cpu_time_ms: e.target.value })}
-              placeholder={t("agents.form.cpu_time_placeholder")}
+              placeholder="30000"
               className={inputClass}
             />
           </Field>
@@ -357,67 +300,50 @@ export function AgentManifestForm({
           <TagInput
             value={value.capabilities.network}
             onChange={(next) => updateCapabilities({ network: next })}
-            placeholder={t("agents.form.network_hosts_placeholder")}
+            placeholder="api.openai.com:443"
           />
         </Field>
         <Field label={t("agents.form.shell_commands")} hint={t("agents.form.shell_commands_hint")}>
           <TagInput
             value={value.capabilities.shell}
             onChange={(next) => updateCapabilities({ shell: next })}
-            placeholder={t("agents.form.shell_commands_placeholder")}
+            placeholder="ls, cat, grep"
           />
         </Field>
         <Field label={t("agents.form.cap_tools")} hint={t("agents.form.cap_tools_hint")}>
-          {toolFinder ? (
-            <MultiSelectCmdk
-              options={toolFinder.options}
-              optionMeta={toolFinder.meta}
-              value={value.capabilities.tools}
-              onChange={(next) => {
-                const nextValue =
-                  typeof next === "function" ? next(value.capabilities.tools) : next;
-                updateCapabilities({ tools: nextValue });
-              }}
-              placeholder={t("agents.form.cap_tools_search_placeholder", {
-                defaultValue: "Search tools…",
-              })}
-              allowFreeText
-            />
-          ) : (
-            <TagInput
-              value={value.capabilities.tools}
-              onChange={(next) => updateCapabilities({ tools: next })}
-              placeholder={t("agents.form.cap_tools_placeholder")}
-            />
-          )}
+          <TagInput
+            value={value.capabilities.tools}
+            onChange={(next) => updateCapabilities({ tools: next })}
+            placeholder="file_read, web_fetch"
+          />
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.memory_read")}>
             <TagInput
               value={value.capabilities.memory_read}
               onChange={(next) => updateCapabilities({ memory_read: next })}
-              placeholder={t("agents.form.memory_glob_placeholder")}
+              placeholder="user/*"
             />
           </Field>
           <Field label={t("agents.form.memory_write")}>
             <TagInput
               value={value.capabilities.memory_write}
               onChange={(next) => updateCapabilities({ memory_write: next })}
-              placeholder={t("agents.form.memory_glob_placeholder")}
+              placeholder="user/*"
             />
           </Field>
           <Field label={t("agents.form.agent_message")}>
             <TagInput
               value={value.capabilities.agent_message}
               onChange={(next) => updateCapabilities({ agent_message: next })}
-              placeholder={t("agents.form.agent_message_placeholder")}
+              placeholder="* or agent-name"
             />
           </Field>
           <Field label={t("agents.form.ofp_connect")}>
             <TagInput
               value={value.capabilities.ofp_connect}
               onChange={(next) => updateCapabilities({ ofp_connect: next })}
-              placeholder={t("agents.form.ofp_connect_placeholder")}
+              placeholder="peer pattern"
             />
           </Field>
         </div>
@@ -443,53 +369,19 @@ export function AgentManifestForm({
             placeholder={t("agents.form.tags_placeholder")}
           />
         </Field>
-        <Field label={t("agents.form.skills")} hint={t("agents.form.skills_hint")}>
-          {skillFinder ? (
-            <MultiSelectCmdk
-              options={skillFinder.options}
-              optionMeta={skillFinder.meta}
-              value={value.skills}
-              onChange={(next) => {
-                const nextValue =
-                  typeof next === "function" ? next(value.skills) : next;
-                update({ skills: nextValue });
-              }}
-              placeholder={t("agents.form.skills_search_placeholder", {
-                defaultValue: "Search installed skills…",
-              })}
-              allowFreeText
-            />
-          ) : (
-            <TagInput
-              value={value.skills}
-              onChange={(next) => update({ skills: next })}
-              placeholder={t("agents.form.skills_placeholder")}
-            />
-          )}
+        <Field label={t("agents.form.skills")}>
+          <TagInput
+            value={value.skills}
+            onChange={(next) => update({ skills: next })}
+            placeholder={t("agents.form.skills_placeholder")}
+          />
         </Field>
-        <Field label={t("agents.form.mcp_servers")} hint={t("agents.form.mcp_servers_hint")}>
-          {mcpFinder ? (
-            <MultiSelectCmdk
-              options={mcpFinder.options}
-              optionMeta={mcpFinder.meta}
-              value={value.mcp_servers}
-              onChange={(next) => {
-                const nextValue =
-                  typeof next === "function" ? next(value.mcp_servers) : next;
-                update({ mcp_servers: nextValue });
-              }}
-              placeholder={t("agents.form.mcp_servers_search_placeholder", {
-                defaultValue: "Search MCP servers…",
-              })}
-              allowFreeText
-            />
-          ) : (
-            <TagInput
-              value={value.mcp_servers}
-              onChange={(next) => update({ mcp_servers: next })}
-              placeholder={t("agents.form.mcp_servers_placeholder")}
-            />
-          )}
+        <Field label={t("agents.form.mcp_servers")}>
+          <TagInput
+            value={value.mcp_servers}
+            onChange={(next) => update({ mcp_servers: next })}
+            placeholder={t("agents.form.mcp_servers_placeholder")}
+          />
         </Field>
       </Section>
 
@@ -513,12 +405,12 @@ export function AgentManifestForm({
           </select>
         </Field>
         {value.schedule.mode === "periodic" && (
-          <Field label={t("agents.form.cron")} hint={t("agents.form.cron_hint")}>
+          <Field label={t("agents.form.cron")} hint="0 9 * * *">
             <input
               type="text"
               value={value.schedule.cron}
               onChange={(e) => update({ schedule: { mode: "periodic", cron: e.target.value } })}
-              placeholder={t("agents.form.cron_placeholder")}
+              placeholder="0 9 * * *"
               className={inputClass}
             />
           </Field>
@@ -528,7 +420,7 @@ export function AgentManifestForm({
             <TagInput
               value={value.schedule.conditions}
               onChange={(next) => update({ schedule: { mode: "proactive", conditions: next } })}
-              placeholder={t("agents.form.conditions_placeholder")}
+              placeholder="cpu > 80"
             />
           </Field>
         )}
@@ -543,7 +435,7 @@ export function AgentManifestForm({
                   schedule: { mode: "continuous", check_interval_secs: e.target.value },
                 })
               }
-              placeholder={t("agents.form.check_interval_placeholder")}
+              placeholder="300"
               className={inputClass}
             />
           </Field>
@@ -554,7 +446,7 @@ export function AgentManifestForm({
         <p className="text-[10px] text-text-dim/70 mb-2">{t("agents.form.fallback_models_hint")}</p>
         {value.fallback_models.map((fb, idx) => (
           <div
-            key={fb._uid}
+            key={idx}
             className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2 space-y-2"
           >
             <div className="flex items-center justify-between">
@@ -606,7 +498,7 @@ export function AgentManifestForm({
             update({
               fallback_models: [
                 ...value.fallback_models,
-                { _uid: generateUid(), provider: "", model: "", api_key_env: "", base_url: "", extras: {} },
+                { provider: "", model: "", api_key_env: "", base_url: "", extras: {} },
               ],
             })
           }
@@ -631,7 +523,7 @@ export function AgentManifestForm({
                 min="0"
                 value={value.thinking.budget_tokens}
                 onChange={(e) => updateThinking({ budget_tokens: e.target.value })}
-                placeholder={t("agents.form.budget_tokens_placeholder")}
+                placeholder="10000"
                 className={inputClass}
               />
             </Field>
@@ -660,7 +552,7 @@ export function AgentManifestForm({
                 min="1"
                 value={value.autonomous.max_iterations}
                 onChange={(e) => updateAutonomous({ max_iterations: e.target.value })}
-                placeholder={t("agents.form.max_iterations_placeholder")}
+                placeholder="50"
                 className={inputClass}
               />
             </Field>
@@ -670,7 +562,7 @@ export function AgentManifestForm({
                 min="0"
                 value={value.autonomous.max_restarts}
                 onChange={(e) => updateAutonomous({ max_restarts: e.target.value })}
-                placeholder={t("agents.form.max_restarts_placeholder")}
+                placeholder="10"
                 className={inputClass}
               />
             </Field>
@@ -680,7 +572,7 @@ export function AgentManifestForm({
                 min="1"
                 value={value.autonomous.heartbeat_interval_secs}
                 onChange={(e) => updateAutonomous({ heartbeat_interval_secs: e.target.value })}
-                placeholder={t("agents.form.heartbeat_interval_placeholder")}
+                placeholder="30"
                 className={inputClass}
               />
             </Field>
@@ -690,7 +582,7 @@ export function AgentManifestForm({
                 min="1"
                 value={value.autonomous.heartbeat_timeout_secs}
                 onChange={(e) => updateAutonomous({ heartbeat_timeout_secs: e.target.value })}
-                placeholder={t("agents.form.auto_placeholder")}
+                placeholder="auto"
                 className={inputClass}
               />
             </Field>
@@ -700,7 +592,7 @@ export function AgentManifestForm({
                 min="0"
                 value={value.autonomous.heartbeat_keep_recent}
                 onChange={(e) => updateAutonomous({ heartbeat_keep_recent: e.target.value })}
-                placeholder={t("agents.form.auto_placeholder")}
+                placeholder="auto"
                 className={inputClass}
               />
             </Field>
@@ -709,16 +601,16 @@ export function AgentManifestForm({
                 type="text"
                 value={value.autonomous.heartbeat_channel}
                 onChange={(e) => updateAutonomous({ heartbeat_channel: e.target.value })}
-                placeholder={t("agents.form.heartbeat_channel_placeholder")}
+                placeholder="telegram"
                 className={inputClass}
               />
             </Field>
-            <Field label={t("agents.form.quiet_hours")} hint={t("agents.form.quiet_hours_hint")}>
+            <Field label={t("agents.form.quiet_hours")} hint="0 22 * * *">
               <input
                 type="text"
                 value={value.autonomous.quiet_hours}
                 onChange={(e) => updateAutonomous({ quiet_hours: e.target.value })}
-                placeholder={t("agents.form.quiet_hours_placeholder")}
+                placeholder="0 22 * * *"
                 className={inputClass}
               />
             </Field>
@@ -767,7 +659,7 @@ export function AgentManifestForm({
                   min="0"
                   value={value.routing.simple_threshold}
                   onChange={(e) => updateRouting({ simple_threshold: e.target.value })}
-                  placeholder={t("agents.form.simple_threshold_placeholder")}
+                  placeholder="100"
                   className={inputClass}
                 />
               </Field>
@@ -777,7 +669,7 @@ export function AgentManifestForm({
                   min="0"
                   value={value.routing.complex_threshold}
                   onChange={(e) => updateRouting({ complex_threshold: e.target.value })}
-                  placeholder={t("agents.form.complex_threshold_placeholder")}
+                  placeholder="500"
                   className={inputClass}
                 />
               </Field>
@@ -792,7 +684,7 @@ export function AgentManifestForm({
         </p>
         {value.context_injection.map((ci, idx) => (
           <div
-            key={ci._uid}
+            key={idx}
             className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2 space-y-2"
           >
             <div className="flex items-center justify-between">
@@ -851,7 +743,7 @@ export function AgentManifestForm({
             update({
               context_injection: [
                 ...value.context_injection,
-                { _uid: generateUid(), name: "", content: "", position: "system", condition: "" },
+                { name: "", content: "", position: "system", condition: "" },
               ],
             })
           }
@@ -882,38 +774,28 @@ export function AgentManifestForm({
             <option value="json_schema">{t("agents.form.response_json_schema")}</option>
           </select>
         </Field>
-        {jsonSchemaFormat && (
+        {value.response_format.mode === "json_schema" && (
           <div className="space-y-2 mt-2">
             <Field label={t("agents.form.schema_name")}>
               <input
                 type="text"
-                value={jsonSchemaFormat.name}
+                value={value.response_format.name}
                 onChange={(e) =>
                   update({
-                    response_format: {
-                      mode: "json_schema",
-                      name: e.target.value,
-                      schema: jsonSchemaFormat.schema,
-                      strict: jsonSchemaFormat.strict,
-                    },
-                  })
+                    response_format: { ...value.response_format, name: e.target.value },
+                  } as Partial<ManifestFormState>)
                 }
-                placeholder={t("agents.form.schema_name_placeholder")}
+                placeholder="user_response"
                 className={inputClass}
               />
             </Field>
             <Field label={t("agents.form.schema_body")}>
               <textarea
-                value={jsonSchemaFormat.schema}
+                value={value.response_format.schema}
                 onChange={(e) =>
                   update({
-                    response_format: {
-                      mode: "json_schema",
-                      name: jsonSchemaFormat.name,
-                      schema: e.target.value,
-                      strict: jsonSchemaFormat.strict,
-                    },
-                  })
+                    response_format: { ...value.response_format, schema: e.target.value },
+                  } as Partial<ManifestFormState>)
                 }
                 rows={6}
                 className={textareaClass}
@@ -921,16 +803,11 @@ export function AgentManifestForm({
             </Field>
             <Toggle
               label={t("agents.form.strict")}
-              checked={jsonSchemaFormat.strict}
+              checked={value.response_format.strict}
               onChange={(checked) =>
                 update({
-                  response_format: {
-                    mode: "json_schema",
-                    name: jsonSchemaFormat.name,
-                    schema: jsonSchemaFormat.schema,
-                    strict: checked,
-                  },
-                })
+                  response_format: { ...value.response_format, strict: checked },
+                } as Partial<ManifestFormState>)
               }
             />
           </div>
@@ -1005,7 +882,7 @@ export function AgentManifestForm({
               type="text"
               value={value.workspace}
               onChange={(e) => update({ workspace: e.target.value })}
-              placeholder={t("agents.form.auto_placeholder")}
+              placeholder="auto"
               className={inputClass}
             />
           </Field>
@@ -1061,35 +938,6 @@ function patchListItem<T>(list: T[], idx: number, patch: T | ((item: T) => T)): 
   return next;
 }
 
-/**
- * Build the options + description map for the skill/tool finders
- * (#5049). The catalog is union-ed with the currently-selected values
- * so chips for unknown entries stay rendered even before the catalog
- * loads. Returns `null` when no catalog is available so the caller can
- * fall back to a plain tag input.
- *
- * The returned `options` list is sorted for stable rendering order.
- */
-function mergeCatalog(
-  catalog: ManifestCatalogEntry[] | undefined,
-  selected: string[],
-): { options: string[]; meta: Record<string, { description?: string }> } | null {
-  if (!catalog) return null;
-  const meta: Record<string, { description?: string }> = {};
-  const seen = new Set<string>();
-  for (const entry of catalog) {
-    if (!entry?.name || seen.has(entry.name)) continue;
-    seen.add(entry.name);
-    if (entry.description) meta[entry.name] = { description: entry.description };
-  }
-  for (const name of selected) {
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-  }
-  const options = Array.from(seen).sort((a, b) => a.localeCompare(b));
-  return { options, meta };
-}
-
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3">
@@ -1139,20 +987,11 @@ function Field({
   invalid?: boolean;
   children: React.ReactNode;
 }) {
-  // Use a <div> wrapper rather than a <label> (#5246). A <label>
-  // forwards every click within its bounds to its first labelable form
-  // control, which silently steals clicks on composite widgets like
-  // MultiSelectCmdk (cmdk dropdown options): the click that lights up
-  // an item was being redirected to the search input, so picking a
-  // skill / tool from the catalog never reached the option's
-  // onSelect handler and the chip was never added. Switching to <div>
-  // makes each interactive child (input, button, option) receive its
-  // own click as the user intends. The trade-off is that the label
-  // text no longer focuses the input on click — which is a non-issue
-  // here because every field already gets focus via direct click on
-  // its visible control.
+  // Wrap children inside the <label> rather than relying on htmlFor —
+  // implicit association works without each child needing an id, and
+  // clicking the label text focuses the input as users expect.
   return (
-    <div className="block">
+    <label className="block">
       {label && (
         <span
           className={`text-[10px] font-bold uppercase block ${
@@ -1165,7 +1004,7 @@ function Field({
       )}
       <span className={label ? "mt-1 block" : "block"}>{children}</span>
       {hint && <span className="mt-1 text-[10px] text-text-dim/70 block">{hint}</span>}
-    </div>
+    </label>
   );
 }
 
@@ -1209,14 +1048,11 @@ function TagInput({
   onChange: (next: string[]) => void;
   placeholder?: string;
 }) {
-  const [inputValue, setInputValue] = useState("");
-
   const commit = (raw: string): void => {
     const cleaned = raw.trim();
     if (!cleaned) return;
     if (value.includes(cleaned)) return;
     onChange([...value, cleaned]);
-    setInputValue("");
   };
   return (
     <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border-subtle bg-main px-2 py-1.5 focus-within:border-brand">
@@ -1238,20 +1074,20 @@ function TagInput({
       ))}
       <input
         type="text"
-        value={inputValue}
-        onChange={(e) => setInputValue(e.target.value)}
         placeholder={value.length === 0 ? placeholder : undefined}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === ",") {
             e.preventDefault();
-            commit(inputValue);
-          } else if (e.key === "Backspace" && !inputValue && value.length > 0) {
+            commit(e.currentTarget.value);
+            e.currentTarget.value = "";
+          } else if (e.key === "Backspace" && !e.currentTarget.value && value.length > 0) {
             onChange(value.slice(0, -1));
           }
         }}
-        onBlur={() => {
-          if (inputValue) {
-            commit(inputValue);
+        onBlur={(e) => {
+          if (e.currentTarget.value) {
+            commit(e.currentTarget.value);
+            e.currentTarget.value = "";
           }
         }}
         className="flex-1 min-w-[100px] bg-transparent text-xs outline-none placeholder:text-text-dim/40"

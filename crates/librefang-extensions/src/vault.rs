@@ -288,18 +288,6 @@ impl CredentialVault {
     }
 
     /// Initialize a new vault. Generates a master key and stores it in the OS keyring.
-    ///
-    /// Key resolution shares the exact same path as [`Self::resolve_master_key`]
-    /// (env var → OS keyring) so that a subsequent `unlock()` on a fresh
-    /// `CredentialVault` over the same file is guaranteed to read the same
-    /// master-key bytes init wrote with. Pre-fix #5069 the two sites
-    /// duplicated the env / keyring lookup code, so the two paths could
-    /// diverge whenever the environment (or keyring) mutated between
-    /// init's save and the next unlock's read — surfacing as an
-    /// `aead::Error` on the second `vault_set` from the MCP OAuth handler.
-    /// Only the "no key available anywhere" branch generates a random key;
-    /// that branch falls through to `store_keyring_key` so the next
-    /// `resolve_master_key` finds the same value via the keyring path.
     pub fn init(&mut self) -> ExtensionResult<()> {
         if self.path.exists() {
             return Err(ExtensionError::Vault(
@@ -307,42 +295,37 @@ impl CredentialVault {
             ));
         }
 
-        // Resolve the master key through the SAME code path used by
-        // unlock-time `resolve_master_key`, so a freshly-init'd vault is
-        // always decryptable by the next `unlock()` on a separate instance
-        // (the MCP OAuth handler's vault_set pattern in #5069).
-        // `cached_key` is None here (we just constructed `self` or a prior
-        // op left it cleared), so this call falls through to env → keyring.
-        let key_bytes = match self.resolve_master_key() {
-            Ok(k) => k,
-            Err(ExtensionError::VaultLocked) => {
-                // No master key resolvable anywhere — generate a random
-                // one and persist it to the OS keyring (or file fallback)
-                // so subsequent `resolve_master_key` calls on fresh
-                // instances find the same value.
-                let mut kb = Zeroizing::new([0u8; 32]);
-                OsRng.fill_bytes(kb.as_mut());
-                let key_b64 = Zeroizing::new(base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    kb.as_ref(),
-                ));
+        // Check if a master key is already available (env var or keyring)
+        let key_bytes = if let Ok(existing_b64) = std::env::var(VAULT_KEY_ENV) {
+            // Use the existing key from env var
+            info!("Using existing vault key from {}", VAULT_KEY_ENV);
+            decode_master_key(&existing_b64)?
+        } else if let Ok(existing_b64) = load_keyring_key() {
+            info!("Using existing vault key from OS keyring");
+            decode_master_key(&existing_b64)?
+        } else {
+            // Generate a random master key
+            let mut kb = Zeroizing::new([0u8; 32]);
+            OsRng.fill_bytes(kb.as_mut());
+            let key_b64 = Zeroizing::new(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                kb.as_ref(),
+            ));
 
-                // Try to store in OS keyring (or file fallback)
-                match store_keyring_key(&key_b64) {
-                    Ok(()) => {
-                        info!("Vault master key stored in OS keyring");
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Could not store vault key in OS keyring: {e}. \
-                             Set {VAULT_KEY_ENV} env var manually. \
-                             Use `librefang vault init` interactively to retrieve the key.",
-                        );
-                    }
+            // Try to store in OS keyring
+            match store_keyring_key(&key_b64) {
+                Ok(()) => {
+                    info!("Vault master key stored in OS keyring");
                 }
-                kb
+                Err(e) => {
+                    warn!(
+                        "Could not store vault key in OS keyring: {e}. \
+                         Set {VAULT_KEY_ENV} env var manually. \
+                         Use `librefang vault init` interactively to retrieve the key.",
+                    );
+                }
             }
-            Err(other) => return Err(other),
+            kb
         };
 
         // Create empty vault file with the startup sentinel pre-written
@@ -356,45 +339,6 @@ impl CredentialVault {
         );
         self.unlocked = true;
         self.save(&key_bytes)?;
-
-        // Post-write verification (#5069): immediately confirm the file we
-        // just persisted is decryptable by a fresh `CredentialVault::new`
-        // instance walking the unlock path — i.e. the exact code path the
-        // next `KernelOAuthProvider::vault_set` call from the MCP OAuth
-        // handler will take. Catches any latent init/unlock divergence at
-        // the source (clear, actionable error) rather than letting the
-        // next caller fail with an opaque `aead::Error`. Constructing a
-        // sibling instance (instead of just re-resolving the key) also
-        // catches a path-binding regression where AAD would differ between
-        // save and load.
-        let mut verify = CredentialVault::new(self.path.clone());
-        if let Err(e) = verify.unlock() {
-            // Roll back the freshly-written file so the next `init()`
-            // attempt isn't blocked by the "Vault already exists" guard
-            // against a file that can't be opened. Rollback failure is
-            // informational — the divergence error below is what callers
-            // need to see — but log it so operators can clean up a stale
-            // corrupt file that a permission error left behind (EACCES
-            // would otherwise leave the next `init()` returning "Vault
-            // already exists" against an unreadable file).
-            if let Err(unlink_err) = std::fs::remove_file(&self.path) {
-                warn!(
-                    error = ?unlink_err,
-                    path = ?self.path,
-                    "vault init rollback: failed to unlink corrupt vault file",
-                );
-            }
-            return Err(ExtensionError::Vault(format!(
-                "Vault init succeeded on disk but the freshly-written file \
-                 cannot be decrypted by a fresh CredentialVault::unlock() \
-                 — the same code path subsequent vault_set calls will \
-                 walk. This means init() and resolve_master_key() resolved \
-                 different master keys; LIBREFANG_VAULT_KEY may have \
-                 changed during init or the OS keyring returned an \
-                 unexpected value. Underlying error: {e}"
-            )));
-        }
-
         self.cached_key = Some(key_bytes);
         info!("Credential vault initialized at {:?}", self.path);
         Ok(())
@@ -477,31 +421,15 @@ impl CredentialVault {
     /// Rejects writes to the reserved [`SENTINEL_KEY`] (#3651) so external
     /// callers cannot corrupt the startup-validation contract by overwriting
     /// the sentinel with arbitrary plaintext.
-    ///
-    /// Lazy-initialises a never-materialised vault on first write: when the
-    /// caller holds an unopened handle (vault.enc does not exist on disk),
-    /// the first `set()` call runs `init()` so the credential lands in a
-    /// real, persisted vault instead of being silently dropped on the
-    /// floor. This is the contract `kernel::vault_handle()`'s doc-comment
-    /// has always promised; before this, `set()` returned `VaultLocked` on
-    /// a fresh handle and `install_integration` swallowed the error while
-    /// reporting `Ready` (refs #4788, #4791).
     pub fn set(&mut self, key: String, value: Zeroizing<String>) -> ExtensionResult<()> {
-        // Reject the reserved sentinel slot BEFORE any side-effecting work
-        // (#3651). Doing it first means a rejected write on a fresh handle
-        // does not materialise vault.enc as a side effect of lazy-init —
-        // a no-op call must remain a no-op on disk.
+        if !self.unlocked {
+            return Err(ExtensionError::VaultLocked);
+        }
         if key == SENTINEL_KEY {
             return Err(ExtensionError::Vault(format!(
                 "Refusing to write reserved key {SENTINEL_KEY}; this slot is owned by \
                  the vault startup-validation sentinel (#3651)."
             )));
-        }
-        if !self.unlocked && !self.path.exists() {
-            self.init()?;
-        }
-        if !self.unlocked {
-            return Err(ExtensionError::VaultLocked);
         }
         self.entries.insert(key, value);
         let master_key = self.resolve_master_key()?;
@@ -704,74 +632,12 @@ impl CredentialVault {
         // file currently holds — which races between parallel tests
         // (#TOTP flake) and surprises CI/headless deployments that set
         // the env var as the source of truth.
-        // Audit: vault-key-env-overrides-keyring. Resolve BOTH
-        // sources up front so the choice — and any disagreement
-        // between them — is visible in the daemon log instead of
-        // env silently winning. Precedence stays env-first to
-        // preserve the documented behaviour and the test-stability
-        // rationale in the original comment above; what changes is
-        // that an operator who set the env var and ALSO has a
-        // different value in the keyring sees a single WARN line
-        // naming the divergence on the next unlock, instead of
-        // never finding out their keyring is being ignored.
-        let env_key = std::env::var(VAULT_KEY_ENV).ok().map(Zeroizing::new);
-        // Side-effect-free peek when the env var is set: the divergence
-        // diagnostic must NOT trigger keyring writes / OS Keychain prompts
-        // on env-only (headless / CI / Docker) deployments. Only the
-        // genuine no-env fallback path is allowed to auto-migrate legacy
-        // keyring files (v1/v2 → v3, macOS opt-out mirror).
-        let keyring_key = if env_key.is_some() {
-            load_keyring_key_inner(false).ok()
-        } else {
-            load_keyring_key().ok()
-        };
-
-        match classify_master_key_sources(
-            env_key.as_ref().map(|s| s.as_str()),
-            keyring_key.as_ref().map(|s| s.as_str()),
-        ) {
-            MasterKeySource::EnvOverridesDifferentKeyring => {
-                // The classic divergence case. WARN once per
-                // resolution so operators investigating credential
-                // weirdness find this line by grepping for
-                // VAULT_KEY_ENV. Values stay redacted — log only
-                // the fact that they differ.
-                tracing::warn!(
-                    target: "vault::keyring",
-                    env = %VAULT_KEY_ENV,
-                    "both LIBREFANG_VAULT_KEY env var AND OS keyring are set, \
-                     and they DISAGREE; env wins (current behaviour). \
-                     If you intended the keyring value to take effect, unset \
-                     the env var on the daemon process."
-                );
-            }
-            MasterKeySource::EnvMatchesKeyring => {
-                tracing::debug!(
-                    target: "vault::keyring",
-                    "env LIBREFANG_VAULT_KEY matches OS keyring value; using env source"
-                );
-            }
-            MasterKeySource::EnvOnly => {
-                tracing::debug!(
-                    target: "vault::keyring",
-                    "vault master key sourced from LIBREFANG_VAULT_KEY env var \
-                     (no OS keyring entry present)"
-                );
-            }
-            MasterKeySource::KeyringOnly => {
-                tracing::debug!(
-                    target: "vault::keyring",
-                    "vault master key sourced from OS keyring \
-                     (no LIBREFANG_VAULT_KEY env var set)"
-                );
-            }
-            MasterKeySource::Neither => {}
-        }
-
-        if let Some(key_b64) = env_key {
+        if let Ok(key_b64) = std::env::var(VAULT_KEY_ENV) {
+            let key_b64 = Zeroizing::new(key_b64);
             return decode_master_key(&key_b64);
         }
-        if let Some(key_b64) = keyring_key {
+
+        if let Ok(key_b64) = load_keyring_key() {
             return decode_master_key(&key_b64);
         }
 
@@ -1164,68 +1030,12 @@ fn store_keyring_key_to_file(key_b64: &str) -> Result<(), String> {
 /// use `Argon2id(SHA-512(domain || random_id || os_material)[..32], salt)`.
 ///
 /// We retain the v2 read path for one release cycle to allow auto-migration
-/// Classification of which master-key source was available at
-/// resolution time. Used by `resolve_master_key` to emit the right
-/// observability signal. Audit: vault-key-env-overrides-keyring.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MasterKeySource {
-    /// Both env and keyring set, but the two values disagree —
-    /// env wins (preserves historical precedence), but the
-    /// divergence is WARN-logged so an operator who expected the
-    /// keyring value to take effect can find out.
-    EnvOverridesDifferentKeyring,
-    /// Both env and keyring set, same value — env source used
-    /// (no divergence to warn about).
-    EnvMatchesKeyring,
-    /// Only env present.
-    EnvOnly,
-    /// Only keyring present.
-    KeyringOnly,
-    /// Neither — `resolve_master_key` returns `VaultLocked`.
-    Neither,
-}
-
-pub(crate) fn classify_master_key_sources(
-    env: Option<&str>,
-    keyring: Option<&str>,
-) -> MasterKeySource {
-    match (env, keyring) {
-        (Some(e), Some(k)) if e != k => MasterKeySource::EnvOverridesDifferentKeyring,
-        (Some(_), Some(_)) => MasterKeySource::EnvMatchesKeyring,
-        (Some(_), None) => MasterKeySource::EnvOnly,
-        (None, Some(_)) => MasterKeySource::KeyringOnly,
-        (None, None) => MasterKeySource::Neither,
-    }
-}
-
 /// on first daemon restart post-upgrade.  Plan to remove the v2 branch after
 /// release N+2 (tracked in #4159 follow-up).
 ///
 /// On a successful v2 decrypt the file is atomically re-wrapped as v3 so
 /// subsequent loads take the fast v3 path.
-/// Auto-migrating loader used by the no-env fallback path. Reads the
-/// master key from the OS keyring / file store and rewrites legacy
-/// (v1/v2) keyring files to v3 in place, plus the macOS opt-out
-/// migration. Side effects are intentional here.
 fn load_keyring_key() -> Result<Zeroizing<String>, String> {
-    load_keyring_key_inner(true)
-}
-
-/// Shared keyring loader.
-///
-/// When `migrate == true`, behaves exactly like the historical
-/// `load_keyring_key`: rewrites legacy v1/v2 files to v3, and on the
-/// macOS opt-out path force-reads the OS keyring and mirrors it to the
-/// file store.
-///
-/// When `migrate == false`, performs a SIDE-EFFECT-FREE peek: it still
-/// reads and decrypts the existing keyring value, but never calls
-/// `store_keyring_key` / `store_keyring_key_to_file` and never takes the
-/// `os_keyring::try_load_force()` macOS-migration branch (which can
-/// trigger an OS Keychain prompt). This lets `resolve_master_key`
-/// compare env vs keyring for the divergence diagnostic without
-/// incurring keyring writes/prompts on env-only deployments.
-fn load_keyring_key_inner(migrate: bool) -> Result<Zeroizing<String>, String> {
     #[cfg(not(test))]
     {
         // OS keyring first (issue #3178). `try_load` returns None for both
@@ -1254,12 +1064,7 @@ fn load_keyring_key_inner(migrate: bool) -> Result<Zeroizing<String>, String> {
             // fact enabled, `try_load` already attempted this and failed,
             // so `try_load_force` will return `None` immediately and we
             // fall through to the missing-file error.
-            //
-            // Skipped entirely on a non-migrating peek (`migrate == false`):
-            // `try_load_force` can trigger an OS Keychain prompt and the
-            // mirror writes to disk — both forbidden side effects when we
-            // are only comparing env vs keyring.
-            if migrate && !should_use_os_keyring() {
+            if !should_use_os_keyring() {
                 if let Some(s) = os_keyring::try_load_force() {
                     info!(
                         "Migrated master key from OS keyring to file-based store at {:?}; \
@@ -1370,16 +1175,12 @@ fn load_keyring_key_inner(migrate: bool) -> Result<Zeroizing<String>, String> {
                         )?;
 
                     // Re-wrap with v3 fingerprint and atomically replace the file.
-                    // Suppressed on a non-migrating peek (`migrate == false`):
-                    // we return the decrypted value without rewriting the file.
-                    if migrate {
-                        if let Err(e) = store_keyring_key(&key_str) {
-                            warn!("Failed to migrate keyring from v2 to v3 format: {e}");
-                        } else {
-                            info!(
-                                "Successfully migrated keyring file from v2 to v3 (mixed fingerprint)"
-                            );
-                        }
+                    if let Err(e) = store_keyring_key(&key_str) {
+                        warn!("Failed to migrate keyring from v2 to v3 format: {e}");
+                    } else {
+                        info!(
+                            "Successfully migrated keyring file from v2 to v3 (mixed fingerprint)"
+                        );
                     }
 
                     return Ok(Zeroizing::new(key_str));
@@ -1412,22 +1213,17 @@ fn load_keyring_key_inner(migrate: bool) -> Result<Zeroizing<String>, String> {
             .collect();
         let key_str = String::from_utf8(key_bytes).map_err(|e| format!("legacy utf8: {e}"))?;
 
-        // Re-store with proper encryption to auto-migrate.
-        // Suppressed on a non-migrating peek (`migrate == false`): we
-        // return the decrypted value without rewriting the file.
-        if migrate {
-            if let Err(e) = store_keyring_key(&key_str) {
-                warn!("Failed to migrate legacy keyring to v3 format: {e}");
-            } else {
-                info!("Successfully migrated keyring file to AES-256-GCM wrapped format (v3)");
-            }
+        // Re-store with proper encryption to auto-migrate
+        if let Err(e) = store_keyring_key(&key_str) {
+            warn!("Failed to migrate legacy keyring to v3 format: {e}");
+        } else {
+            info!("Successfully migrated keyring file to AES-256-GCM wrapped format (v3)");
         }
 
         Ok(Zeroizing::new(key_str))
     }
     #[cfg(test)]
     {
-        let _ = migrate;
         Err("Keyring not available in tests".to_string())
     }
 }
@@ -1776,35 +1572,6 @@ fn machine_fingerprint() -> Vec<u8> {
 /// Windows: MachineGuid via `reg query HKLM\SOFTWARE\Microsoft\Cryptography`.
 ///          If the reg query fails, emit nothing — fingerprint relies on the
 ///          persisted random_id alone (same posture as Linux without machine-id).
-/// Pick the first candidate that we can resolve. Absolute paths must exist on
-/// disk; bare names are accepted (PATH lookup will be used). Falls back to the
-/// last candidate as a last resort. Required because launchd / Windows service
-/// contexts may run with a minimal PATH that excludes `/usr/sbin` or
-/// `C:\Windows\System32`, so a bare `Command::new("ioreg")` / `Command::new("reg")`
-/// silently returns ENOENT (see #5025).
-///
-/// On Linux the lib build has no production callers (both call sites are
-/// gated to `target_os = "macos"` / `target_os = "windows"`), so the
-/// `--deny=warnings` CI lane flags this as dead code. The unit tests
-/// (cfg(test)) cover all platforms, but the lib-only metadata build that
-/// `cargo llvm-cov` performs first does not include them.
-#[allow(dead_code)]
-fn resolve_command(candidates: &[&'static str]) -> &'static str {
-    for &p in candidates {
-        let is_absolute = p.starts_with('/') || p.contains(":\\");
-        if is_absolute {
-            if std::path::Path::new(p).exists() {
-                return p;
-            }
-            // Doesn't exist — fall through to next candidate.
-            continue;
-        }
-        // Bare name: trust PATH; return immediately.
-        return p;
-    }
-    candidates.last().copied().unwrap_or("")
-}
-
 #[cfg(not(test))]
 fn collect_os_machine_id_material() -> Vec<u8> {
     let mut out = Vec::new();
@@ -1861,56 +1628,26 @@ fn collect_os_machine_id_material() -> Vec<u8> {
     // This UUID is stable across reboots and unique per physical machine.
     // We shell out rather than reading /private/var/db/SystemPolicyConfiguration/SystemPolicy
     // (root-only, binary blob, content unstable across macOS releases).
-    //
-    // `ioreg` lives at `/usr/sbin/ioreg`, which launchd's default minimal PATH
-    // (`/usr/local/bin:/usr/bin:/bin`) does NOT include. A bare
-    // `Command::new("ioreg")` therefore silently ENOENTs in the daemon
-    // context, producing a different fingerprint than the one that wrote the
-    // keyring and leaving the vault locked at startup (#5025). Resolve to an
-    // absolute path first; only fall back to PATH lookup if no candidate
-    // exists on disk.
     #[cfg(target_os = "macos")]
     {
-        let ioreg = resolve_command(&["/usr/sbin/ioreg", "/sbin/ioreg", "ioreg"]);
-        match std::process::Command::new(ioreg)
+        if let Ok(output) = std::process::Command::new("ioreg")
             .args(["-rd1", "-c", "IOPlatformExpertDevice"])
             .output()
         {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let mut found = false;
-                for line in stdout.lines() {
-                    if line.contains("IOPlatformUUID") {
-                        // Line format: `  "IOPlatformUUID" = "GUID-HERE"`
-                        // Split on '"' and take the 4th token (index 3) as the UUID value.
-                        let parts: Vec<&str> = line.splitn(4, '"').collect();
-                        if let Some(raw) = parts.get(3) {
-                            let uuid = raw.trim_end_matches('"').trim();
-                            if !uuid.is_empty() {
-                                emit(b"macos-platform-uuid", uuid.as_bytes());
-                                found = true;
-                            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains("IOPlatformUUID") {
+                    // Line format: `  "IOPlatformUUID" = "GUID-HERE"`
+                    // Split on '"' and take the 4th token (index 3) as the UUID value.
+                    let parts: Vec<&str> = line.splitn(4, '"').collect();
+                    if let Some(raw) = parts.get(3) {
+                        let uuid = raw.trim_end_matches('"').trim();
+                        if !uuid.is_empty() {
+                            emit(b"macos-platform-uuid", uuid.as_bytes());
                         }
-                        break;
                     }
+                    break;
                 }
-                if !found {
-                    warn!(
-                        binary = ioreg,
-                        "ioreg did not return an IOPlatformUUID — macOS fingerprint will rely on random_id alone; \
-                         this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
-                         will appear locked at startup (#5025)"
-                    );
-                }
-            }
-            Err(e) => {
-                warn!(
-                    binary = ioreg,
-                    error = %e,
-                    "failed to spawn ioreg — macOS fingerprint will rely on random_id alone; \
-                     this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
-                     will appear locked at startup. Ensure /usr/sbin/ioreg exists or that /usr/sbin is on PATH (#5025)"
-                );
             }
         }
     }
@@ -1920,14 +1657,9 @@ fn collect_os_machine_id_material() -> Vec<u8> {
     // Shell out to `reg query` — no external crate needed, and vault load
     // happens only once per daemon start so the overhead is acceptable.
     // Output format: "    MachineGuid    REG_SZ    <guid>"
-    //
-    // `reg.exe` lives at `C:\Windows\System32\reg.exe`. A service-account
-    // context with a stripped PATH would hit the same class of bug as the
-    // macOS launchd case (#5025), so we resolve to an absolute path first.
     #[cfg(target_os = "windows")]
     {
-        let reg_bin = resolve_command(&[r"C:\Windows\System32\reg.exe", "reg"]);
-        match std::process::Command::new(reg_bin)
+        if let Ok(output) = std::process::Command::new("reg")
             .args([
                 "query",
                 r"HKLM\SOFTWARE\Microsoft\Cryptography",
@@ -1936,40 +1668,21 @@ fn collect_os_machine_id_material() -> Vec<u8> {
             ])
             .output()
         {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let mut found = false;
-                for line in stdout.lines() {
-                    if line.contains("MachineGuid") && line.contains("REG_SZ") {
-                        // The GUID is the last whitespace-delimited token.
-                        if let Some(guid) = line.split_whitespace().last() {
-                            if !guid.is_empty() {
-                                emit(b"windows-machine-guid", guid.as_bytes());
-                                found = true;
-                            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains("MachineGuid") && line.contains("REG_SZ") {
+                    // The GUID is the last whitespace-delimited token.
+                    if let Some(guid) = line.split_whitespace().last() {
+                        if !guid.is_empty() {
+                            emit(b"windows-machine-guid", guid.as_bytes());
                         }
-                        break;
                     }
+                    break;
                 }
-                if !found {
-                    warn!(
-                        binary = reg_bin,
-                        "reg query did not return a MachineGuid — Windows fingerprint will rely on random_id alone; \
-                         this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
-                         will appear locked at startup (#5025)"
-                    );
-                }
-            }
-            Err(e) => {
-                warn!(
-                    binary = reg_bin,
-                    error = %e,
-                    "failed to spawn reg.exe — Windows fingerprint will rely on random_id alone; \
-                     this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
-                     will appear locked at startup. Ensure C:\\Windows\\System32\\reg.exe exists or is on PATH (#5025)"
-                );
             }
         }
+        // If reg query fails: emit nothing — fingerprint falls back to the
+        // persisted random_id alone, same posture as Linux without machine-id.
     }
 
     out
@@ -2986,458 +2699,5 @@ mod tests {
         let user_visible = vault.list_keys();
         assert!(!user_visible.contains(&SENTINEL_KEY));
         assert!(user_visible.contains(&"USER_KEY"));
-    }
-
-    /// `set()` on a never-materialised vault (vault.enc absent on disk,
-    /// `unlocked == false`) must lazy-init via the env-driven master key
-    /// path, persist the entry, and leave the vault readable through the
-    /// same instance. This pins the contract `kernel::vault_handle()`'s
-    /// doc-comment promised but the previous implementation didn't honour
-    /// — `install_integration_writes_through_cached_vault_handle` failed
-    /// because the silent `VaultLocked` return swallowed by
-    /// `installer::install_integration` reported `Ready` while never
-    /// touching disk (refs #4788, #4791).
-    #[test]
-    #[serial_test::serial]
-    fn set_lazy_inits_unopened_vault_on_first_write() {
-        // Fixed test key — base64 of 32 zero bytes — keeps the test
-        // hermetic (no random keyring writes, no Argon2id race).
-        const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-
-        // SAFETY: serialised via `#[serial_test::serial]`; no other thread
-        // in this crate's test suite reads these vars concurrently.
-        unsafe {
-            std::env::set_var(VAULT_KEY_ENV, TEST_VAULT_KEY_B64);
-            std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
-        }
-
-        let (_dir, mut vault) = test_vault();
-        // Precondition: file does not exist yet, vault is locked.
-        assert!(!vault.exists(), "fresh test vault must not exist on disk");
-        assert!(!vault.is_unlocked(), "fresh handle must be locked");
-
-        let path = vault.path.clone();
-        vault
-            .set(
-                "LAZY_INIT_TOKEN".to_string(),
-                Zeroizing::new("hello-lazy".to_string()),
-            )
-            .expect("set() must lazy-init when path is absent and proceed");
-
-        // After lazy-init: file materialised, vault unlocked, value
-        // readable through this handle.
-        assert!(vault.exists(), "set() should have materialised vault.enc");
-        assert!(vault.is_unlocked(), "set() should leave vault unlocked");
-        let got = vault.get("LAZY_INIT_TOKEN").expect("value must round-trip");
-        assert_eq!(got.as_str(), "hello-lazy");
-
-        // Round-trip through a fresh process-shaped instance: drop the
-        // unlocked vault, re-open the same path, and unlock via the env
-        // master key. This pins that lazy-init *actually used* the
-        // env-driven key — the previous in-instance get could pass even
-        // if init() had silently fallen back to a random key (cached_key
-        // would still hot-read the just-written entry within the same
-        // instance, masking the divergence).
-        drop(vault);
-        let mut reopened = CredentialVault::new(path);
-        reopened
-            .unlock()
-            .expect("env master key must unlock the lazy-initialised vault");
-        let persisted = reopened
-            .get("LAZY_INIT_TOKEN")
-            .expect("token must survive a re-open with the env key");
-        assert_eq!(persisted.as_str(), "hello-lazy");
-
-        // Cleanup so neighbouring tests see an unset env.
-        unsafe {
-            std::env::remove_var(VAULT_KEY_ENV);
-            std::env::remove_var(VAULT_NO_KEYRING_ENV);
-        }
-    }
-
-    /// Calling `set()` with the reserved [`SENTINEL_KEY`] on a fresh
-    /// handle must reject the write WITHOUT materialising vault.enc on
-    /// disk. A rejected write is a no-op, including its filesystem
-    /// footprint — otherwise an attacker / misuser triggering the
-    /// rejection path can still mint a stray vault file in the home dir.
-    #[test]
-    #[serial_test::serial]
-    fn set_rejects_sentinel_key_before_lazy_init_side_effect() {
-        const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-
-        unsafe {
-            std::env::set_var(VAULT_KEY_ENV, TEST_VAULT_KEY_B64);
-            std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
-        }
-
-        let (_dir, mut vault) = test_vault();
-        assert!(!vault.exists());
-
-        let err = vault
-            .set(
-                SENTINEL_KEY.to_string(),
-                Zeroizing::new("attacker-controlled".to_string()),
-            )
-            .expect_err("writing the sentinel must fail");
-        assert!(
-            matches!(err, ExtensionError::Vault(_)),
-            "expected Vault(_) refusal, got: {err:?}"
-        );
-        assert!(
-            !vault.exists(),
-            "rejected sentinel write must not materialise vault.enc"
-        );
-        assert!(
-            !vault.is_unlocked(),
-            "rejected sentinel write must leave the handle locked"
-        );
-
-        unsafe {
-            std::env::remove_var(VAULT_KEY_ENV);
-            std::env::remove_var(VAULT_NO_KEYRING_ENV);
-        }
-    }
-
-    /// `set()` must NOT lazy-init when `vault.enc` already exists but the
-    /// handle hasn't been unlocked — that is a real "wrong key / not yet
-    /// unlocked" state and silently re-init'ing would either fail
-    /// (`init()` rejects existing files) or worse, mask a misconfigured
-    /// boot. The pre-existing `VaultLocked` error path must stay.
-    #[test]
-    #[serial_test::serial]
-    fn set_does_not_lazy_init_when_vault_file_already_present() {
-        const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-
-        unsafe {
-            std::env::set_var(VAULT_KEY_ENV, TEST_VAULT_KEY_B64);
-            std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
-        }
-
-        // Materialise a vault, then drop the unlocked handle and build a
-        // fresh locked one over the same path.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vault.enc");
-        let mut bootstrap = CredentialVault::new(path.clone());
-        bootstrap.init().expect("bootstrap init must succeed");
-        drop(bootstrap);
-
-        let mut locked = CredentialVault::new(path);
-        assert!(locked.exists(), "precondition: vault.enc must exist");
-        assert!(!locked.is_unlocked(), "precondition: handle must be locked");
-
-        let err = locked
-            .set("X".to_string(), Zeroizing::new("y".to_string()))
-            .expect_err("set() on an existing-but-locked vault must error");
-        assert!(
-            matches!(err, ExtensionError::VaultLocked),
-            "expected VaultLocked, got: {err:?}"
-        );
-
-        unsafe {
-            std::env::remove_var(VAULT_KEY_ENV);
-            std::env::remove_var(VAULT_NO_KEYRING_ENV);
-        }
-    }
-
-    /// Regression for #5069: when a daemon process explicitly calls `init()`
-    /// followed by `set()` on one handle, then drops the handle and tries to
-    /// `unlock()` a fresh handle on the same file using the env-supplied
-    /// master key, the unlock MUST succeed.
-    ///
-    /// The MCP OAuth `auth_start` handler hits this pattern when it stores
-    /// `pkce_verifier`, then `pkce_state`, then `redirect_uri` in sequence:
-    /// the first call walks the `init() + set()` branch, every subsequent
-    /// call walks the `unlock() + set()` branch against a fresh
-    /// `CredentialVault` instance constructed inside `KernelOAuthProvider::vault_set`.
-    /// Pre-fix the second call's `unlock()` failed with `aead::Error` because
-    /// `init()` duplicated the env / keyring lookup code from
-    /// `resolve_master_key()`. The two sites could resolve different master
-    /// keys on container hosts (keyring side effects, env-mutation races
-    /// from other code paths), leaving a file the same process could not
-    /// decrypt one call later. The fix routes init's key resolution through
-    /// `resolve_master_key()` and adds a post-write verification so any
-    /// future divergence fails fast at init time with an actionable error
-    /// instead of an opaque AEAD failure downstream.
-    #[test]
-    #[serial_test::serial]
-    fn init_then_set_then_reopen_unlock_via_env_key() {
-        const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-
-        unsafe {
-            std::env::set_var(VAULT_KEY_ENV, TEST_VAULT_KEY_B64);
-            std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vault.enc");
-
-        // Mirror `KernelOAuthProvider::vault_set` on a first call: fresh
-        // handle, file absent → init(), then set().
-        {
-            let mut vault = CredentialVault::new(path.clone());
-            assert!(!vault.exists());
-            vault.init().expect("init() with env key must succeed");
-            assert!(vault.exists());
-            vault
-                .set(
-                    "pkce_verifier".to_string(),
-                    Zeroizing::new("verifier-1".to_string()),
-                )
-                .expect("first set() must succeed");
-        } // drop
-
-        // Second call: fresh handle, file present → unlock() (the failing
-        // path in #5069), then set() of a different key.
-        {
-            let mut vault = CredentialVault::new(path.clone());
-            assert!(vault.exists());
-            vault
-                .unlock()
-                .expect("env key must unlock the vault written by init()+set()");
-            vault
-                .set(
-                    "pkce_state".to_string(),
-                    Zeroizing::new("state-1".to_string()),
-                )
-                .expect("second set() after unlock() must succeed");
-        }
-
-        // Third call mimicking `redirect_uri`: unlock and read everything
-        // back to confirm no entry was lost across the re-open boundary.
-        {
-            let mut vault = CredentialVault::new(path);
-            vault.unlock().expect("third unlock must succeed");
-            assert_eq!(
-                vault.get("pkce_verifier").map(|v| v.as_str().to_string()),
-                Some("verifier-1".to_string())
-            );
-            assert_eq!(
-                vault.get("pkce_state").map(|v| v.as_str().to_string()),
-                Some("state-1".to_string())
-            );
-        }
-
-        unsafe {
-            std::env::remove_var(VAULT_KEY_ENV);
-            std::env::remove_var(VAULT_NO_KEYRING_ENV);
-        }
-    }
-
-    /// Regression for #5069 (env mutation between init's save and the next
-    /// unlock's read). Pre-fix `init()` had no post-write verification, so
-    /// if `LIBREFANG_VAULT_KEY` mutated between init's save and a later
-    /// `unlock()` call the daemon would write a file the same process
-    /// could not decrypt — surfacing downstream as an opaque
-    /// `"Decryption failed: aead::Error"` on the next `vault_set`, with
-    /// the corrupt file left on disk for any subsequent `init()` to trip
-    /// over its `"Vault already exists"` guard.
-    ///
-    /// This test drives the divergence deterministically by mutating the
-    /// env var **inside** the init() call from a worker thread that wakes
-    /// while init's Argon2id-bound `save()` is still running. With the
-    /// post-fix unified resolution + post-write verify-unlock + rollback,
-    /// the divergence is caught at init time:
-    ///
-    /// 1. init() returns `ExtensionError::Vault(_)` whose message names
-    ///    the divergence (NOT a bare `Decryption failed: aead::Error`).
-    /// 2. The freshly-written corrupt file is unlinked so a follow-up
-    ///    `init()` under the new key can succeed cleanly without the
-    ///    operator manually deleting `vault.enc`.
-    ///
-    /// On `origin/main` (pre-fix) this test fails: init() returns Ok, the
-    /// file stays on disk under key_A, the follow-up init() with key_B is
-    /// blocked by the "Vault already exists" guard.
-    #[test]
-    #[serial_test::serial]
-    fn init_env_mutation_during_save_rolls_back_and_surfaces_typed_error() {
-        // Two valid 32-byte keys that decode cleanly. The decoded values
-        // are different so a file written under key_A cannot decrypt under
-        // key_B.
-        const KEY_A_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        const KEY_B_B64: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
-
-        unsafe {
-            std::env::set_var(VAULT_KEY_ENV, KEY_A_B64);
-            std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vault.enc");
-
-        // Spawn a worker that flips the env var to key_B shortly after the
-        // main thread enters init(). Argon2id inside save() takes well
-        // over 50 ms on every supported host (default Params are
-        // m_cost=19_456 KiB, t_cost=2, p_cost=1), so the 30 ms sleep
-        // lands the mutation between init's initial resolve_master_key()
-        // (read #1 — sees key_A) and init's post-write verify-unlock
-        // (read #2 — sees key_B). Serial_test::serial gates this whole
-        // test against any other VAULT_KEY mutator in this crate.
-        let worker = std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            // SAFETY: serial_test::serial gates concurrent mutators.
-            unsafe {
-                std::env::set_var(VAULT_KEY_ENV, KEY_B_B64);
-            }
-        });
-
-        let mut vault = CredentialVault::new(path.clone());
-        let init_result = vault.init();
-        worker.join().expect("env-mutator thread must join cleanly");
-
-        // Assertion 1: init() surfaces the divergence as a typed
-        // `ExtensionError::Vault(_)` (NOT a bare aead::Error / NOT
-        // silently Ok). The error message names the divergence so an
-        // operator reading the daemon log can act on it.
-        let err =
-            init_result.expect_err("init() must surface env-mutation divergence as a typed error");
-        match &err {
-            ExtensionError::Vault(msg) => {
-                assert!(
-                    msg.contains("freshly-written file")
-                        || msg.contains("cannot be decrypted")
-                        || msg.contains("different master keys"),
-                    "expected divergence-naming error message, got: {msg}",
-                );
-            }
-            other => {
-                panic!("expected ExtensionError::Vault(_) from init's verify-unlock, got {other:?}")
-            }
-        }
-
-        // Assertion 2: the freshly-written corrupt file was rolled back,
-        // so the "Vault already exists" guard does not block a follow-up
-        // init() under the current env key.
-        assert!(
-            !path.exists(),
-            "init() must roll back the corrupt vault.enc on divergence so \
-             a follow-up init() can recover without manual cleanup",
-        );
-
-        // Assertion 3: with env now stably at key_B (the worker landed
-        // its mutation), a fresh init() succeeds cleanly. This pins that
-        // the rollback path leaves the directory in a re-init-able state.
-        let mut recovery = CredentialVault::new(path.clone());
-        recovery
-            .init()
-            .expect("post-rollback init() under the stabilised env key must succeed");
-        assert!(
-            path.exists(),
-            "recovery init() must materialise vault.enc under key_B",
-        );
-
-        unsafe {
-            std::env::remove_var(VAULT_KEY_ENV);
-            std::env::remove_var(VAULT_NO_KEYRING_ENV);
-        }
-    }
-
-    // ── resolve_command ─────────────────────────────────────────────────
-    //
-    // Regression suite for the launchd `ioreg` ENOENT bug (#5025). The
-    // helper must:
-    //   1. Pick an existing absolute path when one is present.
-    //   2. Skip absolute paths that do not exist.
-    //   3. Accept a bare command name as an implicit "trust PATH" fallback.
-
-    #[cfg(unix)]
-    #[test]
-    fn resolve_command_picks_first_existing_absolute() {
-        // /bin/sh exists on every supported Unix host (macOS, Linux). If a
-        // CI environment ever pares this down we'll learn about it via this
-        // test, which is exactly the visibility #5025 wished it had.
-        let pick = resolve_command(&[
-            "/this/path/definitely/does/not/exist",
-            "/bin/sh",
-            "fallback-bare-name",
-        ]);
-        assert_eq!(pick, "/bin/sh");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn resolve_command_skips_missing_absolutes() {
-        // Both absolutes are bogus — the bare-name fallback wins.
-        let pick = resolve_command(&["/nope/one", "/nope/two", "fallback-bare-name"]);
-        assert_eq!(pick, "fallback-bare-name");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn resolve_command_returns_last_when_all_absolutes_missing_and_no_bare() {
-        // Edge case: all candidates are absolute and none exist. The helper
-        // returns the last candidate so the caller still passes a non-empty
-        // command to `Command::new` and gets a proper Err back (which the
-        // updated `collect_os_machine_id_material` logs explicitly).
-        let pick = resolve_command(&["/nope/one", "/nope/two"]);
-        assert_eq!(pick, "/nope/two");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn resolve_command_skips_missing_windows_absolutes() {
-        // On Windows the absolute-path discriminator is the drive prefix
-        // `X:\`. cmd.exe is virtually always present in System32.
-        let pick = resolve_command(&[
-            r"C:\nope\does\not\exist.exe",
-            r"C:\Windows\System32\cmd.exe",
-            "fallback-bare-name",
-        ]);
-        assert_eq!(pick, r"C:\Windows\System32\cmd.exe");
-    }
-
-    #[test]
-    fn resolve_command_accepts_bare_name_without_filesystem_check() {
-        // The bare name is returned immediately — even if no such command
-        // exists on PATH, the caller's `Command::new` will surface the
-        // ENOENT (and the updated collector logs that path explicitly).
-        let pick = resolve_command(&["definitely-not-a-real-command-1234567890"]);
-        assert_eq!(pick, "definitely-not-a-real-command-1234567890");
-    }
-
-    /// Audit: vault-key-env-overrides-keyring. The classification
-    /// helper is the single source of truth for which observability
-    /// signal `resolve_master_key` emits. Pinning its truth table
-    /// here keeps the WARN-on-divergence contract testable without
-    /// having to spin up a tracing subscriber and capture log lines.
-    #[test]
-    fn classify_master_key_sources_flags_divergence() {
-        assert_eq!(
-            classify_master_key_sources(Some("env-key"), Some("keyring-key")),
-            MasterKeySource::EnvOverridesDifferentKeyring,
-            "differing env + keyring must surface as the WARN-eligible class"
-        );
-    }
-
-    #[test]
-    fn classify_master_key_sources_handles_agreement() {
-        assert_eq!(
-            classify_master_key_sources(Some("same"), Some("same")),
-            MasterKeySource::EnvMatchesKeyring,
-            "identical env + keyring must NOT WARN — no divergence to flag"
-        );
-    }
-
-    #[test]
-    fn classify_master_key_sources_handles_env_only() {
-        assert_eq!(
-            classify_master_key_sources(Some("env-key"), None),
-            MasterKeySource::EnvOnly
-        );
-    }
-
-    #[test]
-    fn classify_master_key_sources_handles_keyring_only() {
-        assert_eq!(
-            classify_master_key_sources(None, Some("keyring-key")),
-            MasterKeySource::KeyringOnly
-        );
-    }
-
-    #[test]
-    fn classify_master_key_sources_handles_neither() {
-        assert_eq!(
-            classify_master_key_sources(None, None),
-            MasterKeySource::Neither
-        );
     }
 }

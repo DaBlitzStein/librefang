@@ -4,16 +4,8 @@
 //! The last test (`test_six_agent_fleet`) is a live LLM integration test
 //! that only runs when GROQ_API_KEY is set.
 
-// `send_message_full` now nests its body inside `held_agent_locks::scope`
-// (#5125/#5126), deepening the monomorphized future-type layout. Match the
-// crate-root limit (`librefang-kernel/src/lib.rs:3`) and the other heavy
-// integration-test binaries (`audit_retention_test`, `workflow_integration_test`).
-#![recursion_limit = "256"]
-
 use librefang_kernel::triggers::TriggerPattern;
-use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
-use librefang_kernel::SkillsSubsystemApi;
 use librefang_types::agent::{AgentId, AgentManifest};
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::collections::HashMap;
@@ -44,7 +36,7 @@ fn test_config(name: &str) -> KernelConfig {
 /// Install a hand from TOML content into the kernel's hand registry.
 fn install_hand(kernel: &LibreFangKernel, toml_content: &str) {
     kernel
-        .hand_registry_ref()
+        .hands()
         .install_from_content(toml_content, "")
         .unwrap_or_else(|e| panic!("Failed to install hand: {e}"));
 }
@@ -135,7 +127,7 @@ fn test_activate_hand_spawns_agent() {
 
     let agent_id = instance.agent_id().unwrap();
     assert!(
-        kernel.agent_registry_ref().get(agent_id).is_some(),
+        kernel.agent_registry().get(agent_id).is_some(),
         "Agent should exist in registry"
     );
 
@@ -201,7 +193,7 @@ fn test_deterministic_id_stable_across_reactivation() {
 
     // Re-install (since deactivate doesn't remove the definition, but it may
     // already be registered — wrap in allow-already-active)
-    let _ = kernel.hand_registry_ref().install_from_content(HAND_A, "");
+    let _ = kernel.hands().install_from_content(HAND_A, "");
 
     // Second activation gets a new instance_id and therefore a new unique agent ID.
     let inst2 = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
@@ -232,13 +224,13 @@ fn test_deactivate_kills_agent() {
     let agent_id = instance.agent_id().unwrap();
 
     // Agent should exist before deactivation
-    assert!(kernel.agent_registry_ref().get(agent_id).is_some());
+    assert!(kernel.agent_registry().get(agent_id).is_some());
 
     kernel.deactivate_hand(instance.instance_id).unwrap();
 
     // Agent should be gone after deactivation
     assert!(
-        kernel.agent_registry_ref().get(agent_id).is_none(),
+        kernel.agent_registry().get(agent_id).is_none(),
         "Agent should be killed after deactivation"
     );
 
@@ -256,24 +248,18 @@ fn test_pause_and_resume_hand() {
 
     // Pause
     kernel.pause_hand(instance_id).unwrap();
-    let paused = kernel
-        .hand_registry_ref()
-        .get_instance(instance_id)
-        .unwrap();
+    let paused = kernel.hands().get_instance(instance_id).unwrap();
     assert_eq!(paused.status.to_string(), "Paused");
 
     // Agent should still exist (paused, not killed)
     assert!(
-        kernel.agent_registry_ref().get(agent_id).is_some(),
+        kernel.agent_registry().get(agent_id).is_some(),
         "Paused agent should still exist"
     );
 
     // Resume
     kernel.resume_hand(instance_id).unwrap();
-    let resumed = kernel
-        .hand_registry_ref()
-        .get_instance(instance_id)
-        .unwrap();
+    let resumed = kernel.hands().get_instance(instance_id).unwrap();
     assert_eq!(resumed.status.to_string(), "Active");
 
     kernel.shutdown();
@@ -287,7 +273,7 @@ fn test_agent_tagged_with_hand_metadata() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let entry = kernel.agent_registry_ref().get(agent_id).unwrap();
+    let entry = kernel.agent_registry().get(agent_id).unwrap();
     assert!(
         entry.tags.contains(&"hand:test-clip".to_string()),
         "Agent should be tagged with hand ID"
@@ -310,7 +296,7 @@ fn test_hand_tools_applied_to_agent() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let entry = kernel.agent_registry_ref().get(agent_id).unwrap();
+    let entry = kernel.agent_registry().get(agent_id).unwrap();
     // HAND_A defines tools = ["file_read", "file_write", "shell_exec"]
     for tool in &["file_read", "file_write", "shell_exec"] {
         assert!(
@@ -585,11 +571,11 @@ fn test_multiple_hands_coexist() {
 
     // Both agents exist
     assert!(kernel
-        .agent_registry_ref()
+        .agent_registry()
         .get(clip.agent_id().unwrap())
         .is_some());
     assert!(kernel
-        .agent_registry_ref()
+        .agent_registry()
         .get(devops.agent_id().unwrap())
         .is_some());
 
@@ -611,7 +597,7 @@ fn test_deactivate_one_hand_preserves_other() {
 
     // Devops agent should still be alive
     assert!(
-        kernel.agent_registry_ref().get(devops_agent_id).is_some(),
+        kernel.agent_registry().get(devops_agent_id).is_some(),
         "DevOps agent should survive clip deactivation"
     );
 
@@ -626,16 +612,13 @@ fn test_find_instance_by_agent_id() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let found = kernel.hand_registry_ref().find_by_agent(agent_id);
+    let found = kernel.hands().find_by_agent(agent_id);
     assert!(found.is_some(), "Should find instance by agent ID");
     assert_eq!(found.unwrap().instance_id, instance.instance_id);
 
     // Random agent ID should not find any instance
     let random_id = AgentId::from_hand_id("nonexistent");
-    assert!(kernel
-        .hand_registry_ref()
-        .find_by_agent(random_id)
-        .is_none());
+    assert!(kernel.hands().find_by_agent(random_id).is_none());
 
     kernel.shutdown();
 }
@@ -659,7 +642,7 @@ fn test_system_prompt_preserved() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let entry = kernel.agent_registry_ref().get(agent_id).unwrap();
+    let entry = kernel.agent_registry().get(agent_id).unwrap();
     assert!(
         entry.manifest.model.system_prompt.contains("clip agent"),
         "System prompt should contain the hand's prompt"
@@ -677,7 +660,7 @@ fn test_default_provider_resolved_to_kernel_default() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let entry = kernel.agent_registry_ref().get(agent_id).unwrap();
+    let entry = kernel.agent_registry().get(agent_id).unwrap();
     // Activation resolves the default provider sentinel against the effective
     // kernel config. The effective provider may differ from the test config's
     // initial value when the primary driver fails and auto-detect kicks in
@@ -757,10 +740,7 @@ fn test_reactivation_restores_triggers_to_original_roles() {
 
     // Remove the instance entry without killing the agents to force the
     // activation path to clean up and migrate the stale hand agents.
-    kernel
-        .hand_registry_ref()
-        .deactivate(instance.instance_id)
-        .unwrap();
+    kernel.hands().deactivate(instance.instance_id).unwrap();
 
     let reactivated = kernel
         .activate_hand("test-research", HashMap::new())
@@ -928,11 +908,7 @@ memory_write = ["self.*"]
         agent_ids.push(id);
     }
 
-    assert_eq!(
-        kernel.agent_registry_ref().count(),
-        6,
-        "Should have 6 agents"
-    );
+    assert_eq!(kernel.agent_registry().count(), 6, "Should have 6 agents");
     println!(
         "\n  All {} agents spawned. Sending messages...\n",
         agents.len()

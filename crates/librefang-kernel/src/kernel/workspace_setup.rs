@@ -279,25 +279,8 @@ pub(super) fn safe_path_component(input: &str, fallback: &str) -> String {
 }
 
 pub(super) fn has_unsafe_relative_components(path: &Path) -> bool {
-    // `ParentDir` (..) is always unsafe — it can escape the workspaces root
-    // after joining regardless of the rest of the path.
-    //
-    // `Prefix` (Windows drive / UNC prefix like `C:` or `\\?\C:`) is unsafe
-    // ONLY when the path is not already absolute. A fully absolute Windows
-    // path *always* begins with a `Prefix` component (e.g. `C:\Users\foo`
-    // decomposes into `Prefix("C:")`, `RootDir`, `Normal("Users")`, …), so
-    // treating `Prefix` as unsafe unconditionally rejects every well-formed
-    // absolute path on Windows — including ones already validated by
-    // `starts_with(workspaces_root)`. What we actually want to block is
-    // drive-relative inputs like `C:foo` where `is_absolute()` is false yet
-    // the components still carry a `Prefix` that would let the path escape
-    // a `<root>.join(rel)` operation.
-    let is_absolute = path.is_absolute();
-    path.components().any(|c| match c {
-        Component::ParentDir => true,
-        Component::Prefix(_) => !is_absolute,
-        _ => false,
-    })
+    path.components()
+        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
 }
 
 pub(super) fn resolve_workspace_dir(
@@ -315,28 +298,7 @@ pub(super) fn resolve_workspace_dir(
     let root = workspaces_root.to_path_buf();
 
     if let Some(path) = requested {
-        // Reject `..` traversal or Windows drive prefixes anywhere in the
-        // requested path — these can escape `workspaces_root` even after
-        // joining and must never be honoured.
-        if has_unsafe_relative_components(&path) {
-            return Err(KernelError::LibreFang(LibreFangError::Internal(
-                "Invalid workspace path".to_string(),
-            )));
-        }
-        // Refs #4991: an absolute path is acceptable iff it lies inside
-        // `workspaces_root`. Spawn previously rewrote `manifest.workspace`
-        // to the resolved absolute directory and `persist_manifest_to_disk`
-        // round-tripped it back into `agent.toml`. Re-spawning the agent
-        // (recreate after delete, template instantiation, daemon restart)
-        // would then feed that absolute path back through this helper and
-        // hit the blanket `is_absolute()` reject below — hence the
-        // user-visible `Internal error: Invalid workspace path` 500 on
-        // recreate with a previously-used name. Accept absolute paths
-        // under the root; everything outside still fails closed.
-        if path.is_absolute() {
-            if path.starts_with(&root) {
-                return Ok(path);
-            }
+        if path.is_absolute() || has_unsafe_relative_components(&path) {
             return Err(KernelError::LibreFang(LibreFangError::Internal(
                 "Invalid workspace path".to_string(),
             )));
@@ -398,6 +360,9 @@ pub(super) fn generate_identity_files(
     manifest: &AgentManifest,
     resolved_workspaces: &HashMap<String, (PathBuf, WorkspaceMode)>,
 ) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
     let identity_dir = workspace.join(".identity");
     // Ensure `.identity/` exists before any of the per-file opens below;
     // without this, every TOOLS.md write from a fresh agent boot warns
@@ -505,59 +470,49 @@ pub(super) fn generate_identity_files(
     };
 
     for (filename, content) in editable_files {
-        let path = identity_dir.join(filename);
-        create_new_or_cleanup(&path, content.as_bytes(), "identity file");
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(identity_dir.join(filename))
+        {
+            Ok(mut f) => {
+                let _ = f.write_all(content.as_bytes());
+            }
+            Err(_) => {
+                // File already exists — preserve user edits
+            }
+        }
     }
 
-    // TOOLS.md is auto-generated config — always rewrite so named workspace
-    // paths stay current. Write-then-rename atomically: the previous
-    // `truncate(true)` + swallowed `write_all` left an empty or half-written
-    // TOOLS.md on any partial-write failure, so the next agent boot rendered
-    // a broken prompt with no trace (#5137).
-    let tools_path = identity_dir.join("TOOLS.md");
-    if let Err(e) = super::cron_script::atomic_write_toml(&tools_path, &tools_content) {
-        tracing::error!(
-            path = %tools_path.display(),
-            error = %e,
-            "Failed to write TOOLS.md (atomic write); agent prompt may be stale"
-        );
+    // TOOLS.md is auto-generated config — always rewrite so named workspace paths stay current
+    match OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(identity_dir.join("TOOLS.md"))
+    {
+        Ok(mut f) => {
+            let _ = f.write_all(tools_content.as_bytes());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to write TOOLS.md for {}: {e}", workspace.display());
+        }
     }
 
     // Write HEARTBEAT.md for autonomous agents
     if let Some(ref hb) = heartbeat_content {
-        let path = identity_dir.join("HEARTBEAT.md");
-        create_new_or_cleanup(&path, hb.as_bytes(), "HEARTBEAT.md");
-    }
-}
-
-/// Create `path` exclusively (`create_new`) and write `content`. If the file
-/// already exists, do nothing (preserves user edits). If the write fails
-/// mid-stream (ENOSPC / EIO / EDQUOT), log and remove the partial file so
-/// the next spawn isn't permanently blocked by `create_new` refusing to
-/// overwrite a corrupted zero-byte file. See
-/// `docs/issues/workspace-setup-write-all-swallow.md`.
-fn create_new_or_cleanup(path: &Path, content: &[u8], kind: &str) {
-    use std::fs::OpenOptions;
-
-    match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(f) => write_or_cleanup(f, path, content, kind),
-        Err(_) => {
-            // File already exists — preserve user edits.
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(identity_dir.join("HEARTBEAT.md"))
+        {
+            Ok(mut f) => {
+                let _ = f.write_all(hb.as_bytes());
+            }
+            Err(_) => {
+                // File already exists — preserve user edits
+            }
         }
-    }
-}
-
-/// Inner write step, generic over `Write` so it can be unit-tested with a
-/// failing writer. `path` is used for the cleanup `remove_file` call and
-/// the diagnostic log; `writer` is the just-opened handle.
-fn write_or_cleanup<W: std::io::Write>(mut writer: W, path: &Path, content: &[u8], kind: &str) {
-    if let Err(e) = writer.write_all(content) {
-        tracing::warn!(
-            path = %path.display(),
-            error = %e,
-            "Failed to write {kind}; removing partial file so next spawn retries"
-        );
-        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -1045,79 +1000,5 @@ mod mount_tests {
         assert_eq!(resolved.len(), 2, "both decls should resolve");
         assert!(workspaces_root.join("shared/library").is_dir());
         assert!(mount_target.is_dir());
-    }
-}
-
-#[cfg(test)]
-mod identity_write_tests {
-    //! Regression tests for the audit item
-    //! `docs/issues/workspace-setup-write-all-swallow.md`: a swallowed
-    //! `write_all` after `create_new` could leave SOUL.md / HEARTBEAT.md
-    //! empty, and `create_new` then refused to overwrite on the next
-    //! spawn, permanently bricking the agent's identity files.
-
-    use super::*;
-    use std::io::{self, Write};
-
-    /// Writer that fails on the first `write` call — simulates ENOSPC /
-    /// EIO / EDQUOT after a successful `OpenOptions::create_new(...).open`.
-    struct FailingWriter;
-
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("simulated disk full"))
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn write_or_cleanup_removes_partial_file_on_write_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("SOUL.md");
-        // Simulate the post-`create_new` state: the file exists on disk
-        // (zero bytes), and the writer fails mid-stream.
-        std::fs::write(&path, b"").unwrap();
-        assert!(path.exists(), "precondition: empty file exists");
-
-        write_or_cleanup(FailingWriter, &path, b"hello", "SOUL.md");
-
-        assert!(
-            !path.exists(),
-            "partial file must be removed so next spawn's create_new can retry"
-        );
-    }
-
-    #[test]
-    fn write_or_cleanup_keeps_file_on_success() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("SOUL.md");
-        let f = std::fs::File::create(&path).unwrap();
-
-        write_or_cleanup(f, &path, b"hello", "SOUL.md");
-
-        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
-    }
-
-    #[test]
-    fn create_new_or_cleanup_writes_new_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("SOUL.md");
-        create_new_or_cleanup(&path, b"content", "identity file");
-        assert_eq!(std::fs::read(&path).unwrap(), b"content");
-    }
-
-    #[test]
-    fn create_new_or_cleanup_preserves_existing_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("SOUL.md");
-        std::fs::write(&path, b"user edits").unwrap();
-        create_new_or_cleanup(&path, b"overwritten", "identity file");
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            b"user edits",
-            "create_new must refuse to overwrite, preserving user edits"
-        );
     }
 }

@@ -1,5 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
-import { flushSync } from 'react-dom';
+import { useState, useEffect, useMemo } from 'react';
 import { animate } from 'motion/react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -39,17 +38,18 @@ const mdComponents: Components = {
 /// (e.g. the upstream message restarted), the typewriter rewinds to 0.
 export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: number }) {
   const [displayed, setDisplayed] = useState("");
-  const lastIdxRef = useRef(0);
+  // Lazy-load remark-math / rehype-katex / katex CSS only when the source
+  // contains math delimiters. While the dynamic import is in flight the
+  // arrays are empty, so math notation transiently shows as raw text — that's
+  // the same fallback react-markdown would produce without the plugins, and
+  // it avoids paying ~280 KB of KaTeX on every chat (#3381).
   const { remarkPlugins: mathRemark, rehypePlugins: mathRehype } = useMathPlugins(text);
 
   useEffect(() => {
-    const needsReset = lastIdxRef.current > text.length;
-    if (needsReset) {
-      flushSync(() => setDisplayed(""));
-      lastIdxRef.current = 0;
-    }
-
-    const start = lastIdxRef.current;
+    // If upstream restarted the stream (new text shorter than what we already
+    // typed out), rewind. Otherwise resume from where we are.
+    const start = displayed.length > text.length ? 0 : displayed.length;
+    if (start === 0 && displayed !== "") setDisplayed("");
     const remaining = text.length - start;
     if (remaining <= 0) return;
     const controls = animate(start, text.length, {
@@ -57,13 +57,12 @@ export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: numb
       ease: "linear",
       onUpdate: (latest) => {
         const idx = Math.min(Math.floor(latest), text.length);
-        if (idx !== lastIdxRef.current) {
-          lastIdxRef.current = idx;
-          setDisplayed(text.slice(0, idx));
-        }
+        setDisplayed(text.slice(0, idx));
       },
     });
     return () => controls.stop();
+    // displayed intentionally excluded — re-running on every char update
+    // would restart the animation each frame. Only react to source changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, speed]);
 
@@ -72,7 +71,7 @@ export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: numb
     [mathRemark],
   );
 
-  const markdown = useMemo(() => (
+  return useMemo(() => (
     <Markdown
       remarkPlugins={remarkPlugins}
       rehypePlugins={mathRehype}
@@ -81,10 +80,4 @@ export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: numb
       {displayed}
     </Markdown>
   ), [displayed, remarkPlugins, mathRehype]);
-
-  return (
-    <div aria-live="polite" aria-atomic="false">
-      {markdown}
-    </div>
-  );
 }

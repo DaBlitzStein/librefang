@@ -233,10 +233,8 @@ pub(super) fn infer_provider_from_model(model: &str) -> Option<String> {
     }
 }
 
-/// A well-known agent ID used for the legacy shared memory namespace.
-/// This is a fixed UUID. Pre-#5070, all agents read/wrote to this single
-/// namespace. Post-#5070, LLM-facing tools use per-agent scoping; this ID
-/// remains for internal kernel subsystems and backward compatibility.
+/// A well-known agent ID used for shared memory operations across agents.
+/// This is a fixed UUID so all agents read/write to the same namespace.
 /// Parse an agent.toml string and return true if `enabled` is explicitly set
 /// Try to extract an `AgentManifest` from a `hand.toml` file (HandDefinition format).
 ///
@@ -514,44 +512,12 @@ pub fn shared_memory_agent_id() -> AgentId {
 }
 
 /// Namespace a memory key by peer ID for per-user isolation.
-/// When `peer_id` is `Some(pid)` (non-empty, colon-free), returns
-/// `"peer:{pid}:{key}"`. When `None`, returns the key unchanged (global scope).
-///
-/// SECURITY (#5119 / #5120): the `peer:{pid}:{key}` framing is only injective
-/// when `pid` contains no `:`. A peer_id like Slack's `T1:U2` or IRC's
-/// `user:42` would collide with a different `(peer_id, key)` pair under the
-/// historical `strip_prefix("peer:{pid}:")` recovery path in the
-/// `memory_access` handle's `memory_list`, letting one peer see another peer's
-/// keys. We reject colon-bearing peer ids at this boundary.
-/// An empty `peer_id` is likewise rejected: `peer::{key}` is ambiguous with a
-/// `None`-scope key literally named `:{key}` and would split a namespace.
-/// Similarly, an LLM-supplied key starting with `peer:` is rejected so the tool
-/// layer cannot plant rows that appear to come from a different peer namespace.
-pub(super) fn peer_scoped_key(
-    key: &str,
-    peer_id: Option<&str>,
-) -> Result<String, librefang_runtime::kernel_handle::KernelOpError> {
-    use librefang_runtime::kernel_handle::KernelOpError;
-    if key.starts_with("peer:") {
-        return Err(KernelOpError::InvalidInput(format!(
-            "memory key '{key}' must not start with reserved 'peer:' prefix"
-        )));
-    }
+/// When `peer_id` is `Some`, returns `"peer:{peer_id}:{key}"`.
+/// When `None`, returns the key unchanged (global scope).
+pub(super) fn peer_scoped_key(key: &str, peer_id: Option<&str>) -> String {
     match peer_id {
-        Some(pid) => {
-            if pid.is_empty() {
-                return Err(KernelOpError::InvalidInput(
-                    "peer_id must not be empty (ambiguous with global scope)".to_string(),
-                ));
-            }
-            if pid.contains(':') {
-                return Err(KernelOpError::InvalidInput(format!(
-                    "peer_id '{pid}' must not contain ':' (reserved namespace separator)"
-                )));
-            }
-            Ok(format!("peer:{pid}:{key}"))
-        }
-        None => Ok(key.to_string()),
+        Some(pid) => format!("peer:{pid}:{key}"),
+        None => key.to_string(),
     }
 }
 

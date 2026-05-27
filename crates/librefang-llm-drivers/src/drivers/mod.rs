@@ -14,11 +14,9 @@ pub mod fallback;
 pub mod fallback_chain;
 pub mod gemini;
 pub mod gemini_cli;
-pub mod ollama;
 pub mod openai;
 pub mod qwen_code;
 pub mod token_rotation;
-pub(crate) mod trace_headers;
 pub mod vertex_ai;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
@@ -83,27 +81,16 @@ impl DriverCache {
 
     /// Build a deterministic cache key from the driver config fields that
     /// affect which concrete driver instance is produced.
-    ///
-    /// The api_key is hashed (not stored verbatim) so secrets don't sit
-    /// in HashMap keys. Audit: drivercache-defaulthasher — switched
-    /// from `std::collections::hash_map::DefaultHasher` (64-bit, prone
-    /// to birthday collisions at ~2^32 entries, and credential-pool
-    /// deployments now ship hundreds of keys per provider across
-    /// multiple instances) to SHA-256 truncated to 128 bits of hex.
-    /// 128 bits puts the birthday-collision frontier past 2^64
-    /// entries — orders of magnitude beyond any realistic pool size
-    /// — so the cache can no longer hand back a driver instance
-    /// built for a different API key. Truncation is fine here: this
-    /// is collision avoidance over a bounded keyspace, not preimage
-    /// resistance.
     fn cache_key(config: &DriverConfig) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(config.api_key.as_deref().unwrap_or("").as_bytes());
-        let digest = hasher.finalize();
-        // 128 bits = 32 hex chars — compact in log lines but takes
-        // birthday collisions out of the threat model.
-        let key_hash = hex::encode(&digest[..16]);
+        // We include provider, api_key hash (not the raw key), and base_url.
+        // Hashing the api_key avoids storing secrets as map keys while still
+        // distinguishing configs that differ only by credential.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        config.api_key.as_deref().unwrap_or("").hash(&mut hasher);
+        let key_hash = hasher.finish();
 
         format!(
             "{}|{}|{}|{}|{}",
@@ -145,12 +132,6 @@ pub enum ApiFormat {
     AzureOpenAI,
     /// AWS Bedrock Converse API (Bearer token auth via `AWS_BEARER_TOKEN_BEDROCK`).
     Bedrock,
-    /// Native Ollama API (`/api/chat`, NDJSON streaming, first-class
-    /// `think` and `thinking` fields). Distinct from the OpenAI-compat shim
-    /// at `/v1/chat/completions` — covers real Ollama plus the long tail of
-    /// "Ollama-protocol" servers (Lemonade, certain llama.cpp wrappers,
-    /// gpt4all variants) that don't implement the OpenAI shim. See #4810.
-    Ollama,
 }
 
 /// A provider entry in the static registry.
@@ -294,14 +275,10 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         // localhost resolves to both ::1 and 127.0.0.1, IPv6 is tried first,
         // and these local servers usually bind IPv4 only, causing instant
         // connection-refused errors that don't always fall back to IPv4.
-        //
-        // No trailing `/v1`: native Ollama API (`/api/chat`, …) lives off the
-        // host root. Existing user configs that still carry `/v1` are
-        // auto-stripped at driver construction (see ollama::OllamaDriver).
-        base_url: "http://127.0.0.1:11434",
+        base_url: "http://127.0.0.1:11434/v1",
         api_key_env: "OLLAMA_API_KEY",
         key_required: false,
-        api_format: ApiFormat::Ollama,
+        api_format: ApiFormat::OpenAI,
         alt_api_key_env: None,
         hidden: false,
     },
@@ -725,69 +702,54 @@ fn create_driver_from_entry(
     let request_timeout_secs = config.request_timeout_secs;
 
     match entry.api_format {
-        ApiFormat::OpenAI => Ok(Arc::new(
-            openai::OpenAIDriver::with_proxy_and_timeout(
-                api_key,
-                base_url,
-                proxy_url,
-                request_timeout_secs,
-            )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
+        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::with_proxy_and_timeout(
+            api_key,
+            base_url,
+            proxy_url,
+            request_timeout_secs,
+        ))),
         ApiFormat::Anthropic => Ok(Arc::new(
             anthropic::AnthropicDriver::with_proxy_and_timeout(
                 api_key,
                 base_url,
                 proxy_url,
                 request_timeout_secs,
-            )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+            ),
         )),
-        ApiFormat::Gemini => Ok(Arc::new(
-            gemini::GeminiDriver::with_proxy_and_timeout(
-                api_key,
-                base_url,
-                proxy_url,
-                request_timeout_secs,
-            )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
+        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::with_proxy_and_timeout(
+            api_key,
+            base_url,
+            proxy_url,
+            request_timeout_secs,
+        ))),
         ApiFormat::ClaudeCode => {
             let mut d = claude_code::ClaudeCodeDriver::with_timeout(
                 config.base_url.clone(),
                 config.skip_permissions,
                 config.message_timeout_secs,
-            )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers);
+            );
             if let Some(bridge) = config.mcp_bridge.clone() {
                 d = d.with_mcp_bridge(bridge);
             }
             Ok(Arc::new(d))
         }
-        ApiFormat::QwenCode => Ok(Arc::new(
-            qwen_code::QwenCodeDriver::new(config.base_url.clone(), config.skip_permissions)
-                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
-        ApiFormat::GeminiCli => Ok(Arc::new(
-            gemini_cli::GeminiCliDriver::new(config.base_url.clone(), config.skip_permissions)
-                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
-        ApiFormat::CodexCli => Ok(Arc::new(
-            codex_cli::CodexCliDriver::new(config.base_url.clone(), config.skip_permissions)
-                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
-        ApiFormat::ChatGpt => Ok(Arc::new(
-            chatgpt::ChatGptDriver::with_proxy(api_key, base_url, proxy_url)
-                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
-        ApiFormat::Copilot => Ok(Arc::new(
-            copilot::CopilotDriver::new(api_key, base_url)
-                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
-        ApiFormat::VertexAI => Ok(Arc::new(
-            vertex_ai::VertexAiDriver::new(config)?
-                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
+        ApiFormat::QwenCode => Ok(Arc::new(qwen_code::QwenCodeDriver::new(
+            config.base_url.clone(),
+            config.skip_permissions,
+        ))),
+        ApiFormat::GeminiCli => Ok(Arc::new(gemini_cli::GeminiCliDriver::new(
+            config.base_url.clone(),
+            config.skip_permissions,
+        ))),
+        ApiFormat::CodexCli => Ok(Arc::new(codex_cli::CodexCliDriver::new(
+            config.base_url.clone(),
+            config.skip_permissions,
+        ))),
+        ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::with_proxy(
+            api_key, base_url, proxy_url,
+        ))),
+        ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
+        ApiFormat::VertexAI => Ok(Arc::new(vertex_ai::VertexAiDriver::new(config)?)),
         ApiFormat::AzureOpenAI => {
             let azure = &config.azure_openai;
             let endpoint = azure
@@ -812,16 +774,13 @@ fn create_driver_from_entry(
                 .clone()
                 .or_else(|| std::env::var("AZURE_OPENAI_API_VERSION").ok())
                 .unwrap_or_else(|| "2024-02-01".to_string());
-            Ok(Arc::new(
-                openai::OpenAIDriver::new_azure_with_proxy(
-                    api_key,
-                    endpoint,
-                    deployment,
-                    api_version,
-                    proxy_url,
-                )
-                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-            ))
+            Ok(Arc::new(openai::OpenAIDriver::new_azure_with_proxy(
+                api_key,
+                endpoint,
+                deployment,
+                api_version,
+                proxy_url,
+            )))
         }
         ApiFormat::Bedrock => {
             // Region falls back to AWS_REGION → AWS_DEFAULT_REGION → us-east-1
@@ -829,20 +788,11 @@ fn create_driver_from_entry(
             let region = std::env::var("AWS_REGION")
                 .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
                 .ok();
-            Ok(Arc::new(
-                bedrock::BedrockDriver::new_with_credentials(Some(api_key), region)?
-                    .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-            ))
+            Ok(Arc::new(bedrock::BedrockDriver::new_with_credentials(
+                Some(api_key),
+                region,
+            )?))
         }
-        ApiFormat::Ollama => Ok(Arc::new(
-            ollama::OllamaDriver::with_proxy_and_timeout(
-                api_key,
-                base_url,
-                proxy_url,
-                request_timeout_secs,
-            )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
     }
 }
 
@@ -868,15 +818,12 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
             std::env::var(&env_var).unwrap_or_default()
         });
-        return Ok(Arc::new(
-            openai::OpenAIDriver::with_proxy_and_timeout(
-                api_key,
-                base_url.clone(),
-                config.proxy_url.as_deref(),
-                config.request_timeout_secs,
-            )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        ));
+        return Ok(Arc::new(openai::OpenAIDriver::with_proxy_and_timeout(
+            api_key,
+            base_url.clone(),
+            config.proxy_url.as_deref(),
+            config.request_timeout_secs,
+        )));
     }
 
     // No base_url either — last resort: check if the user set an API key env var
@@ -1120,88 +1067,6 @@ pub fn resolve_provider_api_key(provider: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Audit: drivercache-defaulthasher. The cache key embeds a
-    /// hashed api_key so secrets don't sit in HashMap keys, but the
-    /// hash MUST be wide enough that birthday collisions are
-    /// infeasible. These tests pin the new SHA-256-truncated-to-128-
-    /// bit shape so a future refactor that swaps back to
-    /// DefaultHasher (or any 64-bit digest) gets caught by CI.
-    #[test]
-    fn cache_key_api_key_segment_is_128_bit_hex_not_64_bit_decimal() {
-        let cfg = DriverConfig {
-            provider: "openai".to_string(),
-            api_key: Some("sk-test".to_string()),
-            ..DriverConfig::default()
-        };
-        let key = DriverCache::cache_key(&cfg);
-        // Shape: "openai|<hex>|||0"
-        let parts: Vec<&str> = key.split('|').collect();
-        assert_eq!(parts.len(), 5, "cache key shape: {key}");
-        let hash_segment = parts[1];
-        assert_eq!(
-            hash_segment.len(),
-            32,
-            "api_key hash segment must be 32 hex chars (128 bits) — \
-             {hash_segment:?} of len {}",
-            hash_segment.len()
-        );
-        assert!(
-            hash_segment.chars().all(|c| c.is_ascii_hexdigit()),
-            "hash segment must be lowercase hex, got {hash_segment:?}"
-        );
-    }
-
-    #[test]
-    fn cache_key_distinguishes_distinct_api_keys() {
-        // Two configs that differ ONLY by api_key must produce
-        // distinct cache keys. The DefaultHasher path could in
-        // theory survive this trivial test too, but it's a sanity
-        // check that the swap didn't accidentally produce a
-        // constant.
-        let a = DriverConfig {
-            provider: "openai".to_string(),
-            api_key: Some("sk-key-a".to_string()),
-            ..DriverConfig::default()
-        };
-        let b = DriverConfig {
-            api_key: Some("sk-key-b".to_string()),
-            ..a.clone()
-        };
-        assert_ne!(DriverCache::cache_key(&a), DriverCache::cache_key(&b));
-    }
-
-    #[test]
-    fn cache_key_is_deterministic_across_calls() {
-        // The SHA-256 path must be deterministic — same input
-        // produces the same key on every call. DefaultHasher would
-        // (per HashMap rules) produce process-local but
-        // deterministic-within-process digests, so this test
-        // overlaps with the previous shape, but it also pins
-        // process-local determinism in case someone swaps in a
-        // randomised hasher later.
-        let cfg = DriverConfig {
-            provider: "openai".to_string(),
-            api_key: Some("sk-test".to_string()),
-            ..DriverConfig::default()
-        };
-        let k1 = DriverCache::cache_key(&cfg);
-        let k2 = DriverCache::cache_key(&cfg);
-        assert_eq!(k1, k2);
-    }
-
-    #[test]
-    fn cache_key_handles_missing_api_key_without_panic() {
-        // Some providers (ollama, local) don't require an api_key.
-        // The empty-key hash path must produce a valid key.
-        let cfg = DriverConfig {
-            provider: "ollama".to_string(),
-            api_key: None,
-            ..DriverConfig::default()
-        };
-        let key = DriverCache::cache_key(&cfg);
-        assert!(key.starts_with("ollama|"));
-    }
-
     #[test]
     fn test_provider_defaults_groq() {
         let d = provider_defaults("groq").unwrap();
@@ -1241,7 +1106,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1260,7 +1124,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1448,7 +1311,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1475,7 +1337,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1502,7 +1363,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1529,7 +1389,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let result = create_driver(&config);
         assert!(result.is_err());
@@ -1565,7 +1424,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1594,7 +1452,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
 
         let driver = create_driver(&config);
@@ -1635,7 +1492,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1657,7 +1513,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         // Clear any env var that might interfere
         std::env::remove_var("AZURE_OPENAI_ENDPOINT");
@@ -1688,7 +1543,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let d1 = cache.get_or_create(&config).unwrap();
         let d2 = cache.get_or_create(&config).unwrap();
@@ -1710,7 +1564,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let config_b = DriverConfig {
             provider: "ollama".to_string(),
@@ -1723,7 +1576,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         let d_a = cache.get_or_create(&config_a).unwrap();
         let d_b = cache.get_or_create(&config_b).unwrap();
@@ -1748,7 +1600,6 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: true,
         };
         cache.get_or_create(&config).unwrap();
         assert_eq!(cache.len(), 1);

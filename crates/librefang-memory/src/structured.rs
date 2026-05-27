@@ -3,61 +3,42 @@
 use chrono::Utc;
 use librefang_types::agent::{AgentEntry, AgentId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
-use tracing::error;
-
-/// Hard ceiling on a single serialized KV value, enforced inside
-/// [`StructuredStore::set`] / [`StructuredStore::modify`] /
-/// [`StructuredStore::set_returning_existed`] so no call path can land an
-/// unbounded blob (#5138). 256 KiB comfortably holds the largest legitimate
-/// structured payloads (goal arrays, peer KV) while keeping worst-case row
-/// size, WAL replay, and cold-load RAM bounded. An over-limit write is
-/// rejected with [`LibreFangError::InvalidInput`] *before* the INSERT runs,
-/// so a coerced agent cannot wedge the substrate with a 100 MB array.
-pub const MAX_KV_VALUE_BYTES: usize = 256 * 1024;
-
-/// Reject a serialized value that exceeds [`MAX_KV_VALUE_BYTES`].
-fn check_value_size(blob: &[u8], key: &str) -> LibreFangResult<()> {
-    if blob.len() > MAX_KV_VALUE_BYTES {
-        return Err(LibreFangError::InvalidInput(format!(
-            "memory value for key '{key}' is {} bytes, exceeds the {MAX_KV_VALUE_BYTES}-byte limit",
-            blob.len()
-        )));
-    }
-    Ok(())
-}
+use rusqlite::Connection;
+use std::sync::{Arc, Mutex};
 
 /// Structured store backed by SQLite for key-value operations and agent storage.
 #[derive(Clone)]
 pub struct StructuredStore {
-    pool: Pool<SqliteConnectionManager>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl StructuredStore {
-    /// Create a new structured store wrapping the given connection pool.
-    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { pool }
+    /// Create a new structured store wrapping the given connection.
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
     }
 
     /// Get a value from the key-value store.
     pub fn get(&self, agent_id: AgentId, key: &str) -> LibreFangResult<Option<serde_json::Value>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT value FROM kv_store WHERE agent_id = ?1 AND key = ?2")
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let result = stmt.query_row(rusqlite::params![agent_id.0.to_string(), key], |row| {
             let blob: Vec<u8> = row.get(0)?;
             Ok(blob)
         });
         match result {
             Ok(blob) => {
-                let value: serde_json::Value =
-                    serde_json::from_slice(&blob).map_err(LibreFangError::serialization)?;
+                let value: serde_json::Value = serde_json::from_slice(&blob)
+                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 Ok(Some(value))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::memory(e)),
+            Err(e) => Err(LibreFangError::Memory(e.to_string())),
         }
     }
 
@@ -68,131 +49,33 @@ impl StructuredStore {
         key: &str,
         value: serde_json::Value,
     ) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let blob = serde_json::to_vec(&value).map_err(LibreFangError::serialization)?;
-        check_value_size(&blob, key)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let blob =
+            serde_json::to_vec(&value).map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)
              ON CONFLICT(agent_id, key) DO UPDATE SET value = ?3, version = version + 1, updated_at = ?4",
             rusqlite::params![agent_id.0.to_string(), key, blob, now],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
-    }
-
-    /// Atomic read-modify-write of a single KV key under a `BEGIN IMMEDIATE`
-    /// write transaction (#5138).
-    ///
-    /// Loads the current value (or `None`), hands it to `f`, and persists the
-    /// returned value — all inside one SQLite write lock, so two concurrent
-    /// `modify` calls on the same key serialize instead of clobbering each
-    /// other (the lost-update / last-writer-wins race that the goals routes
-    /// and `goal_update` previously had with a plain `get` → mutate → `set`).
-    /// `BEGIN IMMEDIATE` escalates to a write lock immediately, mirroring the
-    /// proven `SessionStore::append_canonical` shape for the identical
-    /// single-shared-blob pattern.
-    ///
-    /// `f` may return an error to abort the transaction without writing; the
-    /// error is propagated and the row is left unchanged. `f`'s `Ok` payload
-    /// is also returned to the caller so handlers can echo the mutated entity
-    /// without a second read.
-    pub fn modify<T>(
-        &self,
-        agent_id: AgentId,
-        key: &str,
-        f: impl FnOnce(Option<serde_json::Value>) -> LibreFangResult<(serde_json::Value, T)>,
-    ) -> LibreFangResult<T> {
-        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(LibreFangError::memory)?;
-
-        let current: Option<serde_json::Value> = {
-            let mut stmt = tx
-                .prepare("SELECT value FROM kv_store WHERE agent_id = ?1 AND key = ?2")
-                .map_err(LibreFangError::memory)?;
-            let row = stmt.query_row(rusqlite::params![agent_id.0.to_string(), key], |row| {
-                let blob: Vec<u8> = row.get(0)?;
-                Ok(blob)
-            });
-            match row {
-                Ok(blob) => {
-                    Some(serde_json::from_slice(&blob).map_err(LibreFangError::serialization)?)
-                }
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => return Err(LibreFangError::memory(e)),
-            }
-        };
-
-        let (new_value, out) = f(current)?;
-        let blob = serde_json::to_vec(&new_value).map_err(LibreFangError::serialization)?;
-        check_value_size(&blob, key)?;
-        let now = Utc::now().to_rfc3339();
-        tx.execute(
-            "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)
-             ON CONFLICT(agent_id, key) DO UPDATE SET value = ?3, version = version + 1, updated_at = ?4",
-            rusqlite::params![agent_id.0.to_string(), key, blob, now],
-        )
-        .map_err(LibreFangError::memory)?;
-        tx.commit().map_err(LibreFangError::memory)?;
-        Ok(out)
-    }
-
-    /// Set a value and report whether the key already existed, atomically
-    /// (#5138).
-    ///
-    /// The existence check and the write run inside one `BEGIN IMMEDIATE`
-    /// transaction, so the returned `bool` reflects the state the write
-    /// actually replaced — not a pre-read that could race with a concurrent
-    /// first-time write. `memory_store` uses this to publish
-    /// `MemoryUpdate{Created|Updated}` based on the committed transition
-    /// rather than a stale `had_old` snapshot.
-    ///
-    /// Returns `true` if a prior value was overwritten, `false` if this
-    /// created the key.
-    pub fn set_returning_existed(
-        &self,
-        agent_id: AgentId,
-        key: &str,
-        value: serde_json::Value,
-    ) -> LibreFangResult<bool> {
-        let blob = serde_json::to_vec(&value).map_err(LibreFangError::serialization)?;
-        check_value_size(&blob, key)?;
-        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(LibreFangError::memory)?;
-        let existed: bool = tx
-            .query_row(
-                "SELECT 1 FROM kv_store WHERE agent_id = ?1 AND key = ?2",
-                rusqlite::params![agent_id.0.to_string(), key],
-                |_| Ok(()),
-            )
-            .map(|_| true)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(false),
-                other => Err(LibreFangError::memory(other)),
-            })?;
-        let now = Utc::now().to_rfc3339();
-        tx.execute(
-            "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)
-             ON CONFLICT(agent_id, key) DO UPDATE SET value = ?3, version = version + 1, updated_at = ?4",
-            rusqlite::params![agent_id.0.to_string(), key, blob, now],
-        )
-        .map_err(LibreFangError::memory)?;
-        tx.commit().map_err(LibreFangError::memory)?;
-        Ok(existed)
     }
 
     /// Delete a value from the key-value store.
     pub fn delete(&self, agent_id: AgentId, key: &str) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         conn.execute(
             "DELETE FROM kv_store WHERE agent_id = ?1 AND key = ?2",
             rusqlite::params![agent_id.0.to_string(), key],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -244,41 +127,30 @@ impl StructuredStore {
 
     /// List all key-value pairs for an agent.
     pub fn list_kv(&self, agent_id: AgentId) -> LibreFangResult<Vec<(String, serde_json::Value)>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT key, value FROM kv_store WHERE agent_id = ?1 ORDER BY key")
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
                 let key: String = row.get(0)?;
                 let blob: Vec<u8> = row.get(1)?;
                 Ok((key, blob))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut pairs = Vec::new();
         for row in rows {
-            let (key, blob) = row.map_err(LibreFangError::memory)?;
-            // Audit: json-text-silent-parse-fallback. The previous code
-            // fell back to a `Value::String` reconstructed from the raw
-            // bytes when JSON decode failed, laundering corrupted blobs
-            // into the agent's LLM context as plausible-looking strings.
-            // Skip the row with a loud log so the operator can audit /
-            // repair it; under no circumstance fabricate a value here.
-            let value: serde_json::Value = match serde_json::from_slice(&blob) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                        agent_id = %agent_id.0,
-                        key = %key,
-                        table = "kv_store",
-                        column = "value",
-                        error = %e,
-                        "corrupt JSON blob in kv_store; skipping row in list_kv"
-                    );
-                    continue;
-                }
-            };
+            let (key, blob) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let value: serde_json::Value = serde_json::from_slice(&blob).unwrap_or_else(|_| {
+                // Fallback: try as UTF-8 string
+                String::from_utf8(blob)
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null)
+            });
             pairs.push((key, value));
         }
         Ok(pairs)
@@ -286,20 +158,23 @@ impl StructuredStore {
 
     /// List only keys for an agent (without values).
     pub fn list_keys(&self, agent_id: AgentId) -> LibreFangResult<Vec<String>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT key FROM kv_store WHERE agent_id = ?1 ORDER BY key")
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
                 let key: String = row.get(0)?;
                 Ok(key)
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut keys = Vec::new();
         for row in rows {
-            let key = row.map_err(LibreFangError::memory)?;
+            let key = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             keys.push(key);
         }
         Ok(keys)
@@ -307,28 +182,36 @@ impl StructuredStore {
 
     /// Save an agent entry to the database.
     pub fn save_agent(&self, entry: &AgentEntry) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         // Use named-field encoding so new fields with #[serde(default)] are
         // handled gracefully when the struct evolves between versions.
-        let manifest_blob =
-            rmp_serde::to_vec_named(&entry.manifest).map_err(LibreFangError::serialization)?;
-        let state_str =
-            serde_json::to_string(&entry.state).map_err(LibreFangError::serialization)?;
+        let manifest_blob = rmp_serde::to_vec_named(&entry.manifest)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let state_str = serde_json::to_string(&entry.state)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
 
-        // NOTE(#5138): the `session_id` / `identity` / `source_toml_path`
-        // columns are NO LONGER added here. They were previously fired as
-        // three `let _ = ALTER TABLE agents ADD COLUMN ...` on every
-        // `save_agent`, swallowing the "duplicate column" error on the
-        // common path. That bypassed the migration ladder entirely — the
-        // columns never appeared in any `migrate_vN`, so `user_version` and
-        // the `migrations` audit trail never reflected them, and deleting an
-        // `ALTER` in a refactor would silently break fresh installs that
-        // never had the column. They are now declared in `migrate_v40`,
-        // which runs once at substrate boot inside the laddered transaction.
+        // Add session_id column if it doesn't exist yet (migration compat)
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN session_id TEXT DEFAULT ''",
+            [],
+        );
+        // Add identity column (migration compat)
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN identity TEXT DEFAULT '{}'",
+            [],
+        );
+        // Add source_toml_path column (migration compat)
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN source_toml_path TEXT DEFAULT NULL",
+            [],
+        );
 
-        let identity_json =
-            serde_json::to_string(&entry.identity).map_err(LibreFangError::serialization)?;
+        let identity_json = serde_json::to_string(&entry.identity)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let source_toml_path = entry
             .source_toml_path
             .as_ref()
@@ -350,13 +233,16 @@ impl StructuredStore {
                 source_toml_path,
             ],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
     /// Load an agent entry from the database.
     pub fn load_agent(&self, agent_id: AgentId) -> LibreFangResult<Option<AgentEntry>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut stmt = conn
             .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents WHERE id = ?1")
@@ -370,7 +256,7 @@ impl StructuredStore {
                         conn.prepare("SELECT id, name, manifest, state, created_at, updated_at FROM agents WHERE id = ?1")
                     })
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let col_count = stmt.column_count();
         let result = stmt.query_row(rusqlite::params![agent_id.0.to_string()], |row| {
@@ -415,7 +301,8 @@ impl StructuredStore {
                 source_toml_path,
             )) => {
                 let mut manifest: librefang_types::agent::AgentManifest =
-                    rmp_serde::from_slice(&manifest_blob).map_err(LibreFangError::serialization)?;
+                    rmp_serde::from_slice(&manifest_blob)
+                        .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 // Migrate legacy hand agents: if manifest.is_hand is not set but
                 // the agent looks like a hand (tags or name convention), fix it now.
                 if !manifest.is_hand {
@@ -428,8 +315,8 @@ impl StructuredStore {
                         manifest.is_hand = true;
                     }
                 }
-                let state =
-                    serde_json::from_str(&state_str).map_err(LibreFangError::serialization)?;
+                let state = serde_json::from_str(&state_str)
+                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
@@ -462,7 +349,7 @@ impl StructuredStore {
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::memory(e)),
+            Err(e) => Err(LibreFangError::Memory(e.to_string())),
         }
     }
 
@@ -484,13 +371,17 @@ impl StructuredStore {
     /// dependent experiment_variants and experiment_metrics rows), and
     /// events via source_agent.
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let id = agent_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         execute_structured_agent_deletes(&tx, &id)?;
-        tx.commit().map_err(LibreFangError::memory)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -501,7 +392,10 @@ impl StructuredStore {
     /// automatically re-saved to upgrade the stored blob. Duplicate agent names
     /// are deduplicated (first occurrence wins).
     pub fn load_all_agents(&self) -> LibreFangResult<Vec<AgentEntry>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         // Try with identity+session_id columns first, fall back gracefully
         let mut stmt = conn
@@ -517,7 +411,7 @@ impl StructuredStore {
             .or_else(|_| {
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at FROM agents")
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let col_count = stmt.column_count();
         let rows = stmt
@@ -553,7 +447,7 @@ impl StructuredStore {
                     source_toml_path,
                 ))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut agents = Vec::new();
         let mut seen_names = std::collections::HashSet::new();
@@ -622,8 +516,8 @@ impl StructuredStore {
 
             // Auto-repair: re-serialize with current schema and queue for update.
             // This upgrades the stored blob so future boots don't hit lenient paths.
-            let new_blob =
-                rmp_serde::to_vec_named(&manifest).map_err(LibreFangError::serialization)?;
+            let new_blob = rmp_serde::to_vec_named(&manifest)
+                .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
             if new_blob != manifest_blob {
                 tracing::debug!(
                     agent = %name, id = %id_str,
@@ -688,10 +582,13 @@ impl StructuredStore {
 
     /// List all agents in the database.
     pub fn list_agents(&self) -> LibreFangResult<Vec<(String, String, String)>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, name, state FROM agents")
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -700,10 +597,10 @@ impl StructuredStore {
                     row.get::<_, String>(2)?,
                 ))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let mut agents = Vec::new();
         for row in rows {
-            agents.push(row.map_err(LibreFangError::memory)?);
+            agents.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
         }
         Ok(agents)
     }
@@ -739,18 +636,10 @@ pub(crate) fn execute_structured_agent_deletes(
         "DELETE FROM entities WHERE agent_id = ?1",
         "DELETE FROM relations WHERE agent_id = ?1",
         "DELETE FROM events WHERE source_agent = ?1",
-        // pending_approvals (v26 — #3611) was missing from this
-        // cascade; the audit found that on `remove_agent` the table
-        // would retain rows for the deleted agent and a stale
-        // approval could fail-open on restart recovery. Authored
-        // approvals are scoped by `agent_id`, so the purge is a
-        // direct WHERE filter. (audit:
-        // agent-cascade-delete-missing-tables)
-        "DELETE FROM pending_approvals WHERE agent_id = ?1",
         "DELETE FROM agents WHERE id = ?1",
     ] {
         tx.execute(stmt, rusqlite::params![agent_id])
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
     }
     Ok(())
 }
@@ -761,137 +650,9 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn setup() -> StructuredStore {
-        let pool = Pool::builder()
-            .max_size(1)
-            .build(SqliteConnectionManager::memory())
-            .unwrap();
-        run_migrations(&pool.get().unwrap()).unwrap();
-        StructuredStore::new(pool)
-    }
-
-    /// File-backed store with a multi-connection pool so two threads can
-    /// genuinely contend for the SQLite write lock. An in-memory
-    /// `:memory:` DB with `max_size(1)` cannot exercise the race the
-    /// transactional `modify` fixes.
-    fn setup_file_backed(path: &std::path::Path) -> StructuredStore {
-        let pool = Pool::builder()
-            .max_size(8)
-            .build(SqliteConnectionManager::file(path))
-            .unwrap();
-        {
-            let conn = pool.get().unwrap();
-            conn.busy_timeout(std::time::Duration::from_secs(10))
-                .unwrap();
-            run_migrations(&conn).unwrap();
-        }
-        StructuredStore::new(pool)
-    }
-
-    #[test]
-    fn modify_concurrent_appends_lose_no_writes_5138() {
-        // Regression for #5138: a plain get -> mutate -> set on a single
-        // shared key drops one of two concurrent appends (last writer
-        // wins). `modify` runs the RMW under BEGIN IMMEDIATE so both
-        // appends must survive.
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("kv.db");
-        let store = setup_file_backed(&db);
-        let agent = AgentId::new();
-        store.set(agent, "arr", serde_json::json!([])).unwrap();
-
-        let n = 24usize;
-        std::thread::scope(|s| {
-            for i in 0..n {
-                let store = store.clone();
-                s.spawn(move || {
-                    store
-                        .modify(agent, "arr", |cur| {
-                            let mut v = match cur {
-                                Some(serde_json::Value::Array(a)) => a,
-                                _ => Vec::new(),
-                            };
-                            v.push(serde_json::json!(i));
-                            Ok((serde_json::Value::Array(v), ()))
-                        })
-                        .unwrap();
-                });
-            }
-        });
-
-        let final_arr = match store.get(agent, "arr").unwrap() {
-            Some(serde_json::Value::Array(a)) => a,
-            other => panic!("expected array, got {other:?}"),
-        };
-        assert_eq!(
-            final_arr.len(),
-            n,
-            "every concurrent append must persist; lost-update race not fixed"
-        );
-        let mut seen: Vec<u64> = final_arr.iter().map(|v| v.as_u64().unwrap()).collect();
-        seen.sort_unstable();
-        let expected: Vec<u64> = (0..n as u64).collect();
-        assert_eq!(seen, expected, "no individual write may be clobbered");
-    }
-
-    #[test]
-    fn modify_error_aborts_without_writing_5138() {
-        let store = setup();
-        let agent = AgentId::new();
-        store.set(agent, "k", serde_json::json!("orig")).unwrap();
-        let err = store.modify(agent, "k", |_cur| {
-            Err::<(serde_json::Value, ()), _>(LibreFangError::InvalidInput("nope".into()))
-        });
-        assert!(matches!(err, Err(LibreFangError::InvalidInput(_))));
-        // Row unchanged — the aborted tx must not have written.
-        assert_eq!(
-            store.get(agent, "k").unwrap(),
-            Some(serde_json::json!("orig"))
-        );
-    }
-
-    #[test]
-    fn set_returning_existed_reports_atomic_transition_5138() {
-        let store = setup();
-        let agent = AgentId::new();
-        // First write: key did not exist -> false (Created).
-        assert!(!store
-            .set_returning_existed(agent, "k", serde_json::json!(1))
-            .unwrap());
-        // Second write: key existed -> true (Updated).
-        assert!(store
-            .set_returning_existed(agent, "k", serde_json::json!(2))
-            .unwrap());
-        assert_eq!(store.get(agent, "k").unwrap(), Some(serde_json::json!(2)));
-    }
-
-    #[test]
-    fn kv_value_size_cap_rejects_oversized_blob_5138() {
-        let store = setup();
-        let agent = AgentId::new();
-        // Build a value whose serialized form exceeds MAX_KV_VALUE_BYTES.
-        let big = "x".repeat(MAX_KV_VALUE_BYTES + 1);
-        let v = serde_json::json!(big);
-        let err = store.set(agent, "k", v.clone());
-        assert!(
-            matches!(err, Err(LibreFangError::InvalidInput(_))),
-            "oversized set must be rejected, got {err:?}"
-        );
-        // The over-limit write must not have landed a row.
-        assert_eq!(store.get(agent, "k").unwrap(), None);
-        // Same guard via modify and set_returning_existed.
-        assert!(matches!(
-            store.modify(agent, "k", |_| Ok((v.clone(), ()))),
-            Err(LibreFangError::InvalidInput(_))
-        ));
-        assert!(matches!(
-            store.set_returning_existed(agent, "k", v),
-            Err(LibreFangError::InvalidInput(_))
-        ));
-        // A value at exactly the limit is accepted.
-        let ok_blob_str = "y".repeat(MAX_KV_VALUE_BYTES - 16);
-        store
-            .set(agent, "k2", serde_json::json!(ok_blob_str))
-            .expect("value within the cap must be accepted");
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        StructuredStore::new(Arc::new(Mutex::new(conn)))
     }
 
     #[test]
@@ -1048,324 +809,6 @@ mod tests {
         assert_eq!(
             loaded.source_toml_path,
             Some(std::path::PathBuf::from("/tmp/test-agent/agent.toml"))
-        );
-    }
-
-    /// Regression guard for the audit item
-    /// `agent-cascade-delete-missing-tables`: every table with an
-    /// `agent_id` column MUST be purged when an agent is deleted.
-    /// Walks `sqlite_master` for every user table, then `PRAGMA
-    /// table_info` for each, to discover the agent-keyed set; seeds
-    /// one row per table for the target agent and one row per table
-    /// for an unrelated control agent; runs the cascade; asserts the
-    /// target's rows are gone but the control's survive. A new
-    /// agent-keyed table added in a future migration without a
-    /// corresponding `DELETE FROM <table> WHERE agent_id = ?1` line
-    /// in `execute_structured_agent_deletes` (or the sibling
-    /// `execute_session_agent_deletes` for `sessions`) will cause
-    /// this test to fail at the assertion below with the offending
-    /// table name printed, blocking the regression at CI time.
-    ///
-    /// Excluded tables (audit doc listed but they are not in fact
-    /// agent-scoped at this layer):
-    ///
-    /// - `paired_devices` — no `agent_id` column (devices are
-    ///   operator-scoped, not per-agent); they continue to
-    ///   authenticate against the operator's API key, not any
-    ///   particular agent. Bearer-token-replay-against-deleted-agent
-    ///   is therefore not the right framing — that path is governed
-    ///   by paired-device lifecycle, not agent lifecycle.
-    /// - `idempotency_keys` — no `agent_id` column; keys are scoped
-    ///   by request `Idempotency-Key` value, not by agent.
-    /// - `workflow_runs` — `workflow_id` column exists, but there
-    ///   is no `workflows.agent_id` mapping at the
-    ///   `librefang-memory` layer (workflow definitions live in
-    ///   `librefang-kernel` + YAML on disk). Per-agent scoping must
-    ///   be done at the kernel layer if it is ever needed; out of
-    ///   scope for this fix.
-    #[test]
-    fn agent_cascade_purges_every_agent_keyed_table() {
-        // Use the substrate's own remove path so we exercise the
-        // exact transaction that runs in production (it invokes
-        // both `execute_session_agent_deletes` and
-        // `execute_structured_agent_deletes` in one tx).
-        let pool = Pool::builder()
-            .max_size(2)
-            .build(SqliteConnectionManager::memory())
-            .unwrap();
-        run_migrations(&pool.get().unwrap()).unwrap();
-
-        let conn = pool.get().unwrap();
-
-        // Discover every user table.
-        let user_tables: Vec<String> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT name FROM sqlite_master \
-                     WHERE type='table' \
-                       AND name NOT LIKE 'sqlite_%' \
-                       AND name NOT LIKE '%_fts%' \
-                       AND name NOT IN ('migrations')",
-                )
-                .unwrap();
-            stmt.query_map([], |row| row.get::<_, String>(0))
-                .unwrap()
-                .map(|r| r.unwrap())
-                .collect()
-        };
-        assert!(
-            user_tables.len() > 10,
-            "schema discovery sanity: expected many tables, found {}",
-            user_tables.len()
-        );
-
-        // Discover the agent-keyed subset. A column named `agent_id`
-        // is the canonical signal; `source_agent` is the historical
-        // alias in `events` (already purged by the cascade).
-        let mut agent_keyed: Vec<String> = Vec::new();
-        for table in &user_tables {
-            let mut stmt = conn
-                .prepare(&format!("PRAGMA table_info({table})"))
-                .unwrap();
-            let cols: Vec<String> = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .unwrap()
-                .map(|r| r.unwrap())
-                .collect();
-            if cols.iter().any(|c| c == "agent_id" || c == "source_agent") {
-                agent_keyed.push(table.clone());
-            }
-        }
-        // Sanity: we know at least these are agent-keyed. If the
-        // schema regresses below this floor the test is wrong, not
-        // production.
-        for must_have in ["audit_entries", "kv_store", "memories", "pending_approvals"] {
-            assert!(
-                agent_keyed.iter().any(|t| t == must_have),
-                "schema sanity: expected {must_have} in agent-keyed set; got {agent_keyed:?}",
-            );
-        }
-
-        // Tables that carry an agent-scoping column but are deliberately
-        // NOT purged by the agent cascade. Keep this list tiny and
-        // documented — any discovered agent-keyed table that is neither
-        // cascaded nor listed here trips the purge assertion below.
-        //
-        // Note: `group_roster` (v28) is intentionally absent here. It has
-        // NO `agent_id` / `source_agent` column at all (it is keyed by
-        // `channel_type` + `chat_id` + `user_id`; rows model group-chat
-        // membership, not agent ownership), so the discovery loop above
-        // never adds it to `agent_keyed` and there is nothing to exempt.
-        // Removing an agent must not delete a chat's roster.
-        let not_cascaded: std::collections::HashSet<&str> = std::collections::HashSet::new();
-
-        // The agent-scoping column for a given table.
-        let id_col = |table: &str| -> &'static str {
-            match table {
-                "agents" => "id",
-                "events" => "source_agent",
-                _ => "agent_id",
-            }
-        };
-
-        // Tables the cascade is expected to purge: every discovered
-        // agent-keyed table minus the documented exceptions, plus
-        // `agents` itself (keyed by `id`, not discovered above).
-        // `agents` goes FIRST so it exists before we seed tables that
-        // foreign-key it (e.g. prompt_experiments.agent_id → agents.id);
-        // foreign_keys is ON in this build.
-        let mut to_purge: Vec<String> = vec!["agents".to_string()];
-        to_purge.extend(
-            agent_keyed
-                .iter()
-                .filter(|t| !not_cascaded.contains(t.as_str()))
-                .cloned(),
-        );
-
-        // Seed one *valid, complete* row per purge-expected table for two
-        // distinct agents — the target (removed) and a control (must
-        // survive). The previous version inserted only the agent column
-        // with `INSERT OR IGNORE`, so every table with another NOT NULL
-        // column silently seeded zero rows and the purge assertion was
-        // vacuous. Walk the schema and supply a distinct value for every
-        // NOT NULL column instead.
-        let target = AgentId::new();
-        let control = AgentId::new();
-        let target_str = target.to_string();
-        let control_str = control.to_string();
-
-        // Monotonic counter → every supplied value is unique, so UNIQUE
-        // constraints never collide between the two seeded rows.
-        let mut seq: i64 = 0;
-
-        for ag in [&target_str, &control_str] {
-            for table in &to_purge {
-                let agent_col = id_col(table);
-                // (name, declared_type, notnull) for every column.
-                let info: Vec<(String, String, bool)> = {
-                    let mut stmt = conn
-                        .prepare(&format!("PRAGMA table_info({table})"))
-                        .unwrap();
-                    stmt.query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, i64>(3)? != 0,
-                        ))
-                    })
-                    .unwrap()
-                    .map(|r| r.unwrap())
-                    .collect()
-                };
-
-                let mut cols: Vec<String> = Vec::new();
-                let mut vals: Vec<rusqlite::types::Value> = Vec::new();
-                for (name, decl_type, notnull) in &info {
-                    if name == agent_col {
-                        cols.push(name.clone());
-                        vals.push(rusqlite::types::Value::Text((*ag).clone()));
-                        continue;
-                    }
-                    if !notnull {
-                        continue; // nullable → leave NULL
-                    }
-                    seq += 1;
-                    let upper = decl_type.to_uppercase();
-                    let v = if upper.contains("INT") {
-                        rusqlite::types::Value::Integer(seq)
-                    } else if upper.contains("REAL")
-                        || upper.contains("FLOA")
-                        || upper.contains("DOUB")
-                    {
-                        rusqlite::types::Value::Real(seq as f64)
-                    } else if upper.contains("BLOB") {
-                        rusqlite::types::Value::Blob(format!("seed-{seq}").into_bytes())
-                    } else {
-                        rusqlite::types::Value::Text(format!("seed-{seq}"))
-                    };
-                    cols.push(name.clone());
-                    vals.push(v);
-                }
-
-                let placeholders = (1..=cols.len())
-                    .map(|i| format!("?{i}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let sql = format!(
-                    "INSERT INTO {table} ({}) VALUES ({placeholders})",
-                    cols.join(", ")
-                );
-                conn.execute(&sql, rusqlite::params_from_iter(vals.iter()))
-                    .unwrap_or_else(|e| {
-                        panic!("seed insert failed for table '{table}': {e}\n  sql: {sql}")
-                    });
-            }
-        }
-
-        // Pre-cascade guard: prove the seed actually landed a target row
-        // in every purge-expected table — this is exactly what the old
-        // test lacked, which made the post-cascade `== 0` trivially true.
-        for table in &to_purge {
-            let col = id_col(table);
-            let seeded: i64 = conn
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
-                    rusqlite::params![&target_str],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(
-                seeded >= 1,
-                "seed produced no target row in '{table}'; its purge assertion \
-                 would be vacuous",
-            );
-        }
-
-        // Run the cascade in a transaction (mirrors substrate.rs:1446-1447).
-        let mut tx_conn = pool.get().unwrap();
-        let tx = tx_conn.transaction().unwrap();
-        crate::session::execute_session_agent_deletes(&tx, &target_str).unwrap();
-        execute_structured_agent_deletes(&tx, &target_str).unwrap();
-        tx.commit().unwrap();
-
-        // Post-cascade: every purge-expected table loses the target's
-        // rows and keeps the control's.
-        for table in &to_purge {
-            let col = id_col(table);
-            let target_count: i64 = conn
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
-                    rusqlite::params![&target_str],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(
-                target_count, 0,
-                "cascade missed target rows in agent-keyed table '{table}' (col={col}) — \
-                 add a `DELETE FROM {table} WHERE {col} = ?1` line in \
-                 execute_structured_agent_deletes (or execute_session_agent_deletes \
-                 if session-scoped); if the table is intentionally not agent-scoped, \
-                 add it to `not_cascaded` with a reason",
-            );
-            let control_count: i64 = conn
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
-                    rusqlite::params![&control_str],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(
-                control_count, 1,
-                "cascade over-deleted: control agent's row vanished from '{table}'",
-            );
-        }
-    }
-
-    /// Regression for the audit item `json-text-silent-parse-fallback`.
-    ///
-    /// Pre-fix, `list_kv` decoded a row whose `value` BLOB was not valid
-    /// JSON by **fabricating** a `Value::String` out of the raw bytes
-    /// (falling all the way to `Value::Null` only on a non-UTF-8 blob).
-    /// That laundered corrupted blobs into the agent's LLM context as
-    /// plausible-looking strings. After the fix, the corrupted row is
-    /// skipped with a loud `error!` log and the healthy row beside it
-    /// still surfaces — under no circumstance does a fabricated string
-    /// appear in the result set.
-    #[test]
-    fn list_kv_skips_corrupt_blob_instead_of_fabricating_string() {
-        let store = setup();
-        let agent = AgentId::new();
-        // Healthy row written through the normal API.
-        store
-            .set(agent, "healthy", serde_json::json!({"ok": true}))
-            .unwrap();
-        // Corrupt row written directly under the API, simulating a
-        // manual SQL edit or upstream serde drift that left the blob
-        // un-decodable as JSON but still valid UTF-8 (the worst case
-        // for the old code — it would have fabricated `Value::String`).
-        {
-            let conn = store.pool.get().unwrap();
-            conn.execute(
-                "INSERT INTO kv_store (agent_id, key, value, version, updated_at)
-                 VALUES (?1, ?2, ?3, 1, ?4)",
-                rusqlite::params![
-                    agent.0.to_string(),
-                    "corrupt",
-                    b"this is not json".as_slice(),
-                    Utc::now().to_rfc3339(),
-                ],
-            )
-            .unwrap();
-        }
-
-        let pairs = store.list_kv(agent).unwrap();
-        // Healthy row survives; corrupt row is dropped, never fabricated.
-        assert_eq!(pairs.len(), 1, "corrupt row must be skipped, not coerced");
-        assert_eq!(pairs[0].0, "healthy");
-        assert!(
-            !pairs.iter().any(|(k, v)| k == "corrupt"
-                || matches!(v, serde_json::Value::String(s) if s == "this is not json")),
-            "list_kv must never fabricate a Value::String from undecodable bytes"
         );
     }
 }

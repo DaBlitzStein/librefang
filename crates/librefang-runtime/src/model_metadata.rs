@@ -289,7 +289,6 @@ fn synthesize_entry(
         supports_vision: false,
         supports_streaming: false,
         supports_thinking: false,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         aliases: Vec::new(),
     }
 }
@@ -772,7 +771,6 @@ mod tests {
             supports_vision: false,
             supports_streaming: false,
             supports_thinking: false,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             aliases: vec![],
         }
     }

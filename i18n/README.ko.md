@@ -122,7 +122,7 @@ librefang-extensions        25 MCP 템플릿, AES-256-GCM 볼트, OAuth2 PKCE
 librefang-wire              OFP P2P 프로토콜, HMAC-SHA256 상호 인증
 librefang-cli               CLI, 데몬 관리, TUI 대시보드, MCP 서버 모드
 librefang-desktop           Tauri 2.0 네이티브 앱 (트레이, 알림, 단축키)
-librefang-import            OpenClaw, LangChain, AutoGPT 임포트/마이그레이션 엔진
+librefang-migrate           OpenClaw, LangChain, AutoGPT 마이그레이션 엔진
 librefang-http              공유 HTTP 클라이언트 빌더, 프록시, TLS 폴백
 librefang-testing           테스트 인프라: 모의(mock) 커널, 모의 LLM 드라이버 및 API 라우트 테스트 유틸리티
 librefang-telemetry         용 OpenTelemetry + Prometheus 메트릭 계측
@@ -130,7 +130,9 @@ librefang-llm-driver        용 LLM 드라이버 trait 및 공유 타입
 librefang-llm-drivers       trait를 구현하는 구체적인 LLM 제공자 드라이버(anthropic, openai, gemini 등)
 librefang-runtime-mcp       런타임용 MCP(Model Context Protocol) 클라이언트
 librefang-kernel-handle     커널로의 인프로세스(in-process) 호출자를 위한 KernelHandle trait
+librefang-runtime-wasm      런타임용 WASM 스킬 샌드박스
 librefang-kernel-router     커널용 Hand/Template 라우팅 엔진
+librefang-runtime-oauth     런타임 드라이버용 OAuth 플로우(ChatGPT, GitHub Copilot)
 librefang-kernel-metering   커널에 대한 비용 측정 및 할당량(quota) 적용
 xtask                       빌드 자동화
 ```

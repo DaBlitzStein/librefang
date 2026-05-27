@@ -13,15 +13,14 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
     MemoryFilter, MemoryFragment, MemoryId, MemoryModality, MemorySource, VectorStore,
 };
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 // Single canonical impl lives in librefang-types; re-exported here so
 // existing `librefang_memory::semantic::cosine_similarity` callers keep
 // working without three independently-edited copies drifting (see PR #4125).
 pub use librefang_types::memory::cosine_similarity;
+use rusqlite::Connection;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tracing::{debug, error, warn};
+use std::sync::{Arc, Mutex};
+use tracing::{debug, warn};
 
 /// Semantic store backed by SQLite with optional vector search.
 ///
@@ -31,26 +30,26 @@ use tracing::{debug, error, warn};
 /// When no backend is set (the default), the original SQLite path is used.
 #[derive(Clone)]
 pub struct SemanticStore {
-    pool: Pool<SqliteConnectionManager>,
+    conn: Arc<Mutex<Connection>>,
     vector_store: Option<Arc<dyn VectorStore>>,
 }
 
 impl SemanticStore {
-    /// Create a new semantic store wrapping the given connection pool.
-    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
+    /// Create a new semantic store wrapping the given connection.
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self {
-            pool,
+            conn,
             vector_store: None,
         }
     }
 
     /// Create a new semantic store with an external vector backend.
     pub fn new_with_vector_store(
-        pool: Pool<SqliteConnectionManager>,
+        conn: Arc<Mutex<Connection>>,
         vector_store: Arc<dyn VectorStore>,
     ) -> Self {
         Self {
-            pool,
+            conn,
             vector_store: Some(vector_store),
         }
     }
@@ -61,8 +60,8 @@ impl SemanticStore {
     }
 
     /// Get a reference to the underlying connection for advanced operations.
-    pub fn pool(&self) -> &Pool<SqliteConnectionManager> {
-        &self.pool
+    pub fn conn(&self) -> &Arc<Mutex<Connection>> {
+        &self.conn
     }
 
     /// Store a new memory fragment (without embedding).
@@ -130,15 +129,20 @@ impl SemanticStore {
         modality: MemoryModality,
         peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let id = MemoryId::new();
         let now = Utc::now().to_rfc3339();
-        let source_str = serde_json::to_string(&source).map_err(LibreFangError::serialization)?;
-        let meta_str = serde_json::to_string(&metadata).map_err(LibreFangError::serialization)?;
+        let source_str = serde_json::to_string(&source)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let meta_str = serde_json::to_string(&metadata)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let embedding_bytes: Option<Vec<u8>> = embedding.map(embedding_to_bytes);
         let image_embedding_bytes: Option<Vec<u8>> = image_embedding.map(embedding_to_bytes);
-        let modality_str =
-            serde_json::to_string(&modality).map_err(LibreFangError::serialization)?;
+        let modality_str = serde_json::to_string(&modality)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         // Strip the surrounding quotes from the JSON string (e.g. "\"text\"" -> "text")
         let modality_str = modality_str.trim_matches('"');
 
@@ -160,7 +164,7 @@ impl SemanticStore {
                 peer_id,
             ],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(id)
     }
 
@@ -193,11 +197,10 @@ impl SemanticStore {
             return self.recall_via_vector_store(vs, qe, limit, filter.clone());
         }
 
-        // mut: needed for the `transaction()` call inside
-        // `bump_recall_access_counts` after the read is done. The
-        // read-side `stmt` borrow is explicitly dropped below
-        // before that borrow occurs.
-        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         // Build SQL: fetch candidates (broader than limit for vector re-ranking)
         let fetch_limit = if query_embedding.is_some() {
@@ -239,8 +242,8 @@ impl SemanticStore {
                 param_idx += 1;
             }
             if let Some(ref source) = f.source {
-                let source_str =
-                    serde_json::to_string(source).map_err(LibreFangError::serialization)?;
+                let source_str = serde_json::to_string(source)
+                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 sql.push_str(&format!(" AND source = ?{param_idx}"));
                 params.push(Box::new(source_str));
                 param_idx += 1;
@@ -280,7 +283,9 @@ impl SemanticStore {
         sql.push_str(" ORDER BY confidence DESC, accessed_at DESC, access_count DESC");
         sql.push_str(&format!(" LIMIT {fetch_limit}"));
 
-        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
@@ -317,7 +322,7 @@ impl SemanticStore {
                     modality_str,
                 ))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut fragments = Vec::new();
         for row_result in rows {
@@ -336,35 +341,18 @@ impl SemanticStore {
                 image_url,
                 image_embedding_bytes,
                 modality_str,
-            ) = row_result.map_err(LibreFangError::memory)?;
+            ) = row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let id = uuid::Uuid::parse_str(&id_str)
                 .map(MemoryId)
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let agent_id = uuid::Uuid::parse_str(&agent_str)
                 .map(librefang_types::agent::AgentId)
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let source: MemorySource =
                 serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
-            // Refuse to silently substitute `HashMap::default()` for a TEXT
-            // blob we cannot parse — that disguises corruption (manual SQL
-            // edit, pre-#3451 FTS bug, serde drift) as "no metadata". Skip
-            // the row with a loud log so the operator can audit / repair it
-            // (audit: json-text-silent-parse-fallback).
-            let metadata: HashMap<String, serde_json::Value> = match serde_json::from_str(&meta_str)
-            {
-                Ok(m) => m,
-                Err(e) => {
-                    error!(
-                        row_id = %id_str,
-                        table = "memories",
-                        column = "metadata",
-                        error = %e,
-                        "corrupt JSON in TEXT column; skipping row in recall"
-                    );
-                    continue;
-                }
-            };
+            let metadata: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&meta_str).unwrap_or_default();
             let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
@@ -428,27 +416,18 @@ impl SemanticStore {
             );
         }
 
-        // Drop the prepared SELECT explicitly so `conn` is no
-        // longer borrowed below — we need a mutable borrow to open
-        // the access-count transaction. (NLL would keep `stmt`
-        // alive to end-of-scope otherwise; the explicit drop is
-        // cheaper than restructuring the entire read into a sub-
-        // block.)
-        drop(stmt);
-
-        // Bump access_count + accessed_at on recalled fragments
-        // (audit: memory-recall-n+1-update). Pre-fix this was a
-        // per-row `conn.execute` with no transaction wrapper, which
-        // forced WAL fsync once per recalled fragment — at 100
-        // recalls per tool-augmented turn the latency dominated the
-        // recall path. Now wrapped in a single transaction +
-        // prepared statement so all UPDATEs amortise to one WAL
-        // fsync. The decay/consolidation engine keys TTL decisions
-        // off `accessed_at`, so this MUST persist; the helper keeps
-        // the per-row warn-on-failure log so silent loss of a
-        // single row's bump (e.g. transient SQLite lock) still
-        // surfaces.
-        bump_recall_access_counts(&mut conn, &fragments);
+        // Update access counts for returned memories. Logged on failure
+        // because the decay/consolidation engine keys TTL decisions off
+        // accessed_at — silently losing updates means "active" memories
+        // can be garbage-collected when they shouldn't be.
+        for frag in &fragments {
+            if let Err(e) = conn.execute(
+                "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
+                rusqlite::params![Utc::now().to_rfc3339(), frag.id.0.to_string()],
+            ) {
+                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
+            }
+        }
 
         Ok(fragments)
     }
@@ -477,89 +456,33 @@ impl SemanticStore {
             results.len()
         );
 
-        // Hydrate full MemoryFragments from SQLite by ID. Pre-fix
-        // this was K calls to `get_by_id`, each opening a
-        // pool connection + preparing a statement (audit:
-        // memory-recall-n+1-update — second sub-finding). At K=50
-        // that was 50 round-trips for what is a single SELECT
-        // WHERE id IN (?,?,...). Parse all ANN-returned ids first
-        // (so a single malformed UUID fails the whole hydrate
-        // rather than silently skipping), then issue one batched
-        // SELECT. The batch preserves the ANN ranking order by
-        // re-ordering against the input vec after fetch.
-        let mut ordered_ids: Vec<MemoryId> = Vec::with_capacity(results.len());
+        // Hydrate full MemoryFragments from SQLite by ID
+        let mut fragments = Vec::with_capacity(results.len());
         for r in &results {
             let mem_id = uuid::Uuid::parse_str(&r.id)
                 .map(MemoryId)
-                .map_err(LibreFangError::memory)?;
-            ordered_ids.push(mem_id);
-        }
-        let mut by_id = self.get_by_ids_batch(&ordered_ids, false)?;
-        let mut fragments: Vec<MemoryFragment> = Vec::with_capacity(ordered_ids.len());
-        for mem_id in &ordered_ids {
-            if let Some(frag) = by_id.remove(mem_id) {
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if let Some(frag) = self.get_by_id(mem_id, false)? {
                 fragments.push(frag);
             }
         }
 
-        // Update access counts — see note on the SQLite-path
-        // update above for why silent drops would corrupt decay
-        // logic. Same tx-wrapped helper. The vector-store branch
-        // has no other live conn handle at this point, so we
-        // acquire one for the write.
-        if let Ok(mut write_conn) = self.pool.get() {
-            bump_recall_access_counts(&mut write_conn, &fragments);
-        } else {
-            warn!("memory recall (vector store): pool.get() for access-count bump failed");
+        // Update access counts — see note on the SQLite-path update above
+        // for why silent drops would corrupt decay logic.
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        for frag in &fragments {
+            if let Err(e) = conn.execute(
+                "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
+                rusqlite::params![Utc::now().to_rfc3339(), frag.id.0.to_string()],
+            ) {
+                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
+            }
         }
 
         Ok(fragments)
-    }
-
-    /// Batch counterpart to [`Self::get_by_id`] used by
-    /// `recall_via_vector_store` (audit: memory-recall-n+1-update).
-    /// Issues a single `SELECT … WHERE id IN (?,?,…)` query and
-    /// returns a map keyed by `MemoryId` so the caller can re-order
-    /// against its ANN-ranked input vector. Empty input returns
-    /// an empty map without touching the pool.
-    fn get_by_ids_batch(
-        &self,
-        ids: &[MemoryId],
-        include_deleted: bool,
-    ) -> LibreFangResult<HashMap<MemoryId, MemoryFragment>> {
-        if ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let deleted_clause = if include_deleted {
-            ""
-        } else {
-            " AND deleted = 0"
-        };
-        let placeholders = std::iter::repeat_n("?", ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality
-             FROM memories WHERE id IN ({placeholders}){deleted_clause}",
-        );
-        let id_strs: Vec<String> = ids.iter().map(|m| m.0.to_string()).collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = id_strs
-            .iter()
-            .map(|s| s as &dyn rusqlite::types::ToSql)
-            .collect();
-
-        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
-        let rows = stmt
-            .query_map(param_refs.as_slice(), decode_memory_row)
-            .map_err(LibreFangError::memory)?;
-
-        let mut out = HashMap::with_capacity(ids.len());
-        for row in rows {
-            let frag = row.map_err(LibreFangError::memory)?;
-            out.insert(frag.id, frag);
-        }
-        Ok(out)
     }
 
     /// Get a single memory fragment by ID (including soft-deleted ones for history).
@@ -568,7 +491,10 @@ impl SemanticStore {
         id: MemoryId,
         include_deleted: bool,
     ) -> LibreFangResult<Option<MemoryFragment>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let deleted_clause = if include_deleted {
             ""
@@ -580,27 +506,116 @@ impl SemanticStore {
              FROM memories WHERE id = ?1{deleted_clause}",
         );
 
-        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
-        // Row decoder lives at module scope (`decode_memory_row`) so
-        // `get_by_ids_batch` can share it without copy-pasting the
-        // ~60-line column mapping (audit:
-        // memory-recall-n+1-update).
-        match stmt.query_row(rusqlite::params![id.0.to_string()], decode_memory_row) {
-            Ok(frag) => Ok(Some(frag)),
+        let result = stmt.query_row(rusqlite::params![id.0.to_string()], |row| {
+            let id_str: String = row.get(0)?;
+            let agent_str: String = row.get(1)?;
+            let content: String = row.get(2)?;
+            let source_str: String = row.get(3)?;
+            let scope: String = row.get(4)?;
+            let confidence: f64 = row.get(5)?;
+            let meta_str: String = row.get(6)?;
+            let created_str: String = row.get(7)?;
+            let accessed_str: String = row.get(8)?;
+            let access_count: i64 = row.get(9)?;
+            let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
+            let image_url: Option<String> = row.get(11)?;
+            let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
+            let modality_str: Option<String> = row.get(13)?;
+            Ok((
+                id_str,
+                agent_str,
+                content,
+                source_str,
+                scope,
+                confidence,
+                meta_str,
+                created_str,
+                accessed_str,
+                access_count,
+                embedding_bytes,
+                image_url,
+                image_embedding_bytes,
+                modality_str,
+            ))
+        });
+
+        match result {
+            Ok((
+                id_str,
+                agent_str,
+                content,
+                source_str,
+                scope,
+                confidence,
+                meta_str,
+                created_str,
+                accessed_str,
+                access_count,
+                embedding_bytes,
+                image_url,
+                image_embedding_bytes,
+                modality_str,
+            )) => {
+                let id = uuid::Uuid::parse_str(&id_str)
+                    .map(MemoryId)
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let agent_id = uuid::Uuid::parse_str(&agent_str)
+                    .map(librefang_types::agent::AgentId)
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let source: MemorySource =
+                    serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
+                let metadata: HashMap<String, serde_json::Value> =
+                    serde_json::from_str(&meta_str).unwrap_or_default();
+                let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let accessed_at = chrono::DateTime::parse_from_rfc3339(&accessed_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
+                let image_embedding = image_embedding_bytes.as_deref().map(embedding_from_bytes);
+                let modality: MemoryModality = modality_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok())
+                    .unwrap_or_default();
+
+                Ok(Some(MemoryFragment {
+                    id,
+                    agent_id,
+                    content,
+                    embedding,
+                    metadata,
+                    source,
+                    confidence: confidence as f32,
+                    created_at,
+                    accessed_at,
+                    access_count: access_count as u64,
+                    scope,
+                    image_url,
+                    image_embedding,
+                    modality,
+                }))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::memory(e)),
+            Err(e) => Err(LibreFangError::Memory(e.to_string())),
         }
     }
 
     /// Soft-delete a memory fragment.
     pub fn forget(&self, id: MemoryId) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         conn.execute(
             "UPDATE memories SET deleted = 1 WHERE id = ?1",
             rusqlite::params![id.0.to_string()],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -614,34 +629,41 @@ impl SemanticStore {
         new_content: &str,
         new_metadata: Option<HashMap<String, serde_json::Value>>,
     ) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         if let Some(meta) = new_metadata {
-            let meta_str = serde_json::to_string(&meta).map_err(LibreFangError::serialization)?;
+            let meta_str = serde_json::to_string(&meta)
+                .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
             conn.execute(
                 "UPDATE memories SET content = ?1, metadata = ?2, accessed_at = ?3 WHERE id = ?4 AND deleted = 0",
                 rusqlite::params![new_content, meta_str, now, id.0.to_string()],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         } else {
             conn.execute(
                 "UPDATE memories SET content = ?1, accessed_at = ?2 WHERE id = ?3 AND deleted = 0",
                 rusqlite::params![new_content, now, id.0.to_string()],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         }
         Ok(())
     }
 
     /// Update the embedding for an existing memory.
     pub fn update_embedding(&self, id: MemoryId, embedding: &[f32]) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let bytes = embedding_to_bytes(embedding);
         conn.execute(
             "UPDATE memories SET embedding = ?1 WHERE id = ?2",
             rusqlite::params![bytes, id.0.to_string()],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -653,14 +675,17 @@ impl SemanticStore {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         // SQLite doesn't support IN with parameterized lists easily for large N,
         // so we query one at a time for safety (N ≤ 100 in find_duplicates).
         let mut map = HashMap::new();
         let mut stmt = conn
             .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         for id in ids {
             if let Ok(Some(b)) = stmt.query_row(rusqlite::params![*id], |row| {
                 let b: Option<Vec<u8>> = row.get(0)?;
@@ -676,25 +701,31 @@ impl SemanticStore {
 
     /// Soft-delete all memories for a specific agent.
     pub fn forget_by_agent(&self, agent_id: AgentId) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let count = conn
             .execute(
                 "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND deleted = 0",
                 rusqlite::params![agent_id.0.to_string()],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count as u64)
     }
 
     /// Soft-delete all memories for a specific agent and scope.
     pub fn forget_by_scope(&self, agent_id: AgentId, scope: &str) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let count = conn
             .execute(
                 "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND deleted = 0",
                 rusqlite::params![agent_id.0.to_string(), scope],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count as u64)
     }
 
@@ -705,13 +736,16 @@ impl SemanticStore {
         scope: &str,
         before: chrono::DateTime<Utc>,
     ) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let count = conn
             .execute(
                 "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND created_at < ?3 AND deleted = 0",
                 rusqlite::params![agent_id.0.to_string(), scope, before.to_rfc3339()],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count as u64)
     }
 
@@ -724,19 +758,25 @@ impl SemanticStore {
         scope: &str,
         before: chrono::DateTime<Utc>,
     ) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let count = conn
             .execute(
                 "UPDATE memories SET deleted = 1 WHERE scope = ?1 AND created_at < ?2 AND deleted = 0",
                 rusqlite::params![scope, before.to_rfc3339()],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count as u64)
     }
 
     /// Count non-deleted memories for a specific agent, optionally filtered by scope.
     pub fn count(&self, agent_id: AgentId, scope: Option<&str>) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let count: i64 = if let Some(s) = scope {
             conn.query_row(
                 "SELECT COUNT(*) FROM memories WHERE agent_id = ?1 AND scope = ?2 AND deleted = 0",
@@ -750,7 +790,7 @@ impl SemanticStore {
                 |row| row.get(0),
             )
         }
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count as u64)
     }
 
@@ -762,13 +802,16 @@ impl SemanticStore {
         agent_id: AgentId,
         limit: usize,
     ) -> LibreFangResult<Vec<MemoryId>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare(
                 "SELECT id FROM memories WHERE agent_id = ?1 AND deleted = 0 \
                  ORDER BY confidence ASC, created_at ASC LIMIT ?2",
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map(
                 rusqlite::params![agent_id.0.to_string(), limit as i64],
@@ -777,11 +820,12 @@ impl SemanticStore {
                     Ok(id_str)
                 },
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let mut ids = Vec::new();
         for row in rows {
-            let id_str = row.map_err(LibreFangError::memory)?;
-            let uuid = uuid::Uuid::parse_str(&id_str).map_err(LibreFangError::memory)?;
+            let id_str = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let uuid = uuid::Uuid::parse_str(&id_str)
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             ids.push(MemoryId(uuid));
         }
         Ok(ids)
@@ -789,7 +833,10 @@ impl SemanticStore {
 
     /// Count memories across ALL agents, optionally filtered by scope.
     pub fn count_all(&self, scope: Option<&str>) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let count: i64 = if let Some(s) = scope {
             conn.query_row(
                 "SELECT COUNT(*) FROM memories WHERE scope = ?1 AND deleted = 0",
@@ -803,7 +850,7 @@ impl SemanticStore {
                 |row| row.get(0),
             )
         }
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count as u64)
     }
 
@@ -815,7 +862,10 @@ impl SemanticStore {
         &self,
         agent_id: Option<AgentId>,
     ) -> LibreFangResult<HashMap<String, usize>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
             if let Some(aid) = agent_id {
@@ -840,18 +890,20 @@ impl SemanticStore {
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map(param_refs.as_slice(), |row| {
                 let cat: String = row.get(0)?;
                 let count: i64 = row.get(1)?;
                 Ok((cat, count as usize))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut map = HashMap::new();
         for row in rows {
-            let (cat, count) = row.map_err(LibreFangError::memory)?;
+            let (cat, count) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             map.insert(cat, count);
         }
         Ok(map)
@@ -882,145 +934,6 @@ fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Row decoder shared by `MemoryStore::get_by_id` and
-/// `MemoryStore::get_by_ids_batch` (audit:
-/// memory-recall-n+1-update — second sub-finding). The closure
-/// must satisfy `FnMut(&Row) -> rusqlite::Result<MemoryFragment>`
-/// so it can be passed to both `query_row` and `query_map` —
-/// rusqlite errors propagate to the caller, which is responsible
-/// for converting them into `LibreFangError`.
-///
-/// UUID / JSON parse failures inside the row map to
-/// `rusqlite::Error::FromSqlConversionFailure` so they surface in
-/// the same channel as primitive-column errors. Most rows in
-/// practice parse cleanly; this only matters when a row is
-/// hand-mutated outside the kernel write paths (operator running
-/// SQL by hand).
-fn decode_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryFragment> {
-    fn fsql<E: std::error::Error + Send + Sync + 'static>(
-        idx: usize,
-        ty: rusqlite::types::Type,
-        e: E,
-    ) -> rusqlite::Error {
-        rusqlite::Error::FromSqlConversionFailure(idx, ty, Box::new(e))
-    }
-    let id_str: String = row.get(0)?;
-    let agent_str: String = row.get(1)?;
-    let content: String = row.get(2)?;
-    let source_str: String = row.get(3)?;
-    let scope: String = row.get(4)?;
-    let confidence: f64 = row.get(5)?;
-    let meta_str: String = row.get(6)?;
-    let created_str: String = row.get(7)?;
-    let accessed_str: String = row.get(8)?;
-    let access_count: i64 = row.get(9)?;
-    let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
-    let image_url: Option<String> = row.get(11)?;
-    let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
-    let modality_str: Option<String> = row.get(13)?;
-
-    let id = uuid::Uuid::parse_str(&id_str)
-        .map(MemoryId)
-        .map_err(|e| fsql(0, rusqlite::types::Type::Text, e))?;
-    let agent_id = uuid::Uuid::parse_str(&agent_str)
-        .map(librefang_types::agent::AgentId)
-        .map_err(|e| fsql(1, rusqlite::types::Type::Text, e))?;
-    let source: MemorySource = serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
-    // Surface corruption rather than disguising it as "no metadata" — the
-    // caller (`get_by_id` / `get_by_ids_batch`) receives a `Result`, so a
-    // bad row should be loud, not a silent `HashMap::default()` (audit:
-    // json-text-silent-parse-fallback).
-    let metadata: HashMap<String, serde_json::Value> = match serde_json::from_str(&meta_str) {
-        Ok(m) => m,
-        Err(e) => {
-            error!(
-                row_id = %id_str,
-                table = "memories",
-                column = "metadata",
-                error = %e,
-                "corrupt JSON in TEXT column"
-            );
-            return Err(fsql(6, rusqlite::types::Type::Text, e));
-        }
-    };
-    let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
-    let accessed_at = chrono::DateTime::parse_from_rfc3339(&accessed_str)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
-    let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
-    let image_embedding = image_embedding_bytes.as_deref().map(embedding_from_bytes);
-    let modality: MemoryModality = modality_str
-        .as_deref()
-        .and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok())
-        .unwrap_or_default();
-    Ok(MemoryFragment {
-        id,
-        agent_id,
-        content,
-        embedding,
-        metadata,
-        source,
-        confidence: confidence as f32,
-        created_at,
-        accessed_at,
-        access_count: access_count as u64,
-        scope,
-        image_url,
-        image_embedding,
-        modality,
-    })
-}
-
-/// Bump access_count + accessed_at on every recalled fragment in
-/// a single transaction (audit: memory-recall-n+1-update — first
-/// sub-finding). Pre-fix this was a per-row `conn.execute` with
-/// no transaction wrapper, forcing one WAL fsync per row; at 100
-/// fragments per tool-augmented turn the latency dominated the
-/// recall path.
-///
-/// Failures on individual rows are logged but don't abort the
-/// remaining UPDATEs — the decay/consolidation engine keys TTL
-/// decisions off `accessed_at`, so we'd rather persist what we
-/// can than lose the whole batch on one bad row. A failure to
-/// acquire the connection or open the transaction is also
-/// logged + ignored (recall already returned the fragments to
-/// the caller; we don't want to surface a write-side error on a
-/// successful read).
-fn bump_recall_access_counts(conn: &mut rusqlite::Connection, fragments: &[MemoryFragment]) {
-    if fragments.is_empty() {
-        return;
-    }
-    let tx = match conn.transaction() {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(error = %e, "memory recall: transaction() failed for access-count bump");
-            return;
-        }
-    };
-    let now = Utc::now().to_rfc3339();
-    {
-        let mut stmt = match tx.prepare(
-            "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "memory recall: stmt.prepare() failed");
-                return;
-            }
-        };
-        for frag in fragments {
-            if let Err(e) = stmt.execute(rusqlite::params![now, frag.id.0.to_string()]) {
-                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
-            }
-        }
-    }
-    if let Err(e) = tx.commit() {
-        warn!(error = %e, "memory recall: tx.commit() failed for access-count bump");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // SqliteVectorStore — VectorStore trait implementation for SQLite backend
 // ---------------------------------------------------------------------------
@@ -1038,13 +951,13 @@ use librefang_types::memory::VectorSearchResult;
 /// trait for a dedicated vector database (Qdrant, Pinecone, Chroma, etc.).
 #[derive(Clone)]
 pub struct SqliteVectorStore {
-    pool: Pool<SqliteConnectionManager>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl SqliteVectorStore {
     /// Create a new SQLite vector store wrapping the given connection.
-    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { pool }
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
     }
 }
 
@@ -1057,13 +970,16 @@ impl VectorStore for SqliteVectorStore {
         _payload: &str,
         _metadata: HashMap<String, serde_json::Value>,
     ) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let bytes = embedding_to_bytes(embedding);
         conn.execute(
             "UPDATE memories SET embedding = ?1 WHERE id = ?2",
             rusqlite::params![bytes, id],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -1073,7 +989,10 @@ impl VectorStore for SqliteVectorStore {
         limit: usize,
         filter: Option<librefang_types::memory::MemoryFilter>,
     ) -> LibreFangResult<Vec<VectorSearchResult>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let fetch_limit = (limit * 10).max(100);
         let mut sql = String::from(
@@ -1098,7 +1017,9 @@ impl VectorStore for SqliteVectorStore {
 
         sql.push_str(&format!(" LIMIT {fetch_limit}"));
 
-        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
 
@@ -1110,12 +1031,13 @@ impl VectorStore for SqliteVectorStore {
                 let emb_bytes: Vec<u8> = row.get(3)?;
                 Ok((id, content, meta_str, emb_bytes))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut results = Vec::new();
         let mut skipped_non_comparable: u64 = 0;
         for row_result in rows {
-            let (id, content, meta_str, emb_bytes) = row_result.map_err(LibreFangError::memory)?;
+            let (id, content, meta_str, emb_bytes) =
+                row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let emb = embedding_from_bytes(&emb_bytes);
             // Skip non-comparable rows (dim mismatch from re-embedding,
             // zero vector). Including them with score=0.0 would let them
@@ -1131,25 +1053,8 @@ impl VectorStore for SqliteVectorStore {
                 skipped_non_comparable += 1;
                 continue;
             };
-            // Skip rather than silently substitute `HashMap::default()` for
-            // a corrupt `metadata` TEXT blob — that disguises corruption as
-            // a row with no metadata, which the operator cannot tell apart
-            // from a legitimately empty row (audit:
-            // json-text-silent-parse-fallback).
-            let metadata: HashMap<String, serde_json::Value> = match serde_json::from_str(&meta_str)
-            {
-                Ok(m) => m,
-                Err(e) => {
-                    error!(
-                        row_id = %id,
-                        table = "memories",
-                        column = "metadata",
-                        error = %e,
-                        "corrupt JSON in TEXT column; skipping vector search candidate"
-                    );
-                    continue;
-                }
-            };
+            let metadata: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&meta_str).unwrap_or_default();
             results.push(VectorSearchResult {
                 id,
                 payload: content,
@@ -1176,12 +1081,15 @@ impl VectorStore for SqliteVectorStore {
     }
 
     async fn delete(&self, id: &str) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         conn.execute(
             "UPDATE memories SET embedding = NULL WHERE id = ?1",
             rusqlite::params![id],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -1189,11 +1097,14 @@ impl VectorStore for SqliteVectorStore {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut map = HashMap::new();
         let mut stmt = conn
             .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         for id in ids {
             if let Ok(Some(b)) = stmt.query_row(rusqlite::params![*id], |row| {
                 let b: Option<Vec<u8>> = row.get(0)?;
@@ -1218,12 +1129,9 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn setup() -> SemanticStore {
-        let pool = Pool::builder()
-            .max_size(1)
-            .build(SqliteConnectionManager::memory())
-            .unwrap();
-        run_migrations(&pool.get().unwrap()).unwrap();
-        SemanticStore::new(pool)
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        SemanticStore::new(Arc::new(Mutex::new(conn)))
     }
 
     #[test]
@@ -1611,88 +1519,5 @@ mod tests {
         assert_eq!(store.count(agent_id, Some("session_memory")).unwrap(), 1);
         assert_eq!(store.count(agent_id, Some("user_memory")).unwrap(), 1);
         assert_eq!(store.count(agent_id, Some("agent_memory")).unwrap(), 0);
-    }
-
-    /// Regression for the audit item `json-text-silent-parse-fallback`.
-    ///
-    /// Pre-fix, `recall` decoded a row whose `metadata` TEXT column was
-    /// corrupt by silently substituting `HashMap::default()` — so the
-    /// caller could not distinguish "this memory has no metadata" from
-    /// "this memory's metadata is destroyed". After the fix, the loop
-    /// drops the corrupt row with a loud `error!` log and the healthy
-    /// row beside it still surfaces.
-    #[test]
-    fn recall_skips_corrupt_metadata_row_instead_of_returning_default() {
-        let store = setup();
-        let agent_id = AgentId::new();
-        store
-            .remember(
-                agent_id,
-                "healthy memory",
-                MemorySource::Conversation,
-                "episodic",
-                HashMap::new(),
-            )
-            .unwrap();
-        let corrupt_id = store
-            .remember(
-                agent_id,
-                "corrupt memory",
-                MemorySource::Conversation,
-                "episodic",
-                HashMap::new(),
-            )
-            .unwrap();
-        {
-            let conn = store.pool.get().unwrap();
-            conn.execute(
-                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
-                rusqlite::params!["not-json", corrupt_id.0.to_string()],
-            )
-            .unwrap();
-        }
-
-        let results = store.recall("memory", 10, None).unwrap();
-        assert_eq!(
-            results.len(),
-            1,
-            "corrupt row must be skipped (not silently coerced to default metadata)"
-        );
-        assert_eq!(results[0].content, "healthy memory");
-    }
-
-    /// Same audit item, on the `decode_memory_row` path — used by
-    /// `get_by_id` / `get_by_ids_batch`. Pre-fix, a corrupt `metadata`
-    /// blob would silently produce a `MemoryFragment` with empty
-    /// metadata; after the fix, the row decoder returns an error so
-    /// callers see the failure instead of working with poisoned data.
-    #[test]
-    fn get_by_id_surfaces_corrupt_metadata_instead_of_defaulting() {
-        let store = setup();
-        let agent_id = AgentId::new();
-        let id = store
-            .remember(
-                agent_id,
-                "fragment",
-                MemorySource::Conversation,
-                "episodic",
-                HashMap::new(),
-            )
-            .unwrap();
-        {
-            let conn = store.pool.get().unwrap();
-            conn.execute(
-                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
-                rusqlite::params!["not-json", id.0.to_string()],
-            )
-            .unwrap();
-        }
-
-        let res = store.get_by_id(id, false);
-        assert!(
-            res.is_err(),
-            "corrupt metadata must surface as Err from get_by_id, not be silently defaulted; \
-             got: {res:?}"
-        );
     }
 }

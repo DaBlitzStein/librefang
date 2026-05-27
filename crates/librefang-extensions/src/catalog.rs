@@ -7,14 +7,13 @@
 //! `[[mcp_servers]]` with an optional `template_id` pointing back into the
 //! catalog.
 
-use librefang_types::mcp::{McpCatalogEntry, McpCategory};
+use crate::{McpCatalogEntry, McpCategory};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 /// The MCP catalog — in-memory view of all template files under
 /// `~/.librefang/mcp/catalog/`.
-#[derive(Clone)]
 pub struct McpCatalog {
     /// All known templates, keyed by id.
     entries: HashMap<String, McpCatalogEntry>,

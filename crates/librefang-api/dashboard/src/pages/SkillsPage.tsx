@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   type ClawHubBrowseItem,
@@ -38,8 +38,6 @@ import { Input } from "../components/ui/Input";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { PageHeader } from "../components/ui/PageHeader";
-import { PendingSkillsSection } from "../components/PendingSkillsSection";
-import { usePendingSkillCandidates } from "../lib/queries/skills";
 import { useUIStore } from "../lib/store";
 import {
   SkillHubBar,
@@ -86,7 +84,7 @@ import {
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
-type ViewMode = "installed" | "browse" | "pending";
+type ViewMode = "installed" | "browse";
 type MarketplaceSource = "fanghub" | "clawhub" | "clawhub-cn" | "skillhub";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -174,7 +172,7 @@ interface SkillCardProps {
   t: (key: string, opts?: Record<string, unknown>) => string;
 }
 
-const SkillCard = React.memo(function SkillCard({
+function SkillCard({
   name,
   version,
   description,
@@ -356,6 +354,7 @@ const SkillCard = React.memo(function SkillCard({
           ) : null}
         </div>
 
+        {/* Tags */}
         {tags && tags.length > 0 && (
           <div className="flex flex-wrap gap-1">
             {tags.slice(0, 4).map((tag) => (
@@ -371,7 +370,7 @@ const SkillCard = React.memo(function SkillCard({
       </div>
     </Card>
   );
-});
+}
 
 // ─── Category chips ───────────────────────────────────────────────────────────
 
@@ -885,14 +884,12 @@ function EvolveUploadPane({
   onSubmit,
   onCancel,
   busy,
-  addToast,
   t,
 }: {
   skillName: string;
   onSubmit: (params: { path: string; content: string }) => void;
   onCancel: () => void;
   busy: boolean;
-  addToast: (msg: string, type: "success" | "error" | "info") => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
   const [subdir, setSubdir] = useState("references");
@@ -902,9 +899,8 @@ function EvolveUploadPane({
 
   const handleFilePick = async (file: File) => {
     if (file.size > 1024 * 1024) {
-      addToast(
+      alert(
         t("skills.evo_file_too_large", { defaultValue: "File exceeds 1 MiB limit" }),
-        "error",
       );
       return;
     }
@@ -1088,17 +1084,11 @@ function SkillDetailModal({
   const [pane, setPane] = useState<EvolvePane>("none");
   const [viewingFile, setViewingFile] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [confirmAction, setConfirmAction] = useState<{
-    title: string;
-    message: string;
-    onConfirm: () => void;
-  } | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
       setPane("none");
       setViewingFile(null);
-      setConfirmAction(null);
     }
   }, [isOpen, skillName]);
 
@@ -1119,68 +1109,64 @@ function SkillDetailModal({
 
   const handleRollback = () => {
     if (!skillName) return;
-    setConfirmAction({
-      title: t("skills.evo_rollback", { defaultValue: "Rollback" }),
-      message: t("skills.evo_rollback_confirm", {
-        defaultValue:
-          "Roll back to the previous version? This cannot be undone unless you patch again.",
-      }),
-      onConfirm: () => {
-        setConfirmAction(null);
-        void runMutation(
-          () => rollbackMutation.mutateAsync({ name: skillName }),
-          t("skills.evo_rolled_back", { defaultValue: "Skill rolled back" }),
-        );
-      },
-    });
+    if (
+      !confirm(
+        t("skills.evo_rollback_confirm", {
+          defaultValue:
+            "Roll back to the previous version? This cannot be undone unless you patch again.",
+        }),
+      )
+    )
+      return;
+    void runMutation(
+      () => rollbackMutation.mutateAsync({ name: skillName }),
+      t("skills.evo_rolled_back", { defaultValue: "Skill rolled back" }),
+    );
   };
 
   const handleRemoveFile = (path: string) => {
     if (!skillName) return;
-    setConfirmAction({
-      title: t("skills.evo_remove_file", { defaultValue: "Remove File" }),
-      message: t("skills.evo_remove_file_confirm", {
-        defaultValue: `Remove ${path}?`,
-        path,
-      }),
-      onConfirm: () => {
-        setConfirmAction(null);
-        void runMutation(
-          () => removeFileMutation.mutateAsync({ name: skillName, path }),
-          t("skills.evo_file_removed", { defaultValue: "File removed" }),
-        );
-      },
-    });
+    if (
+      !confirm(
+        t("skills.evo_remove_file_confirm", {
+          defaultValue: `Remove ${path}?`,
+          path,
+        }),
+      )
+    )
+      return;
+    void runMutation(
+      () => removeFileMutation.mutateAsync({ name: skillName, path }),
+      t("skills.evo_file_removed", { defaultValue: "File removed" }),
+    );
   };
 
   const handleDelete = () => {
     if (!skillName) return;
-    setConfirmAction({
-      title: t("skills.evo_delete", { defaultValue: "Delete" }),
-      message: t("skills.evo_delete_confirm", {
-        defaultValue: `Permanently delete ${skillName}? This cannot be undone.`,
-        name: skillName,
-      }),
-      onConfirm: () => {
-        const name = skillName;
-        setConfirmAction(null);
-        (async () => {
-          setBusy(true);
-          try {
-            await deleteSkillMutation.mutateAsync({ name });
-            addToast(
-              t("skills.evo_deleted", { defaultValue: "Skill deleted" }),
-              "success",
-            );
-            onClose();
-          } catch (e: unknown) {
-            addToast(e instanceof Error ? e.message : t("skills.evo_delete_failed"), "error");
-          } finally {
-            setBusy(false);
-          }
-        })();
-      },
-    });
+    if (
+      !confirm(
+        t("skills.evo_delete_confirm", {
+          defaultValue: `Permanently delete ${skillName}? This cannot be undone.`,
+          name: skillName,
+        }),
+      )
+    )
+      return;
+    (async () => {
+      setBusy(true);
+      try {
+        await deleteSkillMutation.mutateAsync({ name: skillName });
+        addToast(
+          t("skills.evo_deleted", { defaultValue: "Skill deleted" }),
+          "success",
+        );
+        onClose();
+      } catch (e: unknown) {
+        addToast(e instanceof Error ? e.message : t("skills.evo_delete_failed"), "error");
+      } finally {
+        setBusy(false);
+      }
+    })();
   };
 
   return (
@@ -1314,7 +1300,6 @@ function SkillDetailModal({
               }
               onCancel={() => setPane("none")}
               busy={busy}
-              addToast={addToast}
               t={t}
             />
           )}
@@ -1463,14 +1448,6 @@ function SkillDetailModal({
           {t("skills.evo_not_found", { defaultValue: "Skill not found" })}
         </p>
       )}
-      <ConfirmDialog
-        isOpen={!!confirmAction}
-        title={confirmAction?.title ?? ""}
-        message={confirmAction?.message ?? ""}
-        tone="destructive"
-        onConfirm={() => confirmAction?.onConfirm()}
-        onClose={() => setConfirmAction(null)}
-      />
     </DrawerPanel>
   );
 }
@@ -1481,37 +1458,7 @@ export function SkillsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
 
-  // Read optional `?tab=` search param on mount so deep links from the
-  // NotificationCenter footer ("X skill candidates pending review →")
-  // land directly on the matching tab instead of the default.
-  const initialViewMode = ((): ViewMode => {
-    if (typeof window === "undefined") return "browse";
-    const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "pending" || tab === "installed" || tab === "browse"
-      ? tab
-      : "browse";
-  })();
-  const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode);
-  // Skill workshop pending queue — surfaced as a third tab only when
-  // the queue is non-empty so the Skills page stays clean for operators
-  // who never touch the workshop. The tab disappears the moment the
-  // queue drains, returning the page to its two-tab layout.
-  const pendingSkillsQuery = usePendingSkillCandidates();
-  const pendingSkillsCount = pendingSkillsQuery.data?.length ?? 0;
-  // If the deep link or the user landed on the Pending tab but the
-  // queue has since drained (someone else approved / rejected, the
-  // last candidate was just acted on), fall back to the Browse tab —
-  // otherwise the active-tab indicator would point at a tab that no
-  // longer exists.
-  useEffect(() => {
-    if (
-      viewMode === "pending" &&
-      !pendingSkillsQuery.isLoading &&
-      pendingSkillsCount === 0
-    ) {
-      setViewMode("browse");
-    }
-  }, [viewMode, pendingSkillsCount, pendingSkillsQuery.isLoading]);
+  const [viewMode, setViewMode] = useState<ViewMode>("browse");
   /**
    * Which federated hub the browse grid pulls from. Defaults to
    * `"fanghub"` so the page lands on a populated grid (FangHub is the
@@ -1613,35 +1560,18 @@ export function SkillsPage() {
 
   // ── Filtered data ─────────────────────────────────────────────────────────
 
-  const installedSlugSet = useMemo(() => {
-    const set = new Set<string>();
-    for (const s of installedSkills) {
-      const src = s.source;
-      const srcType = src?.type ?? "";
-      const srcSlug = src?.slug;
-      if (srcSlug) {
-        if (srcType === "clawhub" || srcType === "clawhub-cn") {
-          set.add(`clawhub:${srcSlug}`);
-          set.add(`clawhub-cn:${srcSlug}`);
-        } else {
-          set.add(`${srcType}:${srcSlug}`);
-        }
-      }
-      if (srcType === "" || srcType === "local") {
-        set.add(`name:${s.name}`);
-      }
-    }
-    return set;
-  }, [installedSkills]);
-
   const isInstalledFromMarketplace = useCallback(
     (slug: string, src: MarketplaceSource) => {
-      if (src === "clawhub" || src === "clawhub-cn") {
-        return installedSlugSet.has(`clawhub:${slug}`) || installedSlugSet.has(`clawhub-cn:${slug}`) || installedSlugSet.has(`name:${slug}`);
-      }
-      return installedSlugSet.has(`${src}:${slug}`) || installedSlugSet.has(`name:${slug}`);
+      // clawhub and clawhub-cn share the same slug namespace (same content)
+      const matchTypes =
+        src === "clawhub" || src === "clawhub-cn"
+          ? ["clawhub", "clawhub-cn"]
+          : [src];
+      return installedSkills.some(
+        (s) => matchTypes.includes(s.source?.type ?? "") && s.source?.slug === slug,
+      );
     },
-    [installedSlugSet],
+    [installedSkills],
   );
 
   /** Items from a non-fanghub remote registry, normalized with
@@ -1838,10 +1768,7 @@ export function SkillsPage() {
         }
       />
 
-      {/* Tab bar — `Pending` only renders when the workshop has
-          something queued so the steady-state Skills page stays a
-          two-tab layout (#3328). The tab disappears as soon as the
-          queue drains. */}
+      {/* Tab bar */}
       <div className="flex gap-1 p-1 bg-surface rounded-xl border border-border-subtle w-fit">
         {(
           [
@@ -1858,19 +1785,6 @@ export function SkillsPage() {
               label: t("skills.browse", { defaultValue: "Browse" }),
               activeColor: "text-brand",
             },
-            ...(pendingSkillsCount > 0
-              ? [
-                  {
-                    mode: "pending" as const,
-                    icon: <Sparkles className="w-4 h-4" />,
-                    label: t("skills.pending_tab", {
-                      defaultValue: "Pending",
-                    }),
-                    count: pendingSkillsCount,
-                    activeColor: "text-warning",
-                  },
-                ]
-              : []),
           ]
         ).map((tab) => {
           const active = viewMode === tab.mode;
@@ -1973,9 +1887,6 @@ export function SkillsPage() {
           }
         />
       )}
-
-      {/* ── Pending (#3328 skill workshop review queue) ── */}
-      {viewMode === "pending" && <PendingSkillsSection />}
 
       {/* ── Installed ── */}
       {viewMode === "installed" &&

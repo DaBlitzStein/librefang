@@ -1,0 +1,16 @@
+[Unit]
+Description=LibreFang Agent OS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/proteo/.librefang/bin/librefang start --foreground
+WorkingDirectory=/home/proteo/.librefang
+Environment=VIRTUAL_ENV=/home/proteo/.librefang/venv
+Environment=PATH=/home/proteo/.librefang/venv/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -123,10 +123,7 @@ async fn media_image_rejects_empty_prompt() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
     assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("empty"),
+        body["error"].as_str().unwrap_or("").contains("empty"),
         "{body:?}"
     );
 }
@@ -142,10 +139,7 @@ async fn media_image_rejects_invalid_count() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("count"));
+    assert!(body["error"].as_str().unwrap_or("").contains("count"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -191,10 +185,7 @@ async fn media_speech_rejects_empty_text() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("empty"));
+    assert!(body["error"].as_str().unwrap_or("").contains("empty"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -208,10 +199,7 @@ async fn media_speech_rejects_out_of_range_speed() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("speed"));
+    assert!(body["error"].as_str().unwrap_or("").contains("speed"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -241,7 +229,7 @@ async fn media_video_rejects_empty_prompt_and_no_image() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
+    assert!(body["error"]
         .as_str()
         .unwrap_or("")
         .to_lowercase()
@@ -259,10 +247,7 @@ async fn media_video_rejects_invalid_duration() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("duration"));
+    assert!(body["error"].as_str().unwrap_or("").contains("duration"));
 }
 
 // ── GET /media/video/{task_id} ──────────────────────────────────────────
@@ -272,10 +257,7 @@ async fn media_video_poll_requires_provider_query() {
     let h = boot().await;
     let (status, body) = json_request(&h, Method::GET, "/api/media/video/abc123", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("provider"));
+    assert!(body["error"].as_str().unwrap_or("").contains("provider"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -305,7 +287,7 @@ async fn media_music_rejects_when_neither_prompt_nor_lyrics() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
+    assert!(body["error"]
         .as_str()
         .unwrap_or("")
         .to_lowercase()
@@ -324,10 +306,7 @@ async fn media_music_rejects_overlong_lyrics() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("Lyrics"));
+    assert!(body["error"].as_str().unwrap_or("").contains("Lyrics"));
 }
 
 // ── GET /media/providers ────────────────────────────────────────────────
@@ -374,10 +353,7 @@ async fn media_transcribe_rejects_non_audio_content_type() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("audio"));
+    assert!(body["error"].as_str().unwrap_or("").contains("audio"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -392,7 +368,7 @@ async fn media_transcribe_rejects_empty_body() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
-    assert!(body["error"]["message"]
+    assert!(body["error"]
         .as_str()
         .unwrap_or("")
         .to_lowercase()

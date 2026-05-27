@@ -145,17 +145,6 @@ impl AgentRegistry {
         self.agents.get(&id).map(|e| (**e.value()).clone())
     }
 
-    /// Cheap-read accessor: hand back the stored `Arc<AgentEntry>` without
-    /// deep-cloning. Hot paths (skill-workshop after-turn hook, metrics
-    /// scrapes) call this once per turn per agent and only need read
-    /// access. Mirrors [`Self::list_arcs`] but for a single id; identical
-    /// snapshot semantics — subsequent registry mutations create copy-on-
-    /// write replacements via `Arc::make_mut` and are not visible through
-    /// previously returned Arcs.
-    pub fn get_arc(&self, id: AgentId) -> Option<Arc<AgentEntry>> {
-        self.agents.get(&id).map(|e| Arc::clone(e.value()))
-    }
-
     /// Find an agent by name.
     pub fn find_by_name(&self, name: &str) -> Option<AgentEntry> {
         self.name_index
@@ -354,47 +343,12 @@ impl AgentRegistry {
     /// Replace an agent's manifest wholesale. The caller is responsible for
     /// preserving runtime-only fields (workspace, tags) and invalidating any
     /// caches that depend on the manifest. Used by `reload_agent_from_disk`.
-    ///
-    /// Concurrency-affecting fields (`session_mode`,
-    /// `max_concurrent_invocations`) are intentionally NOT invalidated in
-    /// the per-agent semaphore cache — see `agent_concurrency_for` in
-    /// `kernel/accessors.rs` and the project CLAUDE.md "respawn to re-read"
-    /// policy. To make that policy visible to operators, this method emits
-    /// a single `warn!` per swap when either of those fields changed,
-    /// telling them an agent kill + respawn (or daemon restart) is
-    /// required for the new cap to take effect. Without the WARN, a
-    /// hot-reload from `Persistent + cap=1` to `New + cap=5` would
-    /// silently mint fresh sessions while still throttling them at the
-    /// old 1-permit semaphore — a half-upgraded state with no operator
-    /// signal. See `docs/issues/trigger-dispatch-two-snapshots.md`.
     pub fn replace_manifest(
         &self,
         id: AgentId,
         manifest: librefang_types::agent::AgentManifest,
     ) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
-            let old_session_mode = entry.manifest.session_mode;
-            let new_session_mode = manifest.session_mode;
-            let old_cap = entry.manifest.max_concurrent_invocations;
-            let new_cap = manifest.max_concurrent_invocations;
-            let session_mode_changed = old_session_mode != new_session_mode;
-            let cap_changed = old_cap != new_cap;
-            if session_mode_changed || cap_changed {
-                tracing::warn!(
-                    agent_id = %id,
-                    session_mode_changed,
-                    cap_changed,
-                    old_session_mode = ?old_session_mode,
-                    new_session_mode = ?new_session_mode,
-                    old_max_concurrent_invocations = ?old_cap,
-                    new_max_concurrent_invocations = ?new_cap,
-                    "Agent manifest changed concurrency-affecting field(s); cached \
-                     per-agent semaphore is retained until the agent respawns. \
-                     Kill+respawn the agent (or restart the daemon) for the new \
-                     session_mode / max_concurrent_invocations to take effect on \
-                     trigger dispatch.",
-                );
-            }
             entry.manifest = manifest;
             entry.last_active = chrono::Utc::now();
         })?;
@@ -496,24 +450,6 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Update an agent's schedule mode (Reactive / Periodic / Proactive /
-    /// Continuous). Mutates the manifest only — the kernel-level wrapper
-    /// `LibreFangKernel::set_agent_schedule` is what callers should use to
-    /// also stop the prior background loop and start the new one so the
-    /// runtime actually reflects the change without a daemon restart.
-    pub fn update_schedule(
-        &self,
-        id: AgentId,
-        schedule: librefang_types::agent::ScheduleMode,
-    ) -> LibreFangResult<()> {
-        self.with_entry_mut(id, |entry| {
-            entry.manifest.schedule = schedule;
-            entry.last_active = chrono::Utc::now();
-        })?;
-        self.notify_changed();
-        Ok(())
-    }
-
     /// Update an agent's fallback model chain.
     pub fn update_fallback_models(
         &self,
@@ -521,7 +457,7 @@ impl AgentRegistry {
         fallback_models: Vec<librefang_types::agent::FallbackModel>,
     ) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
-            entry.manifest.fallback_models = Some(fallback_models);
+            entry.manifest.fallback_models = fallback_models;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -630,13 +566,6 @@ impl AgentRegistry {
 
     /// Update an agent's name (also updates the name index).
     pub fn update_name(&self, id: AgentId, new_name: String) -> LibreFangResult<()> {
-        // #4980 nit: reject renames into the reserved `_operator:`
-        // namespace — synthetic operator-node step-result names would
-        // collide with the real agent and make run history ambiguous.
-        // `spawn_agent_inner` enforces the same rule at create time;
-        // the rename path needs its own gate because it bypasses spawn.
-        librefang_types::agent::validate_agent_name(&new_name)?;
-
         // Use atomic entry() API to avoid TOCTOU race between contains_key and insert.
         match self.name_index.entry(new_name.clone()) {
             Entry::Occupied(_) => {
@@ -1096,34 +1025,8 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        // Two-phase deterministic driver. Earlier iterations:
-        //   v1 (#4393): wall-clock 100ms slice + `lookups > 1_000`. Flaked
-        //     on Ubuntu shard 1 under load (reader couldn't squeeze 1k
-        //     iterations in time).
-        //   v2 (#4673): fixed 5_000 writer cycles + `hits > 0`. Removed
-        //     the wall-clock dependency but introduced a probabilistic
-        //     vacuous-pass: on a fast runner that gives the writer
-        //     priority (observed on macOS, #4704), the writer can drain
-        //     all 5_000 register/remove cycles before the reader thread
-        //     ever schedules — `hits` stays 0 and the assertion fires.
-        //
-        // v3 (this): split into two phases.
-        //   Phase 1 — establish that the reader actually ran. Writer
-        //     registers "racy" once and waits on `phase1_done` until
-        //     the reader has observed the entry at least once. No race
-        //     here: "racy" is permanently in the registry, so the
-        //     reader's first hit is structural, not probabilistic.
-        //   Phase 2 — race phase. Writer cycles register/remove; reader
-        //     keeps polling. This is what actually exercises the
-        //     torn-read invariant.
-        // After this, `hits > 0` is guaranteed (Phase 1 sets it),
-        // `torn == 0` is the real invariant under test, and the test
-        // is no longer schedule-dependent.
-        const WRITER_CYCLES: usize = 5_000;
-
         let registry = Arc::new(AgentRegistry::new());
         let stop = Arc::new(AtomicBool::new(false));
-        let phase1_done = Arc::new(AtomicBool::new(false));
         // Count cases where `find_by_name` returned `Some` but the entry's
         // name disagreed with the lookup key (impossible if registry is
         // self-consistent; would catch torn reads).
@@ -1134,48 +1037,28 @@ mod tests {
         let writer = {
             let registry = Arc::clone(&registry);
             let stop = Arc::clone(&stop);
-            let phase1_done = Arc::clone(&phase1_done);
             thread::spawn(move || {
-                // Phase 1: register "racy" once, wait for reader to observe.
-                let entry = test_entry("racy");
-                let id = entry.id;
-                registry
-                    .register(entry)
-                    .expect("phase 1: initial register should succeed");
-                while !phase1_done.load(Ordering::Acquire) {
-                    std::hint::spin_loop();
-                }
-                registry.remove(id).ok();
-
-                // Phase 2: race cycles.
-                for _ in 0..WRITER_CYCLES {
+                while !stop.load(Ordering::Relaxed) {
                     let entry = test_entry("racy");
                     let id = entry.id;
                     if registry.register(entry).is_ok() {
                         registry.remove(id).ok();
                     }
                 }
-                stop.store(true, Ordering::Release);
             })
         };
 
         let reader = {
             let registry = Arc::clone(&registry);
             let stop = Arc::clone(&stop);
-            let phase1_done = Arc::clone(&phase1_done);
             let torn = Arc::clone(&torn);
             let lookups = Arc::clone(&lookups);
             let hits = Arc::clone(&hits);
             thread::spawn(move || {
-                while !stop.load(Ordering::Acquire) {
+                while !stop.load(Ordering::Relaxed) {
                     lookups.fetch_add(1, Ordering::Relaxed);
                     if let Some(found) = registry.find_by_name("racy") {
                         hits.fetch_add(1, Ordering::Relaxed);
-                        // Release-store so the writer's Acquire-load on
-                        // phase1_done sees the same memory state where
-                        // we incremented `hits`. Cheap to do every hit;
-                        // the writer only checks during Phase 1.
-                        phase1_done.store(true, Ordering::Release);
                         if found.name != "racy" {
                             torn.fetch_add(1, Ordering::Relaxed);
                         }
@@ -1184,21 +1067,21 @@ mod tests {
             })
         };
 
+        thread::sleep(std::time::Duration::from_millis(100));
+        stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
         reader.join().unwrap();
 
-        // Reader ran (vacuous on a truly broken scheduler, but if Phase 1
-        // signalled `phase1_done` the reader must have observed at least
-        // once — both this and the `hits > 0` assertion below should hold).
+        // Sanity: reader actually ran enough iterations and saw the agent
+        // some of the time, otherwise a clean pass is vacuous.
         assert!(
-            lookups.load(Ordering::Relaxed) >= 1,
-            "reader thread did not run a single iteration before the writer finished"
+            lookups.load(Ordering::Relaxed) > 1_000,
+            "reader did not run enough iterations to be a meaningful probe"
         );
         assert!(
             hits.load(Ordering::Relaxed) > 0,
-            "reader never observed the agent — Phase 1 was supposed to make this \
-             structural; if this fires the registry's find_by_name is broken or \
-             the phase1 hand-off is wrong"
+            "reader never observed the agent — the writer/reader interleaving \
+             produced a vacuous pass; widen the test if this fires on slow CI"
         );
         assert_eq!(
             torn.load(Ordering::Relaxed),
@@ -1325,180 +1208,5 @@ mod tests {
         registry.remove(id).expect("remove");
         let s3 = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
         assert!(matches!(s3, Ok(Ok(()))), "remove should fire event");
-    }
-
-    // ─── replace_manifest concurrency-change WARN (refs trigger-dispatch-two-snapshots) ───
-    //
-    // The per-agent semaphore cache in `agent_concurrency_for`
-    // (kernel/accessors.rs) is intentionally NOT invalidated on
-    // manifest hot-reload — operators must kill+respawn the agent.
-    // To make that policy visible, `replace_manifest` emits a single
-    // `warn!` per swap when either `session_mode` or
-    // `max_concurrent_invocations` changes. The tests below capture
-    // tracing output via a `VecWriter` fmt subscriber (same pattern as
-    // `supervised_spawn::tests::span_inherited_by_supervised_task`).
-    mod concurrency_warn {
-        use super::*;
-        use std::io;
-        use std::sync::Mutex;
-        use tracing_subscriber::fmt::MakeWriter;
-        use tracing_subscriber::layer::SubscriberExt;
-
-        #[derive(Clone)]
-        struct VecWriter(Arc<Mutex<Vec<u8>>>);
-        impl io::Write for VecWriter {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for VecWriter {
-            type Writer = VecWriter;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        /// Run `f` with a fmt subscriber attached, return captured stderr-style
-        /// log text. Filters to WARN+ to keep the buffer focused on what we
-        /// assert on.
-        fn capture_logs<F: FnOnce()>(f: F) -> String {
-            let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-            let writer = VecWriter(buf.clone());
-            let layer = tracing_subscriber::fmt::layer()
-                .with_writer(writer)
-                .with_ansi(false)
-                .with_target(false);
-            let subscriber = tracing_subscriber::registry().with(layer).with(
-                tracing_subscriber::filter::LevelFilter::from_level(tracing::Level::WARN),
-            );
-            let _g = tracing::subscriber::set_default(subscriber);
-            f();
-            let bytes = buf.lock().unwrap().clone();
-            String::from_utf8(bytes).unwrap_or_default()
-        }
-
-        fn registered_entry(
-            registry: &AgentRegistry,
-            name: &str,
-            session_mode: SessionMode,
-            cap: Option<u32>,
-        ) -> AgentId {
-            let mut entry = test_entry(name);
-            entry.manifest.session_mode = session_mode;
-            entry.manifest.max_concurrent_invocations = cap;
-            let id = entry.id;
-            registry.register(entry).unwrap();
-            id
-        }
-
-        const WARN_SENTINEL: &str = "concurrency-affecting field(s); cached \
-             per-agent semaphore is retained";
-
-        /// Hot-reload that flips `session_mode` from Persistent → New
-        /// must emit exactly one WARN at the swap. This is the durable
-        /// hot-reload signal — the existing WARN at
-        /// `accessors.rs:967-976` only fires on FIRST semaphore
-        /// resolution and would be silent on a subsequent reload.
-        #[test]
-        fn warns_when_session_mode_changes() {
-            let logs = capture_logs(|| {
-                let registry = AgentRegistry::new();
-                let id = registered_entry(
-                    &registry,
-                    "swap-session-mode",
-                    SessionMode::Persistent,
-                    None,
-                );
-                let mut new_manifest = registry.get(id).unwrap().manifest.clone();
-                new_manifest.session_mode = SessionMode::New;
-                registry.replace_manifest(id, new_manifest).unwrap();
-            });
-            let occurrences = logs.matches(WARN_SENTINEL).count();
-            assert_eq!(
-                occurrences, 1,
-                "expected exactly one WARN on session_mode change; got logs:\n{logs}"
-            );
-            assert!(
-                logs.contains("session_mode_changed=true"),
-                "WARN must mark session_mode_changed=true; got:\n{logs}"
-            );
-            assert!(
-                logs.contains("cap_changed=false"),
-                "WARN must mark cap_changed=false when only session_mode flipped; got:\n{logs}"
-            );
-        }
-
-        /// Hot-reload that bumps `max_concurrent_invocations` (e.g. 1 → 5)
-        /// must emit exactly one WARN.
-        #[test]
-        fn warns_when_max_concurrent_invocations_changes() {
-            let logs = capture_logs(|| {
-                let registry = AgentRegistry::new();
-                let id = registered_entry(&registry, "swap-cap", SessionMode::New, Some(1));
-                let mut new_manifest = registry.get(id).unwrap().manifest.clone();
-                new_manifest.max_concurrent_invocations = Some(5);
-                registry.replace_manifest(id, new_manifest).unwrap();
-            });
-            let occurrences = logs.matches(WARN_SENTINEL).count();
-            assert_eq!(
-                occurrences, 1,
-                "expected exactly one WARN on cap change; got logs:\n{logs}"
-            );
-            assert!(
-                logs.contains("cap_changed=true"),
-                "WARN must mark cap_changed=true; got:\n{logs}"
-            );
-            assert!(
-                logs.contains("session_mode_changed=false"),
-                "WARN must mark session_mode_changed=false when only cap changed; got:\n{logs}"
-            );
-        }
-
-        /// When BOTH fields change in one swap, a single WARN that
-        /// names both is sufficient — we don't want to double-log.
-        #[test]
-        fn warns_once_when_both_fields_change() {
-            let logs = capture_logs(|| {
-                let registry = AgentRegistry::new();
-                let id = registered_entry(&registry, "swap-both", SessionMode::Persistent, Some(1));
-                let mut new_manifest = registry.get(id).unwrap().manifest.clone();
-                new_manifest.session_mode = SessionMode::New;
-                new_manifest.max_concurrent_invocations = Some(8);
-                registry.replace_manifest(id, new_manifest).unwrap();
-            });
-            let occurrences = logs.matches(WARN_SENTINEL).count();
-            assert_eq!(
-                occurrences, 1,
-                "expected exactly one WARN naming both changed fields; got logs:\n{logs}"
-            );
-            assert!(
-                logs.contains("session_mode_changed=true") && logs.contains("cap_changed=true"),
-                "WARN must mark both changed flags true; got:\n{logs}"
-            );
-        }
-
-        /// Hot-reload that only touches unrelated fields (here:
-        /// description) must NOT emit the concurrency WARN. Otherwise
-        /// routine reloads (skill allowlist edits, system prompt
-        /// tweaks) would spam operators with stale warnings.
-        #[test]
-        fn no_warn_when_unrelated_field_changes() {
-            let logs = capture_logs(|| {
-                let registry = AgentRegistry::new();
-                let id = registered_entry(&registry, "swap-noop", SessionMode::Persistent, Some(1));
-                let mut new_manifest = registry.get(id).unwrap().manifest.clone();
-                new_manifest.description = "edited description, no concurrency change".to_string();
-                registry.replace_manifest(id, new_manifest).unwrap();
-            });
-            let occurrences = logs.matches(WARN_SENTINEL).count();
-            assert_eq!(
-                occurrences, 0,
-                "expected NO WARN when concurrency fields unchanged; got logs:\n{logs}"
-            );
-        }
     }
 }

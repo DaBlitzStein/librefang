@@ -28,19 +28,6 @@ daemon-start-fail = 无法启动守护进程：{ $error }
 daemon-start-fail-fix = 请手动启动：librefang start
 shutdown-request-fail = 关闭请求失败（{ $status }）
 could-not-reach-daemon = 无法连接守护进程：{ $error }
-# Issue #4693 — `curl install.sh | sh` 升级二进制后没有重启守护进程，
-# 新版 CLI 调用旧守护进程的 /api/shutdown 时因 api_key 不一致而被拒绝
-# (vault 锁定 / 密钥轮换 / 刚启用控制台凭证)。直接说明原因并退回到
-# 基于 PID 的强制停止，让用户不必手动改配置。
-shutdown-401-detected = 关闭请求被运行中的守护进程拒绝（401 Unauthorized）。
-shutdown-401-explainer = 新版 CLI 无法对当前运行的守护进程进行身份认证。这种情况通常发生在 `curl install.sh | sh` 升级二进制后未重启守护进程 —— 旧守护进程使用了不同的 api_key，或保存该 key 的 vault 无法解锁。
-shutdown-401-fallback-attempt = 退回到基于 PID 的停止方式（PID { $pid }）...
-shutdown-401-fallback-success = 已通过 PID { $pid } 停止守护进程
-shutdown-401-fallback-fail = 基于 PID 的停止也失败了。
-shutdown-401-fallback-fix = 请手动停止守护进程，然后重新启动：
-    kill { $pid }    # 或：kill -9 { $pid } 如果没有退出
-    librefang start
-shutdown-401-no-pid-fix = 无法从 { $path } 读取守护进程 PID。请运行 `ps -ef | grep librefang` 找到 PID，然后 `kill <pid>` 并执行 `librefang start`。
 
 # --- Labels ---
 label-api = API
@@ -262,9 +249,10 @@ channel-password-saved = 密码已保存至 ~/.librefang/.env
 channel-phone-saved = 手机号已保存至 ~/.librefang/.env
 channel-key-saved = { $key } 已保存至 ~/.librefang/.env
 channel-unknown = 未知通道：{ $name }
-channel-unknown-fix = 可用通道：discord、slack、whatsapp、email、signal、matrix
+channel-unknown-fix = 可用通道：telegram、discord、slack、whatsapp、email、signal、matrix
 channel-test-ok = 通道测试通过
 channel-test-fail = 通道测试失败
+section-setup-telegram = 设置 Telegram
 section-setup-discord = 设置 Discord
 section-setup-slack = 设置 Slack
 section-setup-whatsapp = 设置 WhatsApp

@@ -6,7 +6,6 @@ import {
   getUsageDaily,
   getUsageByModelPerformance,
   getBudgetStatus,
-  getProviderBudgets,
 } from "../http/client";
 import { usageKeys, budgetKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -66,17 +65,6 @@ export const budgetQueries = {
       refetchInterval: REFRESH_MS,
       refetchIntervalInBackground: false, // #3393
     }),
-  // Per-provider spend snapshot (#5650). Same refresh cadence as the
-  // global budget query so the dashboard's two budget cards stay in
-  // lock-step rather than ping-ponging slightly out of sync.
-  providers: () =>
-    queryOptions({
-      queryKey: budgetKeys.providers(),
-      queryFn: getProviderBudgets,
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
-      refetchIntervalInBackground: false, // #3393
-    }),
 };
 
 export function useUsageSummary(options: QueryOverrides = {}) {
@@ -101,8 +89,4 @@ export function useModelPerformance(options: QueryOverrides = {}) {
 
 export function useBudgetStatus(options: QueryOverrides = {}) {
   return useQuery(withOverrides(budgetQueries.status(), options));
-}
-
-export function useProviderBudgets(options: QueryOverrides = {}) {
-  return useQuery(withOverrides(budgetQueries.providers(), options));
 }

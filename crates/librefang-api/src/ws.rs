@@ -13,7 +13,7 @@
 //! Server → Client: `{"type":"canvas","canvas_id":"...","html":"...","title":"..."}`
 
 use crate::routes::AppState;
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, Uri};
 use axum::response::IntoResponse;
@@ -21,10 +21,10 @@ use dashmap::DashMap;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use librefang_channels::types::SenderContext;
-use librefang_kernel::kernel_handle::prelude::*;
-use librefang_kernel::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
-use librefang_kernel::llm_errors;
-use librefang_types::agent::{AgentId, ResetScope, SessionId};
+use librefang_runtime::kernel_handle::prelude::*;
+use librefang_runtime::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
+use librefang_runtime::llm_errors;
+use librefang_types::agent::{AgentId, SessionId};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
@@ -350,12 +350,9 @@ pub async fn agent_ws(
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
     // SECURITY: Authenticate WebSocket upgrades (bypasses HTTP middleware).
-    // Single snapshot so all three derived flags come from the same hot-reload
-    // generation (#3744 review #2).
-    let auth_snap = librefang_kernel::kernel_handle::ApiAuth::auth_snapshot(state.kernel.as_ref());
-    let valid_tokens = crate::server::valid_api_tokens(&auth_snap);
-    let user_api_keys = crate::server::configured_user_api_keys(&auth_snap);
-    let dashboard_auth = crate::server::has_dashboard_credentials(&auth_snap);
+    let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
+    let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
+    let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
     let auth_required = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
 
     // Mirror middleware: when no auth is configured, only allow loopback
@@ -594,26 +591,15 @@ async fn handle_agent_ws(
     // Per-connection verbose level (default: Full)
     let verbose = Arc::new(AtomicU8::new(VerboseLevel::Full as u8));
 
-    // Send initial connection confirmation. If this very first frame fails
-    // the peer is already unreachable — there is no useful work left to do,
-    // so close the socket with a 1011 server-error frame and stop (#5137).
-    if send_json_or_close(
+    // Send initial connection confirmation
+    let _ = send_json(
         &sender,
         &serde_json::json!({
             "type": "connected",
             "agent_id": id_str,
         }),
     )
-    .await
-    .is_err()
-    {
-        info!(
-            agent_id = %id_str,
-            conn_id = %conn_id,
-            "WebSocket closed before any message handled (initial frame send failed)"
-        );
-        return;
-    }
+    .await;
 
     // Spawn background task: event-driven agent list updates (#3513).
     //
@@ -675,11 +661,7 @@ async fn handle_agent_ws(
             }
             *last_hash = new_hash;
 
-            // Drive the send through the close-on-error helper so a failure
-            // here pushes a 1011 close frame to the peer instead of leaving
-            // the main loop pumping on a half-broken socket (#5137). The
-            // outer task signals teardown via `Err(())` as before.
-            if send_json_or_close(
+            if send_json(
                 sender,
                 &serde_json::json!({
                     "type": "agents_updated",
@@ -763,11 +745,7 @@ async fn handle_agent_ws(
             _ = tokio::time::sleep(ws_idle_timeout.saturating_sub(last_activity.elapsed())) => {
                 let timeout_secs = ws_idle_timeout.as_secs();
                 info!(agent_id = %id_str, conn_id = %conn_id, timeout_secs, "WebSocket idle timeout");
-                // Best-effort notify the peer; we're closing the socket either
-                // way. Drive the send through the helper so we always emit a
-                // close frame (the previous swallowed error left the socket
-                // half-open if the notify itself failed — #5137).
-                let _ = send_json_or_close(
+                let _ = send_json(
                     &sender,
                     &serde_json::json!({
                         "type": "error",
@@ -795,19 +773,14 @@ async fn handle_agent_ws(
                 // SECURITY: Reject oversized WebSocket messages (64KB max)
                 const MAX_WS_MSG_SIZE: usize = 64 * 1024;
                 if text.len() > MAX_WS_MSG_SIZE {
-                    if send_json_or_close(
+                    let _ = send_json(
                         &sender,
                         &serde_json::json!({
                             "type": "error",
                             "content": "Message too large (max 64KB)",
                         }),
                     )
-                    .await
-                    .is_err()
-                    {
-                        disconnect_reason = "send_error";
-                        break;
-                    }
+                    .await;
                     continue;
                 }
 
@@ -815,19 +788,14 @@ async fn handle_agent_ws(
                 let now = std::time::Instant::now();
                 msg_times.retain(|t| now.duration_since(*t) < window);
                 if msg_times.len() >= max_per_min {
-                    if send_json_or_close(
+                    let _ = send_json(
                         &sender,
                         &serde_json::json!({
                             "type": "error",
                             "content": format!("Rate limit exceeded. Max {max_per_min} messages per minute."),
                         }),
                     )
-                    .await
-                    .is_err()
-                    {
-                        disconnect_reason = "send_error";
-                        break;
-                    }
+                    .await;
                     continue;
                 }
                 msg_times.push(now);
@@ -842,7 +810,7 @@ async fn handle_agent_ws(
                 // from "proxy IP" to "real client IP" on the very first
                 // request after operators flip the flags on. No-op when the
                 // flags are off (defaults).
-                if handle_text_message(
+                handle_text_message(
                     &sender,
                     &state,
                     agent_id,
@@ -851,15 +819,7 @@ async fn handle_agent_ws(
                     client_ip,
                     explicit_session,
                 )
-                .await
-                .is_err()
-                {
-                    // A frame send failed inside the handler; the helper has
-                    // already pushed a 1011 close frame, so just tear down the
-                    // main loop with an explicit reason (#5137).
-                    disconnect_reason = "send_error";
-                    break;
-                }
+                .await;
             }
             Message::Close(frame) => {
                 let close_code = frame
@@ -905,11 +865,6 @@ async fn handle_agent_ws(
 // ---------------------------------------------------------------------------
 
 /// Handle a text message from the WebSocket client.
-///
-/// Returns `Err(WsClosed)` when a frame send has failed and the helper has
-/// already pushed a 1011 close frame — the caller MUST stop pumping the main
-/// loop in that case (#5137). Successful handling (including validation
-/// errors that were reported back to the client) returns `Ok(())`.
 async fn handle_text_message(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     state: &Arc<AppState>,
@@ -918,7 +873,7 @@ async fn handle_text_message(
     verbose: &Arc<AtomicU8>,
     client_ip: IpAddr,
     explicit_session: Option<SessionId>,
-) -> Result<(), WsClosed> {
+) {
     // Parse the message
     let parsed: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -935,7 +890,7 @@ async fn handle_text_message(
             let raw_content = match parsed["content"].as_str() {
                 Some(c) if !c.trim().is_empty() => c.to_string(),
                 _ => {
-                    return send_json_or_close(
+                    let _ = send_json(
                         sender,
                         &serde_json::json!({
                             "type": "error",
@@ -943,6 +898,7 @@ async fn handle_text_message(
                         }),
                     )
                     .await;
+                    return;
                 }
             };
 
@@ -955,7 +911,7 @@ async fn handle_text_message(
             // Sanitize inbound user input
             let content = sanitize_user_input(&raw_content);
             if content.is_empty() {
-                return send_json_or_close(
+                let _ = send_json(
                     sender,
                     &serde_json::json!({
                         "type": "error",
@@ -963,6 +919,7 @@ async fn handle_text_message(
                     }),
                 )
                 .await;
+                return;
             }
 
             // Reject messages when provider API key is missing
@@ -990,12 +947,15 @@ async fn handle_text_message(
                     let is_missing = state
                         .kernel
                         .model_catalog_ref()
-                        .load()
-                        .get_provider(provider)
-                        .map(|p| !p.auth_status.is_available())
+                        .read()
+                        .ok()
+                        .and_then(|cat| {
+                            cat.get_provider(provider)
+                                .map(|p| !p.auth_status.is_available())
+                        })
                         .unwrap_or(false);
                     if is_missing {
-                        return send_json_or_close(
+                        let _ = send_json(
                             sender,
                             &serde_json::json!({
                                 "type": "error",
@@ -1003,6 +963,7 @@ async fn handle_text_message(
                             }),
                         )
                         .await;
+                        return;
                     }
                 }
             }
@@ -1019,7 +980,7 @@ async fn handle_text_message(
                     if !image_blocks.is_empty() {
                         has_images = true;
                         crate::routes::inject_attachments_into_session(
-                            state.kernel.as_ref(),
+                            &state.kernel,
                             agent_id,
                             image_blocks,
                         );
@@ -1035,21 +996,15 @@ async fn handle_text_message(
                     .get(agent_id)
                     .map(|e| e.manifest.model.model.clone())
                     .unwrap_or_default();
-                // Refs #4745: respect user-configured vision override so the
-                // CLI/WS warning matches what the dashboard shows. If the user
-                // explicitly forced `supports_vision = true` for a model whose
-                // catalog declared it false (because the provider's
-                // `capabilities` field is wrong), we should let the image
-                // request through.
-                let supports_vision = {
-                    let catalog = state.kernel.model_catalog_ref().load();
-                    catalog
-                        .find_model(&model_name)
-                        .map(|m| catalog.effective_capabilities(m).supports_vision)
-                        .unwrap_or(false)
-                };
+                let supports_vision = state
+                    .kernel
+                    .model_catalog_ref()
+                    .read()
+                    .ok()
+                    .and_then(|cat| cat.find_model(&model_name).map(|m| m.supports_vision))
+                    .unwrap_or(false);
                 if !supports_vision {
-                    send_json_or_close(
+                    let _ = send_json(
                         sender,
                         &serde_json::json!({
                             "type": "command_result",
@@ -1061,24 +1016,25 @@ async fn handle_text_message(
                             ),
                         }),
                     )
-                    .await?;
+                    .await;
                 }
             }
 
             // Send typing lifecycle: start
-            send_json_or_close(
+            let _ = send_json(
                 sender,
                 &serde_json::json!({
                     "type": "typing",
                     "state": "start",
                 }),
             )
-            .await?;
+            .await;
 
             // Send message to agent with streaming
-            let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
+            let kernel_handle: Arc<dyn KernelHandle> =
+                state.kernel.clone() as Arc<dyn KernelHandle>;
             let sender_ctx = SenderContext {
-                channel: librefang_kernel::SYSTEM_CHANNEL_WEBUI.to_string(),
+                channel: "webui".to_string(),
                 // Behaviour change (`trusted_proxies` + `trust_forwarded_for`):
                 // when both flags are configured AND the TCP peer matches the
                 // allowlist, this is the resolved real client IP, not the proxy
@@ -1096,24 +1052,15 @@ async fn handle_text_message(
                 // so GET /session, list_agent_sessions, switch_agent_session,
                 // and agent_send all see the same conversation history.
                 use_canonical_session: true,
-                // Trusted internal system path. The reserved `"webui"` channel
-                // here is the kernel's own, not external input; flag it so the
-                // session resolver never rewrites it to `ext-webui` (audit:
-                // cron-channel-name-not-reserved). Currently the
-                // `use_canonical_session` flag above already bypasses the
-                // channel-derived branch, but this keeps the trust signal
-                // explicit and correct if that bypass is ever removed.
-                is_internal_system: true,
                 ..Default::default()
             };
             match state
                 .kernel
-                .clone()
                 .send_message_streaming_with_sender_context_routing_thinking_and_session(
                     agent_id,
                     &content,
                     Some(kernel_handle),
-                    sender_ctx.clone(),
+                    &sender_ctx,
                     thinking_override,
                     explicit_session,
                 )
@@ -1162,15 +1109,11 @@ async fn handle_text_message(
                                             if let StreamEvent::TextDelta { ref text } = ev {
                                                 text_buffer.push_str(text);
                                                 if text_buffer.len() >= debounce_chars {
-                                                    if flush_text_buffer(
+                                                    let _ = flush_text_buffer(
                                                         &sender_stream,
                                                         &mut text_buffer,
                                                     )
-                                                    .await
-                                                    .is_err()
-                                                    {
-                                                        break;
-                                                    }
+                                                    .await;
                                                     flush_deadline = far_future;
                                                 } else if flush_deadline >= far_future {
                                                     flush_deadline =
@@ -1179,26 +1122,19 @@ async fn handle_text_message(
                                                 }
                                             } else {
                                                 // Flush pending text before non-text events
-                                                if flush_text_buffer(
+                                                let _ = flush_text_buffer(
                                                     &sender_stream,
                                                     &mut text_buffer,
                                                 )
-                                                .await
-                                                .is_err()
-                                                {
-                                                    break;
-                                                }
+                                                .await;
                                                 flush_deadline = far_future;
 
-                                                // Send typing indicator for tool events. Treat a
-                                                // failure here the same as the main event send below:
-                                                // the helper closes the socket with 1011 and we
-                                                // bail out of the stream forwarder loop (#5137).
+                                                // Send typing indicator for tool events
                                                 if let StreamEvent::ToolUseStart {
                                                     ref name, ..
                                                 } = ev
                                                 {
-                                                    if send_json_or_close(
+                                                    let _ = send_json(
                                                         &sender_stream,
                                                         &serde_json::json!({
                                                             "type": "typing",
@@ -1206,11 +1142,7 @@ async fn handle_text_message(
                                                             "tool": name,
                                                         }),
                                                     )
-                                                    .await
-                                                    .is_err()
-                                                    {
-                                                        break;
-                                                    }
+                                                    .await;
                                                 }
 
                                                 // Map event to JSON with verbose filtering
@@ -1225,7 +1157,7 @@ async fn handle_text_message(
                                                                 .store(true, Ordering::Release);
                                                         }
                                                     }
-                                                    if send_json_or_close(&sender_stream, &json)
+                                                    if send_json(&sender_stream, &json)
                                                         .await
                                                         .is_err()
                                                     {
@@ -1238,15 +1170,11 @@ async fn handle_text_message(
                                 }
                                 _ = &mut sleep => {
                                     // Timer fired — flush text buffer
-                                    if flush_text_buffer(
+                                    let _ = flush_text_buffer(
                                         &sender_stream,
                                         &mut text_buffer,
                                     )
-                                    .await
-                                    .is_err()
-                                    {
-                                        break;
-                                    }
+                                    .await;
                                     flush_deadline = far_future;
                                 }
                             }
@@ -1276,19 +1204,19 @@ async fn handle_text_message(
                             // stream forwarder already emitted it via the
                             // `response_complete` phase).
                             if !early_stop_sent.load(Ordering::Acquire) {
-                                send_json_or_close(
+                                let _ = send_json(
                                     sender,
                                     &serde_json::json!({
                                         "type": "typing",
                                         "state": "stop",
                                     }),
                                 )
-                                .await?;
+                                .await;
                             }
 
                             // NO_REPLY: agent intentionally chose not to reply
                             if result.silent {
-                                return send_json_or_close(
+                                let _ = send_json(
                                     sender,
                                     &serde_json::json!({
                                         "type": "silent_complete",
@@ -1297,6 +1225,7 @@ async fn handle_text_message(
                                     }),
                                 )
                                 .await;
+                                return;
                             }
 
                             // Extract reasoning trace (optional) and strip
@@ -1362,19 +1291,7 @@ async fn handle_text_message(
                             if let Some(ref t) = thinking_trace {
                                 resp_json["thinking"] = serde_json::json!(t);
                             }
-                            // When the client connected without a ?session_id=
-                            // param it rides the canonical pointer, which may
-                            // flip across restarts.  Emit the session the kernel
-                            // actually used so the frontend can pin ?sessionId=
-                            // in the URL — making subsequent navigations and
-                            // reloads land on the same conversation.
-                            if explicit_session.is_none() {
-                                if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-                                    resp_json["session_id"] =
-                                        serde_json::json!(entry.session_id.to_string());
-                                }
-                            }
-                            send_json_or_close(sender, &resp_json).await?;
+                            let _ = send_json(sender, &resp_json).await;
                         }
                         Ok(Err(e)) => {
                             // Let the stream forwarder drain before
@@ -1382,22 +1299,22 @@ async fn handle_text_message(
                             // still delivered to the client.
                             let _ = tokio::time::timeout(Duration::from_secs(2), stream_task).await;
                             warn!("Agent message failed: {e}");
-                            send_json_or_close(
+                            let _ = send_json(
                                 sender,
                                 &serde_json::json!({
                                     "type": "typing", "state": "stop",
                                 }),
                             )
-                            .await?;
+                            .await;
                             let user_msg = classify_streaming_error(&e);
-                            send_json_or_close(
+                            let _ = send_json(
                                 sender,
                                 &serde_json::json!({
                                     "type": "error",
                                     "content": user_msg,
                                 }),
                             )
-                            .await?;
+                            .await;
                         }
                         Err(e) => {
                             // Let the stream forwarder drain before
@@ -1405,42 +1322,42 @@ async fn handle_text_message(
                             // still delivered to the client.
                             let _ = tokio::time::timeout(Duration::from_secs(2), stream_task).await;
                             warn!("Agent task panicked: {e}");
-                            send_json_or_close(
+                            let _ = send_json(
                                 sender,
                                 &serde_json::json!({
                                     "type": "typing", "state": "stop",
                                 }),
                             )
-                            .await?;
-                            send_json_or_close(
+                            .await;
+                            let _ = send_json(
                                 sender,
                                 &serde_json::json!({
                                     "type": "error",
                                     "content": "Internal error occurred",
                                 }),
                             )
-                            .await?;
+                            .await;
                         }
                     }
                 }
                 Err(e) => {
                     warn!("Streaming setup failed: {e}");
-                    send_json_or_close(
+                    let _ = send_json(
                         sender,
                         &serde_json::json!({
                             "type": "typing", "state": "stop",
                         }),
                     )
-                    .await?;
+                    .await;
                     let user_msg = classify_streaming_error(&e);
-                    send_json_or_close(
+                    let _ = send_json(
                         sender,
                         &serde_json::json!({
                             "type": "error",
                             "content": user_msg,
                         }),
                     )
-                    .await?;
+                    .await;
                 }
             }
         }
@@ -1448,24 +1365,23 @@ async fn handle_text_message(
             let cmd = parsed["command"].as_str().unwrap_or("");
             let args = parsed["args"].as_str().unwrap_or("");
             let response = handle_command(sender, state, agent_id, cmd, args, verbose).await;
-            send_json_or_close(sender, &response).await?;
+            let _ = send_json(sender, &response).await;
         }
         "ping" => {
-            send_json_or_close(sender, &serde_json::json!({"type": "pong"})).await?;
+            let _ = send_json(sender, &serde_json::json!({"type": "pong"})).await;
         }
         other => {
             warn!(msg_type = other, "Unknown WebSocket message type");
-            send_json_or_close(
+            let _ = send_json(
                 sender,
                 &serde_json::json!({
                     "type": "error",
                     "content": format!("Unknown message type: {other}"),
                 }),
             )
-            .await?;
+            .await;
         }
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1474,7 +1390,7 @@ async fn handle_text_message(
 
 /// Handle a WS command and return the response JSON.
 async fn handle_command(
-    sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
+    _sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     state: &Arc<AppState>,
     agent_id: AgentId,
     cmd: &str,
@@ -1504,21 +1420,13 @@ async fn handle_command(
                 serde_json::json!({"type": "error", "content": format!("New session failed: {e}")})
             }
         },
-        "reset" => match state
-            .kernel
-            .reset_session(agent_id, ResetScope::Agent)
-            .await
-        {
+        "reset" => match state.kernel.reset_session(agent_id) {
             Ok(()) => {
                 serde_json::json!({"type": "command_result", "command": "reset", "message": "Session reset. Chat history cleared."})
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
         },
-        "reboot" => match state
-            .kernel
-            .reboot_session(agent_id, ResetScope::Agent)
-            .await
-        {
+        "reboot" => match state.kernel.reboot_session(agent_id) {
             Ok(()) => {
                 serde_json::json!({"type": "command_result", "command": "reboot", "message": "Session rebooted. Context cleared."})
             }
@@ -1526,41 +1434,14 @@ async fn handle_command(
                 serde_json::json!({"type": "error", "content": format!("Reboot failed: {e}")})
             }
         },
-        "compact" => {
-            let kernel = Arc::clone(&state.kernel);
-            let sender_task = Arc::clone(sender);
-            tokio::spawn(async move {
-                match kernel.compact_agent_session(agent_id, true).await {
-                    Ok(msg) => {
-                        let _ = send_json(
-                            &sender_task,
-                            &serde_json::json!({
-                                "type": "compaction:complete",
-                                "command": "compact",
-                                "message": msg,
-                            }),
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        let _ = send_json(
-                            &sender_task,
-                            &serde_json::json!({
-                                "type": "compaction:error",
-                                "command": "compact",
-                                "content": format!("Compaction failed: {e}"),
-                            }),
-                        )
-                        .await;
-                    }
-                }
-            });
-            serde_json::json!({
-                "type": "compaction:started",
-                "command": "compact",
-                "message": "Compaction started.",
-            })
-        }
+        "compact" => match state.kernel.compact_agent_session(agent_id).await {
+            Ok(msg) => {
+                serde_json::json!({"type": "command_result", "command": cmd, "message": msg})
+            }
+            Err(e) => {
+                serde_json::json!({"type": "error", "content": format!("Compaction failed: {e}")})
+            }
+        },
         "stop" => match state.kernel.stop_agent_run(agent_id) {
             Ok(true) => {
                 serde_json::json!({"type": "command_result", "command": cmd, "message": "Run cancelled."})
@@ -1617,7 +1498,7 @@ async fn handle_command(
         },
         "context" => match state.kernel.context_report(agent_id) {
             Ok(report) => {
-                let formatted = librefang_kernel::compactor::format_context_report(&report);
+                let formatted = librefang_runtime::compactor::format_context_report(&report);
                 serde_json::json!({
                     "type": "command_result",
                     "command": cmd,
@@ -1843,18 +1724,14 @@ fn map_stream_event(
 // ---------------------------------------------------------------------------
 
 /// Flush accumulated text buffer as a single text_delta event.
-///
-/// Mirrors the close-on-send-failure policy of every other outbound frame
-/// (#5137): a failed flush emits a 1011 close frame and is reported back to
-/// the caller as `Err(WsClosed)` so the stream forwarder can break its loop.
 async fn flush_text_buffer(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     buffer: &mut String,
-) -> Result<(), WsClosed> {
+) -> Result<(), axum::Error> {
     if buffer.is_empty() {
         return Ok(());
     }
-    let result = send_json_or_close(
+    let result = send_json(
         sender,
         &serde_json::json!({
             "type": "text_delta",
@@ -1871,57 +1748,11 @@ pub async fn send_json(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     value: &serde_json::Value,
 ) -> Result<(), axum::Error> {
-    // Don't send `""` on encode failure — the client would receive an empty
-    // frame it can't decode and silently stall. Surface the error so the
-    // caller can close the socket with a server-error code (#5137).
-    let text = serde_json::to_string(value).map_err(axum::Error::new)?;
+    let text = serde_json::to_string(value).unwrap_or_default();
     let mut s = sender.lock().await;
     s.send(Message::Text(text.into()))
         .await
         .map_err(axum::Error::new)
-}
-
-/// Send a server-error close frame (RFC 6455 code 1011) to the peer.
-///
-/// Used after a `send_json` failure: the transport is already broken or the
-/// payload could not be serialized, so the only useful next step is to tell
-/// the client we are terminating the connection. Errors from the close write
-/// itself are intentionally swallowed — by definition we are already on the
-/// failure path, and the surrounding handler is about to drop the socket.
-async fn close_ws_server_error(
-    sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
-    reason: &'static str,
-) {
-    let mut s = sender.lock().await;
-    let _ = s
-        .send(Message::Close(Some(CloseFrame {
-            code: 1011,
-            reason: reason.into(),
-        })))
-        .await;
-}
-
-/// Sentinel type returned when a WebSocket send has failed and the socket
-/// was closed with a 1011 server-error frame. Callers should propagate it
-/// with `?` so the connection loop terminates promptly (#5137).
-#[derive(Debug, Clone, Copy)]
-pub struct WsClosed;
-
-/// Attempt to send a JSON value; on failure, log + close the socket with a
-/// 1011 server-error frame and return `Err(WsClosed)` so the caller can
-/// propagate with `?`. A successful send returns `Ok(())`.
-async fn send_json_or_close(
-    sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
-    value: &serde_json::Value,
-) -> Result<(), WsClosed> {
-    match send_json(sender, value).await {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            warn!(error = %e, "WebSocket send_json failed; closing connection");
-            close_ws_server_error(sender, "server send failed").await;
-            Err(WsClosed)
-        }
-    }
 }
 
 /// Sanitize inbound user input.
@@ -1952,7 +1783,7 @@ fn sanitize_text(s: &str) -> String {
 
 /// Classify a streaming/setup error into a user-friendly message.
 ///
-/// Uses the proper LLM error classifier from `librefang_kernel::llm_errors`
+/// Uses the proper LLM error classifier from `librefang_runtime::llm_errors`
 /// for comprehensive 20-provider coverage with actionable advice.
 // Accepts any `Display` error so this module does not have to depend on
 // `librefang_kernel::error::KernelError` directly. Keeping the API↔kernel

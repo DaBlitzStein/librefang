@@ -1,14 +1,13 @@
 import { formatDate } from "../lib/datetime";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
   type ApiActionResponse,
   type DryRunResult,
   type ScheduleItem,
-  type TemplateParameter,
   type WorkflowItem,
-  type WorkflowRunInput,
+  type WorkflowRunItem,
   type WorkflowStep,
   type WorkflowStepResult,
   type WorkflowTemplate,
@@ -29,7 +28,6 @@ import {
 } from "lucide-react";
 import {
   useWorkflows,
-  useWorkflowDetail,
   useWorkflowRuns,
   useWorkflowRunDetail,
   useWorkflowTemplates,
@@ -42,10 +40,6 @@ import {
 } from "../lib/mutations/workflows";
 import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useUIStore } from "../lib/store";
-import { extractImageRefs } from "../lib/workflowOutputImages";
-import { WorkflowStepImageGallery } from "../components/WorkflowStepImageGallery";
-import { OperatorActionBar } from "../components/OperatorActionBar";
-import { PendingOperatorReviewsBanner } from "../components/PendingOperatorReviewsBanner";
 
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
@@ -160,184 +154,7 @@ const getRunStepResults = (data: ApiActionResponse | undefined): WorkflowStepRes
 const getErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-// `WorkflowRunState` (Rust kernel) serializes terminal/unit variants as bare
-// snake_case strings (`"running"`, `"completed"`, …) and the struct variant
-// `Paused { resume_token_hash, reason, paused_at }` as an externally-tagged
-// object `{ paused: { … } }`. Anything checking "is this run paused?" from
-// the wire shape needs to accept BOTH the bare string (defensive for any
-// flattened/normalised callers) AND the tagged-object form — comparing
-// `state === "paused"` alone silently misses every real paused run, which is
-// exactly the case where the HITL `OperatorActionBar` must mount. Same
-// reasoning the kernel-handle layer hits in workflow_runner.rs:198.
-const isPausedRunState = (state: unknown): boolean => {
-  if (state === "paused") return true;
-  if (state !== null && typeof state === "object" && "paused" in (state as Record<string, unknown>)) {
-    return true;
-  }
-  return false;
-};
-
-// Normalize either wire shape — bare string OR externally-tagged object
-// (currently only `{paused: {…}}`) — to a single discriminator string the
-// run-history row pill / dot can switch on. Without this helper, paused
-// runs in the list fall through `isRunState` as `undefined` and render
-// with the neutral grey "unknown" badge instead of the warning hue, even
-// though the page already knows how to colour them (#5257 round-2).
-const runStateKind = (state: unknown): string | undefined => {
-  if (typeof state === "string") return state;
-  if (state !== null && typeof state === "object") {
-    const keys = Object.keys(state as Record<string, unknown>);
-    if (keys.length === 1) return keys[0];
-  }
-  return undefined;
-};
-
-// Image detection is `O(n²)` worst-case on malformed JSON-ish output (a
-// run of unmatched `{` triggers a fresh scan from each one). Memoize so
-// unrelated re-renders of the parent (poll ticks, prop bag churn) don't
-// re-pay the cost on long step outputs.
-function StepResultContent({ step }: { step: WorkflowStepResult }) {
-  const { t } = useTranslation();
-  const imageRefs = useMemo(() => extractImageRefs(step.output), [step.output]);
-  return (
-    <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
-      <div>
-        <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
-        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-          {step.prompt || "(empty)"}
-        </pre>
-      </div>
-      {imageRefs.length > 0 && (
-        <WorkflowStepImageGallery
-          refs={imageRefs}
-          label={t("workflows.generated_images", { defaultValue: "Generated images:" })}
-        />
-      )}
-      <div>
-        <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
-        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-          {step.output || "(empty)"}
-        </pre>
-      </div>
-      <p className="text-[9px] text-text-dim/40">
-        {step.agent_name} · {step.input_tokens} in / {step.output_tokens} out tokens
-      </p>
-    </div>
-  );
-}
-
-function StepAccordion<T>({
-  steps,
-  getKey,
-  renderHeader,
-  renderContent,
-}: {
-  steps: T[];
-  getKey: (step: T, index: number) => string | number;
-  renderHeader: (step: T, index: number, isExpanded: boolean, toggle: () => void) => React.ReactNode;
-  renderContent: (step: T, index: number) => React.ReactNode;
-}) {
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
-
-  return (
-    <>
-      {steps.map((step, i) => (
-        <div key={getKey(step, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
-          {renderHeader(step, i, expandedIdx === i, () => setExpandedIdx(expandedIdx === i ? null : i))}
-          {expandedIdx === i && renderContent(step, i)}
-        </div>
-      ))}
-    </>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Workflow parameter detection — mirrors the kernel's `to_template()` logic
-// that scans `prompt_template` fields for `{{var}}` placeholders.
-// ---------------------------------------------------------------------------
-
-/** Reserved variable names that are set by the engine at runtime. */
-const RESERVED_VARS = new Set(["input"]);
-
-/**
- * Extract typed parameters from a workflow's steps by scanning prompt templates
- * for `{{var}}` placeholders.  Returns one `TemplateParameter` per unique
- * variable, excluding reserved names and step output variables (step names).
- */
-function extractWorkflowParams(steps: WorkflowStep[]): TemplateParameter[] {
-  const re = /\{\{(\w+)\}\}/g;
-  const stepNames = new Set(steps.map((s) => s.name));
-  const seen = new Set<string>();
-  const params: TemplateParameter[] = [];
-
-  for (const step of steps) {
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(step.prompt_template)) !== null) {
-      const name = match[1];
-      if (seen.has(name) || RESERVED_VARS.has(name) || stepNames.has(name)) continue;
-      seen.add(name);
-      params.push({
-        name,
-        description: `Parameter '${name}' used in step '${step.name}'`,
-        param_type: "string",
-        required: true,
-      });
-    }
-  }
-  return params;
-}
-
-/**
- * Inline form fields for detected workflow parameters.  Each parameter gets
- * its own labeled input.  Values are stored in the parent via `onChange`.
- */
-function WorkflowParamFields({
-  params,
-  values,
-  onChange,
-}: {
-  params: TemplateParameter[];
-  values: Record<string, string>;
-  onChange: (values: Record<string, string>) => void;
-}) {
-  const { t } = useTranslation();
-
-  const handleChange = useCallback(
-    (name: string, value: string) => {
-      onChange({ ...values, [name]: value });
-    },
-    [values, onChange],
-  );
-
-  if (params.length === 0) return null;
-
-  return (
-    <div className="space-y-2.5">
-      <p className="text-[9px] font-bold uppercase tracking-widest text-text-dim/50">
-        {t("workflows.parameters", { defaultValue: "Parameters" })}
-      </p>
-      {params.map((p) => (
-        <label key={p.name} className="block space-y-1">
-          <span className="text-[11px] font-semibold text-text">
-            {p.name}
-            {p.required && <span className="text-rose-500 ml-0.5">*</span>}
-          </span>
-          <input
-            type="text"
-            value={values[p.name] ?? (p.default != null ? String(p.default) : "")}
-            onChange={(e) => handleChange(p.name, e.target.value)}
-            placeholder={p.description ?? p.name}
-            className="w-full rounded-lg border border-border-subtle bg-main px-3 py-1.5 text-sm outline-none focus:border-brand transition-colors"
-            aria-required={p.required}
-          />
-          {p.description && (
-            <p className="text-[10px] text-text-dim/50 leading-snug">{p.description}</p>
-          )}
-        </label>
-      ))}
-    </div>
-  );
-}
+const isRunState = (state: WorkflowRunItem["state"]): state is string => typeof state === "string";
 
 export function WorkflowsPage() {
   const { t, i18n } = useTranslation();
@@ -350,42 +167,12 @@ export function WorkflowsPage() {
   const [activeTab, setActiveTab] = useState<"workflows" | "templates">("workflows");
   const [scheduleWorkflowId, setScheduleWorkflowId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [expandedStepIdx, setExpandedStepIdx] = useState<number | null>(null);
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
-  const [paramValues, setParamValues] = useState<Record<string, string>>({});
 
   const workflowsQuery = useWorkflows();
-  const workflowDetailQuery = useWorkflowDetail(selectedWorkflowId);
   const runsQuery = useWorkflowRuns(selectedWorkflowId);
   const runDetailQuery = useWorkflowRunDetail(selectedRunId ?? "");
-
-  // Run history is paginated to the most recent 10 in the UI, but the
-  // pending-operator-reviews banner can select a paused run from anywhere
-  // in the full history. Without this, clicking such a row never mounts
-  // the `OperatorActionBar` (it lives inside the sliced map) and the
-  // dashboard provides no path to resolve that review (#5257 round-2,
-  // Codex P2). Always include the selected run in the rendered list when
-  // it lives outside the first-page slice. We append (rather than re-sort)
-  // so the rest of the recent-history view stays unchanged.
-  const FIRST_PAGE_SIZE = 10;
-  const displayedRuns = useMemo(() => {
-    const all = runsQuery.data ?? [];
-    const firstPage = all.slice(0, FIRST_PAGE_SIZE);
-    if (!selectedRunId) return firstPage;
-    if (firstPage.some((r) => r.id === selectedRunId)) return firstPage;
-    const selected = all.find((r) => r.id === selectedRunId);
-    return selected ? [...firstPage, selected] : firstPage;
-  }, [runsQuery.data, selectedRunId]);
-  // When the selected run was pulled in from outside the first page,
-  // the matching row is rendered with a "from review banner" pill so the
-  // operator can see why the truncated list now has an 11th entry.
-  const bannerSelectedRunOutsideFirstPage = useMemo(() => {
-    if (!selectedRunId) return null;
-    const all = runsQuery.data ?? [];
-    const firstPage = all.slice(0, FIRST_PAGE_SIZE);
-    if (firstPage.some((r) => r.id === selectedRunId)) return null;
-    return all.some((r) => r.id === selectedRunId) ? selectedRunId : null;
-  }, [runsQuery.data, selectedRunId]);
-
   const runMutation = useRunWorkflow();
   const dryRunMutation = useDryRunWorkflow();
   const deleteMutation = useDeleteWorkflow();
@@ -403,59 +190,6 @@ export function WorkflowsPage() {
     () => allWorkflows.find(w => w.id === scheduleWorkflowId),
     [allWorkflows, scheduleWorkflowId]
   );
-
-  // Detect parameters from the selected workflow's prompt templates.
-  // Uses the detail query (which includes full step objects with
-  // prompt_template strings) rather than the list query (which may
-  // only carry a step count).
-  const detectedParams = useMemo(() => {
-    const detail = workflowDetailQuery.data;
-    if (!detail || !Array.isArray(detail.steps)) return [];
-    return extractWorkflowParams(detail.steps as WorkflowStep[]);
-  }, [workflowDetailQuery.data]);
-
-  // Seed parameter values once per workflow when its detected params
-  // first become available. The `useWorkflowDetail` query is async, so
-  // on first render `selectedWorkflowId` is set but `detectedParams`
-  // is still empty — a naive `prev !== cur` ref bailed out on initial
-  // render and never seeded again, which silently lost every
-  // `p.default` on the first selection. Track which workflow we've
-  // seeded for instead, and seed only after detail data has actually
-  // arrived. When the destination workflow truly has zero parameters,
-  // clear `paramValues` outright — otherwise stale values from the
-  // previously selected (parameterised) workflow would linger and any
-  // future code that reads `paramValues` directly without re-deriving
-  // from `detectedParams` would silently see them.
-  const seededForRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!selectedWorkflowId) {
-      seededForRef.current = null;
-      return;
-    }
-    if (seededForRef.current === selectedWorkflowId) return;
-    // Wait for detail data to actually arrive before deciding whether
-    // this workflow has parameters. `useWorkflowDetail.isFetching`
-    // distinguishes "still loading" from "loaded with zero params".
-    if (workflowDetailQuery.isFetching || workflowDetailQuery.isLoading) return;
-    if (detectedParams.length === 0) {
-      // Loaded, no params — clear any stale values from a previously
-      // selected workflow.
-      setParamValues({});
-      seededForRef.current = selectedWorkflowId;
-      return;
-    }
-    const defaults: Record<string, string> = {};
-    for (const p of detectedParams) {
-      if (p.default != null) defaults[p.name] = String(p.default);
-    }
-    setParamValues(defaults);
-    seededForRef.current = selectedWorkflowId;
-  }, [
-    selectedWorkflowId,
-    detectedParams,
-    workflowDetailQuery.isFetching,
-    workflowDetailQuery.isLoading,
-  ]);
 
   // First-time visitors with no workflows configured land on the
   // marketplace tab — instantiating a template is the obvious next
@@ -476,7 +210,6 @@ export function WorkflowsPage() {
         setSelectedWorkflowId("");
         setSelectedRunId(null);
         setRunInput("");
-        setParamValues({});
         setDryRunResult(null);
       }
       return;
@@ -488,42 +221,17 @@ export function WorkflowsPage() {
     if (!allWorkflows.some((workflow) => workflow.id === selectedWorkflowId)) {
       setSelectedRunId(null);
       setRunInput("");
-      setParamValues({});
       setDryRunResult(null);
       setSelectedWorkflowId(workflows[0]?.id ?? "");
     }
   }, [allWorkflows, workflows, selectedWorkflowId, workflowsQuery.isSuccess]);
-
-  // Build the effective input for a run.
-  //
-  // When the workflow declares `{{var}}` placeholders, the per-parameter
-  // form values are sent as a JSON object so the kernel's
-  // `seed_input_vars_from_json` (#4982) binds each `{{name}}` to the
-  // value the user typed — a step prompt like "Brainstorm: {{challenge}}"
-  // resolves the challenge text instead of leaving the literal
-  // placeholder. The free-text textarea (additional context) rides along
-  // under the `input` key. When there are no detected params, the plain
-  // free-text string is sent unchanged so `{{input}}` keeps its original
-  // whole-blob meaning (backward-compatible).
-  const buildRunInput = useCallback((): WorkflowRunInput => {
-    const hasParams = detectedParams.length > 0 &&
-      Object.values(paramValues).some((v) => v.trim() !== "");
-    if (!hasParams) return runInput;
-    const obj: Record<string, string> = {};
-    for (const p of detectedParams) {
-      const val = paramValues[p.name]?.trim() ?? "";
-      if (val) obj[p.name] = val;
-    }
-    if (runInput.trim()) obj.input = runInput.trim();
-    return obj;
-  }, [detectedParams, paramValues, runInput]);
 
   const handleRun = async () => {
     if (!selectedWorkflowId) return;
     setDryRunResult(null);
     dryRunMutation.reset();
     try {
-      await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: buildRunInput() });
+      await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
       addToast(t("workflows.run_started", { defaultValue: "Run started" }), "success");
     } catch (err) {
       addToast(
@@ -538,7 +246,7 @@ export function WorkflowsPage() {
     setDryRunResult(null);
     runMutation.reset();
     try {
-      const result = await dryRunMutation.mutateAsync({ workflowId: selectedWorkflowId, input: buildRunInput() });
+      const result = await dryRunMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
       setDryRunResult(result);
     } catch {
       // Error already surfaced via dryRunMutation.error panel at line 465.
@@ -661,21 +369,6 @@ export function WorkflowsPage() {
   const getStepResultKey = (step: StepResultLike, index: number) =>
     step.id ?? step.step_id ?? step.step_name ?? step.name ?? ([step.agent_name, step.duration_ms, step.input_tokens, step.output_tokens].filter(Boolean).join(":") || index);
 
-  const stepResultHeader = (step: WorkflowStepResult, _idx: number, isExpanded: boolean, toggle: () => void) => (
-    <button
-      className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
-      onClick={toggle}>
-      <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
-      <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
-      <span className="text-[9px] text-text-dim/50 shrink-0">{step.duration_ms}ms</span>
-      <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
-    </button>
-  );
-
-  const stepResultContent = (step: WorkflowStepResult, _idx: number) => (
-    <StepResultContent step={step} />
-  );
-
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
       <PageHeader
@@ -701,20 +394,6 @@ export function WorkflowsPage() {
             <kbd className="hidden sm:inline-flex h-5 min-w-[20px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[9px] font-mono font-semibold">n</kbd>
           </Button> : undefined
         }
-      />
-
-      {/* HITL pending-operator-reviews banner (#4977). Renders only when
-          there is at least one workflow run paused at an operator step.
-          Clicking a row jumps the user into that workflow's run-detail
-          panel so the `OperatorActionBar` inside it is on screen. */}
-      <PendingOperatorReviewsBanner
-        onSelectRun={(runId, workflowId) => {
-          setSelectedWorkflowId(workflowId);
-          setSelectedRunId(runId);
-          // Banner only shows on the workflows tab — flip back if the
-          // operator was browsing templates.
-          setActiveTab("workflows");
-        }}
       />
 
       {/* Tabs */}
@@ -1020,20 +699,8 @@ export function WorkflowsPage() {
             <div className="space-y-4">
               <Card padding="lg" className="sticky top-4 space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">{t("workflows.run_workflow")}</h3>
-                {detectedParams.length > 0 && (
-                  <WorkflowParamFields
-                    params={detectedParams}
-                    values={paramValues}
-                    onChange={setParamValues}
-                  />
-                )}
                 <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
-                  placeholder={
-                    detectedParams.length > 0
-                      ? t("workflows.additional_context_placeholder", { defaultValue: "Additional context (optional)..." })
-                      : t("canvas.run_input_placeholder")
-                  }
-                  rows={detectedParams.length > 0 ? 2 : 4}
+                  placeholder={t("canvas.run_input_placeholder")} rows={4}
                   className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2.5 text-sm outline-none focus:border-brand resize-none" />
                 <div className="flex gap-2">
                   <Button variant="primary" className="flex-1" disabled={runMutation.isPending || dryRunMutation.isPending} onClick={handleRun}>
@@ -1059,13 +726,11 @@ export function WorkflowsPage() {
                       </p>
                     </div>
                     <div className="space-y-2">
-                      <StepAccordion
-                        steps={dryRunResult.steps}
-                        getKey={getStepResultKey}
-                        renderHeader={(step, _i, isExpanded, toggle) => (
+                      {dryRunResult.steps.map((step, i) => (
+                        <div key={getStepResultKey(step, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
                           <button
                             className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
-                            onClick={toggle}>
+                            onClick={() => setExpandedStepIdx(expandedStepIdx === i ? null : i)}>
                             {step.skipped
                               ? <SkipForward className="w-3 h-3 text-text-dim/40 shrink-0" />
                               : step.agent_found
@@ -1078,24 +743,24 @@ export function WorkflowsPage() {
                             {step.skipped && (
                               <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main border border-border-subtle text-text-dim/50 shrink-0">{t("workflows.skip", { defaultValue: "skip" })}</span>
                             )}
-                            <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                            <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${expandedStepIdx === i ? "rotate-180" : ""}`} />
                           </button>
-                        )}
-                        renderContent={(step) => (
-                          <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
-                            {!step.agent_found && (
-                              <p className="text-[10px] text-warning mt-2">{t("workflows.agent_not_found", { defaultValue: "Agent not found" })}</p>
-                            )}
-                            {step.skip_reason && (
-                              <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>
-                            )}
-                            <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.resolved_prompt", { defaultValue: "Resolved prompt:" })}</p>
-                            <pre className="text-[10px] text-text whitespace-pre-wrap max-h-28 overflow-y-auto bg-surface rounded-lg p-2">
-                              {step.resolved_prompt || "(empty)"}
-                            </pre>
-                          </div>
-                        )}
-                      />
+                          {expandedStepIdx === i && (
+                            <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
+                              {!step.agent_found && (
+                                <p className="text-[10px] text-warning mt-2">{t("workflows.agent_not_found", { defaultValue: "Agent not found" })}</p>
+                              )}
+                              {step.skip_reason && (
+                                <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>
+                              )}
+                              <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.resolved_prompt", { defaultValue: "Resolved prompt:" })}</p>
+                              <pre className="text-[10px] text-text whitespace-pre-wrap max-h-28 overflow-y-auto bg-surface rounded-lg p-2">
+                                {step.resolved_prompt || "(empty)"}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1111,12 +776,37 @@ export function WorkflowsPage() {
                     {getRunStepResults(runMutation.data).length > 0 && (
                       <div className="space-y-1.5 border-t border-success/20 pt-2">
                         <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.step_details", { defaultValue: "Step details" })}</p>
-                        <StepAccordion
-                          steps={getRunStepResults(runMutation.data)}
-                          getKey={getStepResultKey}
-                          renderHeader={stepResultHeader}
-                          renderContent={stepResultContent}
-                        />
+                        {getRunStepResults(runMutation.data).map((s, i) => (
+                          <div key={getStepResultKey(s, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                            <button
+                              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
+                              onClick={() => setExpandedStepIdx(expandedStepIdx === i + 1000 ? null : i + 1000)}>
+                              <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
+                              <span className="text-[10px] font-bold truncate flex-1">{s.step_name}</span>
+                              <span className="text-[9px] text-text-dim/50 shrink-0">{s.duration_ms}ms</span>
+                              <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${expandedStepIdx === i + 1000 ? "rotate-180" : ""}`} />
+                            </button>
+                            {expandedStepIdx === i + 1000 && (
+                              <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
+                                <div>
+                                  <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
+                                  <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+                                    {s.prompt || "(empty)"}
+                                  </pre>
+                                </div>
+                                <div>
+                                  <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
+                                  <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+                                    {s.output || "(empty)"}
+                                  </pre>
+                                </div>
+                                <p className="text-[9px] text-text-dim/40">
+                                  {s.agent_name} · {s.input_tokens} in / {s.output_tokens} out tokens
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -1141,47 +831,15 @@ export function WorkflowsPage() {
                 )}
               </Card>
 
-              {/* Banner-selected paused run that hasn't surfaced in the
-                  visible Run History yet — either because the runs list
-                  is still loading after the banner click, or because the
-                  run lives outside the first 10 and `displayedRuns` is
-                  still being computed. Mount the `OperatorActionBar`
-                  here as a safety net so the operator can always resolve
-                  the review they jumped to (#5257 round-2 Codex P2). The
-                  inline mount inside the Run History card stays in
-                  place — once both are visible, this block is hidden by
-                  the `!displayedRuns.some(...)` guard so we don't render
-                  the bar twice. */}
-              {selectedRunId
-                && runDetailQuery.data
-                && isPausedRunState(runDetailQuery.data.state)
-                && !displayedRuns.some((r) => r.id === selectedRunId) && (
-                <Card padding="lg" className="space-y-2">
-                  <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">
-                    {t("workflows.selected_review", { defaultValue: "Selected review" })}
-                  </h3>
-                  <OperatorActionBar runId={selectedRunId} />
-                </Card>
-              )}
-
               {/* Run History */}
               {runsQuery.data && runsQuery.data.length > 0 && (
                 <Card padding="lg" className="space-y-3">
                   <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">{t("workflows.run_history", { defaultValue: "Run History" })}</h3>
                   <div className="space-y-1.5">
-                    {displayedRuns.map((run) => {
+                    {runsQuery.data.slice(0, 10).map((run) => {
                       const runId = run.id;
-                      // Use `runStateKind` (handles both bare strings AND
-                      // the tagged `{paused: {…}}` form) so paused runs
-                      // pick up the warning-hue branch added below — not
-                      // the neutral "unknown" fallback the bare
-                      // `isRunState` produces (#5257 round-2).
-                      const state = runStateKind(run.state);
+                      const state = isRunState(run.state) ? run.state : undefined;
                       const isSelected = selectedRunId === runId;
-                      const isBannerPulledIn =
-                        selectedRunId === runId &&
-                        bannerSelectedRunOutsideFirstPage &&
-                        runId === bannerSelectedRunOutsideFirstPage;
                       return (
                         <div key={runId}>
                           <button
@@ -1192,33 +850,22 @@ export function WorkflowsPage() {
                             }`}
                             onClick={() => {
                               setSelectedRunId(isSelected ? null : (runId ?? null));
+                              setExpandedStepIdx(null);
                             }}>
                             <div className={`w-2 h-2 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success" :
                               state === "failed" ? "bg-error" :
-                              state === "running" ? "bg-brand animate-pulse" :
-                              state === "paused" ? "bg-warning" : "bg-text-dim/30"
+                              state === "running" ? "bg-brand animate-pulse" : "bg-text-dim/30"
                             }`} />
                             <div className="flex-1 min-w-0">
                               <p className="text-[10px] font-bold truncate">{run.workflow_name}</p>
                               <p className="text-[9px] text-text-dim/50">{formatDate(run.started_at)}</p>
                             </div>
-                            {/* "Selected from banner" pill — surfaces that
-                                this row was appended to the first-10 slice
-                                so the operator can resolve a paused run
-                                that lives deep in the history (#5257
-                                round-2 Codex P2). */}
-                            {isBannerPulledIn && (
-                              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 bg-warning/10 text-warning">
-                                {t("workflows.from_review_banner", { defaultValue: "from review banner" })}
-                              </span>
-                            )}
                             <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success/10 text-success" :
                               state === "failed" ? "bg-error/10 text-error" :
-                              state === "paused" ? "bg-warning/10 text-warning" :
                               "bg-main text-text-dim"
-                            }`}>{state ?? "unknown"}</span>
+                            }`}>{state}</span>
                           </button>
                           {/* Inline run detail */}
                           {isSelected && runDetailQuery.data && (
@@ -1229,23 +876,37 @@ export function WorkflowsPage() {
                                   <p className="text-[10px] text-error">{runDetailQuery.data.error}</p>
                                 </div>
                               )}
-                              {/* HITL operator-step action bar (#4977).
-                                  Mount whenever the run is paused (any
-                                  paused-shape); the bar's own inspect
-                                  query renders null on 404/409 if it's not
-                                  an operator-step pause. Must use
-                                  `isPausedRunState` not `state === "paused"`
-                                  — the Paused variant ships as
-                                  `{paused: {…}}` not a bare string. */}
-                              {runId && isPausedRunState(runDetailQuery.data.state) && (
-                                <OperatorActionBar runId={runId} />
-                              )}
-                              <StepAccordion
-                                steps={runDetailQuery.data.step_results}
-                                getKey={getStepResultKey}
-                                renderHeader={stepResultHeader}
-                                renderContent={stepResultContent}
-                              />
+                              {runDetailQuery.data.step_results.map((step, si) => (
+                                <div key={getStepResultKey(step, si)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                                  <button
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
+                                    onClick={() => setExpandedStepIdx(expandedStepIdx === si + 2000 ? null : si + 2000)}>
+                                    <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
+                                    <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
+                                    <span className="text-[9px] text-text-dim/50 shrink-0">{step.duration_ms}ms</span>
+                                    <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${expandedStepIdx === si + 2000 ? "rotate-180" : ""}`} />
+                                  </button>
+                                  {expandedStepIdx === si + 2000 && (
+                                    <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
+                                      <div>
+                                  <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
+                                        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+                                          {step.prompt || "(empty)"}
+                                        </pre>
+                                      </div>
+                                      <div>
+                                  <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
+                                        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+                                          {step.output || "(empty)"}
+                                        </pre>
+                                      </div>
+                                      <p className="text-[9px] text-text-dim/40">
+                                        {step.agent_name} · {step.input_tokens} in / {step.output_tokens} out tokens
+                                      </p>
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
                             </div>
                           )}
                           {isSelected && runDetailQuery.isLoading && (

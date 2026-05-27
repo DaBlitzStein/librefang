@@ -122,7 +122,7 @@ librefang-extensions        25 MCP テンプレート、AES-256-GCM ボールト
 librefang-wire              OFP P2P プロトコル、HMAC-SHA256 相互認証
 librefang-cli               CLI、デーモン管理、TUI ダッシュボード、MCP サーバーモード
 librefang-desktop           Tauri 2.0 ネイティブアプリ（トレイ、通知、ショートカット）
-librefang-import            OpenClaw、LangChain、AutoGPT インポート/マイグレーションエンジン
+librefang-migrate           OpenClaw、LangChain、AutoGPT マイグレーションエンジン
 librefang-http              共有HTTPクライアントビルダー、プロキシ、TLSフォールバック
 librefang-testing           テストインフラ：モックカーネル、モックLLMドライバー、APIルートテストユーティリティ
 librefang-telemetry         向けのOpenTelemetry + Prometheusメトリクス計装
@@ -130,7 +130,9 @@ librefang-llm-driver        向けのLLMドライバーtraitおよび共有型
 librefang-llm-drivers       traitを実装する具体的なLLMプロバイダードライバー（anthropic、openai、geminiなど）
 librefang-runtime-mcp       ランタイム向けのMCP（Model Context Protocol）クライアント
 librefang-kernel-handle     カーネルへのインプロセス呼び出し元のためのKernelHandle trait
+librefang-runtime-wasm      ランタイム向けのWASMスキルサンドボックス
 librefang-kernel-router     カーネル向けのHand/Templateルーティングエンジン
+librefang-runtime-oauth     ランタイムドライバー向けのOAuthフロー（ChatGPT、GitHub Copilot）
 librefang-kernel-metering   カーネル向けのコスト計量、クォータ適用
 xtask                       ビルド自動化
 ```

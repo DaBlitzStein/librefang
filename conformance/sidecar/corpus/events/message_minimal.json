@@ -1,8 +1,0 @@
-{
-  "method": "message",
-  "params": {
-    "user_id": "1",
-    "user_name": "Bob",
-    "text": "hi"
-  }
-}

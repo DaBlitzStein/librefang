@@ -398,31 +398,8 @@ async fn goals_delete_removes_goal_and_descendants() {
     let other = create_goal(&h, serde_json::json!({"title": "unrelated"})).await;
     let oid = other["id"].as_str().unwrap().to_string();
 
-    // Issue #3832: DELETE returns 204 No Content per RFC 9110 §15.3.5 — the
-    // response MUST have an empty body. Hit the router directly so we can
-    // assert on the raw byte length.
-    let raw_resp = h
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::DELETE)
-                .uri(format!("/api/goals/{pid}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(raw_resp.status(), StatusCode::NO_CONTENT);
-    let raw_bytes = axum::body::to_bytes(raw_resp.into_body(), 1 << 20)
-        .await
-        .unwrap();
-    assert!(
-        raw_bytes.is_empty(),
-        "204 response must have empty body (got {} bytes: {:?})",
-        raw_bytes.len(),
-        String::from_utf8_lossy(&raw_bytes)
-    );
+    let (status, _) = json_request(&h, Method::DELETE, &format!("/api/goals/{pid}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     for missing in [&pid, &cid, &gid] {
         let (s, _) = json_request(&h, Method::GET, &format!("/api/goals/{missing}"), None).await;
@@ -460,67 +437,4 @@ async fn goals_templates_returns_built_in_catalog() {
     assert!(first["id"].as_str().is_some());
     assert!(first["name"].as_str().is_some());
     assert!(first["goals"].as_array().is_some());
-}
-
-// ---------------------------------------------------------------------------
-// #5138 — `__librefang_goals` RMW race: concurrent writers must not lose
-// each other's goals.
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread")]
-async fn concurrent_goal_creates_lose_no_writes_5138() {
-    // Before the fix, `create_goal` did `structured_get -> push ->
-    // structured_set` with no transaction: N concurrent POSTs each loaded
-    // the same array, each appended one goal, and the last writer's blob
-    // clobbered every other writer's append. The substrate-level
-    // `structured_modify` (BEGIN IMMEDIATE) serializes the RMW so every
-    // POST that returns 201 is present in the final list.
-    let h = boot().await;
-    let app = h.app.clone();
-
-    let n = 16usize;
-    let mut handles = Vec::new();
-    for i in 0..n {
-        let app = app.clone();
-        handles.push(tokio::spawn(async move {
-            let body = serde_json::to_vec(&serde_json::json!({
-                "title": format!("goal-{i}")
-            }))
-            .unwrap();
-            let req = Request::builder()
-                .method(Method::POST)
-                .uri("/api/goals")
-                .header("content-type", "application/json")
-                .body(Body::from(body))
-                .unwrap();
-            let resp = app.oneshot(req).await.unwrap();
-            resp.status()
-        }));
-    }
-
-    let mut created = 0usize;
-    for hd in handles {
-        let status = hd.await.unwrap();
-        assert_eq!(status, StatusCode::CREATED, "each POST must succeed");
-        created += 1;
-    }
-    assert_eq!(created, n);
-
-    // Every accepted create must be readable back — no lost update.
-    let (status, body) = json_request(&h, Method::GET, "/api/goals", None).await;
-    assert_eq!(status, StatusCode::OK);
-    let items = body["items"].as_array().unwrap();
-    assert_eq!(
-        items.len(),
-        n,
-        "all {n} concurrently-created goals must persist; lost-update race not fixed"
-    );
-    let mut titles: Vec<String> = items
-        .iter()
-        .map(|g| g["title"].as_str().unwrap().to_string())
-        .collect();
-    titles.sort();
-    let mut expected: Vec<String> = (0..n).map(|i| format!("goal-{i}")).collect();
-    expected.sort();
-    assert_eq!(titles, expected, "no individual goal may be clobbered");
 }

@@ -1,4 +1,4 @@
-import { formatTime, formatUptime } from "../lib/datetime";
+import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type CommsEventItem } from "../api";
@@ -12,7 +12,7 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import {
   Radio, Activity, Zap, Clock, CheckCircle2, XCircle, MessageSquare, Send,
-  Mail, Phone, Link2, Globe, ChevronRight, Search, X,
+  Mail, Phone, Link2, Wifi, Globe, ChevronRight, Search, X,
   ArrowsUpFromLine, Users
 } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
@@ -28,11 +28,10 @@ const channelIcons: Record<string, React.ReactNode> = {
   webhook: <Link2 className="w-5 h-5" />,
   http: <Globe className="w-5 h-5" />,
   websocket: <Radio className="w-5 h-5" />,
+  mqtt: <Wifi className="w-5 h-5" />,
   slack_events: <Activity className="w-5 h-5" />,
   teams: <MessageSquare className="w-5 h-5" />,
 };
-
-const EVENT_PAGE_SIZE = 50;
 
 function getChannelIcon(name: string): React.ReactNode {
   const key = name.toLowerCase().split("-")[0];
@@ -80,13 +79,8 @@ function TopologyNode({ node, onClick }: { node: { id: string; name?: string; st
 
   return (
     <div
-      role={onClick ? "button" : undefined}
-      tabIndex={onClick ? 0 : undefined}
       onClick={onClick}
-      onKeyDown={onClick ? (e: React.KeyboardEvent) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
-      } : undefined}
-      className={`flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-brand transition-colors${onClick ? " cursor-pointer" : ""}`}
+      className="flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-brand transition-colors cursor-pointer"
     >
       <div className={`w-12 h-12 rounded-xl bg-linear-to-br ${getNodeColor()} flex items-center justify-center shadow-lg`}>
         <Users className="w-6 h-6 text-white" />
@@ -109,9 +103,10 @@ export function CommsPage() {
 
   const snapshotQuery = useDashboardSnapshot();
 
-  const topologyQuery = useCommsTopology({ enabled: activeTab === "topology" });
+  const topologyQuery = useCommsTopology();
 
-  const eventsQuery = useCommsEvents(EVENT_PAGE_SIZE, {
+  const eventsQuery = useCommsEvents(50, {
+    enabled: activeTab === "events",
     refetchInterval: 5_000,
   });
 
@@ -151,9 +146,10 @@ export function CommsPage() {
         subtitle={t("comms.subtitle")}
         isFetching={isLoading}
         onRefresh={() => {
-          if (activeTab === "channels") { void channelsQuery.refetch(); void snapshotQuery.refetch(); }
-          if (activeTab === "topology") { void topologyQuery.refetch(); void snapshotQuery.refetch(); }
-          if (activeTab === "events") { void eventsQuery.refetch(); }
+          void channelsQuery.refetch();
+          void snapshotQuery.refetch();
+          void topologyQuery.refetch();
+          void eventsQuery.refetch();
         }}
         icon={<Radio className="h-4 w-4" />}
         helpText={t("comms.help")}
@@ -239,7 +235,7 @@ export function CommsPage() {
               { icon: Radio, label: t("comms.total_channels"), value: channels.length, color: "text-brand", bg: "bg-brand/10" },
               { icon: CheckCircle2, label: t("comms.connected"), value: configuredCount, color: "text-success", bg: "bg-success/10" },
               { icon: Activity, label: t("comms.events_today"), value: events.length, color: "text-warning", bg: "bg-warning/10" },
-              { icon: Clock, label: t("comms.uptime"), value: formatUptime(snapshot?.status?.uptime_seconds ?? 0), color: "text-accent", bg: "bg-accent/10" },
+              { icon: Clock, label: t("comms.uptime"), value: "99.9%", color: "text-accent", bg: "bg-accent/10" },
             ].map((kpi, i) => (
               <Card key={i} hover padding="md">
                 <div className="flex items-center justify-between">

@@ -6,9 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use librefang_types::config::{
-    AzureOpenAiConfig, PromptCacheStrategy, ResponseFormat, VertexAiConfig,
-};
+use librefang_types::config::{AzureOpenAiConfig, ResponseFormat, VertexAiConfig};
 use librefang_types::message::{ContentBlock, Message, StopReason, TokenUsage};
 use librefang_types::tool::{ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
@@ -81,54 +79,6 @@ pub enum LlmError {
         /// Last known activity before the process stalled.
         last_activity: String,
     },
-
-    /// Every entry in a [`crate::LlmDriver`] fallback chain refused the
-    /// request — either pre-checked as exhausted (#4807) or attempted and
-    /// failed. `details` enumerates the slots and the reason each is out;
-    /// the vec is sorted by `provider_id` ascending so any stringified
-    /// surface (logs, error responses, prompt-included error text) is
-    /// byte-identical across processes (#3298).
-    ///
-    /// `cause` carries the last underlying provider error when at least
-    /// one slot was attempted before the chain ran dry. It is exposed
-    /// through [`std::error::Error::source`] via `thiserror`'s `#[source]`
-    /// attribute so callers walking the error chain still see the
-    /// upstream failure (`librefang-llm-driver/AGENTS.md` rule, #3745).
-    /// `None` when every slot was pre-skipped from the exhaustion
-    /// store and the underlying provider was never invoked.
-    #[error("All providers exhausted ({}): {}", details.len(), format_chain_details(details))]
-    AllProvidersExhausted {
-        /// One entry per slot in the chain, sorted by provider id.
-        details: Vec<ProviderExhaustionDetail>,
-        /// The last underlying provider error from the most recent
-        /// attempt before the chain gave up. `Box`ed so the variant
-        /// itself stays small and so the recursive `LlmError` type is
-        /// well-sized.
-        #[source]
-        cause: Option<Box<LlmError>>,
-    },
-}
-
-/// One row of [`LlmError::AllProvidersExhausted::details`] — which
-/// provider was tried and why it was out. Kept here next to `LlmError`
-/// (rather than imported from [`crate::exhaustion`]) because constructing
-/// this row only requires a string and a reason — the in-memory store is
-/// not on the path of building the error.
-#[derive(Debug, Clone, Serialize)]
-pub struct ProviderExhaustionDetail {
-    pub provider_id: String,
-    pub reason: crate::exhaustion::ExhaustionReason,
-}
-
-fn format_chain_details(details: &[ProviderExhaustionDetail]) -> String {
-    if details.is_empty() {
-        return "<empty chain>".to_string();
-    }
-    details
-        .iter()
-        .map(|d| format!("{}={}", d.provider_id, d.reason.as_metric_label()))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 impl LlmError {
@@ -221,27 +171,12 @@ impl LlmError {
             // Distinct from Timeout (inactivity/subprocess) — these are network
             // layer failures before the API even responded.
             LlmError::Http(_) => FailoverReason::HttpError,
-
-            // The chain has nothing left to try. Classify as
-            // `ChainExhausted` — a dedicated terminal reason
-            // distinct from `Unknown` (the latter is "could not
-            // classify"; here we know precisely what happened).
-            // Callers propagate instead of looping further. Review
-            // nit 7.
-            LlmError::AllProvidersExhausted { .. } => FailoverReason::ChainExhausted,
         }
     }
 }
 
 /// A request to an LLM for completion.
-///
-/// `Default` is implemented to make field-by-field construction at the
-/// many call sites cheap when only a few fields differ from the zero
-/// values, and so that adding a new field in the future does not
-/// require touching every construction site again. The default is *not*
-/// a usable request — `model` is empty and `messages` is empty — every
-/// real caller still has to set those explicitly.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CompletionRequest {
     /// Model identifier.
     pub model: String,
@@ -288,26 +223,6 @@ pub struct CompletionRequest {
     ///
     /// Ignored by drivers that don't implement `cache_control` markers.
     pub cache_ttl: Option<&'static str>,
-    /// Breakpoint strategy when [`Self::prompt_caching`] is enabled
-    /// (#4970).
-    ///
-    /// - `None` → driver picks its built-in default
-    ///   (Anthropic: `system_and_3`).
-    /// - `Some(PromptCacheStrategy::Disabled)` → no markers emitted
-    ///   even if `prompt_caching = true` (lets callers force-off the
-    ///   strategy without flipping the master switch).
-    /// - `Some(PromptCacheStrategy::SystemOnly)` → only the
-    ///   system-block marker is emitted; tools and message tail are
-    ///   not stamped.
-    /// - `Some(PromptCacheStrategy::SystemAndN(n))` → system +
-    ///   tools-last + N trailing-message markers, clipped to the
-    ///   provider's breakpoint cap (4 on Anthropic).
-    ///
-    /// Ignored by drivers that don't implement `cache_control`
-    /// breakpoints (OpenAI, DeepSeek, Gemini, Ollama, etc.). When
-    /// `prompt_caching` is `false` the strategy is ignored
-    /// unconditionally.
-    pub prompt_cache_strategy: Option<PromptCacheStrategy>,
     /// Desired response format (structured output).
     ///
     /// When set, instructs the LLM to return output in the specified format.
@@ -333,43 +248,7 @@ pub struct CompletionRequest {
     /// agent's workspace, tool allowlist, and skill allowlist from the
     /// registry. `None` for out-of-band callers (compaction, routing
     /// probes, tests) that have no agent identity to propagate.
-    ///
-    /// Drivers that talk to OpenAI-compatible HTTP endpoints additionally
-    /// surface this value on the wire as `x-librefang-agent-id`, so any
-    /// observability sidecar in front of the upstream provider can attach
-    /// the value to its own log records without parsing the request body.
     pub agent_id: Option<String>,
-    /// Caller session identity.
-    ///
-    /// Identifies the conversation/session the request belongs to. Combined
-    /// with [`Self::agent_id`] this gives a stable correlation key for
-    /// downstream tracing and observability. Drivers that talk to
-    /// OpenAI-compatible HTTP endpoints surface this on the wire as
-    /// `x-librefang-session-id`. `None` for out-of-band callers that have
-    /// no session identity to propagate.
-    pub session_id: Option<String>,
-    /// Caller step identity.
-    ///
-    /// Identifies the iteration / turn within a session that produced this
-    /// request. Useful when a single session issues multiple sequential
-    /// LLM calls (e.g. tool-use loops), since `agent_id` + `session_id`
-    /// alone collapse all of them onto a single correlation key. Drivers
-    /// that talk to OpenAI-compatible HTTP endpoints surface this on the
-    /// wire as `x-librefang-step-id`. `None` for callers that don't
-    /// distinguish between steps.
-    pub step_id: Option<String>,
-    /// How the OpenAI-compat driver should handle `reasoning_content` on
-    /// historical assistant turns for this request's model.
-    ///
-    /// Sourced from the model catalog (`ModelCatalogEntry.reasoning_echo_policy`)
-    /// at request-construction time. When the field is left at its default
-    /// ([`ReasoningEchoPolicy::None`]) the OpenAI driver falls back to
-    /// substring-based detection — see librefang/librefang#4842 for the
-    /// migration plan.
-    ///
-    /// Drivers that don't speak the OpenAI-compatible chat-completions wire
-    /// format (Anthropic, Gemini, etc.) ignore this field.
-    pub reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 }
 
 /// A response from an LLM completion.
@@ -383,17 +262,6 @@ pub struct CompletionResponse {
     pub tool_calls: Vec<ToolCall>,
     /// Token usage statistics.
     pub usage: TokenUsage,
-    /// The provider slot that actually served the request.
-    ///
-    /// Populated by fallback wrappers ([`crate::LlmDriver`]
-    /// implementations that try multiple providers in sequence —
-    /// e.g. `FallbackChain`, `BudgetGatedDriver`) so that the billing
-    /// layer can attribute spend to the slot that *did* the work, not
-    /// the slot the caller nominated. `None` for direct driver calls
-    /// — billing falls back to the original nominator. Always `None`
-    /// on inner leaf drivers; populated by the outermost chain
-    /// wrapper. See librefang/librefang#4807 review nit 10.
-    pub actual_provider: Option<String>,
 }
 
 impl CompletionResponse {
@@ -557,14 +425,6 @@ pub struct DriverConfig {
     /// Provider name.
     pub provider: String,
     /// API key.
-    ///
-    /// SECURITY: `#[serde(skip_serializing)]` so `serde_json::to_*` /
-    /// `toml::to_*` of a `DriverConfig` never emits the key in cleartext
-    /// (cache dump, diagnostic snapshot, `mcp_config.json`, cross-process
-    /// trace, etc.). `Deserialize` is unaffected — config files still
-    /// populate this field on load. Pairs with the hand-written `Debug`
-    /// below which redacts the same field for log output.
-    #[serde(skip_serializing)]
     pub api_key: Option<String>,
     /// Base URL override.
     pub base_url: Option<String>,
@@ -599,11 +459,7 @@ pub struct DriverConfig {
     pub mcp_bridge: Option<McpBridgeConfig>,
     /// Per-provider proxy URL override.
     /// When set, the driver uses this proxy instead of the global proxy config.
-    ///
-    /// SECURITY: `#[serde(skip_serializing)]` because authenticated-proxy
-    /// URLs commonly carry `user:pass@host` — same leak vector as `api_key`
-    /// above. `Deserialize` is preserved so config-file load still works.
-    #[serde(default, skip_serializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
     /// Per-provider HTTP request timeout in seconds.
     ///
@@ -613,18 +469,6 @@ pub struct DriverConfig {
     /// instead; this field only applies to HTTP API drivers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
-    /// Emit `x-librefang-{agent,session,step}-id` trace headers on outbound
-    /// LLM requests. Mirrors `KernelConfig.telemetry.emit_caller_trace_headers`;
-    /// the kernel populates this field per-driver. Default `true`.
-    ///
-    /// Operators with strict zero-egress policies (regulated tenants, EU
-    /// healthcare) can flip the toml-side flag to `false` to suppress all
-    /// three headers wire-side regardless of whether `CompletionRequest`'s
-    /// caller-id fields are populated. Currently only honoured by the
-    /// OpenAI-compatible driver; other drivers do not emit these headers
-    /// today and so are unaffected by this flag.
-    #[serde(default = "default_emit_caller_trace_headers")]
-    pub emit_caller_trace_headers: bool,
 }
 
 /// Configuration for bridging LibreFang tools into a CLI-based driver via MCP.
@@ -655,7 +499,6 @@ impl Default for DriverConfig {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
-            emit_caller_trace_headers: default_emit_caller_trace_headers(),
         }
     }
 }
@@ -666,10 +509,6 @@ fn default_skip_permissions() -> bool {
 
 fn default_message_timeout_secs() -> u64 {
     300
-}
-
-fn default_emit_caller_trace_headers() -> bool {
-    true
 }
 
 /// SECURITY: Custom Debug impl redacts the API key.
@@ -697,7 +536,6 @@ impl std::fmt::Debug for DriverConfig {
             .field("mcp_bridge", &self.mcp_bridge.as_ref().map(|b| &b.base_url))
             .field("proxy_url", &self.proxy_url.as_ref().map(|_| "<redacted>"))
             .field("request_timeout_secs", &self.request_timeout_secs)
-            .field("emit_caller_trace_headers", &self.emit_caller_trace_headers)
             .finish()
     }
 }
@@ -756,56 +594,6 @@ mod tests {
         assert_eq!(empty.failover_reason(), FailoverReason::Timeout);
     }
 
-    // Review nit 7: `AllProvidersExhausted` must classify as the
-    // dedicated terminal reason `ChainExhausted`, not the generic
-    // `Unknown` that means "could not classify".
-    #[test]
-    fn all_providers_exhausted_classifies_as_chain_exhausted() {
-        use crate::llm_errors::FailoverReason;
-
-        let err = LlmError::AllProvidersExhausted {
-            details: vec![],
-            cause: None,
-        };
-        assert_eq!(err.failover_reason(), FailoverReason::ChainExhausted);
-    }
-
-    // #4807 / #3745 — `AllProvidersExhausted` MUST preserve the
-    // upstream provider error via `Error::source()`. The trait crate's
-    // own `AGENTS.md` rule is that no variant introduced for fallback
-    // accounting may drop the source chain — this test pins that
-    // contract so future field-shape edits can't silently regress it.
-    #[test]
-    fn all_providers_exhausted_preserves_source_chain() {
-        let inner = LlmError::Api {
-            status: 402,
-            message: "credit exhausted".to_string(),
-            code: None,
-        };
-        let inner_display = inner.to_string();
-
-        let err = LlmError::AllProvidersExhausted {
-            details: vec![crate::ProviderExhaustionDetail {
-                provider_id: "p1".to_string(),
-                reason: crate::exhaustion::ExhaustionReason::QuotaExceeded,
-            }],
-            cause: Some(Box::new(inner)),
-        };
-
-        // Walking `Error::source` lands on (a non-None) error whose
-        // Display matches the wrapped upstream variant.
-        let src = std::error::Error::source(&err)
-            .expect("AllProvidersExhausted with a cause must expose source()");
-        assert_eq!(src.to_string(), inner_display);
-        // And the `None`-cause shape (every slot pre-skipped) must NOT
-        // fabricate a synthetic source — `source()` returns None.
-        let empty = LlmError::AllProvidersExhausted {
-            details: vec![],
-            cause: None,
-        };
-        assert!(std::error::Error::source(&empty).is_none());
-    }
-
     #[test]
     fn test_completion_response_text() {
         let response = CompletionResponse {
@@ -822,7 +610,6 @@ mod tests {
             stop_reason: StopReason::EndTurn,
             tool_calls: vec![],
             usage: TokenUsage::default(),
-            actual_provider: None,
         };
         assert_eq!(response.text(), "Hello world!");
     }
@@ -964,7 +751,6 @@ mod tests {
                         output_tokens: 3,
                         ..Default::default()
                     },
-                    actual_provider: None,
                 })
             }
         }
@@ -981,14 +767,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let response = driver.stream(request, tx).await.unwrap();
@@ -1030,7 +812,6 @@ mod tests {
                     stop_reason: StopReason::EndTurn,
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
-                    actual_provider: None,
                 })
             }
         }
@@ -1048,14 +829,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let err = driver.stream(request, tx).await.unwrap_err();
         assert!(
@@ -1063,69 +840,7 @@ mod tests {
             "expected receiver-dropped error, got: {err:?}"
         );
     }
-
-    // Regression: `DriverConfig` has hand-written `Debug` that redacts
-    // `api_key` and `proxy_url`, but the derived `Serialize` used to emit
-    // both fields verbatim. Any `serde_json::to_*` / `toml::to_*` of a
-    // `DriverConfig` (cache dump, diagnostic snapshot, `mcp_config.json`,
-    // cross-process trace) would land the secret in cleartext. Pin
-    // `#[serde(skip_serializing)]` on both fields so the serializer
-    // cannot regress to the leaky shape.
-    #[test]
-    fn driver_config_serialize_omits_api_key_and_proxy_credentials() {
-        let sentinel_api_key = "sk-test-DEADBEEF-do-not-leak-1234567890";
-        let sentinel_proxy_user = "proxyuser";
-        let sentinel_proxy_pass = "proxysecret";
-        let proxy_url =
-            format!("http://{sentinel_proxy_user}:{sentinel_proxy_pass}@proxy.internal:8080");
-
-        let cfg = DriverConfig {
-            provider: "anthropic".to_string(),
-            api_key: Some(sentinel_api_key.to_string()),
-            base_url: Some("https://api.anthropic.com".to_string()),
-            proxy_url: Some(proxy_url.clone()),
-            ..DriverConfig::default()
-        };
-
-        let json = serde_json::to_string(&cfg).expect("DriverConfig serialize");
-        assert!(
-            !json.contains(sentinel_api_key),
-            "DriverConfig Serialize must not emit api_key cleartext (got: {json})"
-        );
-        assert!(
-            !json.contains(sentinel_proxy_pass),
-            "DriverConfig Serialize must not emit proxy_url credentials (got: {json})"
-        );
-        // Whole proxy URL (which embeds the credentials) must also be absent.
-        assert!(
-            !json.contains(&proxy_url),
-            "DriverConfig Serialize must not emit proxy_url verbatim (got: {json})"
-        );
-        // Non-secret fields are still present — skip is scoped, not blanket.
-        assert!(
-            json.contains("\"provider\":\"anthropic\""),
-            "non-secret fields must still serialize (got: {json})"
-        );
-
-        // `Deserialize` is unaffected by `skip_serializing`: a config file
-        // that includes `api_key` / `proxy_url` still loads them into the
-        // struct (the kernel populates DriverConfig from on-disk config
-        // every boot via this path).
-        let raw = format!(
-            r#"{{"provider":"anthropic","api_key":"{sentinel_api_key}","proxy_url":"{}","skip_permissions":true,"message_timeout_secs":300,"emit_caller_trace_headers":true}}"#,
-            proxy_url.replace('\\', "\\\\")
-        );
-        let parsed: DriverConfig = serde_json::from_str(&raw)
-            .expect("DriverConfig deserialize must still populate secrets");
-        assert_eq!(parsed.api_key.as_deref(), Some(sentinel_api_key));
-        assert_eq!(parsed.proxy_url.as_deref(), Some(proxy_url.as_str()));
-    }
 }
 
-pub mod exhaustion;
 pub mod llm_errors;
-pub use exhaustion::{
-    ExhaustionReason, ExhaustionSnapshotRow, ProviderExhaustion, ProviderExhaustionStore,
-    DEFAULT_LONG_BACKOFF,
-};
 pub use llm_errors::FailoverReason;

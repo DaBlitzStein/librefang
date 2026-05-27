@@ -17,18 +17,6 @@
   --color-border-subtle: var(--border-color);
   --color-text-dim: var(--text-muted);
 
-  /* Override Tailwind v4's `lg` breakpoint from 1024px → 1000px (refs #4873).
-     iPad Pro 13" portrait is 1024px CSS-wide — exactly on the default `lg`
-     boundary. iOS Safari can report the visual viewport a fraction below
-     1024 (scrollbar / subpixel rounding), which collapses the layout into
-     mobile mode mid-render and traps the agent-panel close button under
-     the bottom-tab nav. Lowering to 1000 puts iPad portrait safely inside
-     the desktop layout while still keeping every phone (incl. landscape
-     iPhone 15 Pro Max at 932px) on the mobile layout. The JS-side checks
-     in PushDrawer.useIsMobile and AgentsPage's auto-select effect are
-     pinned to the same threshold. */
-  --breakpoint-lg: 1000px;
-
   /* Custom breakpoints for wide displays.
      Tailwind v4 defaults stop at 2xl (1536px), which leaves 2K / 4K monitors
      stuck at the same density as a 1536px laptop. These let card grids go
@@ -54,10 +42,6 @@
   --bg-surface-hover: #f1f5f9;
   --border-color: #e2e8f0;
   --text-muted: #64748b;
-
-  --glow-primary: rgba(2, 132, 199, 0.4);
-  --glow-secondary: rgba(2, 132, 199, 0.18);
-  --glow-medium: rgba(2, 132, 199, 0.25);
 }
 
 :root.dark {
@@ -77,10 +61,6 @@
   --bg-surface-hover: rgba(30, 41, 59, 0.75);
   --border-color: rgba(51, 65, 85, 0.8);
   --text-muted: #94a3b8;
-
-  --glow-primary: rgba(56, 189, 248, 0.4);
-  --glow-secondary: rgba(56, 189, 248, 0.18);
-  --glow-medium: rgba(56, 189, 248, 0.25);
 }
 
 html,
@@ -125,6 +105,7 @@ body {
 :root {
   --apple-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --apple-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --apple-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 /* Animation primitives moved to motion (`src/lib/motion.ts` + per-component
@@ -140,19 +121,19 @@ body {
 
 .card-glow:hover {
   transform: translateY(-1px);
-  border-color: var(--glow-primary);
+  border-color: rgba(2, 132, 199, 0.4);
   box-shadow:
-    0 0 0 1px var(--glow-secondary),
-    0 8px 28px -12px var(--glow-medium),
-    0 0 36px -10px var(--glow-secondary);
+    0 0 0 1px rgba(2, 132, 199, 0.18),
+    0 8px 28px -12px rgba(2, 132, 199, 0.25),
+    0 0 36px -10px rgba(2, 132, 199, 0.18);
 }
 
 .dark .card-glow:hover {
-  border-color: var(--glow-primary);
+  border-color: rgba(56, 189, 248, 0.4);
   box-shadow:
-    0 0 0 1px var(--glow-secondary),
-    0 8px 28px -12px var(--glow-medium),
-    0 0 36px -10px var(--glow-secondary);
+    0 0 0 1px rgba(56, 189, 248, 0.18),
+    0 8px 28px -12px rgba(56, 189, 248, 0.25),
+    0 0 36px -10px rgba(56, 189, 248, 0.18);
 }
 
 /* ── Surface "lit" highlight — subtle inner top-light ─── */
@@ -178,6 +159,19 @@ body {
   animation: pulse-soft 2s ease-in-out infinite;
 }
 
+/* ── Shimmer for skeletons / placeholder ─────────── */
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+@utility animate-shimmer {
+  background: linear-gradient(90deg,
+    rgba(51, 65, 85, 0.15) 0%,
+    rgba(51, 65, 85, 0.35) 50%,
+    rgba(51, 65, 85, 0.15) 100%);
+  background-size: 800px 100%;
+  animation: shimmer 1.6s linear infinite;
+}
 
 /* ── Rise (toast / modal entry) ─────────────────── */
 @keyframes rise {
@@ -188,13 +182,24 @@ body {
   animation: rise 0.5s var(--apple-spring) both;
 }
 
+/* ── Approval glow ring ─────────────────────────── */
+@keyframes glow-ring {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.3); }
+  50% { box-shadow: 0 0 0 4px rgba(251, 191, 36, 0); }
+}
+@utility animate-glow-ring {
+  animation: glow-ring 2.4s ease-in-out infinite;
+}
 
+/* ── Grid bg (canvas / scratchpad) ─────────────── */
+@utility bg-grid {
+  background-image:
+    linear-gradient(rgba(51, 65, 85, 0.18) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(51, 65, 85, 0.18) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
 
 /* ── Smooth scrollbar ───────────────────────────── */
-.scrollbar-thin {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-color) transparent;
-}
 .scrollbar-thin::-webkit-scrollbar { width: 5px; }
 .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
 .scrollbar-thin::-webkit-scrollbar-thumb {
@@ -206,41 +211,33 @@ body {
 .dark .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
 .dark .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
-@media (prefers-reduced-motion: reduce) {
-  .animate-pulse-soft,
-  .animate-rise,
-  .card-glow {
-    animation: none !important;
-    transition: none !important;
-  }
-}
+/* prefers-reduced-motion is handled by motion (`useReducedMotion`) on a
+   per-variant basis; no global override is needed here. */
 
 /* ── iOS / Android safe-area insets ────────────── */
-/* Applied to elements at screen edge so content clears the iOS home indicator
-   and Android gesture navigation bar. */
+/* Applied to elements that sit at the edge of the screen (sidebar bottom,
+   chat input bar, sticky action bars) so content clears the iOS home
+   indicator and Android gesture navigation bar.
+
+   pb-safe         — pure inset, no minimum (for fixed wrappers with no base padding)
+   pb-safe-2 / -4  — inset OR base padding, whichever is larger; use these when the
+                     element already has p-2 / p-4 padding and must not lose it on
+                     non-mobile platforms where the inset is 0. */
 @utility pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
-
-/* ── Hide browser-default number-input spinner buttons (#5293) ────
-   Every <input type="number"> on the dashboard (config page, agent
-   manifest form, agent schedule panel, slider input, schema form,
-   …) is used for typed numeric entry — port numbers, timeouts,
-   token caps, intervals. The up/down stepper that browsers attach
-   by default offers no value (the user is not incrementing
-   anything), and Linux/KDE renders them prominently enough that
-   #5293 's reporter called them out as "arrow up and down for
-   scrolling appears in below ... useless and no need for them".
-   Hide them across Webkit (Chrome / Safari / Edge) and Gecko
-   (Firefox). Up / Down arrow keys still step the value, so
-   keyboard affordance is preserved. */
-input[type="number"]::-webkit-inner-spin-button,
-input[type="number"]::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
+@utility pb-safe-2 {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
 }
-input[type="number"] {
-  -moz-appearance: textfield;
-  appearance: textfield;
+@utility pb-safe-4 {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 1rem);
 }
-
+@utility pt-safe {
+  padding-top: max(env(safe-area-inset-top, 0px), 0px);
+}
+@utility pl-safe {
+  padding-left: max(env(safe-area-inset-left, 0px), 0px);
+}
+@utility pr-safe {
+  padding-right: max(env(safe-area-inset-right, 0px), 0px);
+}

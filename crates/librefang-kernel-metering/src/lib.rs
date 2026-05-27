@@ -1,21 +1,10 @@
 //! Metering engine — tracks LLM cost and enforces spending quotas.
-//!
-//! The dependency on `librefang-llm-driver` is intentionally narrow:
-//! we only pull in [`ProviderExhaustionStore`] and the
-//! [`ExhaustionReason`] / [`DEFAULT_LONG_BACKOFF`] types so a budget
-//! gate-trip on this engine can flag the offending provider in the
-//! same exhaustion view the LLM fallback chain reads from (#4807).
-//! Nothing else from the driver crate is used here.
 
-use librefang_llm_driver::exhaustion::{
-    ExhaustionReason, ProviderExhaustionStore, DEFAULT_LONG_BACKOFF,
-};
 use librefang_memory::usage::{ModelUsage, UsageRecord, UsageStore, UsageSummary};
 use librefang_types::agent::{AgentId, ResourceQuota, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::model_catalog::ModelCatalogEntry;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 const DEFAULT_INPUT_COST_PER_M: f64 = 1.0;
 const DEFAULT_OUTPUT_COST_PER_M: f64 = 3.0;
@@ -42,37 +31,12 @@ impl CostReservationLedger {
         *self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Atomically check that adding `usd` to the current pending total
-    /// keeps it within all of `caps` (each entry is `(limit, already_spent)`,
-    /// limits of `0.0` or below are skipped). On success the amount is
-    /// committed under the same lock acquisition; on failure nothing is
-    /// mutated. Returns `Ok(())` if added, or `Err(index)` of the first
-    /// cap that would be exceeded — the caller turns that into the
-    /// matching `QuotaExceeded` message with its own context strings.
-    ///
-    /// Single critical section: this closes the check-then-add race in
-    /// `reserve_global_budget`. Two concurrent callers cannot both
-    /// observe the pre-add `current()` and both commit, because the
-    /// second waits on the mutex until the first has either added or
-    /// returned.
-    fn check_and_add(&self, usd: f64, caps: &[(f64, f64)]) -> Result<(f64, f64), CapBreach> {
-        let mut g = self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner());
-        let add = usd.max(0.0);
-        for (idx, (limit, already_spent)) in caps.iter().enumerate() {
-            if *limit <= 0.0 {
-                continue;
-            }
-            let projected = already_spent + *g + add;
-            if projected > *limit {
-                return Err(CapBreach {
-                    index: idx,
-                    pending: *g,
-                });
-            }
+    fn add(&self, usd: f64) {
+        if usd <= 0.0 {
+            return;
         }
-        let pending_before = *g;
-        *g += add;
-        Ok((pending_before, add))
+        let mut g = self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner());
+        *g += usd;
     }
 
     /// Subtract a previously-reserved amount. Clamped at 0 to defend
@@ -84,15 +48,6 @@ impl CostReservationLedger {
         let mut g = self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner());
         *g = (*g - usd).max(0.0);
     }
-}
-
-/// Which cap (by index in the slice handed to `check_and_add`) tripped,
-/// and the pending value that was observed under the lock — used by the
-/// caller to build the matching error message.
-#[derive(Debug)]
-struct CapBreach {
-    index: usize,
-    pending: f64,
 }
 
 /// Token returned by [`MeteringEngine::reserve_global_budget`]; on drop /
@@ -142,11 +97,6 @@ pub struct MeteringEngine {
     store: Arc<UsageStore>,
     /// In-memory ledger of pre-charged but not-yet-settled USD cost (#3616).
     pending: Arc<CostReservationLedger>,
-    /// Optional shared provider-exhaustion store (#4807). When set,
-    /// per-provider budget breaches (operator caps in `[budget.providers]`)
-    /// flag the provider as exhausted so the fallback chain skips it
-    /// instead of attempting the call and getting a fresh quota error.
-    exhaustion: Option<ProviderExhaustionStore>,
 }
 
 impl MeteringEngine {
@@ -155,50 +105,6 @@ impl MeteringEngine {
         Self {
             store,
             pending: Arc::new(CostReservationLedger::default()),
-            exhaustion: None,
-        }
-    }
-
-    /// Attach a shared provider-exhaustion store (#4807). When set, the
-    /// metering engine marks a provider as `BudgetExceeded` whenever its
-    /// operator-set per-provider budget gate trips, so the LLM fallback
-    /// chain skips that slot for [`DEFAULT_LONG_BACKOFF`] without first
-    /// dispatching a request that the gate would only deny again.
-    ///
-    /// The store is cheap-clone — pass the same instance the
-    /// `FallbackChain` uses so both layers observe a coherent view.
-    pub fn with_exhaustion_store(mut self, store: ProviderExhaustionStore) -> Self {
-        self.exhaustion = Some(store);
-        self
-    }
-
-    /// Return a clone of the attached exhaustion store, when one is wired.
-    /// Used by callers that need to seed the same store into other layers
-    /// (e.g. an `AuxClient` built after the metering engine).
-    pub fn exhaustion_store(&self) -> Option<ProviderExhaustionStore> {
-        self.exhaustion.clone()
-    }
-
-    /// Mark a provider as budget-exhausted on the attached store, if any.
-    /// No-op when no exhaustion store is wired (legacy callers). Centralised
-    /// here so every "budget refused this provider" site uses the same
-    /// reason / backoff combo.
-    fn flag_provider_budget_exhausted(&self, provider: &str) {
-        if provider.is_empty() {
-            return;
-        }
-        if let Some(store) = &self.exhaustion {
-            tracing::info!(
-                target: "metering",
-                event = "provider_budget_exhausted",
-                provider = %provider,
-                "operator budget cap reached; flagging provider in exhaustion store"
-            );
-            store.mark_exhausted(
-                provider,
-                ExhaustionReason::BudgetExceeded,
-                Some(Instant::now() + DEFAULT_LONG_BACKOFF),
-            );
         }
     }
 
@@ -218,62 +124,50 @@ impl MeteringEngine {
         budget: &librefang_types::config::BudgetConfig,
         estimated_usd: f64,
     ) -> LibreFangResult<MeteringReservation> {
-        // Read settled spend from SQLite up front, outside the in-memory
-        // ledger lock — these queries can be slow and may fail, and the
-        // ledger lock guards an in-process f64 only. Settled spend is
-        // monotonic within a time window and adding the just-observed
-        // value (rather than a re-read after the lock) cannot under-count
-        // the gate.
-        let hourly_spent = if budget.max_hourly_usd > 0.0 {
-            self.store.query_global_hourly()?
-        } else {
-            0.0
-        };
-        let daily_spent = if budget.max_daily_usd > 0.0 {
-            self.store.query_today_cost()?
-        } else {
-            0.0
-        };
-        let monthly_spent = if budget.max_monthly_usd > 0.0 {
-            self.store.query_global_monthly()?
-        } else {
-            0.0
-        };
+        let pending = self.pending.current();
 
-        // Single critical section across check + add. The lock is held
-        // for the full ">" check and the matching `+=`, so two concurrent
-        // callers cannot both observe the pre-add pending total and both
-        // commit (#3616). Use ">" not ">=" so a fresh kernel with a
-        // single call exactly at the limit isn't rejected before it's
-        // ever recorded.
-        //
-        // Order matches the previous sequential gate so error messages
-        // pick the same cap as before: hourly → daily → monthly.
-        let caps: [(f64, f64); 3] = [
-            (budget.max_hourly_usd, hourly_spent),
-            (budget.max_daily_usd, daily_spent),
-            (budget.max_monthly_usd, monthly_spent),
-        ];
-
-        match self.pending.check_and_add(estimated_usd, &caps) {
-            Ok((_pending_before, reserved)) => Ok(MeteringReservation {
-                ledger: Arc::clone(&self.pending),
-                estimated_usd: reserved,
-                settled: false,
-            }),
-            Err(CapBreach { index, pending }) => {
-                let (limit, spent, label) = match index {
-                    0 => (budget.max_hourly_usd, hourly_spent, "hourly"),
-                    1 => (budget.max_daily_usd, daily_spent, "daily"),
-                    _ => (budget.max_monthly_usd, monthly_spent, "monthly"),
-                };
-                Err(LibreFangError::QuotaExceeded(format!(
-                    "Global {label} budget would be exceeded: \
+        // Use ">" not ">=" so a fresh kernel with a single call exactly
+        // at the limit isn't rejected before it's ever recorded.
+        if budget.max_hourly_usd > 0.0 {
+            let spent = self.store.query_global_hourly()?;
+            let projected = spent + pending + estimated_usd.max(0.0);
+            if projected > budget.max_hourly_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global hourly budget would be exceeded: \
                      spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
-                    spent, pending, estimated_usd, limit
-                )))
+                    spent, pending, estimated_usd, budget.max_hourly_usd
+                )));
             }
         }
+        if budget.max_daily_usd > 0.0 {
+            let spent = self.store.query_today_cost()?;
+            let projected = spent + pending + estimated_usd.max(0.0);
+            if projected > budget.max_daily_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global daily budget would be exceeded: \
+                     spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
+                    spent, pending, estimated_usd, budget.max_daily_usd
+                )));
+            }
+        }
+        if budget.max_monthly_usd > 0.0 {
+            let spent = self.store.query_global_monthly()?;
+            let projected = spent + pending + estimated_usd.max(0.0);
+            if projected > budget.max_monthly_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global monthly budget would be exceeded: \
+                     spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
+                    spent, pending, estimated_usd, budget.max_monthly_usd
+                )));
+            }
+        }
+
+        self.pending.add(estimated_usd.max(0.0));
+        Ok(MeteringReservation {
+            ledger: Arc::clone(&self.pending),
+            estimated_usd: estimated_usd.max(0.0),
+            settled: false,
+        })
     }
 
     /// Currently-pending (reserved-but-not-settled) USD across all callers.
@@ -618,11 +512,6 @@ impl MeteringEngine {
     /// gating or dashboards).
     ///
     /// Zero limits are treated as "unlimited" and are skipped.
-    ///
-    /// When the gate refuses a provider AND an exhaustion store is attached
-    /// (see [`Self::with_exhaustion_store`]), the provider is also marked
-    /// as `BudgetExceeded` for [`DEFAULT_LONG_BACKOFF`] so the LLM fallback
-    /// chain skips it on subsequent calls without re-dispatching (#4807).
     pub fn check_provider_budget(
         &self,
         provider: &str,
@@ -635,7 +524,6 @@ impl MeteringEngine {
         if budget.max_cost_per_hour_usd > 0.0 {
             let cost = self.store.query_provider_hourly(provider)?;
             if cost >= budget.max_cost_per_hour_usd {
-                self.flag_provider_budget_exhausted(provider);
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded hourly cost budget: ${:.4} / ${:.4}",
                     provider, cost, budget.max_cost_per_hour_usd
@@ -646,7 +534,6 @@ impl MeteringEngine {
         if budget.max_cost_per_day_usd > 0.0 {
             let cost = self.store.query_provider_daily(provider)?;
             if cost >= budget.max_cost_per_day_usd {
-                self.flag_provider_budget_exhausted(provider);
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded daily cost budget: ${:.4} / ${:.4}",
                     provider, cost, budget.max_cost_per_day_usd
@@ -657,7 +544,6 @@ impl MeteringEngine {
         if budget.max_cost_per_month_usd > 0.0 {
             let cost = self.store.query_provider_monthly(provider)?;
             if cost >= budget.max_cost_per_month_usd {
-                self.flag_provider_budget_exhausted(provider);
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded monthly cost budget: ${:.4} / ${:.4}",
                     provider, cost, budget.max_cost_per_month_usd
@@ -668,7 +554,6 @@ impl MeteringEngine {
         if budget.max_tokens_per_hour > 0 {
             let tokens = self.store.query_provider_tokens_hourly(provider)?;
             if tokens >= budget.max_tokens_per_hour {
-                self.flag_provider_budget_exhausted(provider);
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded hourly token budget: {} / {}",
                     provider, tokens, budget.max_tokens_per_hour
@@ -747,17 +632,9 @@ fn estimate_cost_from_rates(
     input_per_m: f64,
     output_per_m: f64,
 ) -> f64 {
-    // Regular input tokens = total input minus cache tokens.
-    // Audit: metering-token-overflow — the inner `+` was NOT a
-    // saturating_add. All three inputs come from LLM-provider wire
-    // data (`UsageInfo`, `u64`); a malicious or buggy provider
-    // returning `u64::MAX/2 + 1` in both cache fields panicked
-    // debug builds and silently wrapped in release, producing
-    // absurd budget rows that fed straight into spend-cap
-    // enforcement. The outer saturating_sub was already correct;
-    // only the inner sum needed the same protection.
-    let cache_total = cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
-    let regular_input = input_tokens.saturating_sub(cache_total);
+    // Regular input tokens = total input minus cache tokens
+    let regular_input =
+        input_tokens.saturating_sub(cache_read_input_tokens + cache_creation_input_tokens);
     let regular_input_cost = (regular_input as f64 / 1_000_000.0) * input_per_m;
 
     // Cache-read tokens are priced at 10% of input price
@@ -795,7 +672,7 @@ mod tests {
 
     fn setup() -> MeteringEngine {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let store = Arc::new(UsageStore::new(substrate.pool()));
+        let store = Arc::new(UsageStore::new(substrate.usage_conn()));
         MeteringEngine::new(store)
     }
 
@@ -1401,117 +1278,6 @@ mod tests {
         r2.settle();
     }
 
-    /// Audit: cost-reservation-not-atomic. The original
-    /// `reserve_global_budget` acquired the in-memory ledger mutex for
-    /// `current()`, dropped it, ran the SQLite reads, then re-acquired
-    /// the mutex for `add()`. Under concurrency two callers could both
-    /// pass the gate and both commit, exceeding `max_hourly_usd`. The
-    /// fix folds check + add into a single critical section
-    /// (`CostReservationLedger::check_and_add`). This test spawns many
-    /// concurrent reservations whose collective ask greatly exceeds the
-    /// cap and asserts the ledger never lets in-flight reservations
-    /// cross it.
-    ///
-    /// Uses `std::thread` rather than `tokio::test` so the metering
-    /// crate doesn't pick up a tokio dev-dependency just for this
-    /// regression — `reserve_global_budget` is a sync function and OS
-    /// threads exercise the std `Mutex` race directly.
-    #[test]
-    fn concurrent_reservations_never_exceed_cap() {
-        let engine = std::sync::Arc::new(setup());
-        let budget = std::sync::Arc::new(librefang_types::config::BudgetConfig {
-            max_hourly_usd: 100.0,
-            ..Default::default()
-        });
-
-        // A barrier holds every thread at the gate until all 20 are
-        // ready to race — without it the first thread can finish
-        // before the second is even spawned and we never observe the
-        // contended path.
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(20));
-
-        let mut handles = Vec::with_capacity(20);
-        for _ in 0..20 {
-            let engine = engine.clone();
-            let budget = budget.clone();
-            let barrier = barrier.clone();
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                engine.reserve_global_budget(&budget, 10.0)
-            }));
-        }
-
-        let mut reservations = Vec::new();
-        let mut rejections = 0usize;
-        for h in handles {
-            match h.join().expect("thread panicked") {
-                Ok(r) => reservations.push(r),
-                Err(_) => rejections += 1,
-            }
-        }
-
-        // Total committed pending must stay within the cap. If the
-        // bug were still present, 20 * 10 = 200 USD might all sneak
-        // through and `pending_reserved_usd()` would land at 200.
-        let pending = engine.pending_reserved_usd();
-        assert!(
-            pending <= 100.0 + 1e-9,
-            "committed pending {pending} exceeds cap 100.0 — \
-             concurrent reservations leaked past the gate"
-        );
-        // Exactly 10 reservations of $10 fit under a $100 cap (the
-        // gate uses `>` not `>=`, so the 10th call at the cap is
-        // allowed; the 11th would project to $110 > $100).
-        assert_eq!(
-            reservations.len(),
-            10,
-            "expected 10 successful reservations under the cap; got {}",
-            reservations.len()
-        );
-        assert_eq!(
-            rejections, 10,
-            "expected 10 rejections beyond the cap; got {rejections}"
-        );
-        assert!(
-            (pending - 100.0).abs() < 1e-9,
-            "committed pending {pending} should equal cap 100.0 \
-             after exactly 10 reservations of $10"
-        );
-
-        // Releasing every reservation must restore the ledger to zero —
-        // sanity check that the atomic path didn't drop any release.
-        for r in reservations {
-            r.release();
-        }
-        assert!(
-            engine.pending_reserved_usd().abs() < 1e-9,
-            "ledger should return to zero after all reservations release"
-        );
-    }
-
-    /// Edge case for the audit fix: a single reservation that exactly
-    /// fills the cap succeeds (`>` not `>=`), and the very next $1 ask
-    /// is rejected.
-    #[test]
-    fn reservation_at_exact_cap_succeeds_then_next_rejects() {
-        let engine = setup();
-        let budget = librefang_types::config::BudgetConfig {
-            max_hourly_usd: 100.0,
-            ..Default::default()
-        };
-        let r1 = engine
-            .reserve_global_budget(&budget, 100.0)
-            .expect("reservation at exact cap must succeed");
-        let err = engine
-            .reserve_global_budget(&budget, 1.0)
-            .expect_err("a further $1 must be refused");
-        assert!(
-            err.to_string().contains("hourly budget would be exceeded"),
-            "unexpected error: {err}"
-        );
-        r1.release();
-    }
-
     /// Reservations must release on drop so a panic between reserve and
     /// settle doesn't permanently lock the budget down.
     #[test]
@@ -1537,209 +1303,5 @@ mod tests {
         // Even a huge estimate must pass when no limit is configured.
         let r = engine.reserve_global_budget(&budget, 9_999.0).unwrap();
         r.settle();
-    }
-
-    // ── #4807: per-provider budget breach flips exhaustion store ────────
-
-    /// When a per-provider hourly cap trips, the engine must flag the
-    /// provider in the attached exhaustion store. The fallback chain
-    /// reads this on its next call and skips the slot without dispatch.
-    #[test]
-    fn provider_hourly_budget_flips_exhaustion_store() {
-        let exhaustion = ProviderExhaustionStore::new();
-        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let store = Arc::new(UsageStore::new(substrate.pool()));
-        let engine = MeteringEngine::new(store).with_exhaustion_store(exhaustion.clone());
-
-        let agent_id = AgentId::new();
-        let provider_budget = librefang_types::config::ProviderBudget {
-            max_cost_per_hour_usd: 0.01,
-            ..Default::default()
-        };
-
-        // Record cost above the cap.
-        engine
-            .record(&UsageRecord {
-                agent_id,
-                provider: "openai".to_string(),
-                model: "gpt-4o".to_string(),
-                input_tokens: 1_000,
-                output_tokens: 500,
-                cost_usd: 0.50,
-                tool_calls: 0,
-                latency_ms: 100,
-                ..Default::default()
-            })
-            .unwrap();
-
-        // Pre-condition: nothing marked yet.
-        assert!(exhaustion.is_exhausted("openai").is_none());
-
-        let result = engine.check_provider_budget("openai", &provider_budget);
-        assert!(result.is_err(), "budget gate should refuse");
-
-        // Post-condition: provider flagged with BudgetExceeded.
-        let rec = exhaustion
-            .is_exhausted("openai")
-            .expect("provider should be flagged");
-        assert_eq!(rec.reason, ExhaustionReason::BudgetExceeded);
-        assert!(
-            rec.until.is_some(),
-            "budget-exceeded must carry an auto-clear time"
-        );
-    }
-
-    /// Per-provider token cap trips the same path.
-    #[test]
-    fn provider_token_budget_flips_exhaustion_store() {
-        let exhaustion = ProviderExhaustionStore::new();
-        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let store = Arc::new(UsageStore::new(substrate.pool()));
-        let engine = MeteringEngine::new(store).with_exhaustion_store(exhaustion.clone());
-
-        let agent_id = AgentId::new();
-        let provider_budget = librefang_types::config::ProviderBudget {
-            max_tokens_per_hour: 100,
-            ..Default::default()
-        };
-
-        engine
-            .record(&UsageRecord {
-                agent_id,
-                provider: "groq".to_string(),
-                model: "llama-3-70b".to_string(),
-                input_tokens: 1_000,
-                output_tokens: 500,
-                cost_usd: 0.0,
-                tool_calls: 0,
-                latency_ms: 100,
-                ..Default::default()
-            })
-            .unwrap();
-
-        assert!(engine
-            .check_provider_budget("groq", &provider_budget)
-            .is_err());
-        let rec = exhaustion
-            .is_exhausted("groq")
-            .expect("groq should be flagged");
-        assert_eq!(rec.reason, ExhaustionReason::BudgetExceeded);
-    }
-
-    /// Without an attached store the engine works exactly as before —
-    /// the flag call is a no-op and existing call sites are unaffected.
-    #[test]
-    fn provider_budget_no_store_attached_is_legacy_compatible() {
-        let engine = setup();
-        let provider_budget = librefang_types::config::ProviderBudget {
-            max_cost_per_hour_usd: 0.01,
-            ..Default::default()
-        };
-        let agent_id = AgentId::new();
-        engine
-            .record(&UsageRecord {
-                agent_id,
-                provider: "openai".to_string(),
-                model: "gpt-4o".to_string(),
-                input_tokens: 1_000,
-                output_tokens: 500,
-                cost_usd: 0.50,
-                tool_calls: 0,
-                latency_ms: 100,
-                ..Default::default()
-            })
-            .unwrap();
-
-        // Still errors with QuotaExceeded — no panic, no store wiring needed.
-        assert!(engine
-            .check_provider_budget("openai", &provider_budget)
-            .is_err());
-    }
-
-    /// `exhaustion_store()` accessor returns the same instance the engine
-    /// was wired with, so the kernel can pass the same store down to the
-    /// fallback-chain layer.
-    #[test]
-    fn exhaustion_store_accessor_round_trips_attached_handle() {
-        let exhaustion = ProviderExhaustionStore::new();
-        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let store = Arc::new(UsageStore::new(substrate.pool()));
-        let engine = MeteringEngine::new(store).with_exhaustion_store(exhaustion.clone());
-
-        let from_engine = engine
-            .exhaustion_store()
-            .expect("engine should expose attached store");
-        // Mark via the engine-returned handle, observe via the original —
-        // both must point at the same underlying DashMap.
-        from_engine.mark_exhausted(
-            "openai",
-            ExhaustionReason::BudgetExceeded,
-            Some(Instant::now() + DEFAULT_LONG_BACKOFF),
-        );
-        assert!(exhaustion.is_exhausted("openai").is_some());
-    }
-
-    #[test]
-    fn exhaustion_store_accessor_returns_none_when_unwired() {
-        let engine = setup();
-        assert!(engine.exhaustion_store().is_none());
-    }
-
-    // Audit: metering-token-overflow. A buggy LLM-provider response
-    // returning huge `cache_read_input_tokens` and
-    // `cache_creation_input_tokens` used to panic debug builds at
-    // the inner `+` and silently wrap in release, producing absurd
-    // `regular_input`. Both fed straight into billing / spend-cap
-    // enforcement. After the fix the inner sum is `saturating_add`,
-    // so the cache total clamps at `u64::MAX` and `saturating_sub`
-    // keeps `regular_input` non-negative; the function returns a
-    // sane finite cost.
-    #[test]
-    fn estimate_cost_from_rates_handles_provider_returning_overflow_cache_tokens() {
-        // Inputs designed to overflow `cache_read + cache_creation`
-        // if the inner add weren't saturating.
-        let half_max = u64::MAX / 2;
-        let cost = estimate_cost_from_rates(
-            10,           // input_tokens — tiny
-            5,            // output_tokens
-            half_max + 1, // cache_read_input_tokens
-            half_max + 1, // cache_creation_input_tokens → overflow with regular `+`
-            1.0,
-            2.0,
-        );
-        // The function must return a finite f64 and never panic.
-        // Exact value is dominated by the cache costs (each scaled
-        // by the price-per-million), but its finiteness + non-NaN
-        // is the contract this test pins.
-        assert!(
-            cost.is_finite(),
-            "cost must be finite under overflow inputs: {cost}"
-        );
-        assert!(!cost.is_nan(), "cost must not be NaN: {cost}");
-        assert!(cost >= 0.0, "cost must be non-negative: {cost}");
-    }
-
-    #[test]
-    fn estimate_cost_from_rates_treats_cache_above_input_as_zero_regular_input() {
-        // When the provider reports cache_total > input_tokens the
-        // saturating_sub clamps regular_input to 0 — equivalent to
-        // the historical behaviour, just now also safe under the
-        // intermediate add overflow.
-        let cost = estimate_cost_from_rates(
-            100,           // input_tokens
-            0,             // output_tokens
-            1_000_000_000, // cache_read >> input
-            0,
-            1.0,
-            1.0,
-        );
-        // Regular input cost should be 0; only cache_read cost
-        // (1B * 0.10 / 1M = 100.0) contributes.
-        let expected_cache_read_cost = 1_000_000_000.0 / 1_000_000.0 * 1.0 * 0.10;
-        assert!(
-            (cost - expected_cache_read_cost).abs() < 1e-9,
-            "cost {cost} must equal cache_read_cost ({expected_cache_read_cost}) \
-             when cache > input — regular_input should saturate to 0"
-        );
     }
 }

@@ -245,19 +245,16 @@ fn set_mtime_ms(path: &Path, mtime_ms: u64) -> std::io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let c = CString::new(path.as_os_str().as_bytes())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        // `as _` defers to whatever `tv_sec` / `tv_usec` are on this target —
-        // musl 1.2.0 deprecates the `time_t` / `suseconds_t` aliases ahead of
-        // the 64-bit switch, and naming them directly trips `-D deprecated`.
-        let secs = (mtime_ms / 1000) as i64;
-        let usecs = ((mtime_ms % 1000) * 1000) as i64;
+        let secs = (mtime_ms / 1000) as libc::time_t;
+        let usecs = ((mtime_ms % 1000) * 1000) as libc::suseconds_t;
         let times = [
             libc::timeval {
-                tv_sec: secs as _,
-                tv_usec: usecs as _,
+                tv_sec: secs,
+                tv_usec: usecs,
             },
             libc::timeval {
-                tv_sec: secs as _,
-                tv_usec: usecs as _,
+                tv_sec: secs,
+                tv_usec: usecs,
             },
         ];
         // SAFETY: `c` is a valid NUL-terminated C string and `times` is a

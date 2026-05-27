@@ -70,11 +70,6 @@ describe("query key factories", () => {
         "abc",
         "sess-1",
       ]);
-      expect(agentKeys.sessionSnapshots("abc")).toEqual([
-        "agents",
-        "session",
-        "abc",
-      ]);
     });
 
     it("detail is nested under details", () => {
@@ -254,9 +249,6 @@ describe("query key factories", () => {
       expect(agentKeys.details().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.templates().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.sessions("x").slice(0, prefix.length)).toEqual(
-        prefix,
-      );
-      expect(agentKeys.sessionSnapshots("x").slice(0, prefix.length)).toEqual(
         prefix,
       );
       expect(agentKeys.session("x").slice(0, prefix.length)).toEqual(prefix);
@@ -470,44 +462,6 @@ describe("query key factories", () => {
       expect(
         permissionPolicyKeys.detail("alice").slice(0, permissionPolicyKeys.all.length),
       ).toEqual(permissionPolicyKeys.all);
-    });
-  });
-
-  describe("commsKeys (#5666)", () => {
-    it("exposes the standard all / lists() / list / details() / detail hierarchy", () => {
-      expect(commsKeys.all).toEqual(["comms"]);
-      expect(commsKeys.lists()).toEqual(["comms", "list"]);
-      expect(commsKeys.topology()).toEqual(["comms", "list", "topology"]);
-      expect(commsKeys.events()).toEqual(["comms", "list", "events", 200]);
-      expect(commsKeys.events(50)).toEqual(["comms", "list", "events", 50]);
-      expect(commsKeys.details()).toEqual(["comms", "detail"]);
-      expect(commsKeys.detail("evt-1")).toEqual(["comms", "detail", "evt-1"]);
-    });
-
-    it("lists() prefixes both topology and events so list-shaped queries invalidate as a batch", () => {
-      const ls = commsKeys.lists();
-      expect(commsKeys.topology().slice(0, ls.length)).toEqual(ls);
-      expect(commsKeys.events(100).slice(0, ls.length)).toEqual(ls);
-    });
-
-    it("details() prefixes detail(id) and is disjoint from lists()", () => {
-      const ds = commsKeys.details();
-      expect(commsKeys.detail("evt-1").slice(0, ds.length)).toEqual(ds);
-      // Invalidating lists() must NOT clobber a cached event detail.
-      expect(commsKeys.details()).not.toEqual(commsKeys.lists());
-    });
-
-    it("all sub-keys are anchored on commsKeys.all", () => {
-      const prefix = commsKeys.all;
-      expect(commsKeys.lists().slice(0, prefix.length)).toEqual(prefix);
-      expect(commsKeys.topology().slice(0, prefix.length)).toEqual(prefix);
-      expect(commsKeys.events(100).slice(0, prefix.length)).toEqual(prefix);
-      expect(commsKeys.details().slice(0, prefix.length)).toEqual(prefix);
-      expect(commsKeys.detail("x").slice(0, prefix.length)).toEqual(prefix);
-    });
-
-    it("different event limits produce different keys", () => {
-      expect(commsKeys.events(100)).not.toEqual(commsKeys.events(200));
     });
   });
 });

@@ -84,16 +84,8 @@ impl TtsEngine {
             }
             "elevenlabs" => self.synthesize_elevenlabs(text, voice_override).await,
             "google_tts" => {
-                #[cfg(feature = "media")]
-                {
-                    self.synthesize_google(text, voice_override, format_override)
-                        .await
-                }
-                #[cfg(not(feature = "media"))]
-                {
-                    let _ = (text, voice_override, format_override);
-                    Err("google_tts provider requires the `media` feature".to_string())
-                }
+                self.synthesize_google(text, voice_override, format_override)
+                    .await
             }
             other => Err(format!("Unknown TTS provider: {other}")),
         }
@@ -245,7 +237,6 @@ impl TtsEngine {
 
     /// Synthesize via Google Cloud TTS API.
     /// Delegates to `GoogleTtsMediaDriver` to avoid duplicating SSML handling.
-    #[cfg(feature = "media")]
     async fn synthesize_google(
         &self,
         text: &str,

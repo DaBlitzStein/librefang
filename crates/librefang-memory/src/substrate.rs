@@ -12,7 +12,6 @@ use crate::semantic::SemanticStore;
 use crate::session::{Session, SessionStore};
 use crate::structured::StructuredStore;
 use crate::usage::UsageStore;
-use crate::workflow_store::WorkflowStore;
 
 use async_trait::async_trait;
 use librefang_types::agent::{AgentEntry, AgentId, SessionId};
@@ -22,18 +21,15 @@ use librefang_types::memory::{
     ConsolidationReport, Entity, ExportFormat, GraphMatch, GraphPattern, ImportReport, Memory,
     MemoryFilter, MemoryFragment, MemoryId, MemorySource, Relation,
 };
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 /// The unified memory substrate. Implements the `Memory` trait by delegating
-/// to specialized stores backed by a shared SQLite connection pool.
+/// to specialized stores backed by a shared SQLite connection.
 pub struct MemorySubstrate {
-    pool: Pool<SqliteConnectionManager>,
+    conn: Arc<Mutex<Connection>>,
     structured: StructuredStore,
     semantic: SemanticStore,
     knowledge: KnowledgeStore,
@@ -41,109 +37,7 @@ pub struct MemorySubstrate {
     consolidation: ConsolidationEngine,
     usage: UsageStore,
     roster: RosterStore,
-    workflow_store: WorkflowStore,
     chunk_config: ChunkConfig,
-}
-
-/// Canonical PRAGMA set applied to every SqliteConnectionManager
-/// connection on first checkout. Extracted as a `pub(crate)` const
-/// so any future "second pool" on the same DB inherits the full
-/// set — most importantly `foreign_keys=ON`, which is **per-
-/// connection** in SQLite (not per-database), so an independent
-/// pool that omits it silently bypasses every FK declared by the
-/// migrations.
-///
-/// Audit: prompt-store-second-pool-no-fk. The `PromptStore` pool
-/// used to set only journal_mode / busy_timeout / cache_size /
-/// mmap_size; writes through that pool silently bypassed the FKs
-/// declared by `migrate_v13` on `prompt_experiments` /
-/// `experiment_variants` / `experiment_metrics`. Reusing this
-/// const closes that door for every current and future caller.
-///
-/// Field-by-field:
-///   - `journal_mode=WAL` — multi-reader concurrency.
-///   - `busy_timeout=5000` — writers wait 5s for the reserved lock
-///     instead of failing fast.
-///   - `cache_size=-2000` — caps per-connection page cache at
-///     ~2 MiB (so total ceiling is `pool_size × 2 MiB`).
-///   - `mmap_size=0` — disables mmap'd reads (kept for parity
-///     with the pre-pool config).
-///   - `foreign_keys=ON` — enforces the schema FKs every
-///     migration since v1 relies on.
-///   - `synchronous=NORMAL` — WAL-default durability/perf
-///     tradeoff.
-pub(crate) const DEFAULT_CONNECTION_PRAGMAS: &str = "PRAGMA journal_mode=WAL; \
-     PRAGMA busy_timeout=5000; \
-     PRAGMA cache_size=-2000; \
-     PRAGMA mmap_size=0; \
-     PRAGMA foreign_keys=ON; \
-     PRAGMA synchronous=NORMAL;";
-
-/// Default pool size when callers do not pass an explicit value.
-///
-/// Mirrors `default_memory_pool_size` in `librefang-types::config` so that
-/// callers constructing a substrate without a full `MemoryConfig` (tests,
-/// the `open` shortcut, ad-hoc tools) still land on a value consistent with
-/// what `config.toml: [memory] pool_size` defaults to.
-pub const DEFAULT_POOL_SIZE: u32 = 8;
-
-/// Tighten the on-disk SQLite database files to owner-only (`0o600`)
-/// permissions. Targets `db_path`, the matching `-wal`, and the
-/// matching `-shm` siblings. Files that don't exist yet (typical for
-/// `-wal` / `-shm` on first boot before any write) are silently
-/// skipped — they'll be created with the umask, and the next call to
-/// this helper at write time tightens them.
-///
-/// Audit: sqlite-file-permissions. Without this, the DB files inherit
-/// the process umask (typically `0644`), so every other process under
-/// the same UID can read raw user prompts, LLM replies, audit
-/// entries, OAuth nonces, TOTP codes, and paired-device api_key
-/// hashes from `~/.librefang/librefang.db`.
-///
-/// Non-Unix is a no-op (Windows permissions follow a different model
-/// and don't have a meaningful 0o600 equivalent at the file level).
-pub fn restrict_db_file_permissions(db_path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perm = std::fs::Permissions::from_mode(0o600);
-        let parent = db_path.parent();
-        let stem = db_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        // SQLite uses `<db>-wal` and `<db>-shm` for WAL journaling.
-        // They appear lazily — the first write spawns both, so on a
-        // fresh boot they don't yet exist and ENOENT is the expected
-        // outcome (we just want to make sure they're 0600 once they
-        // do show up).
-        let targets: Vec<std::path::PathBuf> = match parent {
-            Some(p) if !stem.is_empty() => vec![
-                db_path.to_path_buf(),
-                p.join(format!("{stem}-wal")),
-                p.join(format!("{stem}-shm")),
-            ],
-            _ => vec![db_path.to_path_buf()],
-        };
-        for path in targets {
-            match std::fs::set_permissions(&path, perm.clone()) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // -wal / -shm not yet materialised — fine, the
-                    // next caller will tighten them.
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "failed to tighten SQLite file permissions to 0o600 — \
-                         file may be world-readable until next boot"
-                    );
-                }
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = db_path;
-    }
 }
 
 impl MemorySubstrate {
@@ -153,86 +47,38 @@ impl MemorySubstrate {
     }
 
     /// Open or create a memory substrate with explicit chunking configuration.
-    ///
-    /// Uses [`DEFAULT_POOL_SIZE`] for the underlying r2d2 pool; production
-    /// callers that need to honour `config.toml: [memory] pool_size` should
-    /// use [`Self::open_with_pool_size`] instead.
     pub fn open_with_chunking(
         db_path: &Path,
         decay_rate: f32,
         chunk_config: ChunkConfig,
     ) -> LibreFangResult<Self> {
-        Self::open_with_pool_size(db_path, decay_rate, chunk_config, DEFAULT_POOL_SIZE)
-    }
+        let conn = Connection::open(db_path).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA busy_timeout=5000; \
+             PRAGMA cache_size=-2000; \
+             PRAGMA mmap_size=0; \
+             PRAGMA foreign_keys=ON; \
+             PRAGMA synchronous=NORMAL;",
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let shared = Arc::new(Mutex::new(conn));
 
-    /// Open or create a memory substrate with explicit chunking configuration
-    /// **and** pool sizing.
-    ///
-    /// `pool_size` is the maximum number of pooled SQLite connections; values
-    /// of 0 are clamped up to 1 (r2d2 panics on `max_size = 0`). The kernel
-    /// boot path passes `config.memory.pool_size` so operators can tune for
-    /// their concurrency profile (#3378 follow-up).
-    pub fn open_with_pool_size(
-        db_path: &Path,
-        decay_rate: f32,
-        chunk_config: ChunkConfig,
-        pool_size: u32,
-    ) -> LibreFangResult<Self> {
-        // PRAGMAs run on every pooled connection's first checkout. The set
-        // mirrors the pre-pool single-connection init: WAL journal for
-        // multi-reader concurrency; 5 s busy_timeout so writers wait for the
-        // reserved lock instead of failing fast; cache_size=-2000 caps the
-        // per-connection page cache at 2 MiB (so total page cache ceiling is
-        // `pool_size * 2 MiB`); mmap_size=0 disables mmap'd reads (kept for
-        // parity with the pre-pool config — flipping this is a separate
-        // decision); foreign_keys=ON enforces the schema FKs the migrations
-        // rely on; synchronous=NORMAL is the WAL-default durability/perf
-        // tradeoff.
-        let manager = SqliteConnectionManager::file(db_path)
-            .with_init(|c| c.execute_batch(DEFAULT_CONNECTION_PRAGMAS));
-        // Clamp to >= 1: r2d2 panics on `max_size = 0`, and a deserialised
-        // `pool_size = 0` (operator typo) should fail soft, not crash boot.
-        let max_size = pool_size.max(1);
-        let pool = Pool::builder()
-            .max_size(max_size)
-            .idle_timeout(Some(Duration::from_secs(30)))
-            .max_lifetime(Some(Duration::from_secs(3600)))
-            .build(manager)
-            .map_err(LibreFangError::memory)?;
-        // Run migrations with a dedicated connection before any concurrent requests.
-        {
-            let migration_conn = pool.get().map_err(LibreFangError::memory)?;
-            run_migrations(&migration_conn).map_err(LibreFangError::memory)?;
-        }
-
-        // Audit: sqlite-file-permissions. SqliteConnectionManager
-        // creates `librefang.db`, `-wal` and `-shm` with the
-        // process umask (typically 0644), making them readable by
-        // every other process under the same UID on shared hosts
-        // (CI runners, multi-user dev boxes). The DB contains raw
-        // user prompts, LLM replies, audit_entries, OAuth nonces,
-        // TOTP codes, paired-device api_key hashes — every secret
-        // we ask operators to consider sensitive. Tighten to 0600
-        // immediately after migrations so the window between
-        // creation and chmod is closed before any other process
-        // can read. Non-Unix is a no-op.
-        restrict_db_file_permissions(db_path);
-
-        let sessions = SessionStore::new(pool.clone());
+        let sessions = SessionStore::new(Arc::clone(&shared));
         // Repair any sessions/sessions_fts drift left over from #3451
         // before save_session became transactional.
         sessions.reconcile_fts_index();
 
         Ok(Self {
-            pool: pool.clone(),
-            structured: StructuredStore::new(pool.clone()),
-            semantic: SemanticStore::new(pool.clone()),
-            knowledge: KnowledgeStore::new(pool.clone()),
+            conn: Arc::clone(&shared),
+            structured: StructuredStore::new(Arc::clone(&shared)),
+            semantic: SemanticStore::new(Arc::clone(&shared)),
+            knowledge: KnowledgeStore::new(Arc::clone(&shared)),
             sessions,
-            usage: UsageStore::new(pool.clone()),
-            roster: RosterStore::new(pool.clone()),
-            workflow_store: WorkflowStore::new(pool.clone()),
-            consolidation: ConsolidationEngine::new(pool, decay_rate),
+            usage: UsageStore::new(Arc::clone(&shared)),
+            roster: RosterStore::new(Arc::clone(&shared)),
+            consolidation: ConsolidationEngine::new(shared, decay_rate),
             chunk_config,
         })
     }
@@ -247,28 +93,25 @@ impl MemorySubstrate {
         decay_rate: f32,
         chunk_config: ChunkConfig,
     ) -> LibreFangResult<Self> {
-        let manager = SqliteConnectionManager::memory()
-            .with_init(|c| c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;"));
-        // in-memory DB: each connection is a separate database, so max_size must be 1.
-        let pool = Pool::builder()
-            .max_size(1)
-            .build(manager)
-            .map_err(LibreFangError::memory)?;
-        {
-            let migration_conn = pool.get().map_err(LibreFangError::memory)?;
-            run_migrations(&migration_conn).map_err(LibreFangError::memory)?;
-        }
+        let conn =
+            Connection::open_in_memory().map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON; \
+             PRAGMA synchronous=NORMAL;",
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let shared = Arc::new(Mutex::new(conn));
 
         Ok(Self {
-            pool: pool.clone(),
-            structured: StructuredStore::new(pool.clone()),
-            semantic: SemanticStore::new(pool.clone()),
-            knowledge: KnowledgeStore::new(pool.clone()),
-            sessions: SessionStore::new(pool.clone()),
-            usage: UsageStore::new(pool.clone()),
-            roster: RosterStore::new(pool.clone()),
-            workflow_store: WorkflowStore::new(pool.clone()),
-            consolidation: ConsolidationEngine::new(pool, decay_rate),
+            conn: Arc::clone(&shared),
+            structured: StructuredStore::new(Arc::clone(&shared)),
+            semantic: SemanticStore::new(Arc::clone(&shared)),
+            knowledge: KnowledgeStore::new(Arc::clone(&shared)),
+            sessions: SessionStore::new(Arc::clone(&shared)),
+            usage: UsageStore::new(Arc::clone(&shared)),
+            roster: RosterStore::new(Arc::clone(&shared)),
+            consolidation: ConsolidationEngine::new(shared, decay_rate),
             chunk_config,
         })
     }
@@ -288,22 +131,6 @@ impl MemorySubstrate {
         &self.roster
     }
 
-    /// Get a reference to the workflow run store.
-    pub fn workflow_store(&self) -> &WorkflowStore {
-        &self.workflow_store
-    }
-
-    /// Force a WAL checkpoint on the shared connection pool.
-    ///
-    /// Flushes any pending WAL frames to the main database file. Called
-    /// during kernel shutdown to ensure all workflow state transitions
-    /// (and other pending writes) are durable on disk.
-    pub fn wal_checkpoint(&self) {
-        if let Err(e) = self.workflow_store.wal_checkpoint() {
-            tracing::warn!("WAL checkpoint failed: {e}");
-        }
-    }
-
     /// Attach an external vector store backend to the semantic store.
     ///
     /// When set, [`SemanticStore::recall_with_embedding`] will delegate vector
@@ -313,9 +140,9 @@ impl MemorySubstrate {
         self.semantic.set_vector_store(store);
     }
 
-    /// Get a clone of the connection pool (for constructing stores from outside).
-    pub fn pool(&self) -> Pool<SqliteConnectionManager> {
-        self.pool.clone()
+    /// Get the shared database connection (for constructing stores from outside).
+    pub fn usage_conn(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.conn)
     }
 
     /// Run time-based memory decay, deleting stale memories based on scope TTL.
@@ -329,14 +156,14 @@ impl MemorySubstrate {
         &self,
         config: &librefang_types::config::MemoryDecayConfig,
     ) -> LibreFangResult<usize> {
-        crate::decay::run_decay(&self.pool, config)
+        crate::decay::run_decay(&self.conn, config)
     }
 
     /// Hard-delete soft-deleted memories whose `deleted_at` is older than
     /// `older_than_days` days. Reclaims embedding BLOBs that would otherwise
     /// stay forever in soft-deleted rows (#3467).
     pub fn prune_soft_deleted_memories(&self, older_than_days: u64) -> LibreFangResult<usize> {
-        crate::decay::prune_soft_deleted_memories(&self.pool, older_than_days)
+        crate::decay::prune_soft_deleted_memories(&self.conn, older_than_days)
     }
 
     /// Save an agent entry to persistent storage.
@@ -365,7 +192,10 @@ impl MemorySubstrate {
     /// the deleted agent's content searchable, which is a privacy
     /// regression rather than a recoverable hygiene issue.
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         remove_agent_inner(&conn, agent_id)
     }
 
@@ -411,32 +241,6 @@ impl MemorySubstrate {
         value: serde_json::Value,
     ) -> LibreFangResult<()> {
         self.structured.set(agent_id, key, value)
-    }
-
-    /// Atomic read-modify-write of a single KV key under a `BEGIN IMMEDIATE`
-    /// write transaction (#5138). Serializes concurrent mutators of the same
-    /// shared key (goals array, peer KV) so no writer's update is lost to a
-    /// last-writer-wins race. See [`StructuredStore::modify`].
-    pub fn structured_modify<T>(
-        &self,
-        agent_id: AgentId,
-        key: &str,
-        f: impl FnOnce(Option<serde_json::Value>) -> LibreFangResult<(serde_json::Value, T)>,
-    ) -> LibreFangResult<T> {
-        self.structured.modify(agent_id, key, f)
-    }
-
-    /// Set a value and atomically report whether the key already existed
-    /// (#5138). The existence check and write share one transaction so
-    /// `memory_store` can publish `Created` vs `Updated` from the committed
-    /// transition rather than a racy pre-read.
-    pub fn structured_set_returning_existed(
-        &self,
-        agent_id: AgentId,
-        key: &str,
-        value: serde_json::Value,
-    ) -> LibreFangResult<bool> {
-        self.structured.set_returning_existed(agent_id, key, value)
     }
 
     /// Get a session by ID.
@@ -562,16 +366,6 @@ impl MemorySubstrate {
         self.sessions.set_session_label(session_id, label)
     }
 
-    /// Set (or clear) the per-session model override (#4898).
-    pub fn set_session_model_override(
-        &self,
-        session_id: SessionId,
-        model_override: Option<&str>,
-    ) -> LibreFangResult<()> {
-        self.sessions
-            .set_session_model_override(session_id, model_override)
-    }
-
     /// Find a session by label for a given agent.
     pub fn find_session_by_label(
         &self,
@@ -628,7 +422,10 @@ impl MemorySubstrate {
         if pruned_count == 0 {
             return Ok(());
         }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         vacuum_inner(&conn, pruned_count);
         Ok(())
     }
@@ -718,12 +515,12 @@ impl MemorySubstrate {
     /// Load all paired devices from the database.
     pub fn load_paired_devices(&self) -> LibreFangResult<Vec<serde_json::Value>> {
         let conn = self
-            .pool
-            .get()
-            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let mut stmt = conn.prepare(
             "SELECT device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash FROM paired_devices"
-        ).map_err(LibreFangError::memory)?;
+        ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(serde_json::json!({
@@ -736,10 +533,10 @@ impl MemorySubstrate {
                     "api_key_hash": row.get::<_, String>(6)?,
                 }))
             })
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let mut devices = Vec::new();
         for row in rows {
-            devices.push(row.map_err(LibreFangError::memory)?);
+            devices.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
         }
         Ok(devices)
     }
@@ -757,27 +554,27 @@ impl MemorySubstrate {
         api_key_hash: &str,
     ) -> LibreFangResult<()> {
         let conn = self
-            .pool
-            .get()
-            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         conn.execute(
             "INSERT OR REPLACE INTO paired_devices (device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash],
-        ).map_err(LibreFangError::memory)?;
+        ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
     /// Remove a paired device from the database.
     pub fn remove_paired_device(&self, device_id: &str) -> LibreFangResult<()> {
         let conn = self
-            .pool
-            .get()
-            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         conn.execute(
             "DELETE FROM paired_devices WHERE device_id = ?1",
             rusqlite::params![device_id],
         )
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -792,7 +589,6 @@ impl MemorySubstrate {
     /// separate memory entry with `parent_id` and `chunk_index` in its
     /// metadata. The returned `MemoryId` belongs to the first chunk (the
     /// logical parent).
-    #[allow(clippy::too_many_arguments)]
     pub fn remember_with_embedding(
         &self,
         agent_id: AgentId,
@@ -801,7 +597,6 @@ impl MemorySubstrate {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
         embedding: Option<&[f32]>,
-        peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
         Self::store_with_chunking(
             &self.semantic,
@@ -812,7 +607,6 @@ impl MemorySubstrate {
             scope,
             metadata,
             embedding,
-            peer_id,
         )
     }
 
@@ -827,13 +621,12 @@ impl MemorySubstrate {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
         embedding: Option<&[f32]>,
-        peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
         let should_chunk =
             chunk_config.enabled && content.chars().count() > chunk_config.max_chunk_size;
 
         if !should_chunk {
-            return semantic.remember_with_embedding_and_peer(
+            return semantic.remember_with_embedding(
                 agent_id,
                 content,
                 source,
@@ -843,7 +636,6 @@ impl MemorySubstrate {
                 None,
                 None,
                 Default::default(),
-                peer_id,
             );
         }
 
@@ -887,7 +679,7 @@ impl MemorySubstrate {
             // computed for the full text and is meaningless for individual
             // chunks.  Let the embedding pipeline compute per-chunk embeddings
             // later.
-            let id = semantic.remember_with_embedding_and_peer(
+            let id = semantic.remember_with_embedding(
                 agent_id,
                 chunk,
                 source.clone(),
@@ -897,7 +689,6 @@ impl MemorySubstrate {
                 None,
                 None,
                 Default::default(),
-                peer_id,
             )?;
 
             if parent_id.is_none() {
@@ -946,7 +737,6 @@ impl MemorySubstrate {
     /// Async wrapper for `remember_with_embedding` — runs in a blocking thread.
     ///
     /// Applies chunking when enabled and the content exceeds `max_chunk_size`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn remember_with_embedding_async(
         &self,
         agent_id: AgentId,
@@ -955,14 +745,12 @@ impl MemorySubstrate {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
         embedding: Option<&[f32]>,
-        peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
         let store = self.semantic.clone();
         let content = content.to_string();
         let scope = scope.to_string();
         let embedding_owned = embedding.map(|e| e.to_vec());
         let chunk_config = self.chunk_config.clone();
-        let peer_id_owned = peer_id.map(String::from);
         tokio::task::spawn_blocking(move || {
             Self::store_with_chunking(
                 &store,
@@ -973,7 +761,6 @@ impl MemorySubstrate {
                 &scope,
                 metadata,
                 embedding_owned.as_deref(),
-                peer_id_owned.as_deref(),
             )
         })
         .await
@@ -992,7 +779,7 @@ impl MemorySubstrate {
         assigned_to: Option<&str>,
         created_by: Option<&str>,
     ) -> LibreFangResult<String> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         let title = title.to_string();
         let description = description.to_string();
         let assigned_to = assigned_to.unwrap_or("").to_string();
@@ -1001,13 +788,13 @@ impl MemorySubstrate {
         tokio::task::spawn_blocking(move || {
             let id = uuid::Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
             db.execute(
                 "INSERT INTO task_queue (id, agent_id, task_type, payload, status, priority, created_at, title, description, assigned_to, created_by)
                  VALUES (?1, ?2, ?3, ?4, 'pending', 0, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![id, &created_by, &title, b"", now, title, description, assigned_to, created_by],
             )
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             Ok(id)
         })
         .await
@@ -1025,12 +812,12 @@ impl MemorySubstrate {
         agent_id: &str,
         agent_name: Option<&str>,
     ) -> LibreFangResult<Option<serde_json::Value>> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         let agent_id = agent_id.to_string();
         let agent_name = agent_name.unwrap_or("").to_string();
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
             // Match tasks assigned to this agent by UUID *or* by name (tasks posted
             // via the API or bridge tools may store the name rather than the UUID),
             // plus any unassigned (empty assigned_to) pending tasks.
@@ -1041,7 +828,7 @@ impl MemorySubstrate {
                    AND (assigned_to = ?1 OR assigned_to = ?2 OR assigned_to = '')
                  ORDER BY priority DESC, created_at ASC
                  LIMIT 1"
-            ).map_err(LibreFangError::memory)?;
+            ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let result = stmt.query_row(rusqlite::params![agent_id, agent_name], |row| {
                 Ok((
@@ -1062,7 +849,7 @@ impl MemorySubstrate {
                     db.execute(
                         "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2, claimed_at = ?3 WHERE id = ?1",
                         rusqlite::params![id, agent_id, claimed_at],
-                    ).map_err(LibreFangError::memory)?;
+                    ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
                     Ok(Some(serde_json::json!({
                         "id": id,
@@ -1076,7 +863,7 @@ impl MemorySubstrate {
                     })))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(LibreFangError::memory(e)),
+                Err(e) => Err(LibreFangError::Memory(e.to_string())),
             }
         })
         .await
@@ -1085,7 +872,7 @@ impl MemorySubstrate {
 
     /// Mark a task as completed with a result string.
     pub async fn task_complete(&self, task_id: &str, result: &str) -> LibreFangResult<()> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         let task_id = task_id.to_string();
         let result = result.to_string();
 
@@ -1093,12 +880,12 @@ impl MemorySubstrate {
             let now_chrono = chrono::Utc::now();
             let now = now_chrono.to_rfc3339();
             let now_unix = now_chrono.timestamp();
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
             // `finished_at` is the unix-epoch column the retention sweep reads (#3466).
             let rows = db.execute(
                 "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, finished_at = ?4, claimed_at = NULL WHERE id = ?1",
                 rusqlite::params![task_id, result, now, now_unix],
-            ).map_err(LibreFangError::memory)?;
+            ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if rows == 0 {
                 return Err(LibreFangError::Internal(format!("Task not found: {task_id}")));
             }
@@ -1110,17 +897,19 @@ impl MemorySubstrate {
 
     /// Delete a task by ID. Returns true if a row was deleted.
     pub async fn task_delete(&self, task_id: &str) -> LibreFangResult<bool> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         let task_id = task_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let rows = db
                 .execute(
                     "DELETE FROM task_queue WHERE id = ?1",
                     rusqlite::params![task_id],
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             Ok(rows > 0)
         })
         .await
@@ -1131,11 +920,13 @@ impl MemorySubstrate {
     /// Only resets tasks with status 'completed' or 'failed' — in_progress
     /// tasks are excluded to prevent duplicate execution.
     pub async fn task_retry(&self, task_id: &str) -> LibreFangResult<bool> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         let task_id = task_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let rows = db
                 .execute(
                     "UPDATE task_queue \
@@ -1144,7 +935,7 @@ impl MemorySubstrate {
                      WHERE id = ?1 AND status IN ('completed', 'failed')",
                     rusqlite::params![task_id],
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             Ok(rows > 0)
         })
         .await
@@ -1153,11 +944,11 @@ impl MemorySubstrate {
 
     /// List tasks, optionally filtered by status.
     pub async fn task_list(&self, status: Option<&str>) -> LibreFangResult<Vec<serde_json::Value>> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         let status = status.map(|s| s.to_string());
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &status {
                 Some(s) => (
                     "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue WHERE status = ?1 ORDER BY created_at DESC",
@@ -1169,7 +960,7 @@ impl MemorySubstrate {
                 ),
             };
 
-            let mut stmt = db.prepare(sql).map_err(LibreFangError::memory)?;
+            let mut stmt = db.prepare(sql).map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
             let rows = stmt.query_map(params_refs.as_slice(), |row| {
                 Ok(serde_json::json!({
@@ -1184,11 +975,11 @@ impl MemorySubstrate {
                     "result": row.get::<_, Option<String>>(8).unwrap_or(None),
                     "claimed_at": row.get::<_, Option<String>>(9).unwrap_or(None),
                 }))
-            }).map_err(LibreFangError::memory)?;
+            }).map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let mut tasks = Vec::new();
             for row in rows {
-                tasks.push(row.map_err(LibreFangError::memory)?);
+                tasks.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
             }
             Ok(tasks)
         })
@@ -1210,10 +1001,12 @@ impl MemorySubstrate {
         ttl_secs: u64,
         max_retries: u32,
     ) -> LibreFangResult<Vec<String>> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
             let cutoff = chrono::Utc::now()
                 - chrono::Duration::from_std(std::time::Duration::from_secs(ttl_secs))
@@ -1227,13 +1020,13 @@ impl MemorySubstrate {
                        AND claimed_at IS NOT NULL \
                        AND claimed_at < ?1",
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let stuck: Vec<(String, u32)> = stmt
                 .query_map(rusqlite::params![cutoff_str], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
                 })
-                .map_err(LibreFangError::memory)?
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -1254,7 +1047,7 @@ impl MemorySubstrate {
                          WHERE id = ?1 AND status = 'in_progress'",
                         rusqlite::params![id, now_unix],
                     )
-                    .map_err(LibreFangError::memory)?;
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                 } else {
                     db.execute(
                         "UPDATE task_queue \
@@ -1263,7 +1056,7 @@ impl MemorySubstrate {
                          WHERE id = ?1 AND status = 'in_progress'",
                         rusqlite::params![id],
                     )
-                    .map_err(LibreFangError::memory)?;
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                 }
                 reset_ids.push(id.clone());
             }
@@ -1275,11 +1068,13 @@ impl MemorySubstrate {
 
     /// Get a single task by ID.
     pub async fn task_get(&self, task_id: &str) -> LibreFangResult<Option<serde_json::Value>> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         let task_id = task_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let mut stmt = db
                 .prepare(
                     "SELECT id, title, description, status, assigned_to, created_by, \
@@ -1287,7 +1082,7 @@ impl MemorySubstrate {
                      COALESCE(retry_count, 0) \
                      FROM task_queue WHERE id = ?1",
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let mut rows = stmt
                 .query_map(rusqlite::params![task_id], |row| {
                     Ok(serde_json::json!({
@@ -1304,10 +1099,10 @@ impl MemorySubstrate {
                         "retry_count":  row.get::<_, u32>(10).unwrap_or(0),
                     }))
                 })
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             match rows.next() {
                 Some(Ok(v)) => Ok(Some(v)),
-                Some(Err(e)) => Err(LibreFangError::memory(e)),
+                Some(Err(e)) => Err(LibreFangError::Memory(e.to_string())),
                 None => Ok(None),
             }
         })
@@ -1325,12 +1120,14 @@ impl MemorySubstrate {
         task_id: &str,
         new_status: &str,
     ) -> LibreFangResult<bool> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         let task_id = task_id.to_string();
         let new_status = new_status.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let now_unix = chrono::Utc::now().timestamp();
             let rows = match new_status.as_str() {
                 // Reset to pending: clear `finished_at` so a previous
@@ -1361,7 +1158,7 @@ impl MemorySubstrate {
                     )))
                 }
             }
-            .map_err(LibreFangError::memory)?;
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             Ok(rows > 0)
         })
         .await
@@ -1382,9 +1179,11 @@ impl MemorySubstrate {
         if older_than_days == 0 {
             return Ok(0);
         }
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            let db = conn.get().map_err(LibreFangError::memory)?;
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let cutoff = chrono::Utc::now().timestamp() - (older_than_days as i64) * 86_400;
             let rows = db
                 .execute(
@@ -1393,7 +1192,7 @@ impl MemorySubstrate {
                        AND finished_at IS NOT NULL AND finished_at < ?1",
                     rusqlite::params![cutoff],
                 )
-                .map_err(LibreFangError::memory)?;
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             Ok(rows)
         })
         .await
@@ -1403,7 +1202,7 @@ impl MemorySubstrate {
     // -----------------------------------------------------------------
     // Async wrappers for sync substrate methods invoked from tokio tasks.
     //
-    // Each wrapper here moves SQLite I/O onto
+    // Each wrapper here moves the std::Mutex<Connection> acquisition onto
     // tokio's blocking thread pool (#3378). Without it, slow INSERTs
     // (FTS5 tokenization, transactional cascades, large UPDATE plans) would
     // park whichever tokio worker thread was running the future, stalling
@@ -1434,9 +1233,11 @@ impl MemorySubstrate {
     /// strategy (e.g. adding a new per-agent table) only has to land in
     /// one place — the sync method and this wrapper both delegate.
     pub async fn remove_agent_async(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            let conn = conn.get().map_err(LibreFangError::memory)?;
+            let conn = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
             remove_agent_inner(&conn, agent_id)
         })
         .await
@@ -1528,9 +1329,11 @@ impl MemorySubstrate {
         if pruned_count == 0 {
             return Ok(());
         }
-        let conn = self.pool.clone();
+        let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || -> LibreFangResult<()> {
-            let conn = conn.get().map_err(LibreFangError::memory)?;
+            let conn = conn
+                .lock()
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             vacuum_inner(&conn, pruned_count);
             Ok(())
         })
@@ -1544,16 +1347,17 @@ impl MemorySubstrate {
 /// `*_agent` methods on the individual stores so a new agent-scoped table
 /// only has to be added in one place.
 ///
-/// The caller passes in an already-acquired `PooledConnection`; this
-/// function only owns the transaction lifecycle.
+/// Caller is responsible for taking the connection mutex; this function
+/// only owns the transaction lifecycle.
 fn remove_agent_inner(conn: &Connection, agent_id: AgentId) -> LibreFangResult<()> {
     let id = agent_id.0.to_string();
     let tx = conn
         .unchecked_transaction()
-        .map_err(LibreFangError::memory)?;
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
     crate::session::execute_session_agent_deletes(&tx, &id)?;
     crate::structured::execute_structured_agent_deletes(&tx, &id)?;
-    tx.commit().map_err(LibreFangError::memory)?;
+    tx.commit()
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
     Ok(())
 }
 
@@ -1562,7 +1366,7 @@ fn remove_agent_inner(conn: &Connection, agent_id: AgentId) -> LibreFangResult<(
 /// failed VACUUM is not fatal.
 ///
 /// Caller is responsible for the `pruned_count == 0` short-circuit and
-/// for passing an already-acquired `PooledConnection`.
+/// for taking the connection mutex.
 fn vacuum_inner(conn: &Connection, pruned_count: usize) {
     // Flush WAL frames to the main DB file first so VACUUM has less work.
     if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
@@ -1616,13 +1420,10 @@ impl Memory for MemorySubstrate {
         source: MemorySource,
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
-        peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
         // Delegate to remember_with_embedding (no embedding) which handles chunking.
-        self.remember_with_embedding_async(
-            agent_id, content, source, scope, metadata, None, peer_id,
-        )
-        .await
+        self.remember_with_embedding_async(agent_id, content, source, scope, metadata, None)
+            .await
     }
 
     async fn recall(
@@ -1715,7 +1516,6 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
-                None,
             )
             .await
             .unwrap();
@@ -1849,7 +1649,7 @@ mod tests {
         // Simulate the worker stalling: back-date `claimed_at` to 5 minutes ago
         // so a TTL of 60 s trips and a TTL of 3600 s does not.
         {
-            let conn = substrate.pool.get().unwrap();
+            let conn = substrate.conn.lock().unwrap();
             let five_min_ago = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
             conn.execute(
                 "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
@@ -1904,7 +1704,6 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
-                None,
             )
             .await
             .unwrap();
@@ -1934,7 +1733,6 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
-                None,
             )
             .await
             .unwrap();
@@ -1980,7 +1778,6 @@ mod tests {
                 "episodic",
                 HashMap::new(),
                 Some(&embedding),
-                None,
             )
             .await
             .unwrap();
@@ -2014,7 +1811,6 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
-                None,
             )
             .await
             .unwrap();
@@ -2039,7 +1835,7 @@ mod tests {
             .unwrap();
         substrate.task_complete(&task_id, "ok").await.unwrap();
 
-        let conn = substrate.pool.get().unwrap();
+        let conn = substrate.conn.lock().unwrap();
         let finished_at: Option<i64> = conn
             .query_row(
                 "SELECT finished_at FROM task_queue WHERE id = ?1",
@@ -2062,7 +1858,7 @@ mod tests {
 
         // Insert directly to control finished_at precisely.
         {
-            let conn = substrate.pool.get().unwrap();
+            let conn = substrate.conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO task_queue (id, agent_id, task_type, payload, status, created_at, completed_at, finished_at) \
                  VALUES ('old-done', 'a', 't', x'00', 'completed', ?1, ?1, ?2)",
@@ -2093,7 +1889,7 @@ mod tests {
         let pruned = substrate.task_prune_finished(7).await.unwrap();
         assert_eq!(pruned, 2, "the two 30-day-old terminal rows should go");
 
-        let conn = substrate.pool.get().unwrap();
+        let conn = substrate.conn.lock().unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM task_queue", [], |row| row.get(0))
             .unwrap();
@@ -2126,7 +1922,7 @@ mod tests {
             .unwrap();
         assert!(changed, "cancellation of a pending task must update");
 
-        let conn = substrate.pool.get().unwrap();
+        let conn = substrate.conn.lock().unwrap();
         let (status, finished_at): (String, Option<i64>) = conn
             .query_row(
                 "SELECT status, finished_at FROM task_queue WHERE id = ?1",
@@ -2157,7 +1953,7 @@ mod tests {
 
         // Force a `failed` row with a stale `finished_at` directly.
         {
-            let conn = substrate.pool.get().unwrap();
+            let conn = substrate.conn.lock().unwrap();
             conn.execute(
                 "UPDATE task_queue SET status = 'failed', finished_at = ?2 WHERE id = ?1",
                 rusqlite::params![&task_id, chrono::Utc::now().timestamp() - 86_400],
@@ -2171,7 +1967,7 @@ mod tests {
             .unwrap();
         assert!(changed);
 
-        let conn = substrate.pool.get().unwrap();
+        let conn = substrate.conn.lock().unwrap();
         let (status, finished_at): (String, Option<i64>) = conn
             .query_row(
                 "SELECT status, finished_at FROM task_queue WHERE id = ?1",
@@ -2204,7 +2000,6 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
-                None,
             )
             .await
             .unwrap();
@@ -2212,8 +2007,8 @@ mod tests {
         // Sanity: both rows exist.
         assert!(substrate.get_session(session.id).unwrap().is_some());
         let pre_count: i64 = substrate
-            .pool
-            .get()
+            .conn
+            .lock()
             .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM memories WHERE agent_id = ?1 AND deleted = 0",
@@ -2226,7 +2021,7 @@ mod tests {
         substrate.remove_agent(agent_id).unwrap();
 
         // Sessions, memories, and the agent row must all be gone.
-        let conn = substrate.pool.get().unwrap();
+        let conn = substrate.conn.lock().unwrap();
         let session_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1",
@@ -2281,7 +2076,7 @@ mod tests {
 
         // Also assert at the row level — search_sessions could in principle
         // filter by JOIN in the future; the underlying table must be empty.
-        let conn = substrate.pool.get().unwrap();
+        let conn = substrate.conn.lock().unwrap();
         let fts_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions_fts WHERE agent_id = ?1",
@@ -2292,85 +2087,8 @@ mod tests {
         assert_eq!(fts_count, 0, "sessions_fts must cascade-delete");
     }
 
-    /// #3378: the r2d2 pool + WAL journal mode allow multiple readers to
-    /// run concurrently without blocking each other. This test acquires 4
-    /// pool connections simultaneously, each holding the connection for a
-    /// fixed 50 ms window. If the pool serialised callers (old
-    /// Mutex<Connection> behaviour), the batch would take ≥ 200 ms;
-    /// with a pool size of 8 and WAL readers don't block each other, so
-    /// multiple tasks can hold pooled connections simultaneously.
-    #[tokio::test]
-    async fn pool_enables_concurrent_reads() {
-        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-        use std::sync::Arc as StdArc;
-        use std::time::Duration;
-
-        // File-backed DB so WAL journal_mode is active; in-memory pools
-        // are max_size=1 and cannot exercise multi-reader concurrency.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("concurrent_reads.db");
-        let substrate = StdArc::new(MemorySubstrate::open(&db_path, 0.1).unwrap());
-
-        // Seed one agent so reads hit real SQL rows.
-        let entry = AgentEntry {
-            id: AgentId::new(),
-            name: "reader-seed".to_string(),
-            session_id: SessionId::new(),
-            ..Default::default()
-        };
-        substrate.save_agent_async(&entry).await.unwrap();
-
-        // Ordering-based proof: track how many tasks hold a pooled
-        // connection simultaneously. If the pool serialises (old
-        // Mutex<Connection> behaviour), max_concurrent stays at 1.
-        // With a real pool and WAL readers, multiple tasks overlap and
-        // max_concurrent reaches >= 2.
-        let in_flight = StdArc::new(AtomicUsize::new(0));
-        let max_concurrent = StdArc::new(AtomicUsize::new(0));
-
-        let hold = Duration::from_millis(50);
-        let pool = substrate.pool();
-        let handles: Vec<_> = (0..4)
-            .map(|_| {
-                let p = pool.clone();
-                let in_flight = StdArc::clone(&in_flight);
-                let max_concurrent = StdArc::clone(&max_concurrent);
-                tokio::task::spawn_blocking(move || {
-                    let conn = p.get().expect("pool get");
-                    // Record entry into the concurrent hold window.
-                    let current = in_flight.fetch_add(1, SeqCst) + 1;
-                    // Update the observed maximum atomically.
-                    let mut prev = max_concurrent.load(SeqCst);
-                    while current > prev {
-                        match max_concurrent.compare_exchange_weak(prev, current, SeqCst, SeqCst) {
-                            Ok(_) => break,
-                            Err(actual) => prev = actual,
-                        }
-                    }
-                    // Real read inside the held connection.
-                    let _count: i64 = conn
-                        .query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))
-                        .unwrap_or(0);
-                    std::thread::sleep(hold);
-                    in_flight.fetch_sub(1, SeqCst);
-                })
-            })
-            .collect();
-        for h in handles {
-            h.await.unwrap();
-        }
-
-        let observed = max_concurrent.load(SeqCst);
-        assert!(
-            observed >= 2,
-            "expected >= 2 tasks to hold pooled connections concurrently, \
-             but max_concurrent = {}. Pool concurrency or WAL may be broken (#3378)",
-            observed,
-        );
-    }
-
     /// #3378: each `_async` substrate wrapper must offload its
-    /// connection pool acquisition to tokio's blocking
+    /// `std::sync::Mutex<Connection>` acquisition to tokio's blocking
     /// pool. This test holds the connection mutex from a non-tokio OS
     /// thread, then drives a wrapper from a `current_thread` runtime.
     /// If the wrapper took the lock on the runtime worker (the pre-fix
@@ -2422,18 +2140,16 @@ mod tests {
             let tick_at: Arc<StdMutex<Option<Instant>>> = Arc::new(StdMutex::new(None));
             let released_at: Arc<StdMutex<Option<Instant>>> = Arc::new(StdMutex::new(None));
 
-            // Saturate the connection pool from outside tokio. The
+            // Saturate the connection mutex from outside tokio. The
             // 100 ms hold is well above any plausible scheduler jitter
             // (Windows / coverage runners ~50 ms) so the in-hold tick
             // window is unambiguous.
-            let pool = substrate.pool.clone();
+            let conn = Arc::clone(&substrate.conn);
             let blocker_holds = Arc::new(std::sync::Barrier::new(2));
             let blocker_holds_inner = Arc::clone(&blocker_holds);
             let released_at_for_blocker = Arc::clone(&released_at);
             let blocker = std::thread::spawn(move || {
-                // Acquire the sole connection from the max_size=1 pool,
-                // blocking any concurrent pool.get() for the hold duration.
-                let g = pool.get().expect("pool get");
+                let g = conn.lock().expect("conn mutex");
                 blocker_holds_inner.wait();
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 drop(g);
@@ -2480,73 +2196,5 @@ mod tests {
                  driven by spawn_blocking"
             );
         });
-    }
-
-    /// Audit: sqlite-file-permissions. After `open_with_pool_size`
-    /// returns, `librefang.db` must be 0o600 — every other process
-    /// under the same UID can otherwise read raw user prompts, LLM
-    /// replies, audit entries, OAuth nonces, TOTP codes, and
-    /// paired-device api_key hashes on shared hosts. Skip on
-    /// non-Unix where the permission model is different.
-    #[cfg(unix)]
-    #[test]
-    fn open_with_pool_size_tightens_db_file_to_0o600() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let db_path = tmp.path().join("test.db");
-
-        let _substrate =
-            MemorySubstrate::open_with_pool_size(&db_path, 0.0, ChunkConfig::default(), 1)
-                .expect("substrate open");
-
-        let mode = std::fs::metadata(&db_path)
-            .expect("db exists after open")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "librefang.db must be owner-only after substrate open — got {mode:o}"
-        );
-    }
-
-    /// Even if the WAL / SHM siblings appear after the first write,
-    /// the helper handles their NotFound case at boot time without
-    /// erroring. This test forces the WAL into existence via a real
-    /// write, then re-runs `restrict_db_file_permissions` and
-    /// asserts both siblings end up 0o600.
-    #[cfg(unix)]
-    #[test]
-    fn restrict_db_file_permissions_covers_wal_and_shm_when_present() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let db_path = tmp.path().join("test.db");
-
-        let substrate =
-            MemorySubstrate::open_with_pool_size(&db_path, 0.0, ChunkConfig::default(), 1)
-                .expect("substrate open");
-
-        // Forcibly trigger a WAL flush by creating a session — that
-        // makes `-wal` / `-shm` appear so the helper has something to
-        // chmod on the second call.
-        let _session = substrate
-            .sessions
-            .create_session(librefang_types::agent::AgentId::new())
-            .unwrap();
-
-        // The post-write WAL files might have been created at 0o644
-        // (depends on SQLite's umask handling). Re-tighten.
-        restrict_db_file_permissions(&db_path);
-
-        for sibling in ["test.db-wal", "test.db-shm"] {
-            let path = tmp.path().join(sibling);
-            if let Ok(meta) = std::fs::metadata(&path) {
-                let mode = meta.permissions().mode() & 0o777;
-                assert_eq!(
-                    mode, 0o600,
-                    "{sibling} must be owner-only after restrict_db_file_permissions — got {mode:o}"
-                );
-            }
-        }
     }
 }

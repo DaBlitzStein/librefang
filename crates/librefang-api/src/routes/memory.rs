@@ -130,7 +130,6 @@ pub struct MemoryListQuery {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MemoryAddBody {
     pub messages: Vec<serde_json::Value>,
     #[serde(default)]
@@ -140,7 +139,6 @@ pub struct MemoryAddBody {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MemoryUpdateBody {
     pub content: String,
 }
@@ -379,7 +377,7 @@ fn auth_denied(
     };
     state.kernel.audit().record_with_context(
         "system",
-        librefang_kernel::audit::AuditAction::PermissionDenied,
+        librefang_runtime::audit::AuditAction::PermissionDenied,
         detail,
         "denied",
         user_id,
@@ -1413,13 +1411,15 @@ pub async fn memory_config_patch(
     let content = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+            return ApiErrorResponse::internal(format!("Failed to read config: {e}"))
+                .into_json_tuple();
         }
     };
     let mut table: toml::Value = match toml::from_str(&content) {
         Ok(t) => t,
         Err(e) => {
-            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+            return ApiErrorResponse::internal(format!("Failed to parse config: {e}"))
+                .into_json_tuple();
         }
     };
 
@@ -1479,7 +1479,8 @@ pub async fn memory_config_patch(
 
     let new_content = toml::to_string_pretty(&table).unwrap_or_default();
     if let Err(e) = std::fs::write(&config_path, &new_content) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
+            .into_json_tuple();
     }
 
     tracing::info!("Memory config updated via API");
@@ -1937,7 +1938,6 @@ mod tests {
     //! observe the audit chain.
     use super::*;
     use librefang_kernel::audit::AuditAction;
-    use librefang_kernel::MemorySubsystemApi;
     use librefang_memory::namespace_acl::{MemoryNamespaceGuard, NamespaceGate};
     use librefang_types::config::KernelConfig;
 
@@ -2072,26 +2072,21 @@ mod tests {
         };
 
         let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
-        let idempotency_store: Arc<
-            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
-        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
-            kernel.substrate_ref().pool(),
-        ));
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
-            bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(None)),
+            bridge_manager: tokio::sync::Mutex::new(None),
             channels_config: tokio::sync::RwLock::new(Default::default()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             clawhub_cache: dashmap::DashMap::new(),
             skillhub_cache: dashmap::DashMap::new(),
-            provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
             provider_test_cache: dashmap::DashMap::new(),
             webhook_store: crate::webhook_store::WebhookStore::load(
                 home_dir.join("data").join("webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            media_drivers: librefang_kernel::media::MediaDriverCache::new(),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -2101,7 +2096,6 @@ mod tests {
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
-            idempotency_store,
         });
         (state, tmp)
     }

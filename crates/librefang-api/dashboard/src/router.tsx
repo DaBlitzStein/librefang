@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
-import { Link, Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { App } from "./App";
 
 // Matches chunk load failures across browsers:
@@ -7,8 +7,6 @@ import { App } from "./App";
 // Firefox: "error loading dynamically imported module: ..."
 // Safari:  "Importing a module script failed"
 // Webpack: "Loading chunk ... failed"
-const CHUNK_RELOAD_KEY = "__chunk_reload";
-
 const CHUNK_ERROR_RE = /dynamically imported module|importing a module script|Loading chunk .* failed/i;
 
 // Matches the transient React 19 + Vite HMR failure mode where the dispatcher
@@ -28,9 +26,10 @@ function shouldAutoReload(err: unknown): boolean {
 // infinite reload loops.
 function tryAutoReload(err: unknown): boolean {
   if (!shouldAutoReload(err)) return false;
-  const last = Number(sessionStorage.getItem(CHUNK_RELOAD_KEY) || "0");
+  const key = "__chunk_reload";
+  const last = Number(sessionStorage.getItem(key) || "0");
   if (Date.now() - last <= 10_000) return false;
-  sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now()));
+  sessionStorage.setItem(key, String(Date.now()));
   window.location.reload();
   return true;
 }
@@ -67,7 +66,7 @@ const CommsPage = lazyWithReload(() => import("./pages/CommsPage").then(m => ({ 
 const GoalsPage = lazyWithReload(() => import("./pages/GoalsPage").then(m => ({ default: m.GoalsPage })));
 const HandsPage = lazyWithReload(() => import("./pages/HandsPage").then(m => ({ default: m.HandsPage })));
 const LogsPage = lazyWithReload(() => import("./pages/LogsPage").then(m => ({ default: m.LogsPage })));
-const MemoryPage = lazyWithReload(() => import("./pages/Memory").then(m => ({ default: m.MemoryPage })));
+const MemoryPage = lazyWithReload(() => import("./pages/MemoryPage").then(m => ({ default: m.MemoryPage })));
 const ProvidersPage = lazyWithReload(() => import("./pages/ProvidersPage").then(m => ({ default: m.ProvidersPage })));
 const RuntimePage = lazyWithReload(() => import("./pages/RuntimePage").then(m => ({ default: m.RuntimePage })));
 const SchedulerPage = lazyWithReload(() => import("./pages/SchedulerPage").then(m => ({ default: m.SchedulerPage })));
@@ -93,28 +92,13 @@ const UserPolicyPage = lazyWithReload(() => import("./pages/UserPolicyPage").the
 const ConnectWizardPage = lazyWithReload(() => import("./pages/ConnectWizardPage").then(m => ({ default: m.ConnectWizardPage })));
 const MobilePairingPage = lazyWithReload(() => import("./pages/MobilePairingPage").then(m => ({ default: m.MobilePairingPage })));
 
-function LazyRouteBoundary({ children }: { children: React.ReactNode }) {
-  return (
-    <Suspense
-      fallback={
-        <div className="flex h-32 items-center justify-center">
-          <div className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-sky-500" />
-        </div>
-      }
-    >
-      {children}
-    </Suspense>
-  );
+// Suspense wrapper — shows nothing briefly while chunk loads (page transition animation covers it)
+function L({ children }: { children: React.ReactNode }) {
+  return <Suspense fallback={null}>{children}</Suspense>;
 }
 
 const rootRoute = createRootRoute({
-  component: App,
-  // Explicit handler for notFound() bubbling to `__root__` (unmatched
-  // URLs, or notFound thrown in a loader/beforeLoad). Without this the
-  // router falls back to its generic `<p>Not Found</p>` and logs a dev
-  // warning; `defaultNotFoundComponent` below is the global fallback,
-  // this is the root-route-level handler the warning asks for.
-  notFoundComponent: NotFound,
+  component: App
 });
 
 const indexRoute = createRoute({
@@ -126,7 +110,7 @@ const indexRoute = createRoute({
 const overviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/overview",
-  component: () => <LazyRouteBoundary><OverviewPage /></LazyRouteBoundary>
+  component: () => <L><OverviewPage /></L>
 });
 
 const canvasRoute = createRoute({
@@ -136,178 +120,172 @@ const canvasRoute = createRoute({
     t: search.t as number | undefined,
     wf: search.wf as string | undefined,
   }),
-  component: () => <LazyRouteBoundary><CanvasPage /></LazyRouteBoundary>
+  component: () => <L><CanvasPage /></L>
 });
 
 const agentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents",
-  component: () => <LazyRouteBoundary><AgentsPage /></LazyRouteBoundary>
+  component: () => <L><AgentsPage /></L>
 });
 
 const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sessions",
-  component: () => <LazyRouteBoundary><SessionsPage /></LazyRouteBoundary>
+  component: () => <L><SessionsPage /></L>
 });
 
 const providersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/providers",
-  component: () => <LazyRouteBoundary><ProvidersPage /></LazyRouteBoundary>
+  component: () => <L><ProvidersPage /></L>
 });
 
 const channelsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/channels",
-  component: () => <LazyRouteBoundary><ChannelsPage /></LazyRouteBoundary>
+  component: () => <L><ChannelsPage /></L>
 });
 
 const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/chat",
-  validateSearch: (search: Record<string, unknown>): { agentId?: string; sessionId?: string; attach?: string; handName?: string } => {
-    const out: { agentId?: string; sessionId?: string; attach?: string; handName?: string } = {};
+  validateSearch: (search: Record<string, unknown>): { agentId?: string; sessionId?: string; attach?: string } => {
+    const out: { agentId?: string; sessionId?: string; attach?: string } = {};
     if (typeof search.agentId === "string") out.agentId = search.agentId;
     if (typeof search.sessionId === "string") out.sessionId = search.sessionId;
+    // Hidden flag: enables the multi-attach SSE viewer (see useSessionStream).
+    // Functionally testable once #3078 lands; before then the hook silently
+    // no-ops on the 404 the route returns.
     if (typeof search.attach === "string") out.attach = search.attach;
-    if (typeof search.handName === "string") out.handName = search.handName;
     return out;
   },
-  component: () => <LazyRouteBoundary><ChatPage /></LazyRouteBoundary>
+  component: () => <L><ChatPage /></L>
 });
 
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
-  component: () => <LazyRouteBoundary><SettingsPage /></LazyRouteBoundary>
+  component: () => <L><SettingsPage /></L>
 });
 
 const skillsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/skills",
-  component: () => <LazyRouteBoundary><SkillsPage /></LazyRouteBoundary>
+  component: () => <L><SkillsPage /></L>
 });
 
 const wizardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/wizard",
-  component: () => <LazyRouteBoundary><WizardPage /></LazyRouteBoundary>
+  component: () => <L><WizardPage /></L>
 });
 
 const workflowsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/workflows",
-  component: () => <LazyRouteBoundary><WorkflowsPage /></LazyRouteBoundary>
+  component: () => <L><WorkflowsPage /></L>
 });
 
 const schedulerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/scheduler",
-  component: () => <LazyRouteBoundary><SchedulerPage /></LazyRouteBoundary>
+  component: () => <L><SchedulerPage /></L>
 });
 
 const goalsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/goals",
-  component: () => <LazyRouteBoundary><GoalsPage /></LazyRouteBoundary>
+  component: () => <L><GoalsPage /></L>
 });
 
 const analyticsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/analytics",
-  component: () => <LazyRouteBoundary><AnalyticsPage /></LazyRouteBoundary>
+  component: () => <L><AnalyticsPage /></L>
 });
 
 const memoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/memory",
-  validateSearch: (search: Record<string, unknown>): { agent?: string; tab?: "records" | "kv" | "dreams" | "health" } => {
-    const out: { agent?: string; tab?: "records" | "kv" | "dreams" | "health" } = {};
-    if (typeof search.agent === "string") out.agent = search.agent;
-    if (search.tab === "records" || search.tab === "kv" || search.tab === "dreams" || search.tab === "health") {
-      out.tab = search.tab;
-    }
-    return out;
-  },
-  component: () => <LazyRouteBoundary><MemoryPage /></LazyRouteBoundary>
+  component: () => <L><MemoryPage /></L>
 });
 
 const commsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/comms",
-  component: () => <LazyRouteBoundary><CommsPage /></LazyRouteBoundary>
+  component: () => <L><CommsPage /></L>
 });
 
 const runtimeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/runtime",
-  component: () => <LazyRouteBoundary><RuntimePage /></LazyRouteBoundary>
+  component: () => <L><RuntimePage /></L>
 });
 
 const logsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/logs",
-  component: () => <LazyRouteBoundary><LogsPage /></LazyRouteBoundary>
+  component: () => <L><LogsPage /></L>
 });
 
 const approvalsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/approvals",
-  component: () => <LazyRouteBoundary><ApprovalsPage /></LazyRouteBoundary>
+  component: () => <L><ApprovalsPage /></L>
 });
 
 const handsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/hands",
-  component: () => <LazyRouteBoundary><HandsPage /></LazyRouteBoundary>
+  component: () => <L><HandsPage /></L>
 });
 
 const pluginsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/plugins",
-  component: () => <LazyRouteBoundary><PluginsPage /></LazyRouteBoundary>
+  component: () => <L><PluginsPage /></L>
 });
 
 const modelsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/models",
-  component: () => <LazyRouteBoundary><ModelsPage /></LazyRouteBoundary>
+  component: () => <L><ModelsPage /></L>
 });
 
 const mediaRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/media",
-  component: () => <LazyRouteBoundary><MediaPage /></LazyRouteBoundary>
+  component: () => <L><MediaPage /></L>
 });
 
 const networkRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/network",
-  component: () => <LazyRouteBoundary><NetworkPage /></LazyRouteBoundary>
+  component: () => <L><NetworkPage /></L>
 });
 
 const a2aRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/a2a",
-  component: () => <LazyRouteBoundary><A2APage /></LazyRouteBoundary>
+  component: () => <L><A2APage /></L>
 });
 
 const telemetryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/telemetry",
-  component: () => <LazyRouteBoundary><TelemetryPage /></LazyRouteBoundary>
+  component: () => <L><TelemetryPage /></L>
 });
 
 const terminalRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/terminal",
-  component: () => <LazyRouteBoundary><TerminalPage /></LazyRouteBoundary>
+  component: () => <L><TerminalPage /></L>
 });
 const mcpServersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/mcp-servers",
-  component: () => <LazyRouteBoundary><McpServersPage /></LazyRouteBoundary>
+  component: () => <L><McpServersPage /></L>
 });
 
 // RBAC M6 — users, identity wizard, permission simulator. Per-user budget
@@ -316,39 +294,39 @@ const mcpServersRoute = createRoute({
 const usersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users",
-  component: () => <LazyRouteBoundary><UsersPage /></LazyRouteBoundary>
+  component: () => <L><UsersPage /></L>
 });
 const usersSimulatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/simulator",
-  component: () => <LazyRouteBoundary><PermissionSimulatorPage /></LazyRouteBoundary>
+  component: () => <L><PermissionSimulatorPage /></L>
 });
 const userBudgetRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/$name/budget",
-  component: () => <LazyRouteBoundary><UserBudgetPage /></LazyRouteBoundary>
+  component: () => <L><UserBudgetPage /></L>
 });
 const userPolicyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/$name/policy",
-  component: () => <LazyRouteBoundary><UserPolicyPage /></LazyRouteBoundary>
+  component: () => <L><UserPolicyPage /></L>
 });
 const auditRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/audit",
-  component: () => <LazyRouteBoundary><AuditPage /></LazyRouteBoundary>
+  component: () => <L><AuditPage /></L>
 });
 
 const connectRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/connect",
-  component: () => <LazyRouteBoundary><ConnectWizardPage /></LazyRouteBoundary>
+  component: () => <L><ConnectWizardPage /></L>
 });
 
 const mobilePairingRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings/mobile-pairing",
-  component: () => <LazyRouteBoundary><MobilePairingPage /></LazyRouteBoundary>
+  component: () => <L><MobilePairingPage /></L>
 });
 
 const configIndexRoute = createRoute({
@@ -359,37 +337,37 @@ const configIndexRoute = createRoute({
 const configGeneralRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/general",
-  component: () => <LazyRouteBoundary><ConfigPage category="general" /></LazyRouteBoundary>
+  component: () => <L><ConfigPage category="general" /></L>
 });
 const configMemoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/memory",
-  component: () => <LazyRouteBoundary><ConfigPage category="memory" /></LazyRouteBoundary>
+  component: () => <L><ConfigPage category="memory" /></L>
 });
 const configToolsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/tools",
-  component: () => <LazyRouteBoundary><ConfigPage category="tools" /></LazyRouteBoundary>
+  component: () => <L><ConfigPage category="tools" /></L>
 });
 const configChannelsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/channels",
-  component: () => <LazyRouteBoundary><ConfigPage category="channels" /></LazyRouteBoundary>
+  component: () => <L><ConfigPage category="channels" /></L>
 });
 const configSecurityRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/security",
-  component: () => <LazyRouteBoundary><ConfigPage category="security" /></LazyRouteBoundary>
+  component: () => <L><ConfigPage category="security" /></L>
 });
 const configNetworkRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/network",
-  component: () => <LazyRouteBoundary><ConfigPage category="network" /></LazyRouteBoundary>
+  component: () => <L><ConfigPage category="network" /></L>
 });
 const configInfraRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/infra",
-  component: () => <LazyRouteBoundary><ConfigPage category="infra" /></LazyRouteBoundary>
+  component: () => <L><ConfigPage category="infra" /></L>
 });
 
 const routeTree = rootRoute.addChildren([
@@ -476,7 +454,7 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
           </button>
           <button
             onClick={() => {
-              sessionStorage.removeItem(CHUNK_RELOAD_KEY);
+              sessionStorage.removeItem("__chunk_reload");
               window.location.reload();
             }}
             className="rounded-xl bg-red-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-red-600 transition-colors"
@@ -503,28 +481,11 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
   );
 }
 
-function NotFound() {
-  return (
-    <div className="flex h-[60vh] items-center justify-center">
-      <div className="max-w-xl text-center space-y-4 px-4">
-        <p className="text-lg font-semibold">Page not found</p>
-        <Link
-          to="/overview"
-          className="inline-block rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
-        >
-          Go to Overview
-        </Link>
-      </div>
-    </div>
-  );
-}
-
 export const router = createRouter({
   routeTree,
   basepath: "/dashboard",
   defaultPreload: "intent",
   defaultErrorComponent: ChunkErrorBoundary,
-  defaultNotFoundComponent: NotFound,
 });
 
 declare module "@tanstack/react-router" {

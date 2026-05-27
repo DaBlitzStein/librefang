@@ -1,11 +1,22 @@
 import { formatRelativeTime } from "../lib/datetime";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import {
   type AgentDetail,
   type AgentItem,
+  type CronJobItem,
+  type PromptVersion,
+  type PromptExperiment,
+  type ExperimentVariantMetrics,
   type ToolDefinition,
+  getAgentTemplateToml,
+  resetAgentSession,
+  getAgentTools,
+  listTools,
+  updateAgentTools,
 } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
 import { isProviderAvailable } from "../lib/status";
@@ -22,27 +33,21 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
-import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/overview";
 import { useSessionDetails } from "../lib/queries/sessions";
 import { useAgentKvMemory } from "../lib/queries/memory";
-// Schedule tab's cron + trigger queries live inside <AgentSchedulePanel/>
-// (issue #4924). React-Query dedupes identical queryKey subscriptions so
-// the panel and the SchedulerPage (when both mounted) share the same cache.
+import { useCronJobs } from "../lib/queries/runtime";
+import { useAgentTriggers } from "../lib/queries/schedules";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
-import { useSkills } from "../lib/queries/skills";
-import { useMcpServers } from "../lib/queries/mcp";
 import { AgentManifestForm } from "../components/AgentManifestForm";
-import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
-import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
   emptyManifestExtras,
   emptyManifestForm,
@@ -59,21 +64,26 @@ import {
   useAgentSessions,
   useAgentStats,
   useAgentTemplates,
-  useAgentTools,
-  useTools,
+  useExperimentMetrics,
+  useExperiments,
+  usePromptVersions,
 } from "../lib/queries/agents";
 import {
-  useAgentTemplateToml,
+  useActivatePromptVersion,
   useCloneAgent,
+  useCompleteExperiment,
+  useCreateExperiment,
+  useCreatePromptVersion,
   useDeleteAgent,
+  useDeletePromptVersion,
   usePatchAgent,
   usePatchAgentConfig,
   usePatchHandAgentRuntimeConfig,
-  useResetAgentSession,
+  usePauseExperiment,
   useResumeAgent,
   useSpawnAgent,
+  useStartExperiment,
   useSuspendAgent,
-  useUpdateAgentTools,
 } from "../lib/mutations/agents";
 
 /**
@@ -106,19 +116,16 @@ type AgentView = AgentDetail & {
   last_active?: string;
   triggers?: AgentTriggerSummary[];
   cron_jobs?: AgentCronSummary[];
-  capabilities?: Omit<NonNullable<AgentDetail["capabilities"]>, "tools" | "skills"> & {
+  // The backend ships capabilities.tools / .skills as string arrays on the
+  // wire, but the canonical `AgentDetail` interface narrows them to
+  // booleans. Override here so consumers of this page can `.length` them
+  // without a cast — the canonical type is fixed in the API layer in a
+  // follow-up PR.
+  capabilities?: AgentDetail["capabilities"] & {
     skills?: string[];
     tools?: string[];
   };
 };
-
-function safeStringify(v: unknown): string {
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
-}
 
 /** Two-column row used inside the detail modal's value cards. */
 function DetailRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
@@ -175,6 +182,7 @@ export function AgentsPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
+  const [, setDetailLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [createMode, setCreateMode] = useState<"form" | "template" | "toml">("form");
   const [templateName, setTemplateName] = useState("");
@@ -209,6 +217,7 @@ export function AgentsPage() {
   const [toolAllowlistDraft, setToolAllowlistDraft] = useState<string[]>([]);
   const [toolBlocklistDraft, setToolBlocklistDraft] = useState<string[]>([]);
   const [toolsDisabledState, setToolsDisabledState] = useState(false);
+  const [toolsEditorLoading, setToolsEditorLoading] = useState(false);
   const [toolsEditorSaving, setToolsEditorSaving] = useState(false);
   const [availableToolNames, setAvailableToolNames] = useState<string[]>([]);
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
@@ -250,9 +259,6 @@ export function AgentsPage() {
   const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
   const patchAgentMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
-  const resetSessionMutation = useResetAgentSession();
-  const updateToolsMutation = useUpdateAgentTools();
-  const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
 
   const rawDeleteMutation = useDeleteAgent();
@@ -260,12 +266,13 @@ export function AgentsPage() {
     mutate: (agentId: string) =>
       rawDeleteMutation.mutate(agentId, {
         onSuccess: () => {
-          if (detailAgent?.id === agentId) {
-            setDetailAgent(null);
-            setDetailDrawerOpen(false);
-          } else {
-            setDetailAgent(prev => prev);
-          }
+          setDetailAgent(prev => {
+            if (prev?.id === agentId) {
+              setDetailDrawerOpen(false);
+              return null;
+            }
+            return prev;
+          });
           addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
         },
         onError: (e: Error) =>
@@ -369,6 +376,7 @@ export function AgentsPage() {
   function closeToolsEditor() {
     setShowToolsEditor(false);
     setToolsEditorAgentId(null);
+    setToolsEditorLoading(false);
     setToolsEditorSaving(false);
     setAvailableToolNames([]);
     setCapabilitiesToolsDraft([]);
@@ -377,44 +385,45 @@ export function AgentsPage() {
     setToolsDisabledState(false);
   }
 
-  // Tool catalog. Used by the per-agent tools editor (existing) and
-  // also by the skill/tool finder in the create-agent form dialog
-  // (#5049), so the enable gate covers both call sites.
-  const toolsListQuery = useTools({
-    enabled:
-      (showToolsEditor && !!toolsEditorAgentId) ||
-      (showCreate && createMode === "form"),
-  });
-  const agentToolsQuery = useAgentTools(toolsEditorAgentId ?? "", { enabled: showToolsEditor && !!toolsEditorAgentId });
-  const toolsEditorLoading = showToolsEditor && !!toolsEditorAgentId && (toolsListQuery.isLoading || agentToolsQuery.isLoading);
-  const toolsEditorInitRef = useRef(false);
-
-  useEffect(() => {
-    if (!showToolsEditor || !toolsEditorAgentId) {
-      toolsEditorInitRef.current = false;
-      return;
-    }
-    const allTools = toolsListQuery.data;
-    const agentTools = agentToolsQuery.data;
-    if (!allTools || !agentTools) return;
-    if (toolsEditorInitRef.current) return;
-    toolsEditorInitRef.current = true;
-    const names = Array.isArray(allTools)
-      ? allTools.map((tool: ToolDefinition) => tool.name).filter(Boolean)
-      : [];
-    setAvailableToolNames(names);
-    setCapabilitiesToolsDraft(Array.isArray(agentTools.capabilities_tools) ? agentTools.capabilities_tools : []);
-    setToolAllowlistDraft(Array.isArray(agentTools.tool_allowlist) ? agentTools.tool_allowlist : []);
-    setToolBlocklistDraft(Array.isArray(agentTools.tool_blocklist) ? agentTools.tool_blocklist : []);
-    setToolsDisabledState(Boolean(agentTools.disabled));
-  }, [showToolsEditor, toolsEditorAgentId, toolsListQuery.data, agentToolsQuery.data]);
-
   useEffect(() => {
     if (!showToolsEditor || !toolsEditorAgentId) return;
-    const err = toolsListQuery.error || agentToolsQuery.error;
-    if (!err) return;
-    addToast(toastErr(err, t("agents.tools_load_failed", { defaultValue: "Failed to load tools" })), "error");
-  }, [showToolsEditor, toolsEditorAgentId, toolsListQuery.error, agentToolsQuery.error, addToast, t]);
+
+    let cancelled = false;
+
+    async function loadToolsEditorState() {
+      setToolsEditorLoading(true);
+      try {
+        const agentId = toolsEditorAgentId;
+        if (!agentId) return;
+        const [allTools, agentTools] = await Promise.all([
+          listTools(),
+          getAgentTools(agentId),
+        ]);
+        if (cancelled) return;
+        const names = Array.isArray(allTools)
+          ? allTools.map((tool: ToolDefinition) => tool.name).filter(Boolean)
+          : [];
+        setAvailableToolNames(names);
+        setCapabilitiesToolsDraft(Array.isArray(agentTools?.capabilities_tools) ? agentTools.capabilities_tools : []);
+        setToolAllowlistDraft(Array.isArray(agentTools?.tool_allowlist) ? agentTools.tool_allowlist : []);
+        setToolBlocklistDraft(Array.isArray(agentTools?.tool_blocklist) ? agentTools.tool_blocklist : []);
+        setToolsDisabledState(Boolean(agentTools?.disabled));
+      } catch (err) {
+        if (cancelled) return;
+        addToast(toastErr(err, t("agents.tools_load_failed", { defaultValue: "Failed to load tools" })), "error");
+      } finally {
+        if (!cancelled) {
+          setToolsEditorLoading(false);
+        }
+      }
+    }
+
+    void loadToolsEditorState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showToolsEditor, toolsEditorAgentId, addToast, t]);
 
   function saveModelEdit() {
     if (!detailAgent) return;
@@ -483,14 +492,15 @@ export function AgentsPage() {
   // memory, which is empty unless [proactive_memory] is enabled — so the
   // tab read empty even when the agent had KV pairs.
   const agentKvMemoryQuery = useAgentKvMemory(detailAgent?.id ?? "");
+  const cronJobsQuery = useCronJobs(detailAgent?.id);
   // Per-agent KPI rollup (#4246) — replaces a global /api/sessions scan
   // that was capped by pagination and missed agents whose sessions
   // weren't in the latest N rows.
   const agentStatsQuery = useAgentStats(detailAgent?.id ?? "");
-  // Cron jobs + per-agent triggers are now consumed inside
-  // <AgentSchedulePanel/> (issue #4924). React-Query dedupes identical
-  // queryKey subscriptions across components, so dropping the page-level
-  // hooks does not double-fetch.
+  // Per-agent triggers — GET /api/triggers?agent_id=… so the Schedule
+  // tab's event-trigger cards don't depend on agent detail embedding
+  // them (which it currently doesn't).
+  const agentTriggersQuery = useAgentTriggers(detailAgent?.id ?? "");
   // Per-agent recent turn events — backs the Logs tab. usage_events is
   // turn-level (model dispatch, latency, tokens, cost) — exactly what
   // the design's stderr-style log feed wants. The previous source
@@ -526,25 +536,6 @@ export function AgentsPage() {
 
   const providersQuery = useProviders();
 
-  // Global skill registry — used to cross-reference descriptions for the
-  // names listed in the agent's `skills` allowlist (issue #4925) and to
-  // seed the skill finder in the create dialog (issue #5049). The hook
-  // is gated on either an open detail panel or an open form-mode create
-  // dialog so the list isn't fetched at page load when neither is
-  // active. `staleTime` from `useSkills` defaults to 30s, matching
-  // SkillsPage, so opening multiple agents in quick succession reuses
-  // the cache.
-  const skillsQuery = useSkills({
-    enabled: !!detailAgent || (showCreate && createMode === "form"),
-  });
-  const skillDescriptionByName = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const s of skillsQuery.data ?? []) {
-      if (s.description) map.set(s.name, s.description);
-    }
-    return map;
-  }, [skillsQuery.data]);
-
   const configuredProviders = useMemo(
     () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
     [providersQuery.data],
@@ -562,56 +553,6 @@ export function AgentsPage() {
         id: m.id,
       })),
     [formModelsQuery.data?.models],
-  );
-
-  // Catalogs for the create-dialog skill/tool finders (#5049). Stay
-  // `undefined` until the underlying queries resolve so AgentManifestForm
-  // falls back to its plain tag input instead of rendering an empty
-  // combobox that misleads users into thinking "no skills are
-  // available". An empty array, by contrast, IS a legitimate state
-  // (registry returned zero rows) and is rendered as such.
-  const skillCatalogForForm = useMemo<
-    { name: string; description?: string }[] | undefined
-  >(
-    () =>
-      skillsQuery.data
-        ? skillsQuery.data.map((s) => ({ name: s.name, description: s.description }))
-        : undefined,
-    [skillsQuery.data],
-  );
-  const toolCatalogForForm = useMemo<
-    { name: string; description?: string }[] | undefined
-  >(
-    () =>
-      toolsListQuery.data
-        ? toolsListQuery.data.map((tool: ToolDefinition) => ({
-            name: tool.name,
-            description: tool.description,
-          }))
-        : undefined,
-    [toolsListQuery.data],
-  );
-  // Configured MCP servers catalog for the create-dialog finder (#5246).
-  // The MCP servers field previously rendered as a free-text TagInput,
-  // forcing users to remember server names exactly. Gate-fetch the
-  // catalog only while the form-mode create dialog is open so we don't
-  // hold an open `/api/mcp/servers` poll when the page first loads.
-  // `refetchInterval: false` overrides the 30s default poll baked into
-  // `useMcpServers` — the catalog only needs to be fresh on dialog open,
-  // and reopening the dialog triggers a fresh fetch via the `enabled`
-  // toggle anyway.
-  const mcpServersQuery = useMcpServers({
-    enabled: showCreate && createMode === "form",
-    refetchInterval: false,
-  });
-  const mcpCatalogForForm = useMemo<
-    { name: string; description?: string }[] | undefined
-  >(
-    () =>
-      mcpServersQuery.data
-        ? mcpServersQuery.data.configured.map((s) => ({ name: s.name }))
-        : undefined,
-    [mcpServersQuery.data],
   );
   const serializedFormToml = useMemo(
     () => serializeManifestForm(formState, formExtras),
@@ -726,32 +667,16 @@ export function AgentsPage() {
     [toolAllowlistDraft, toolBlocklistDraft],
   );
 
-  const drawerDetailState = detailAgent ? ((detailAgent as AgentView).state || "").toLowerCase() : "";
-  const isDetailDrawerSuspended = drawerDetailState === "suspended";
-  const isDetailDrawerCrashed = drawerDetailState === "crashed";
-  const drawerStatusColor = isDetailDrawerSuspended ? "bg-warning" : isDetailDrawerCrashed ? "bg-error" : "bg-success";
-  const lockRename = !!detailAgent?.is_hand;
-  const activeConfigMutation = detailAgent?.is_hand
-    ? patchHandAgentRuntimeConfigMutation
-    : patchAgentConfigMutation;
-  const saveModelDisabled =
-    activeConfigMutation.isPending
-    || !modelDraft.provider.trim()
-    || !modelDraft.model.trim()
-    || isNaN(parseInt(modelDraft.max_tokens, 10))
-    || parseInt(modelDraft.max_tokens, 10) <= 0
-    || isNaN(parseFloat(modelDraft.temperature))
-    || parseFloat(modelDraft.temperature) < 0
-    || parseFloat(modelDraft.temperature) > 2;
-
   const selectAgent = async (agent: AgentItem) => {
     setAgentTab("conversation");
+    setDetailLoading(true);
     try {
       const d = await qc.fetchQuery(agentQueries.detail(agent.id));
       setDetailAgent(mergeHandFlag(d, agent.is_hand));
     } catch {
       setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail);
     }
+    setDetailLoading(false);
   };
 
   // Auto-select the first agent on desktop so the detail panel isn't blank
@@ -760,8 +685,7 @@ export function AgentsPage() {
   useEffect(() => {
     if (detailAgent) return;
     if (filteredAgents.length === 0) return;
-    // 1000px matches the `--breakpoint-lg` override in index.css (#4873).
-    if (typeof window.matchMedia === "function" && !window.matchMedia("(min-width: 1000px)").matches) return;
+    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1024px)").matches) return;
     void selectAgent(filteredAgents[0]);
     // selectAgent is recreated each render; depending on filteredAgents+detailAgent is sufficient.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -832,87 +756,6 @@ export function AgentsPage() {
       { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
-    ];
-
-    const live = agentStatsQuery.data;
-    const sessions24h = live?.sessions_24h ?? 0;
-    const cost24h = live?.cost_24h ?? 0;
-    const p95Ms = live?.p95_latency_ms ?? 0;
-    const samples = live?.samples ?? 0;
-    const activeNow = live?.active_now ?? 0;
-    const prev = live?.prev;
-    // Sort alphabetically (#4940) so the row preview shows the same
-    // first-3 every time — matches the Skills tab ordering.
-    const skillNames: string[] = (
-      Array.isArray((agent as AgentView).skills)
-        ? ((agent as AgentView).skills as string[])
-        : Array.isArray((agent as AgentView).capabilities?.skills)
-          ? (((agent as AgentView).capabilities!.skills) as string[])
-          : []
-    )
-      .slice()
-      .sort();
-    const toolsMeta = skillNames.length > 0
-      ? skillNames.slice(0, 3).join(" · ")
-      : toolsCount > 0
-        ? `${toolsCount} configured`
-        : "—";
-
-    const pctDelta = (cur: number, p: number): string => {
-      if (p === 0) return cur > 0 ? "new" : "—";
-      const d = ((cur - p) / p) * 100;
-      const sign = d >= 0 ? "+" : "−";
-      return `${sign}${Math.abs(d).toFixed(0)}%`;
-    };
-    const usdDelta = (cur: number, p: number): string => {
-      const d = cur - p;
-      if (Math.abs(d) < 0.01) return cur === 0 && p === 0 ? "—" : "≈$0.00";
-      const sign = d >= 0 ? "+" : "−";
-      return `${sign}$${Math.abs(d).toFixed(2)}`;
-    };
-    const msDelta = (cur: number, p: number): string => {
-      if (cur === 0 && p === 0) return "—";
-      if (p === 0) return "new";
-      const d = cur - p;
-      const sign = d >= 0 ? "+" : "−";
-      return Math.abs(d) >= 1000
-        ? `${sign}${(Math.abs(d) / 1000).toFixed(1)}s`
-        : `${sign}${Math.abs(Math.round(d))}ms`;
-    };
-
-    const kpiTiles = [
-      {
-        l: t("agents.kpi.sessions", { defaultValue: "Sessions · 24h" }),
-        v: String(sessions24h),
-        m: prev
-          ? activeNow > 0
-            ? `${activeNow} live · ${pctDelta(sessions24h, prev.sessions_24h)}`
-            : pctDelta(sessions24h, prev.sessions_24h)
-          : activeNow > 0 ? `${activeNow} live` : "—",
-      },
-      {
-        l: t("agents.kpi.cost", { defaultValue: "Cost · 24h" }),
-        v: `$${cost24h.toFixed(2)}`,
-        m: prev ? usdDelta(cost24h, prev.cost_24h) : "—",
-      },
-      {
-        l: t("agents.kpi.p95", { defaultValue: "P95 latency" }),
-        v: p95Ms > 0
-          ? p95Ms >= 1000
-            ? `${(p95Ms / 1000).toFixed(2)}s`
-            : `${Math.round(p95Ms)}ms`
-          : "—",
-        m: prev && (samples > 0 || prev.p95_latency_ms > 0)
-          ? msDelta(p95Ms, prev.p95_latency_ms)
-          : samples > 0
-            ? t("agents.kpi.samples", { count: samples, defaultValue: "{{count}} samples" })
-            : "—",
-      },
-      {
-        l: t("agents.kpi.tools", { defaultValue: "Tools" }),
-        v: toolsCount != null ? String(toolsCount) : "—",
-        m: toolsMeta,
-      },
     ];
 
     return (
@@ -1011,8 +854,89 @@ export function AgentsPage() {
           {/* KPI tiles — Sessions · Cost · P95 · Tools (matches design canvas).
               Backed by GET /api/agents/{id}/stats so values are accurate even
               when the agent hasn't appeared in the global session list page. */}
+          {(() => {
+            const live = agentStatsQuery.data;
+            const sessions24h = live?.sessions_24h ?? 0;
+            const cost24h = live?.cost_24h ?? 0;
+            const p95Ms = live?.p95_latency_ms ?? 0;
+            const samples = live?.samples ?? 0;
+            const activeNow = live?.active_now ?? 0;
+            const prev = live?.prev;
+            const skillNames: string[] = Array.isArray((agent as AgentView).skills)
+              ? ((agent as AgentView).skills as string[])
+              : Array.isArray((agent as AgentView).capabilities?.skills)
+                ? (((agent as AgentView).capabilities!.skills) as string[])
+                : [];
+            const toolsMeta = skillNames.length > 0
+              ? skillNames.slice(0, 3).join(" · ")
+              : toolsCount > 0
+                ? `${toolsCount} configured`
+                : "—";
+
+            // Trend deltas vs the prior 24h. Percent change for counts,
+            // signed dollar for cost, signed milliseconds for latency.
+            // When the prior period is empty we surface "new" instead of
+            // a divide-by-zero-induced "+∞%".
+            const pctDelta = (cur: number, p: number): string => {
+              if (p === 0) return cur > 0 ? "new" : "—";
+              const d = ((cur - p) / p) * 100;
+              const sign = d >= 0 ? "+" : "−";
+              return `${sign}${Math.abs(d).toFixed(0)}%`;
+            };
+            const usdDelta = (cur: number, p: number): string => {
+              const d = cur - p;
+              // Treat sub-cent moves as no-change rather than rendering
+              // "−$0.00" / "+$0.00", which looks like a real signal.
+              if (Math.abs(d) < 0.01) return cur === 0 && p === 0 ? "—" : "≈$0.00";
+              const sign = d >= 0 ? "+" : "−";
+              return `${sign}$${Math.abs(d).toFixed(2)}`;
+            };
+            const msDelta = (cur: number, p: number): string => {
+              if (cur === 0 && p === 0) return "—";
+              if (p === 0) return "new";
+              const d = cur - p;
+              const sign = d >= 0 ? "+" : "−";
+              return Math.abs(d) >= 1000
+                ? `${sign}${(Math.abs(d) / 1000).toFixed(1)}s`
+                : `${sign}${Math.abs(Math.round(d))}ms`;
+            };
+
+            return (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
-                {kpiTiles.map((s) => (
+                {[
+                  {
+                    l: t("agents.kpi.sessions", { defaultValue: "Sessions · 24h" }),
+                    v: String(sessions24h),
+                    m: prev
+                      ? activeNow > 0
+                        ? `${activeNow} live · ${pctDelta(sessions24h, prev.sessions_24h)}`
+                        : pctDelta(sessions24h, prev.sessions_24h)
+                      : activeNow > 0 ? `${activeNow} live` : "—",
+                  },
+                  {
+                    l: t("agents.kpi.cost", { defaultValue: "Cost · 24h" }),
+                    v: `$${cost24h.toFixed(2)}`,
+                    m: prev ? usdDelta(cost24h, prev.cost_24h) : "—",
+                  },
+                  {
+                    l: t("agents.kpi.p95", { defaultValue: "P95 latency" }),
+                    v: p95Ms > 0
+                      ? p95Ms >= 1000
+                        ? `${(p95Ms / 1000).toFixed(2)}s`
+                        : `${Math.round(p95Ms)}ms`
+                      : "—",
+                    m: prev && (samples > 0 || prev.p95_latency_ms > 0)
+                      ? msDelta(p95Ms, prev.p95_latency_ms)
+                      : samples > 0
+                        ? t("agents.kpi.samples", { count: samples, defaultValue: "{{count}} samples" })
+                        : "—",
+                  },
+                  {
+                    l: t("agents.kpi.tools", { defaultValue: "Tools" }),
+                    v: String(toolsCount || "—"),
+                    m: toolsMeta,
+                  },
+                ].map((s) => (
                   <div key={s.l} className="px-3 py-2 rounded-md bg-main/60 border border-border-subtle">
                     <div className="text-[10px] uppercase font-semibold text-text-dim tracking-[0.08em]">{s.l}</div>
                     <div className="font-mono font-semibold text-[17px] mt-1 truncate tabular-nums text-text-main">{s.v}</div>
@@ -1020,6 +944,8 @@ export function AgentsPage() {
                   </div>
                 ))}
               </div>
+            );
+          })()}
 
           {/* Tabs */}
           <div className="flex gap-1 mt-4 -mb-3 border-b border-border-subtle overflow-x-auto">
@@ -1183,7 +1109,13 @@ export function AgentsPage() {
         ? value
         : value == null
           ? "—"
-          : safeStringify(value);
+          : (() => {
+              try {
+                return JSON.stringify(value);
+              } catch {
+                return String(value);
+              }
+            })();
       return {
         key: r.key,
         value: valueStr,
@@ -1201,7 +1133,7 @@ export function AgentsPage() {
             variant="ghost"
             size="sm"
             leftIcon={<Database className="h-3.5 w-3.5" />}
-            onClick={() => navigate({ to: "/memory", search: { agent: agent.id } })}
+            onClick={() => navigate({ to: "/memory", search: { agentId: agent.id } as never })}
           >
             {t("agents.detail.open_memory", { defaultValue: "Open" })}
           </Button>
@@ -1239,19 +1171,11 @@ export function AgentsPage() {
   // ---------- Skills tab — 2-col card grid per design canvas
   const renderSkillsTab = (agent: AgentDetail) => {
     const view = agent as AgentView;
-    // Sort alphabetically (#4940) — the backend returns the manifest's
-    // allowlist order, which is meaningless to humans scanning the tab.
-    // Skill names are slug-shape ASCII IDs, so plain codepoint sort is
-    // stable across locales (localeCompare would flip in tr-TR etc).
-    const skills: string[] = (
-      Array.isArray(view.skills)
-        ? view.skills
-        : Array.isArray(view.capabilities?.skills)
-          ? view.capabilities!.skills!
-          : []
-    )
-      .slice()
-      .sort();
+    const skills: string[] = Array.isArray(view.skills)
+      ? view.skills
+      : Array.isArray(view.capabilities?.skills)
+        ? view.capabilities!.skills!
+        : [];
     // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
     // every skill in the registry, the default), or 'allowlist' (manifest
     // pinned a list). Each needs a different empty-state copy; the
@@ -1316,12 +1240,19 @@ export function AgentsPage() {
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             {skills.map((s) => (
-              <AgentSkillItem
+              <div
                 key={s}
-                name={s}
-                description={skillDescriptionByName.get(s)}
                 onClick={() => navigate({ to: "/skills" })}
-              />
+                className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                    {t("agents.detail.skill_meta", { defaultValue: "installed" })}
+                  </div>
+                </div>
+                <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+              </div>
             ))}
           </div>
         )}
@@ -1329,17 +1260,152 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Schedule tab — editable triggers / cron / continuous-mode panel
-  // (issue #4924). The read-only summary that lived here previously is now
-  // owned by AgentSchedulePanel, which talks to the existing CRUD endpoints
-  // (POST/PATCH/DELETE /api/triggers and /api/cron/jobs, PATCH /api/agents/{id}
-  // for `schedule`). The synthetic "Last 14 runs" bar chart was a placeholder
-  // (no real per-fire telemetry endpoint yet) and was dropped in favour of
-  // real editing affordances — restore it once a per-agent run-history feed
-  // exists.
-  const renderScheduleTab = (agent: AgentDetail) => (
-    <AgentSchedulePanel agent={agent} />
-  );
+  // ---------- Schedule tab — trigger card + 14-run bar chart per design canvas
+  const renderScheduleTab = (agent: AgentDetail) => {
+    const cron = cronJobsQuery.data ?? [];
+    // GET /api/agents/{id} doesn't embed triggers, so we hit the
+    // dedicated /api/triggers?agent_id=... endpoint here. Falling back
+    // to the (legacy) embedded-on-detail field if a future backend
+    // version ships it.
+    const liveTriggers = (agentTriggersQuery.data ?? []) as Array<{
+      id?: string;
+      pattern?: unknown;
+      prompt_template?: string;
+      enabled?: boolean;
+    }>;
+    const triggers: AgentTriggerSummary[] = liveTriggers.map((tr) => {
+      // Render the trigger pattern compactly. The full TriggerPattern shape
+      // is rich (event filters / regex / etc.); the detail panel only
+      // needs a one-liner — full pattern lives on the dedicated page.
+      const patternStr = (() => {
+        if (!tr.pattern) return undefined;
+        if (typeof tr.pattern === "string") return tr.pattern;
+        try {
+          return JSON.stringify(tr.pattern);
+        } catch {
+          return undefined;
+        }
+      })();
+      return {
+        event_pattern: patternStr,
+        name: tr.id,
+        description: tr.prompt_template,
+      };
+    });
+    // Synthetic "last 14 runs" — backend doesn't expose per-fire history
+    // through a single agent-scoped endpoint yet, so we visualise an
+    // agent-id-seeded waveform as a placeholder. Wire up real run
+    // telemetry in the next pass.
+    const seed = agent.id.charCodeAt(0) || 1;
+    const bars = Array.from({ length: 14 }, (_, i) =>
+      Math.round(35 + Math.sin((i + seed) / 2.1) * 12 + i * 1.5),
+    );
+    const hasSchedule = cron.length > 0 || triggers.length > 0;
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+          {t("agents.detail.trigger", { defaultValue: "Trigger" })}
+        </div>
+        {hasSchedule ? (
+          <>
+            {cron.map((c: CronJobItem & AgentCronSummary, i: number) => (
+              <div
+                key={`c-${i}`}
+                className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3"
+              >
+                <div className="w-8 h-8 rounded-md bg-accent/10 text-accent grid place-items-center shrink-0">
+                  <Clock className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-mono text-[13px] truncate text-text-main">
+                    {c.schedule || c.cron || c.expression || "cron"}
+                  </div>
+                  <div className="text-[11px] text-text-dim/80 mt-0.5 truncate">
+                    {c.next_run
+                      ? `${t("agents.detail.next_run", { defaultValue: "Next run" })} · ${formatRelativeTime(c.next_run)}`
+                      : c.name || c.id || "cron job"}
+                  </div>
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => navigate({ to: "/scheduler" })}>
+                  {t("common.edit", { defaultValue: "Edit" })}
+                </Button>
+              </div>
+            ))}
+            {triggers.map((trig: AgentTriggerSummary, i: number) => (
+              <div
+                key={`t-${i}`}
+                className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3"
+              >
+                <div className="w-8 h-8 rounded-md bg-warning/10 text-warning grid place-items-center shrink-0">
+                  <Zap className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-mono text-[13px] truncate text-text-main">
+                    {trig.event_pattern || trig.name || "event trigger"}
+                  </div>
+                  <div className="text-[11px] text-text-dim/80 mt-0.5 truncate">
+                    {trig.description || t("agents.detail.event_driven", { defaultValue: "event-driven" })}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </>
+        ) : (
+          // Honest empty state — most agents are reactive (no cron, no
+          // triggers) and the panel was previously rendering "Manual" as
+          // if it were a misconfiguration. Surface the manifest's actual
+          // schedule mode (also returned by GET /api/agents on list, but
+          // we re-derive from the detail response defensively).
+          (() => {
+            const mode = (agent as AgentDetail).schedule;
+            const isReactive = !mode || mode === "manual";
+            return (
+              <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+                <Zap className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[12.5px] font-medium text-text-main">
+                    {isReactive
+                      ? t("agents.detail.schedule_reactive_title", { defaultValue: "Reactive" })
+                      : mode}
+                  </div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                    {isReactive
+                      ? t("agents.detail.schedule_reactive_desc", {
+                          defaultValue: "wakes on incoming messages and events — no cron or trigger pinned",
+                        })
+                      : t("agents.detail.schedule_no_triggers", {
+                          defaultValue: "schedule mode set but no cron jobs or event triggers configured",
+                        })}
+                  </div>
+                </div>
+              </div>
+            );
+          })()
+        )}
+
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-2">
+          {t("agents.detail.last_runs", { defaultValue: "Last 14 runs" })}
+        </div>
+        <div className="flex gap-[3px] items-end h-16 px-1">
+          {bars.map((v, i) => {
+            const isLast = i === bars.length - 1;
+            return (
+              <div
+                key={i}
+                className={`flex-1 rounded-t-[2px] ${isLast ? "bg-brand" : "bg-brand/40"}`}
+                style={{
+                  height: `${Math.max(8, Math.min(100, v))}%`,
+                  boxShadow: isLast ? "0 0 8px rgba(56,189,248,0.6)" : "none",
+                  minHeight: 6,
+                }}
+                aria-hidden="true"
+              />
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
 
   // ---------- Logs tab — terminal-style turn feed per design canvas
   // Sourced from /api/agents/{id}/events (usage_events) so each row is
@@ -1571,19 +1637,45 @@ export function AgentsPage() {
           in place — no close-then-reopen needed. Sticky header / footer
           keep identity and primary actions pinned while the inspectable
           sections scroll in the middle. */}
-      {detailAgent && detailDrawerOpen && (
+      {detailAgent && detailDrawerOpen && (() => {
+        const detailState = ((detailAgent as AgentView).state || "").toLowerCase();
+        const isDetailSuspended = detailState === "suspended";
+        const isDetailCrashed = detailState === "crashed";
+        const statusColor = isDetailSuspended ? "bg-warning" : isDetailCrashed ? "bg-error" : "bg-success";
+        // Only hand-managed sub-agents are locked from rename — their names
+        // are referenced by the parent hand and changing them would orphan
+        // the parent's call sites. Built-in templates (`assistant`, etc.)
+        // ARE renameable: a fresh agent spawned from a template is a regular
+        // user-owned agent.
+        const lockRename = !!detailAgent.is_hand;
+        // Pick the config mutation that matches this agent's role; mirrors
+        // the branching in saveModelEdit / web-search toggle below.
+        const activeConfigMutation = detailAgent.is_hand
+          ? patchHandAgentRuntimeConfigMutation
+          : patchAgentConfigMutation;
+        const saveModelDisabled =
+          activeConfigMutation.isPending
+          || !modelDraft.provider.trim()
+          || !modelDraft.model.trim()
+          || isNaN(parseInt(modelDraft.max_tokens, 10))
+          || parseInt(modelDraft.max_tokens, 10) <= 0
+          || isNaN(parseFloat(modelDraft.temperature))
+          || parseFloat(modelDraft.temperature) < 0
+          || parseFloat(modelDraft.temperature) > 2;
+        return (
         <DrawerPanel
           isOpen
           onClose={closeDetailModal}
           size="xl"
           hideCloseButton
         >
+            {/* Header — sticky, identity + state. */}
             <div className="px-6 py-4 border-b border-border-subtle sticky top-0 bg-surface z-10">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
                     <Avatar fallback={detailAgent.name} size="lg" />
-                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${drawerStatusColor} border-2 border-surface ${!isDetailDrawerSuspended && !isDetailDrawerCrashed ? "animate-pulse" : ""}`} role="img" aria-label={isDetailDrawerSuspended ? "Agent suspended" : isDetailDrawerCrashed ? "Agent crashed" : "Agent active"} />
+                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && !isDetailCrashed ? "animate-pulse" : ""}`} role="img" aria-label={isDetailSuspended ? "Agent suspended" : isDetailCrashed ? "Agent crashed" : "Agent active"} />
                   </div>
                   <div className="min-w-0 flex-1">
                     {editingName ? (
@@ -1649,8 +1741,8 @@ export function AgentsPage() {
                     <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                       <span className="text-[11px] text-text-dim/70 font-mono">{truncateId(detailAgent.id, 16)}</span>
                       {detailAgent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
-                      <Badge variant={isDetailDrawerSuspended ? "warning" : isDetailDrawerCrashed ? "error" : "success"} dot>
-                        {(detailAgent as AgentView).state ? t(`common.${drawerDetailState}`, { defaultValue: (detailAgent as AgentView).state }) : t("common.running")}
+                      <Badge variant={isDetailSuspended ? "warning" : isDetailCrashed ? "error" : "success"} dot>
+                        {(detailAgent as AgentView).state ? t(`common.${detailState}`, { defaultValue: (detailAgent as AgentView).state }) : t("common.running")}
                       </Badge>
                     </div>
                   </div>
@@ -1859,9 +1951,8 @@ export function AgentsPage() {
                 <section>
                   <h4 className="text-sm font-semibold mb-2">{t("agents.skills")}</h4>
                   <div className="flex flex-wrap gap-1.5">
-                    {/* Sorted alphabetically (#4940) — matches the Skills tab. */}
-                    {detailAgent.skills.slice().sort().map((s: string) => (
-                      <Badge key={s} variant="default">{s}</Badge>
+                    {detailAgent.skills.map((s: string, i: number) => (
+                      <Badge key={i} variant="default">{s}</Badge>
                     ))}
                   </div>
                 </section>
@@ -1936,7 +2027,7 @@ export function AgentsPage() {
               </Button>
 
               <div className="flex flex-wrap gap-2">
-                {isDetailDrawerSuspended ? (
+                {isDetailSuspended ? (
                   <Button
                     variant="secondary"
                     size="sm"
@@ -1995,7 +2086,7 @@ export function AgentsPage() {
                       title: t("agents.reset_title", { defaultValue: "Reset session?" }),
                       message: t("agents.reset_confirm"),
                       onConfirm: async () => {
-                        await resetSessionMutation.mutateAsync(detailAgent.id);
+                        await resetAgentSession(detailAgent.id);
                         await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
                       },
                     })
@@ -2035,7 +2126,8 @@ export function AgentsPage() {
               </Button>
             </div>
         </DrawerPanel>
-      )}
+        );
+      })()}
 
       {/* Tools Editor Modal */}
       {showToolsEditor && toolsEditorAgentId && (
@@ -2152,13 +2244,10 @@ export function AgentsPage() {
                 setToolsEditorSaving(true);
                 try {
                   const resolvedAllowlist = toolAllowlistDraft.filter((name) => !toolBlocklistDraft.includes(name));
-                  await updateToolsMutation.mutateAsync({
-                    agentId: toolsEditorAgentId,
-                    payload: {
-                      capabilities_tools: capabilitiesToolsDraft,
-                      tool_allowlist: resolvedAllowlist,
-                      tool_blocklist: toolBlocklistDraft,
-                    },
+                  await updateAgentTools(toolsEditorAgentId, {
+                    capabilities_tools: capabilitiesToolsDraft,
+                    tool_allowlist: resolvedAllowlist,
+                    tool_blocklist: toolBlocklistDraft,
                   });
                   addToast(
                     conflictingToolNames.length > 0
@@ -2232,9 +2321,6 @@ export function AgentsPage() {
                 models={formModelOptions}
                 invalidFields={formErrors}
                 extras={formExtras}
-                skillCatalog={skillCatalogForForm}
-                toolCatalog={toolCatalogForForm}
-                mcpCatalog={mcpCatalogForForm}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
@@ -2337,11 +2423,11 @@ export function AgentsPage() {
               <button
                 type="button"
                 disabled={!templateName || templateTomlLoading}
-                  onClick={async () => {
-                    if (!templateName) return;
-                    setTemplateTomlLoading(true);
-                    try {
-                      const toml = await templateTomlMutation.mutateAsync(templateName);
+                onClick={async () => {
+                  if (!templateName) return;
+                  setTemplateTomlLoading(true);
+                  try {
+                    const toml = await getAgentTemplateToml(templateName);
                     // Carry the user's custom name across when dropping into
                     // TOML mode — otherwise the input they just typed gets
                     // silently discarded and the template's original name wins.
@@ -2477,3 +2563,260 @@ export function AgentsPage() {
   );
 }
 
+function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: string; agentName: string; onClose: () => void }) {
+  const { t } = useTranslation();
+  const [activeTab, setActiveTab] = useState<"versions" | "experiments">("versions");
+  const [showCreateVersion, setShowCreateVersion] = useState(false);
+  const [showCreateExperiment, setShowCreateExperiment] = useState(false);
+  const [newPromptSystemPrompt, setNewPromptSystemPrompt] = useState("");
+  const [newPromptDescription, setNewPromptDescription] = useState("");
+  const [newExperimentName, setNewExperimentName] = useState("");
+  const [selectedMetrics, setSelectedMetrics] = useState<string | null>(null);
+  const [selectedVariantIds, setSelectedVariantIds] = useState<string[]>([]);
+
+  const versionsQuery = usePromptVersions(agentId);
+  const experimentsQuery = useExperiments(activeTab === "experiments" ? agentId : "");
+  const metricsQuery = useExperimentMetrics(selectedMetrics ?? "");
+
+  const createVersionMutation = useCreatePromptVersion();
+  const createExperimentMutation = useCreateExperiment();
+  const activateMutation = useActivatePromptVersion();
+  const startExpMutation = useStartExperiment();
+  const pauseExpMutation = usePauseExperiment();
+  const completeExpMutation = useCompleteExperiment();
+  const deleteVersionMutation = useDeletePromptVersion();
+
+  const versions = versionsQuery.data ?? [];
+  const experiments = experimentsQuery.data ?? [];
+  const metrics = metricsQuery.data ?? [];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-labelledby="prompts-experiments-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[90vw] max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-4 border-b border-border-subtle flex items-center justify-between shrink-0">
+          <div>
+            <h3 id="prompts-experiments-dialog-title" className="text-lg font-black">{agentName}</h3>
+            <p className="text-xs text-text-dim">Prompts & Experiments</p>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close dialog" })}><X className="w-4 h-4" /></button>
+        </div>
+        
+        <div role="tablist" aria-label="Prompts &amp; Experiments" className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">
+          <button
+            id="agents-tab-versions"
+            role="tab"
+            aria-selected={activeTab === "versions"}
+            aria-controls="agents-panel-versions"
+            tabIndex={activeTab === "versions" ? 0 : -1}
+            onClick={() => setActiveTab("versions")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+          >
+            <FlaskConical className="w-3 h-3 inline mr-1" /> Versions
+          </button>
+          <button
+            id="agents-tab-experiments"
+            role="tab"
+            aria-selected={activeTab === "experiments"}
+            aria-controls="agents-panel-experiments"
+            tabIndex={activeTab === "experiments" ? 0 : -1}
+            onClick={() => setActiveTab("experiments")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+          >
+            <GitBranch className="w-3 h-3 inline mr-1" /> Experiments
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6">
+          <AnimatePresence mode="wait">
+          <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit">
+          {activeTab === "versions" && (
+            <div id="agents-panel-versions" role="tabpanel" aria-labelledby="agents-tab-versions" className="space-y-4">
+              <div className="flex justify-end">
+                <Button variant="primary" size="sm" onClick={() => setShowCreateVersion(true)}>
+                  <Plus className="w-3 h-3 mr-1" /> New Version
+                </Button>
+              </div>
+              
+              {versionsQuery.isLoading ? <CardSkeleton /> : versions.length === 0 ? (
+                <EmptyState title="No prompt versions yet" icon={<FlaskConical className="h-6 w-6" />} />
+              ) : (
+                <div className="space-y-2">
+                  {versions.map((v: PromptVersion) => (
+                    <div key={v.id} className={`p-4 rounded-xl border ${v.is_active ? "border-success bg-success/5" : "border-border-subtle bg-main/30"}`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm">v{v.version}</span>
+                          {v.is_active && <Badge variant="success">Active</Badge>}
+                          {v.description && <span className="text-xs text-text-dim">- {v.description}</span>}
+                        </div>
+                        <div className="flex gap-2">
+                          {!v.is_active && (
+                            <Button variant="secondary" size="sm" onClick={() => activateMutation.mutate({ versionId: v.id, agentId })}>
+                              <Check className="w-3 h-3 mr-1" /> Activate
+                            </Button>
+                          )}
+                          {!v.is_active && (
+                            <Button variant="secondary" size="sm" onClick={() => deleteVersionMutation.mutate({ versionId: v.id, agentId })}>
+                              <Trash2 className="w-3 h-3" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      <pre className="text-xs text-text-dim whitespace-pre-wrap max-h-24 overflow-y-auto">{v.system_prompt.slice(0, 200)}...</pre>
+                      <p className="text-[10px] text-text-dim mt-2">Created: {new Date(v.created_at).toLocaleDateString()}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {showCreateVersion && (
+                <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateVersion(false)}>
+                  <div role="dialog" aria-modal="true" aria-labelledby="create-version-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                    <h4 id="create-version-dialog-title" className="font-bold mb-4">Create Prompt Version</h4>
+                    <div className="space-y-4">
+                      <div>
+                        <label className="text-xs text-text-dim">System Prompt</label>
+                        <textarea value={newPromptSystemPrompt} onChange={e => setNewPromptSystemPrompt(e.target.value)} rows={6}
+                          className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono" placeholder="You are a helpful AI assistant..." />
+                      </div>
+                      <div>
+                        <label className="text-xs text-text-dim">Description (optional)</label>
+                        <input value={newPromptDescription} onChange={e => setNewPromptDescription(e.target.value)}
+                          className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs" placeholder="What's different in this version?" />
+                      </div>
+                    </div>
+                    <div className="flex gap-2 mt-4">
+                      <Button variant="primary" className="flex-1" isLoading={createVersionMutation.isPending} onClick={() => createVersionMutation.mutate({ agentId, version: { system_prompt: newPromptSystemPrompt, description: newPromptDescription, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" } }, { onSuccess: () => { setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); } })} disabled={!newPromptSystemPrompt.trim() || createVersionMutation.isPending}>
+                        {createVersionMutation.isPending ? "Creating..." : "Create"}
+                      </Button>
+                      <Button variant="secondary" onClick={() => setShowCreateVersion(false)}>Cancel</Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "experiments" && (
+            <div id="agents-panel-experiments" role="tabpanel" aria-labelledby="agents-tab-experiments" className="space-y-4">
+              <div className="flex justify-end">
+                <Button variant="primary" size="sm" onClick={() => setShowCreateExperiment(true)}>
+                  <Plus className="w-3 h-3 mr-1" /> New Experiment
+                </Button>
+              </div>
+
+              {experimentsQuery.isLoading ? <CardSkeleton /> : experiments.length === 0 ? (
+                <EmptyState title="No experiments yet" icon={<GitBranch className="h-6 w-6" />} />
+              ) : (
+                <div className="space-y-2">
+                  {experiments.map((exp: PromptExperiment) => (
+                    <div key={exp.id} className="p-4 rounded-xl border border-border-subtle bg-main/30">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm">{exp.name}</span>
+                          <Badge variant={exp.status === "running" ? "success" : exp.status === "completed" ? "default" : "warning"}>{exp.status}</Badge>
+                        </div>
+                        <div className="flex gap-2">
+                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate({ experimentId: exp.id, agentId })}><Play className="w-3 h-3 mr-1" />Start</Button>}
+                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate({ experimentId: exp.id, agentId })}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
+                          {(exp.status === "running" || exp.status === "paused") && (
+                            <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate({ experimentId: exp.id, agentId })}>
+                              <Check className="w-3 h-3 mr-1" />Complete
+                            </Button>
+                          )}
+                          {(exp.status === "running" || exp.status === "paused") && (
+                            <Button variant="secondary" size="sm" onClick={() => setSelectedMetrics(exp.id)}>
+                              <BarChart3 className="w-3 h-3 mr-1" />Metrics
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      <p className="text-xs text-text-dim">{exp.variants?.length || 0} variants</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {selectedMetrics && metricsQuery.data && (
+                <div className="mt-4 p-4 rounded-xl bg-main/50 border border-border-subtle">
+                  <h5 className="text-xs font-bold mb-3">Experiment Metrics</h5>
+                  <div className="space-y-2">
+                    {metrics.map((m: ExperimentVariantMetrics) => (
+                      <div key={m.variant_id} className="p-3 rounded-lg bg-surface border border-border-subtle">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-bold text-xs">{m.variant_name}</span>
+                          <Badge variant={m.success_rate >= 80 ? "success" : m.success_rate >= 50 ? "warning" : "default"}>
+                            {m.success_rate?.toFixed(1)}%
+                          </Badge>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-[10px] text-text-dim">
+                          <div>
+                            <span className="block text-text-dim/60">Requests</span>
+                            <span className="font-mono">{m.total_requests} ({m.successful_requests} ok / {m.failed_requests} err)</span>
+                          </div>
+                          <div>
+                            <span className="block text-text-dim/60">Avg Latency</span>
+                            <span className="font-mono">{m.avg_latency_ms?.toFixed(0)}ms</span>
+                          </div>
+                          <div>
+                            <span className="block text-text-dim/60">Avg Cost</span>
+                            <span className="font-mono">${m.avg_cost_usd?.toFixed(4)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <Button variant="secondary" size="sm" className="mt-3 w-full" onClick={() => setSelectedMetrics(null)}>Close Metrics</Button>
+                </div>
+              )}
+
+              {showCreateExperiment && (
+                <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateExperiment(false)}>
+                  <div role="dialog" aria-modal="true" aria-labelledby="create-experiment-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                    <h4 id="create-experiment-dialog-title" className="font-bold mb-4">Create Experiment</h4>
+                    <div className="space-y-4">
+                      <div>
+                        <label className="text-xs text-text-dim">Experiment Name</label>
+                        <input value={newExperimentName} onChange={e => setNewExperimentName(e.target.value)}
+                          className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs" placeholder="My A/B Test" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-text-dim mb-2 block">Select Prompt Versions (min 2)</label>
+                        {versions.length < 2 ? (
+                          <p className="text-xs text-warning">Create at least 2 prompt versions first.</p>
+                        ) : (
+                          <div className="space-y-1 max-h-40 overflow-y-auto">
+                            {versions.map((v: PromptVersion) => (
+                              <label key={v.id} className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer text-xs ${selectedVariantIds.includes(v.id) ? "bg-brand/10 border border-brand" : "bg-main/30 border border-border-subtle"}`}>
+                                <input type="checkbox" checked={selectedVariantIds.includes(v.id)}
+                                  onChange={e => {
+                                    if (e.target.checked) setSelectedVariantIds([...selectedVariantIds, v.id]);
+                                    else setSelectedVariantIds(selectedVariantIds.filter(id => id !== v.id));
+                                  }} className="rounded" />
+                                <span className="font-bold">v{v.version}</span>
+                                {v.is_active && <Badge variant="success">Active</Badge>}
+                                <span className="text-text-dim truncate">{v.description || v.system_prompt.slice(0, 40) + "..."}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex gap-2 mt-4">
+                      <Button variant="primary" className="flex-1" isLoading={createExperimentMutation.isPending} onClick={() => createExperimentMutation.mutate({ agentId, experiment: { name: newExperimentName, status: "draft", traffic_split: selectedVariantIds.map(() => Math.floor(100 / selectedVariantIds.length)), success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: selectedVariantIds.map((vId, i) => { const ver = versions.find(v => v.id === vId); return { name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`, prompt_version_id: vId, description: ver ? `v${ver.version}` : undefined }; }) } }, { onSuccess: () => { setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); } })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2 || createExperimentMutation.isPending}>
+                        {createExperimentMutation.isPending ? "Creating..." : `Create (${selectedVariantIds.length} variants)`}
+                      </Button>
+                      <Button variant="secondary" onClick={() => { setShowCreateExperiment(false); setSelectedVariantIds([]); }}>Cancel</Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          </motion.div>
+          </AnimatePresence>
+        </div>
+      </div>
+    </div>
+  );
+}

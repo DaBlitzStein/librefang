@@ -33,12 +33,6 @@ pub struct GeminiDriver {
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
-    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
-    /// headers on outbound requests. Mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
-    /// trace headers are emitted regardless of whether `CompletionRequest`'s
-    /// caller-id fields are populated.
-    emit_caller_trace_headers: bool,
 }
 
 impl GeminiDriver {
@@ -77,18 +71,7 @@ impl GeminiDriver {
             base_url,
             client,
             request_timeout_secs,
-            emit_caller_trace_headers: true,
         }
-    }
-
-    /// Override the trace-header emission flag (mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
-    /// meaning the three `x-librefang-{agent,session,step}-id` headers are
-    /// emitted on every request that has those fields populated. Pass `false`
-    /// to suppress them entirely. Non-trace `extra_headers` are unaffected.
-    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
-        self.emit_caller_trace_headers = emit;
-        self
     }
 }
 
@@ -356,24 +339,21 @@ pub(crate) fn convert_messages(
                                 },
                             });
                         }
-                        ContentBlock::ImageFile { media_type, path } => {
-                            match tokio::task::block_in_place(|| std::fs::read(path)) {
-                                Ok(bytes) => {
-                                    use base64::Engine;
-                                    let data =
-                                        base64::engine::general_purpose::STANDARD.encode(&bytes);
-                                    parts.push(GeminiPart::InlineData {
-                                        inline_data: GeminiInlineData {
-                                            mime_type: media_type.clone(),
-                                            data,
-                                        },
-                                    });
-                                }
-                                Err(e) => {
-                                    warn!(path = %path, error = %e, "ImageFile missing, skipping");
-                                }
+                        ContentBlock::ImageFile { media_type, path } => match std::fs::read(path) {
+                            Ok(bytes) => {
+                                use base64::Engine;
+                                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                parts.push(GeminiPart::InlineData {
+                                    inline_data: GeminiInlineData {
+                                        mime_type: media_type.clone(),
+                                        data,
+                                    },
+                                });
                             }
-                        }
+                            Err(e) => {
+                                warn!(path = %path, error = %e, "ImageFile missing, skipping");
+                            }
+                        },
                         ContentBlock::ToolResult {
                             content, tool_name, ..
                         } => {
@@ -592,7 +572,6 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
         stop_reason,
         tool_calls,
         usage,
-        actual_provider: None,
     })
 }
 
@@ -855,7 +834,6 @@ pub(crate) async fn stream_gemini_sse(
         stop_reason,
         tool_calls,
         usage,
-        actual_provider: None,
     })
 }
 
@@ -902,12 +880,6 @@ impl LlmDriver for GeminiDriver {
                 .post(&url)
                 .header("x-goog-api-key", self.api_key.as_str())
                 .header("content-type", "application/json")
-                // Merge per-request caller-identity (`x-librefang-*`) trace headers.
-                .headers(super::trace_headers::build_trace_header_map(
-                    &[],
-                    &request,
-                    self.emit_caller_trace_headers,
-                ))
                 .json(&gemini_request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
@@ -1039,13 +1011,6 @@ impl LlmDriver for GeminiDriver {
                 .post(&url)
                 .header("x-goog-api-key", self.api_key.as_str())
                 .header("content-type", "application/json")
-                // Merge per-request caller-identity (`x-librefang-*`) trace headers
-                // on the streaming path — mirrors the non-streaming path above.
-                .headers(super::trace_headers::build_trace_header_map(
-                    &[],
-                    &request,
-                    self.emit_caller_trace_headers,
-                ))
                 .json(&gemini_request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
@@ -1354,7 +1319,6 @@ impl LlmDriver for GeminiDriver {
                 stop_reason,
                 tool_calls,
                 usage,
-                actual_provider: None,
             });
         }
 
@@ -1552,14 +1516,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let tools = convert_tools(&request);
@@ -1580,14 +1540,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let tools = convert_tools(&request);
@@ -2389,47 +2345,5 @@ mod tests {
             "thoughtSignature: None should be skipped in serialization"
         );
         assert_eq!(json["text"], "Regular text");
-    }
-
-    /// Regression: `ContentBlock::ImageFile` paths must be read via
-    /// `tokio::task::block_in_place` so a multi-MB image read does not
-    /// stall the tokio worker pool. The base64-encoded bytes in the
-    /// resulting `GeminiPart::InlineData` must match the bytes on disk.
-    ///
-    /// Wrap with `flavor = "multi_thread"` so `block_in_place` does not
-    /// panic on a single-threaded runtime.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn convert_messages_imagefile_reads_bytes_without_blocking_worker() {
-        use base64::Engine;
-        use std::io::Write;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("img.png");
-        let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 9, 8, 7];
-        std::fs::File::create(&path)
-            .and_then(|mut f| f.write_all(&bytes))
-            .expect("write png");
-
-        let messages = vec![Message {
-            role: Role::User,
-            content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
-                media_type: "image/png".to_string(),
-                path: path.to_string_lossy().into_owned(),
-            }]),
-            pinned: false,
-            timestamp: None,
-        }];
-        let (contents, _) = convert_messages(&messages, &None);
-        let inline = contents
-            .into_iter()
-            .flat_map(|c| c.parts)
-            .find_map(|p| match p {
-                GeminiPart::InlineData { inline_data } => Some(inline_data),
-                _ => None,
-            })
-            .expect("GeminiPart::InlineData present");
-        assert_eq!(inline.mime_type, "image/png");
-        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        assert_eq!(inline.data, expected, "encoded bytes must round-trip");
     }
 }

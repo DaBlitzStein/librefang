@@ -4,19 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
 use super::DEFAULT_API_LISTEN;
-
-/// Hard ceiling on messages persisted per session, enforced by
-/// `librefang_memory::session::SessionStore::save_session` before the
-/// blob is written to SQLite (#5121 / #5138).
-///
-/// This is the single source of truth shared between the substrate (which
-/// enforces it) and config validation (which warns when an operator's
-/// `cron_session_max_messages` exceeds it, since the substrate will
-/// silently truncate beyond this point regardless of the cron cap). 2000
-/// keeps a worst-case session blob at roughly ~2 MB while leaving room
-/// for unusually long cron-driven sessions.
-pub const MAX_PERSISTED_SESSION_MESSAGES: usize = 2000;
 
 /// DM (direct message) policy for a channel.
 #[derive(
@@ -536,15 +525,12 @@ pub struct DiscordRoleMapping {
 
 /// Slack-side mapping. Slack's `users.info` exposes `is_owner` /
 /// `is_admin` / `is_restricted` / `is_ultra_restricted`. Precedence
-/// (owner > admin > guest > member) was collapsed inside the Rust
-/// channel adapter (`SlackAdapter::parse_users_info_response`) into
-/// a single platform token before this mapping ever saw it. Since
-/// Slack migrated to a sidecar in v2026.5, live `users.info` role
-/// lookup is unavailable; this mapping is parsed but currently
-/// inert until a sidecar-side role-query protocol lands. The
-/// translator here is a flat lookup, not a precedence ladder. Each
-/// step is optional — leave a field unset to fall through to
-/// default-deny `Viewer` for that platform tier.
+/// (owner > admin > guest > member) is collapsed inside the channel
+/// adapter (`SlackAdapter::parse_users_info_response`) into a single
+/// platform token before this mapping ever sees it; the translator
+/// here is a flat lookup, not a precedence ladder. Each step is
+/// optional — leave a field unset to fall through to default-deny
+/// `Viewer` for that platform tier.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SlackRoleMapping {
     /// LibreFang role for `is_owner = true` users.
@@ -763,15 +749,6 @@ pub struct WebFetchConfig {
     /// Cloud metadata endpoints (169.254.x.x, etc.) remain blocked unconditionally.
     #[serde(default)]
     pub ssrf_allowed_hosts: Vec<String>,
-    /// Maximum bytes a single `web_fetch_to_file` download may write to disk.
-    /// Caps response size before the body reaches the workspace; an agent-supplied
-    /// `max_bytes` parameter is further clamped down to this value, never up.
-    #[serde(default = "default_web_fetch_to_file_max_bytes")]
-    pub max_file_bytes: u64,
-}
-
-fn default_web_fetch_to_file_max_bytes() -> u64 {
-    50 * 1024 * 1024
 }
 
 impl Default for WebFetchConfig {
@@ -782,7 +759,6 @@ impl Default for WebFetchConfig {
             timeout_secs: 30,
             readability: true,
             ssrf_allowed_hosts: vec![],
-            max_file_bytes: default_web_fetch_to_file_max_bytes(),
         }
     }
 }
@@ -1006,60 +982,6 @@ impl Default for WebhookTriggerConfig {
     }
 }
 
-/// Credential selection strategy for a credential pool.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialPoolStrategy {
-    /// Always try the highest-priority available key first.
-    #[default]
-    FillFirst,
-    /// Cycle through available keys in priority order.
-    RoundRobin,
-    /// Choose a random available key.
-    Random,
-    /// Choose the key with the fewest successful requests so far.
-    LeastUsed,
-}
-
-/// A single API key entry inside a [`CredentialPoolConfig`].
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CredentialPoolKeyConfig {
-    /// Environment variable holding the API key.
-    pub api_key_env: String,
-    /// Human-readable label for this key (e.g. "Primary", "Backup").
-    pub label: String,
-    /// Higher-priority keys are tried first in FillFirst / RoundRobin.
-    /// Defaults to 0.
-    #[serde(default)]
-    pub priority: u32,
-}
-
-/// Multi-key credential pool for a single provider.
-///
-/// Configurable in `config.toml` as `[[credential_pools]]`:
-/// ```toml
-/// [[credential_pools]]
-/// provider = "openai"
-/// strategy = "round_robin"
-///
-/// [[credential_pools.keys]]
-/// api_key_env = "OPENAI_API_KEY_1"
-/// label = "Primary"
-/// priority = 10
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CredentialPoolConfig {
-    /// Provider name (e.g., "openai", "anthropic").
-    pub provider: String,
-    /// Key selection strategy.
-    #[serde(default)]
-    pub strategy: CredentialPoolStrategy,
-    /// List of API keys in the pool.
-    pub keys: Vec<CredentialPoolKeyConfig>,
-}
-
 /// Fallback provider chain — tried in order if the primary provider fails.
 ///
 /// Configurable in `config.toml` under `[[fallback_providers]]`:
@@ -1113,32 +1035,6 @@ pub enum AuxTask {
     Vision,
     /// Browser-tool vision-driven page understanding.
     BrowserVision,
-    /// Tool-result history fold (#3347 3/N): summarise stale tool results
-    /// from turns older than `history_fold_after_turns` into a compact stub.
-    Fold,
-    /// Skill workshop (#3328) candidate review: classify whether a
-    /// captured workflow is worth promoting to a draft skill, and refine
-    /// its name / one-line summary if so. Cheap classification call,
-    /// runs at most once per turn that produced a heuristic match.
-    SkillReview,
-    /// Skill workshop (#3328) — separate aux slot from `SkillReview` so
-    /// the workshop's after-turn capture review can be costed and
-    /// configured independently of the existing `background_skill_review`
-    /// pipeline (which also resolves through `SkillReview`). Operators
-    /// can disable one without disabling the other; budget tooling sees
-    /// distinct line items.
-    SkillWorkshopReview,
-    /// Session-end summary (#4869): on `reset_session` / `/new`, the
-    /// kernel asks the auxiliary LLM to produce a real summary of the
-    /// session that's about to be deleted (`kv_store` keyed by the
-    /// session id, plus a markdown file in the agent's workspace). The
-    /// pre-#4869 implementation built the summary from the last 10
-    /// `Text`-only user messages, which collapsed to "thanks / sure"
-    /// pleasantries on any non-trivial conversation. Routing through
-    /// `[llm.auxiliary]` keeps the cost on the cheap tier; when no aux
-    /// chain resolves, the kernel falls back to the historical trivial
-    /// summary and logs a WARN so operators see the degraded path.
-    SessionSummary,
 }
 
 impl AuxTask {
@@ -1150,10 +1046,6 @@ impl AuxTask {
             AuxTask::Search => "search",
             AuxTask::Vision => "vision",
             AuxTask::BrowserVision => "browser_vision",
-            AuxTask::Fold => "fold",
-            AuxTask::SkillReview => "skill_review",
-            AuxTask::SkillWorkshopReview => "skill_workshop_review",
-            AuxTask::SessionSummary => "session_summary",
         }
     }
 }
@@ -1790,26 +1682,6 @@ pub struct TelemetryConfig {
     ///
     /// Issue #3136.
     pub auto_start_observability_stack: bool,
-    /// Emit `x-librefang-{agent,session,step}-id` HTTP headers on outbound
-    /// OpenAI-compatible LLM requests so observability sidecars (logging
-    /// gateways, audit proxies, OTel collectors that shape spans from request
-    /// metadata) can correlate request log records to the originating agent /
-    /// session / agent-loop iteration without parsing the JSON body.
-    /// Default: `true`.
-    ///
-    /// Set to `false` to suppress all three headers wire-side regardless of
-    /// whether the kernel populated `CompletionRequest`'s caller-id fields.
-    /// Useful for operators with strict zero-egress policies (regulated
-    /// tenants, EU healthcare) who want no LibreFang-internal identifiers
-    /// crossing the upstream-provider boundary, even though the IDs are
-    /// opaque UUIDs / integers and carry no PII.
-    ///
-    /// Currently consulted only by the OpenAI-compatible driver. Other
-    /// drivers (Anthropic, Gemini, Bedrock, Vertex, ChatGPT, Copilot,
-    /// Claude Code, Codex, Gemini CLI, Qwen Code) do not emit these headers
-    /// today; when they grow per-driver header-emission support, they will
-    /// honour the same flag.
-    pub emit_caller_trace_headers: bool,
 }
 
 impl TelemetryConfig {
@@ -1847,7 +1719,6 @@ impl Default for TelemetryConfig {
             sample_rate: 1.0,
             prometheus_enabled: true,
             auto_start_observability_stack: false,
-            emit_caller_trace_headers: true,
         }
     }
 }
@@ -2117,29 +1988,6 @@ pub enum ResponseFormat {
     },
 }
 
-/// Backpressure policy when the bounded inbound message buffer is full.
-///
-/// Selected via [`SidecarChannelConfig::overflow`].
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum SidecarOverflowPolicy {
-    /// Apply backpressure: the reader awaits buffer space (default).
-    /// Correct for chat — dropping a user message is worse than
-    /// slowing the producer.
-    #[default]
-    Block,
-    /// Shed load: drop the just-arrived message when the buffer is
-    /// full (counted + rate-limited warn). For high-volume,
-    /// loss-tolerant notification sidecars.
-    ///
-    /// Note: a tokio mpsc can't evict the *oldest* entry from the
-    /// producer side, so this drops the newest. Named for intent
-    /// (shed load).
-    DropNewest,
-}
-
 /// Configuration for a sidecar channel adapter (external process-based).
 ///
 /// Sidecar adapters allow external processes written in any language to act as
@@ -2150,7 +1998,7 @@ pub enum SidecarOverflowPolicy {
 /// [[sidecar_channels]]
 /// name = "my-telegram"
 /// command = "python3"
-/// args = ["-m", "librefang.sidecar.adapters.telegram"]
+/// args = ["adapters/telegram_adapter.py"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2168,78 +2016,6 @@ pub struct SidecarChannelConfig {
     /// Channel type identifier (defaults to Custom(name)).
     #[serde(default)]
     pub channel_type: Option<String>,
-    /// Default agent name for incoming messages on this sidecar channel.
-    ///
-    /// When set, seeds the `AgentRouter.channel_defaults` map at boot so
-    /// inbound messages with no explicit binding route to this agent. This
-    /// mirrors the `default_agent` field that lived on the per-channel
-    /// in-process configs (`TelegramConfig`, `WhatsAppConfig`, …) before the
-    /// sidecar migration (#5241 / #5294). Without this, the resolver falls
-    /// through to the non-deterministic "first available agent" branch in
-    /// `resolve_or_fallback`, which silently routes traffic to a different
-    /// agent whenever a new agent is spawned.
-    #[serde(default)]
-    pub default_agent: Option<String>,
-    /// Restart the subprocess automatically when it exits unexpectedly.
-    #[serde(default = "default_sidecar_restart")]
-    pub restart: bool,
-    /// Initial restart backoff in ms (doubles per consecutive failure).
-    #[serde(default = "default_sidecar_restart_initial_backoff_ms")]
-    pub restart_initial_backoff_ms: u64,
-    /// Cap on the restart backoff in ms.
-    #[serde(default = "default_sidecar_restart_max_backoff_ms")]
-    pub restart_max_backoff_ms: u64,
-    /// Consecutive failures before the supervisor gives up (circuit-break).
-    #[serde(default = "default_sidecar_restart_max_retries")]
-    pub restart_max_retries: u32,
-    /// Stable uptime (secs) after which the failure counter resets.
-    #[serde(default = "default_sidecar_restart_reset_after_secs")]
-    pub restart_reset_after_secs: u64,
-    /// How long (secs) to wait for the adapter's `ready` before
-    /// treating the spawn as failed.
-    #[serde(default = "default_sidecar_ready_timeout_secs")]
-    pub ready_timeout_secs: u64,
-    /// Grace period (secs) for a clean exit on `stop()` before SIGKILL.
-    #[serde(default = "default_sidecar_shutdown_grace_secs")]
-    pub shutdown_grace_secs: u64,
-    /// Bounded inbound message buffer (also the backpressure point).
-    #[serde(default = "default_sidecar_message_buffer")]
-    pub message_buffer: usize,
-    /// What to do when `message_buffer` is full.
-    #[serde(default)]
-    pub overflow: SidecarOverflowPolicy,
-}
-
-fn default_sidecar_restart() -> bool {
-    true
-}
-
-fn default_sidecar_restart_initial_backoff_ms() -> u64 {
-    500
-}
-
-fn default_sidecar_restart_max_backoff_ms() -> u64 {
-    30_000
-}
-
-fn default_sidecar_restart_max_retries() -> u32 {
-    10
-}
-
-fn default_sidecar_restart_reset_after_secs() -> u64 {
-    60
-}
-
-fn default_sidecar_ready_timeout_secs() -> u64 {
-    30
-}
-
-fn default_sidecar_shutdown_grace_secs() -> u64 {
-    5
-}
-
-fn default_sidecar_message_buffer() -> usize {
-    256
 }
 
 // ---------------------------------------------------------------------------
@@ -2435,74 +2211,6 @@ impl Default for CompactionTomlConfig {
             token_threshold_ratio: default_compaction_token_threshold_ratio(),
             max_chunk_chars: default_compaction_max_chunk_chars(),
             max_retries: default_compaction_max_retries(),
-        }
-    }
-}
-
-/// Gateway-level safety-net compression (exposed in `[gateway_compression]`
-/// TOML section). Runs at the top of the agent loop, *before* the first LLM
-/// call and *before* the LLM-based [`CompactionTomlConfig`] runs.
-///
-/// Purpose: catch sessions that grew between turns (overnight Telegram
-/// backlog, cron-job output piling up, etc.) and have already exceeded the
-/// model's context window when the next turn starts. Without this pass the
-/// first LLM call would 400 with "context too long" before the agent-level
-/// compactor ever gets a chance to run.
-///
-/// Trade-off vs. [`CompactionTomlConfig`]:
-/// - Gateway pass: cheap (rough token estimation, no LLM call), runs at a
-///   *higher* threshold (default 0.85), prunes tool results + drops oldest
-///   non-pinned messages.
-/// - Agent-level compactor: LLM-summarises, runs at a *lower* threshold
-///   (default 0.70). Owns history compaction proper.
-///
-/// The gateway pass aims to bring the session below ~0.80 so the agent-level
-/// compactor can run normally on the next iteration. It never calls the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct GatewayCompressionConfig {
-    /// Master switch. Default ON. Set to `false` to disable the gateway
-    /// safety-net pass entirely (the agent-level compactor still runs).
-    #[serde(default = "default_gateway_compression_enabled")]
-    pub enabled: bool,
-    /// Trigger ratio: gateway pass fires when estimated session tokens
-    /// exceed `context_window * threshold_ratio` (default: 0.85). Must be
-    /// strictly greater than [`CompactionTomlConfig::token_threshold_ratio`]
-    /// (default 0.70) so the agent-level compactor gets first crack.
-    #[serde(default = "default_gateway_compression_threshold_ratio")]
-    pub threshold_ratio: f32,
-    /// Tool results larger than this character count get stubbed (default:
-    /// 200). Stubbing preserves `tool_use_id` pairing so the assistant ↔
-    /// tool-result chain stays well-formed for the provider.
-    #[serde(default = "default_gateway_compression_max_tool_result_chars")]
-    pub max_tool_result_chars: usize,
-    /// Number of most-recent messages always kept verbatim (default: 5).
-    /// Older non-pinned messages are dropped first if stubbing tool results
-    /// alone does not bring the estimate below the threshold.
-    #[serde(default = "default_gateway_compression_keep_recent")]
-    pub keep_recent_messages: usize,
-}
-
-fn default_gateway_compression_enabled() -> bool {
-    true
-}
-fn default_gateway_compression_threshold_ratio() -> f32 {
-    0.85
-}
-fn default_gateway_compression_max_tool_result_chars() -> usize {
-    200
-}
-fn default_gateway_compression_keep_recent() -> usize {
-    5
-}
-
-impl Default for GatewayCompressionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_gateway_compression_enabled(),
-            threshold_ratio: default_gateway_compression_threshold_ratio(),
-            max_tool_result_chars: default_gateway_compression_max_tool_result_chars(),
-            keep_recent_messages: default_gateway_compression_keep_recent(),
         }
     }
 }
@@ -2873,11 +2581,10 @@ pub struct KernelConfig {
     /// Operator override for the agent message-history trim cap. When set,
     /// any agent without its own `max_history_messages` uses this value
     /// instead of the compiled-in default
-    /// (`agent_loop::history::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to
-    /// bound per-turn token cost; raise it for long-context models. `None`
-    /// means "use the compiled-in default". Runtime clamps values below 4 up
-    /// to the safe-trim floor and values above 500 down to the hard ceiling,
-    /// emitting a `warn!` log with `agent`, `requested`, and `applied`.
+    /// (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound
+    /// per-turn token cost; raise it for long-context models. `None` means
+    /// "use the compiled-in default". Values below 4 are silently clamped
+    /// at runtime with a warning log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_history_messages: Option<usize>,
     /// Kernel-wide Smart Model Router defaults applied to any agent whose
@@ -2891,14 +2598,9 @@ pub struct KernelConfig {
     pub default_model: DefaultModelConfig,
     /// Memory substrate configuration.
     pub memory: MemoryConfig,
-    /// Memory wiki: durable markdown knowledge vault with provenance and
-    /// optional Obsidian-friendly export. Off by default; see
-    /// `librefang-memory-wiki` and issue #3329 for the runbook.
-    #[serde(default)]
-    pub memory_wiki: MemoryWikiConfig,
     /// Network configuration.
     pub network: NetworkConfig,
-    /// Channel bridge configuration (Discord, Slack, etc.).
+    /// Channel bridge configuration (Telegram, etc.).
     pub channels: ChannelsConfig,
     /// API authentication key. When set, all API endpoints (except /api/health)
     /// require a `Authorization: Bearer <key>` header.
@@ -2935,29 +2637,6 @@ pub struct KernelConfig {
     /// `/api/health*` stay reachable in every mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_auth_for_reads: Option<bool>,
-    /// Acknowledges that the daemon is fronted by an external auth proxy
-    /// (e.g. nginx `auth_request`, Cloudflare Access, a corporate IAM
-    /// SSO sidecar) so the dashboard-reads allowlist can legitimately
-    /// be left open.
-    ///
-    /// This flag exists because the `require_auth_for_reads =
-    /// Some(false)` escape hatch is otherwise indistinguishable from a
-    /// config typo: an operator who flipped it without an external
-    /// proxy in front exposed `/api/agents`, `/api/sessions`,
-    /// `/api/providers` to any unauthenticated reader on non-loopback
-    /// binds. Per audit `require-auth-for-reads-false-leak`, the
-    /// resolver now refuses to honour `Some(false)` UNLESS this flag
-    /// is also set — defence in depth against a single-line config
-    /// mistake.
-    ///
-    /// Boot also emits a warning when `bind` is non-loopback and this
-    /// flag is `false`, regardless of `require_auth_for_reads`, so an
-    /// operator running open-on-LAN sees the posture mismatch even if
-    /// they meant to. Defaults to `false` (no external proxy
-    /// assumed); set to `true` only when the proxy in front is
-    /// known-good.
-    #[serde(default)]
-    pub external_auth_proxy: bool,
     /// Hex-encoded Ed25519 public keys (32 bytes → 64 hex chars) allowed to
     /// sign agent manifests. `verify_signed_manifest` requires the envelope's
     /// `signer_public_key` to be on this list before accepting a signature —
@@ -3037,10 +2716,6 @@ pub struct KernelConfig {
     /// Configure in config.toml as `[[fallback_providers]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_providers: Vec<FallbackProviderConfig>,
-    /// Credential pools — multi-key rotation per provider.
-    /// Configure in config.toml as `[[credential_pools]]`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub credential_pools: Vec<CredentialPoolConfig>,
     /// `[llm]` section — currently carries the auxiliary side-task chain
     /// configuration. See [`LlmConfig`] / [`AuxiliaryConfig`].
     #[serde(default)]
@@ -3101,73 +2776,8 @@ pub struct KernelConfig {
     /// each cron fire. Applied in addition to `cron_session_max_tokens`.
     ///
     /// `None` (default) disables message-count pruning.
-    ///
-    /// NOTE (#5138): the memory substrate independently enforces a hard
-    /// persistence ceiling of [`MAX_PERSISTED_SESSION_MESSAGES`] messages
-    /// per session, applied at `save_session` regardless of this value. A
-    /// `cron_session_max_messages` set *above* that ceiling cannot keep
-    /// more than [`MAX_PERSISTED_SESSION_MESSAGES`] across daemon restarts —
-    /// the tail beyond the ceiling is silently truncated on save. Config
-    /// validation emits a warning when this value exceeds the ceiling so
-    /// the discrepancy is not invisible.
     #[serde(default)]
     pub cron_session_max_messages: Option<usize>,
-    /// Fraction of the effective token budget (post-prune) at which the
-    /// kernel emits a `tracing::warn!` for a Persistent cron session
-    /// approaching the provider context window. Closes the operator-
-    /// visibility gap from #3693: pruning prevents the hard 400 from
-    /// the provider, but without this warn the trend is invisible until
-    /// a fire actually fails.
-    ///
-    /// Applied against the effective limit:
-    ///   1. `cron_session_max_tokens` if set, else
-    ///   2. [`Self::cron_session_warn_total_tokens`] as a fallback ceiling.
-    ///
-    /// Skipped entirely when both are `None`, or when this value is
-    /// `None` / `<= 0.0` / `> 1.0`.
-    ///
-    /// Default: `Some(0.8)` — warn at 80% of the budget.
-    #[serde(default = "default_cron_session_warn_fraction")]
-    pub cron_session_warn_fraction: Option<f64>,
-    /// Fallback context-window ceiling used by
-    /// [`Self::cron_session_warn_fraction`] when
-    /// `cron_session_max_tokens` is unset. Lets operators get growth
-    /// warnings even on agents that have not opted into pruning.
-    ///
-    /// Default: `Some(200_000)` — matches the typical Claude / GPT-4
-    /// long-context window. Set to `None` to disable the fallback
-    /// (warn only fires when `cron_session_max_tokens` is explicitly
-    /// configured).
-    #[serde(default = "default_cron_session_warn_total_tokens")]
-    pub cron_session_warn_total_tokens: Option<u64>,
-    /// Compaction strategy applied when the cron session exceeds
-    /// `cron_session_max_tokens` or `cron_session_max_messages` (#3693).
-    ///
-    /// - `"prune"` (default) — drop oldest messages from the front until the
-    ///   budget is satisfied. Identical to the pre-#3693 behaviour.
-    /// - `"summarize_trim"` — summarize the messages that would be dropped with
-    ///   a lightweight LLM call, replace them with a single synthetic summary
-    ///   message, then keep the most recent
-    ///   `cron_session_compaction_keep_recent` messages verbatim. Falls back to
-    ///   `prune` (with a `tracing::warn!`) when the LLM call fails.
-    ///
-    /// Only takes effect when at least one size cap (`cron_session_max_tokens`
-    /// or `cron_session_max_messages`) is configured. The field is ignored and
-    /// session-mode-`new` jobs always skip this path entirely.
-    #[serde(default)]
-    pub cron_session_compaction_mode: CronCompactionMode,
-    /// Number of recent messages to preserve verbatim after summarization when
-    /// `cron_session_compaction_mode = "summarize_trim"` is active.
-    ///
-    /// The LLM summary replaces everything older than the kept tail.
-    ///
-    /// **Reasonable range**: `1` – `64`. Values below `1` are clamped to `1` at
-    /// runtime. Values larger than the current session length are silently
-    /// clamped to the session length (nothing gets summarized in that case and
-    /// the code falls back to plain prune). Setting this to a very large number
-    /// defeats the purpose of summarization. Default: `8`.
-    #[serde(default = "default_cron_session_compaction_keep_recent")]
-    pub cron_session_compaction_keep_recent: usize,
     /// Config include files — loaded and deep-merged before the root config.
     /// Paths are relative to the root config file's directory.
     /// Security: absolute paths and `..` components are rejected.
@@ -3194,13 +2804,6 @@ pub struct KernelConfig {
     /// Docker container sandbox configuration.
     #[serde(default)]
     pub docker: DockerSandboxConfig,
-    /// Pluggable tool-execution backend selection (#3332).
-    /// Default: `local` — keeps the long-standing subprocess-on-daemon
-    /// behavior. Set to `ssh` / `daytona` (with the matching subtable)
-    /// to route tool exec to a remote / managed host. Per-agent
-    /// override available via `agent.toml: tool_exec_backend`.
-    #[serde(default)]
-    pub tool_exec: crate::tool_exec::ToolExecConfig,
     /// Device pairing configuration.
     #[serde(default)]
     pub pairing: PairingConfig,
@@ -3286,41 +2889,12 @@ pub struct KernelConfig {
     /// - **OpenAI**: automatic prefix caching (response cache stats are parsed).
     #[serde(default = "default_prompt_caching")]
     pub prompt_caching: bool,
-    /// Prompt cache breakpoint strategy (#4970).
-    ///
-    /// Anthropic and compatible providers reuse a request's prefix when
-    /// explicit `cache_control` breakpoints anchor stable text. The
-    /// strategy selects which stability anchors are emitted:
-    ///
-    /// - `disabled` — no breakpoints emitted; the prefix is still cached
-    ///   automatically by providers that support it (OpenAI / DeepSeek)
-    ///   above their own length thresholds, but Anthropic gets no hint.
-    /// - `system_only` — one breakpoint at the end of the system block.
-    ///   Caches `(system)` only; tool schemas and history are re-billed
-    ///   every turn.
-    /// - `system_and_N` (default `system_and_3`) — adds the last-tool
-    ///   marker and an N-deep rolling window over the most recent
-    ///   messages. Anthropic enforces a hard cap of 4 `cache_control`
-    ///   breakpoints per request; effective N is clipped accordingly.
-    ///
-    /// The master switch is still [`Self::prompt_caching`]: when that
-    /// is `false`, the strategy is ignored and no markers are written.
-    #[serde(default)]
-    pub prompt_cache: PromptCacheConfig,
     /// Session retention policy (automatic cleanup of old/excess sessions).
     #[serde(default)]
     pub session: SessionConfig,
     /// Session compaction configuration (LLM-based history summarization).
     #[serde(default)]
     pub compaction: CompactionTomlConfig,
-    /// Gateway-level safety-net compression (#4972). Cheap pre-loop pass
-    /// that prunes oversized tool results and oldest non-pinned messages
-    /// when a session has grown past the model's context window *between*
-    /// turns, before the first LLM call. Runs at a higher threshold (0.85)
-    /// than the agent-level compactor (0.70) — they are complementary, not
-    /// alternatives. See [`GatewayCompressionConfig`].
-    #[serde(default)]
-    pub gateway_compression: GatewayCompressionConfig,
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
@@ -3413,7 +2987,7 @@ pub struct KernelConfig {
     /// shell_exec    = 300
     /// ```
     #[serde(default)]
-    pub tool_timeouts: std::collections::BTreeMap<String, u64>,
+    pub tool_timeouts: std::collections::HashMap<String, u64>,
     /// Maximum upload size in bytes (default: 10 MB).
     /// Enterprise deployments may need larger file uploads.
     #[serde(default = "default_max_upload_size_bytes")]
@@ -3443,14 +3017,6 @@ pub struct KernelConfig {
     /// integration lands in PR-4. See [`ParallelToolsConfig`].
     #[serde(default)]
     pub parallel_tools: ParallelToolsConfig,
-    /// Tool-result context budget and artifact spill configuration.
-    /// See [`ToolResultsConfig`] for knob descriptions.  The primary active
-    /// mechanism is artifact spill (responses > `spill_threshold_bytes` are
-    /// written to disk and replaced with a stub + `read_artifact` handle).
-    /// The cumulative budget and history fold knobs are wired but deferred
-    /// — see #3347 2/N and 3/N.
-    #[serde(default)]
-    pub tool_results: ToolResultsConfig,
     /// How long (in minutes) a workflow run may remain in the `Running` or
     /// `Pending` state before it is considered stale after a daemon restart.
     ///
@@ -3460,19 +3026,6 @@ pub struct KernelConfig {
     /// Default: `60` minutes.
     #[serde(default = "default_workflow_stale_timeout_minutes")]
     pub workflow_stale_timeout_minutes: u64,
-    /// Default wall-clock timeout (seconds) for an entire workflow run.
-    ///
-    /// Individual workflows can override this via `Workflow::total_timeout_secs`.
-    /// When both are `None` the workflow runs unbounded (no total timeout).
-    /// Default: `None` (unbounded).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_default_total_timeout_secs: Option<u64>,
-    /// Background autonomous-loop executor knobs (issue #5168).
-    /// Currently governs the rate-limit circuit breaker that stops a
-    /// continuous / periodic loop from re-firing forever when the LLM
-    /// provider is rate-limited or quota-exhausted.
-    #[serde(default)]
-    pub background: BackgroundConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -3707,23 +3260,6 @@ pub struct ContextEngineTomlConfig {
     /// Defaults to the official `librefang/librefang-registry`.
     #[serde(default = "default_plugin_registries")]
     pub plugin_registries: Vec<PluginRegistrySource>,
-    /// When `true` (default), repeated `file_read` calls on the same path in a
-    /// session are collapsed: if the on-disk content's hash matches a prior
-    /// read in the same session, the tool returns a short
-    /// `[File already read — content unchanged since turn N. See above for
-    /// full content.]` stub instead of the full body. If the hash differs,
-    /// the result is prefixed with
-    /// `[File updated since last read at turn N]`. Set to `false` to send the
-    /// full file content every time (legacy behaviour). The tracker is reset
-    /// whenever automatic context compression fires, because the prior full
-    /// content is no longer present in the history (#4971).
-    #[serde(default = "default_deduplicate_file_reads")]
-    pub deduplicate_file_reads: bool,
-}
-
-/// Default for [`ContextEngineTomlConfig::deduplicate_file_reads`]: enabled.
-fn default_deduplicate_file_reads() -> bool {
-    true
 }
 
 impl Default for ContextEngineTomlConfig {
@@ -3735,7 +3271,6 @@ impl Default for ContextEngineTomlConfig {
             plugin_stack_weights: Vec::new(),
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
-            deduplicate_file_reads: default_deduplicate_file_reads(),
         }
     }
 }
@@ -4434,27 +3969,8 @@ pub struct BudgetConfig {
     pub default_max_llm_tokens_per_hour: u64,
     /// Per-provider spending caps, keyed by provider id (e.g. `"moonshot"`,
     /// `"openai"`, `"litellm"`). Missing providers are unlimited.
-    ///
-    /// `BTreeMap` so the serialised form is deterministic — `[budget].providers`
-    /// round-trips byte-identically across reloads, so `field_changed` in
-    /// `config_reload::build_reload_plan` (which compares JSON forms) does not
-    /// emit a spurious `HotAction::UpdateBudget` from HashMap iteration-order
-    /// drift when the operator hasn't actually touched the caps.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub providers: std::collections::BTreeMap<String, ProviderBudget>,
-    /// Global default burst ratio for all agents (`0.0` = unset, use
-    /// compiled default `0.2`). Overridden per-agent via
-    /// `ResourceQuota.burst_ratio`.
-    ///
-    /// Validated at parse time: NaN, infinity, and values outside
-    /// `[0.0, 1.0]` are rejected with a serde error rather than
-    /// silently sanitised at the rate-limiter use site. The
-    /// compiled-default fallback for an out-of-range agent override
-    /// still lives in `ResourceQuota::effective_burst_ratio` (defence
-    /// in depth), but operator-provided config that's nonsensical
-    /// should fail loud at boot, not paper over a typo.
-    #[serde(default, deserialize_with = "deserialize_default_burst_ratio")]
-    pub default_burst_ratio: f32,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub providers: std::collections::HashMap<String, ProviderBudget>,
 }
 
 impl Default for BudgetConfig {
@@ -4465,85 +3981,13 @@ impl Default for BudgetConfig {
             max_monthly_usd: 0.0,
             alert_threshold: 0.8,
             default_max_llm_tokens_per_hour: 0,
-            providers: std::collections::BTreeMap::new(),
-            default_burst_ratio: 0.0,
+            providers: std::collections::HashMap::new(),
         }
     }
 }
 
 fn default_max_cron_jobs() -> usize {
     500
-}
-
-/// Validate `BudgetConfig::default_burst_ratio` at parse time.
-///
-/// Rejects NaN, ±infinity, and values outside `[0.0, 1.0]`. `0.0` is
-/// the explicit "unset, use compiled default" sentinel and is allowed.
-fn deserialize_default_burst_ratio<'de, D>(deserializer: D) -> Result<f32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-    let v = f32::deserialize(deserializer)?;
-    if !v.is_finite() {
-        return Err(D::Error::custom(format!(
-            "default_burst_ratio must be finite (got {v}); use 0.0 to leave unset"
-        )));
-    }
-    if !(0.0..=1.0).contains(&v) {
-        return Err(D::Error::custom(format!(
-            "default_burst_ratio must be in [0.0, 1.0] (got {v}); 0.0 = unset, 1.0 = full hourly budget per minute"
-        )));
-    }
-    Ok(v)
-}
-
-/// Compaction strategy for Persistent cron sessions (#3693).
-///
-/// Controls what happens when the session exceeds `cron_session_max_tokens`
-/// or `cron_session_max_messages` before a cron fire.
-///
-/// Configure in config.toml:
-/// ```toml
-/// cron_session_compaction_mode = "summarize_trim"
-/// cron_session_compaction_keep_recent = 8
-/// ```
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum CronCompactionMode {
-    /// Drop oldest messages from the front of the session until the budget is
-    /// satisfied. Fast and deterministic, but lossy — dropped context is gone.
-    /// This is the historical behaviour and remains the default.
-    #[default]
-    Prune,
-    /// Summarize messages that would be dropped using an LLM call, then keep
-    /// the summary as a synthetic assistant message followed by the most recent
-    /// `cron_session_compaction_keep_recent` messages. Preserves semantic
-    /// continuity at the cost of a lightweight LLM round-trip per fire when the
-    /// session exceeds the budget. Falls back to `Prune` on LLM failure with a
-    /// `tracing::warn!`.
-    SummarizeTrim,
-}
-
-/// Default number of recent messages kept verbatim when
-/// `cron_session_compaction_mode = "summarize_trim"` runs (#3693).
-fn default_cron_session_compaction_keep_recent() -> usize {
-    8
-}
-
-/// Default warn fraction for cron session size (#3693): 80% of the
-/// effective token budget.
-fn default_cron_session_warn_fraction() -> Option<f64> {
-    Some(0.8)
-}
-
-/// Default fallback ceiling for cron session warn (#3693): 200k tokens
-/// — matches typical long-context provider windows so operators get a
-/// signal even without an explicit `cron_session_max_tokens` cap.
-fn default_cron_session_warn_total_tokens() -> Option<u64> {
-    Some(200_000)
 }
 
 /// Default stale workflow run timeout in minutes (60 minutes = 1 hour).
@@ -4852,14 +4296,6 @@ fn default_auto_dream_timeout_secs() -> u64 {
     600
 }
 
-fn default_local_probe_interval_secs() -> u64 {
-    // 60 s. Cadence of the dashboard's local-model (Ollama) availability
-    // probe. Responsive enough to notice `brew services start/stop ollama`
-    // without hammering `/api/tags`. Zero or sub-probe-timeout values are
-    // clamped back to this default by the consumer.
-    60
-}
-
 impl Default for AutoDreamConfig {
     fn default() -> Self {
         Self {
@@ -4869,46 +4305,6 @@ impl Default for AutoDreamConfig {
             check_interval_secs: default_auto_dream_check_interval_secs(),
             lock_dir: String::new(),
             timeout_secs: default_auto_dream_timeout_secs(),
-        }
-    }
-}
-
-/// Background autonomous-loop executor configuration (issue #5168).
-///
-/// Tunes the circuit breaker that stops a continuous / periodic background
-/// loop from re-firing forever when the LLM provider is rate-limited or
-/// quota-exhausted. See the `MAX_CONSECUTIVE_RATE_LIMITS` doc comment in
-/// `librefang_kernel::background` for the rationale.
-///
-/// Configure in `config.toml`:
-/// ```toml
-/// [background]
-/// max_consecutive_rate_limits = 5
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct BackgroundConfig {
-    /// Maximum number of *consecutive* background ticks whose agent turn
-    /// failed because the LLM provider was rate-limited / quota-exhausted
-    /// before the continuous / periodic loop stops re-firing the agent.
-    ///
-    /// A single non-rate-limited tick resets the counter, so transient
-    /// blips do not permanently park a healthy agent. Set to `0` to
-    /// disable the breaker entirely (the loop re-fires forever — only
-    /// appropriate when running against a provider with no quota).
-    /// Default: `5`.
-    #[serde(default = "default_max_consecutive_rate_limits")]
-    pub max_consecutive_rate_limits: u32,
-}
-
-fn default_max_consecutive_rate_limits() -> u32 {
-    5
-}
-
-impl Default for BackgroundConfig {
-    fn default() -> Self {
-        Self {
-            max_consecutive_rate_limits: default_max_consecutive_rate_limits(),
         }
     }
 }
@@ -4973,346 +4369,6 @@ pub struct PluginsConfig {
 
 fn default_prompt_caching() -> bool {
     true
-}
-
-// default_local_probe_interval_secs is defined upstream at line ~4832
-// (re-added in #4ab144c4); duplicated here by an earlier draft of
-// this PR — deleted on rebase so only the upstream copy survives.
-
-/// Prompt cache breakpoint strategy (#4970).
-///
-/// Selects which stability anchors get an explicit `cache_control`
-/// breakpoint on Anthropic and compatible providers. The strategy is a
-/// parsed form of the `[prompt_cache] strategy = "…"` config value; see
-/// [`PromptCacheStrategy::from_str`] for the wire format.
-///
-/// Anthropic enforces a hard cap of **4** `cache_control` breakpoints
-/// per request, counted across system + tools + messages. Drivers that
-/// honour the strategy are responsible for clipping in
-/// most-stable-first order (system → tools → newest message backward).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptCacheStrategy {
-    /// No breakpoints emitted. The provider may still cache automatically
-    /// (OpenAI, DeepSeek) but Anthropic gets no `cache_control` hints.
-    Disabled,
-    /// One breakpoint at the end of the system block. Tool schemas and
-    /// message history are re-billed every turn.
-    SystemOnly,
-    /// System + tools-last + the trailing `N` messages. N is a hint;
-    /// drivers will clip the effective count to the provider's
-    /// breakpoint cap (4 for Anthropic).
-    SystemAndN(u8),
-}
-
-impl PromptCacheStrategy {
-    /// Anthropic's hard cap on `cache_control` breakpoints per request.
-    /// Drivers must not emit more than this across system + tools +
-    /// messages combined.
-    pub const ANTHROPIC_BREAKPOINT_CAP: usize = 4;
-
-    /// Default strategy: `system_and_3`. Empirically saturates the
-    /// 4-slot Anthropic budget (system + tools-last + 2 trailing
-    /// messages) without overflow and yields the ~75 % input-token
-    /// savings reported in the issue.
-    pub const fn default_strategy() -> Self {
-        Self::SystemAndN(3)
-    }
-
-    /// Whether this strategy emits any breakpoints at all. Used by
-    /// drivers to short-circuit before allocating marker structures.
-    pub const fn is_disabled(self) -> bool {
-        matches!(self, Self::Disabled)
-    }
-
-    /// How many trailing-message breakpoints this strategy would like
-    /// to place, **before** the provider-side cap is applied. Used by
-    /// drivers when computing the rolling window.
-    pub const fn message_window(self) -> usize {
-        match self {
-            Self::Disabled | Self::SystemOnly => 0,
-            Self::SystemAndN(n) => n as usize,
-        }
-    }
-
-    /// Whether the system-block breakpoint should be emitted.
-    pub const fn marks_system(self) -> bool {
-        !matches!(self, Self::Disabled)
-    }
-}
-
-impl Default for PromptCacheStrategy {
-    fn default() -> Self {
-        Self::default_strategy()
-    }
-}
-
-impl std::fmt::Display for PromptCacheStrategy {
-    /// Round-trip with [`Self::from_str`] — the wire / TOML form.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Disabled => f.write_str("disabled"),
-            Self::SystemOnly => f.write_str("system_only"),
-            Self::SystemAndN(n) => write!(f, "system_and_{n}"),
-        }
-    }
-}
-
-/// Error returned when [`PromptCacheStrategy::from_str`] cannot parse
-/// a config value. The `Display` impl produces a user-facing message
-/// that points at the bad input.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromptCacheStrategyParseError {
-    pub input: String,
-}
-
-impl std::fmt::Display for PromptCacheStrategyParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "invalid prompt_cache.strategy value {:?}: expected \"disabled\", \"system_only\", or \"system_and_N\" where N is a non-negative integer (e.g. \"system_and_3\")",
-            self.input
-        )
-    }
-}
-
-impl std::error::Error for PromptCacheStrategyParseError {}
-
-impl std::str::FromStr for PromptCacheStrategy {
-    type Err = PromptCacheStrategyParseError;
-
-    /// Parse one of:
-    ///   - `"disabled"`
-    ///   - `"system_only"`
-    ///   - `"system_and_<N>"` where N is a `u8` (`0..=255`)
-    ///
-    /// Matching is case-insensitive on the keyword; the numeric tail
-    /// is parsed exactly. Anything else returns
-    /// [`PromptCacheStrategyParseError`].
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let trimmed = s.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if lower == "disabled" {
-            return Ok(Self::Disabled);
-        }
-        if lower == "system_only" {
-            return Ok(Self::SystemOnly);
-        }
-        if let Some(rest) = lower.strip_prefix("system_and_") {
-            if let Ok(n) = rest.parse::<u8>() {
-                return Ok(Self::SystemAndN(n));
-            }
-        }
-        Err(PromptCacheStrategyParseError {
-            input: trimmed.to_string(),
-        })
-    }
-}
-
-impl Serialize for PromptCacheStrategy {
-    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        ser.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for PromptCacheStrategy {
-    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(de)?;
-        raw.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-/// schemars: emit the union of literal strings the parser accepts plus
-/// the `system_and_<N>` pattern. The string form is the only on-wire
-/// representation, so the schema declares `type: string` with an
-/// informative description.
-impl schemars::JsonSchema for PromptCacheStrategy {
-    fn schema_name() -> String {
-        "PromptCacheStrategy".to_string()
-    }
-
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        let mut obj = schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            ..Default::default()
-        };
-        obj.metadata().description = Some(
-            "Prompt cache strategy. One of: \"disabled\", \"system_only\", or \"system_and_N\" where N is a non-negative integer (e.g. \"system_and_3\")."
-                .to_string(),
-        );
-        schemars::schema::Schema::Object(obj)
-    }
-}
-
-/// Prompt cache configuration section (`[prompt_cache]`).
-///
-/// Lives under [`KernelConfig::prompt_cache`]. The master switch
-/// remains [`KernelConfig::prompt_caching`] — when that is `false`,
-/// drivers ignore this section entirely.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PromptCacheConfig {
-    /// Breakpoint placement strategy. See [`PromptCacheStrategy`] for
-    /// the wire format and the per-provider semantics.
-    #[serde(default)]
-    pub strategy: PromptCacheStrategy,
-    /// TTL hint (seconds) for the cached prefix. Anthropic exposes two
-    /// discrete windows — 5 min (default) and 1 h (beta). The runtime
-    /// maps this hint to the closer of those: ≥ 1800 s selects the 1 h
-    /// beta cache; otherwise the default 5 min ephemeral cache. Other
-    /// providers ignore this hint.
-    #[serde(default = "default_cache_ttl_hint_secs")]
-    pub cache_ttl_hint_secs: u32,
-}
-
-fn default_cache_ttl_hint_secs() -> u32 {
-    300
-}
-
-impl Default for PromptCacheConfig {
-    fn default() -> Self {
-        Self {
-            strategy: PromptCacheStrategy::default(),
-            cache_ttl_hint_secs: default_cache_ttl_hint_secs(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod prompt_cache_tests {
-    use super::*;
-    use std::str::FromStr;
-
-    #[test]
-    fn strategy_parses_disabled() {
-        assert_eq!(
-            PromptCacheStrategy::from_str("disabled").unwrap(),
-            PromptCacheStrategy::Disabled,
-        );
-        // case-insensitive
-        assert_eq!(
-            PromptCacheStrategy::from_str("DISABLED").unwrap(),
-            PromptCacheStrategy::Disabled,
-        );
-    }
-
-    #[test]
-    fn strategy_parses_system_only() {
-        assert_eq!(
-            PromptCacheStrategy::from_str("system_only").unwrap(),
-            PromptCacheStrategy::SystemOnly,
-        );
-    }
-
-    #[test]
-    fn strategy_parses_system_and_n() {
-        assert_eq!(
-            PromptCacheStrategy::from_str("system_and_3").unwrap(),
-            PromptCacheStrategy::SystemAndN(3),
-        );
-        assert_eq!(
-            PromptCacheStrategy::from_str("system_and_0").unwrap(),
-            PromptCacheStrategy::SystemAndN(0),
-        );
-        assert_eq!(
-            PromptCacheStrategy::from_str("system_and_255").unwrap(),
-            PromptCacheStrategy::SystemAndN(255),
-        );
-    }
-
-    #[test]
-    fn strategy_rejects_bad_input() {
-        // Negative / non-numeric tail
-        assert!(PromptCacheStrategy::from_str("system_and_-1").is_err());
-        assert!(PromptCacheStrategy::from_str("system_and_abc").is_err());
-        // Overflow u8
-        assert!(PromptCacheStrategy::from_str("system_and_256").is_err());
-        // Typo
-        assert!(PromptCacheStrategy::from_str("system-only").is_err());
-        // Empty
-        assert!(PromptCacheStrategy::from_str("").is_err());
-        // The error message must mention the bad value for operator
-        // ergonomics — the issue spec requires this.
-        let err = PromptCacheStrategy::from_str("nonsense").unwrap_err();
-        assert!(err.to_string().contains("nonsense"));
-    }
-
-    #[test]
-    fn strategy_display_round_trips() {
-        for s in [
-            PromptCacheStrategy::Disabled,
-            PromptCacheStrategy::SystemOnly,
-            PromptCacheStrategy::SystemAndN(3),
-            PromptCacheStrategy::SystemAndN(0),
-            PromptCacheStrategy::SystemAndN(42),
-        ] {
-            assert_eq!(s.to_string().parse::<PromptCacheStrategy>().unwrap(), s);
-        }
-    }
-
-    #[test]
-    fn strategy_default_is_system_and_3() {
-        assert_eq!(
-            PromptCacheStrategy::default(),
-            PromptCacheStrategy::SystemAndN(3),
-        );
-    }
-
-    #[test]
-    fn strategy_serde_via_string() {
-        // serde uses the same string form as Display/FromStr.
-        let s = PromptCacheStrategy::SystemAndN(3);
-        let json = serde_json::to_string(&s).unwrap();
-        assert_eq!(json, "\"system_and_3\"");
-        let back: PromptCacheStrategy = serde_json::from_str("\"system_only\"").unwrap();
-        assert_eq!(back, PromptCacheStrategy::SystemOnly);
-    }
-
-    #[test]
-    fn strategy_serde_rejects_bad_value_with_clear_error() {
-        // Bad config values should bubble up at deserialize time
-        // (config-load), not silently fall through to the default.
-        let err = serde_json::from_str::<PromptCacheStrategy>("\"bananas\"").unwrap_err();
-        assert!(err.to_string().contains("bananas"));
-    }
-
-    #[test]
-    fn config_default_section_matches_spec() {
-        let c = PromptCacheConfig::default();
-        assert_eq!(c.strategy, PromptCacheStrategy::SystemAndN(3));
-        assert_eq!(c.cache_ttl_hint_secs, 300);
-    }
-
-    #[test]
-    fn config_toml_round_trip() {
-        let toml = r#"
-strategy = "system_and_5"
-cache_ttl_hint_secs = 3600
-"#;
-        let parsed: PromptCacheConfig = toml::from_str(toml).unwrap();
-        assert_eq!(parsed.strategy, PromptCacheStrategy::SystemAndN(5));
-        assert_eq!(parsed.cache_ttl_hint_secs, 3600);
-    }
-
-    #[test]
-    fn config_rejects_unknown_field() {
-        // `deny_unknown_fields` catches typos at config load.
-        let toml = r#"
-strategy = "system_only"
-nope = 1
-"#;
-        assert!(toml::from_str::<PromptCacheConfig>(toml).is_err());
-    }
-
-    #[test]
-    fn strategy_helpers() {
-        assert!(PromptCacheStrategy::Disabled.is_disabled());
-        assert!(!PromptCacheStrategy::SystemOnly.is_disabled());
-        assert!(!PromptCacheStrategy::Disabled.marks_system());
-        assert!(PromptCacheStrategy::SystemOnly.marks_system());
-        assert_eq!(PromptCacheStrategy::Disabled.message_window(), 0);
-        assert_eq!(PromptCacheStrategy::SystemOnly.message_window(), 0);
-        assert_eq!(PromptCacheStrategy::SystemAndN(3).message_window(), 3);
-    }
 }
 
 /// Taint skip rules for a single argument path within a tool.
@@ -5459,13 +4515,7 @@ pub struct NamedTaintRuleSet {
 ///
 /// This is the config.toml representation. The runtime `McpServerConfig`
 /// struct is constructed from this during kernel boot.
-//
-// `deny_unknown_fields` catches typos inside `[[mcp_servers]]` elements at
-// deserialize time. The detect_unknown_nested_fields walker can't see into
-// repeated-table elements (#5130), so the only way to surface a typo in,
-// say, `[[mcp_servers]] timout_secs = 30` is for serde itself to reject it.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
@@ -5692,18 +4742,30 @@ fn default_true() -> bool {
 
 // ── Shared channel timeout defaults ────────────────────────────────
 
-// The shared channel-timeout helpers
-// (`default_channel_initial_backoff_secs`,
-// `default_channel_max_backoff_secs`,
-// `default_channel_initial_backoff_2s`,
-// `default_signal_poll_interval_secs`) are all gone. Their last
-// in-process consumers — Signal, Matrix, WeCom, Feishu, WeChat,
-// Teams, WhatsApp, Webhook, Google Chat — migrated to sidecars;
-// sidecars own their own backoff / poll constants
-// (`INITIAL_BACKOFF_SECS` in `librefang.sidecar.adapters.wecom`,
-// etc.). Re-add when a future in-process channel needs the same
-// shape — until then, `warnings = "deny"` workspace-wide would
-// turn main red on an orphaned helper.
+/// Default initial backoff in seconds for channels using exponential backoff (1s).
+fn default_channel_initial_backoff_secs() -> u64 {
+    1
+}
+
+/// Default maximum backoff in seconds for channels using exponential backoff (60s).
+fn default_channel_max_backoff_secs() -> u64 {
+    60
+}
+
+/// Default initial backoff for channels that default to 2s (WeChat, QQ, Feishu, etc.).
+fn default_channel_initial_backoff_2s() -> u64 {
+    2
+}
+
+/// Default poll interval for Signal (2s).
+fn default_signal_poll_interval_secs() -> u64 {
+    2
+}
+
+/// Default Telegram long-poll timeout (30s).
+fn default_telegram_long_poll_timeout_secs() -> u64 {
+    30
+}
 
 impl Default for KernelConfig {
     fn default() -> Self {
@@ -5720,12 +4782,10 @@ impl Default for KernelConfig {
             default_routing: None,
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
-            memory_wiki: MemoryWikiConfig::default(),
             network: NetworkConfig::default(),
             channels: ChannelsConfig::default(),
             api_key: String::new(),
             require_auth_for_reads: None,
-            external_auth_proxy: false,
             trusted_manifest_signers: Vec::new(),
             dashboard_user: String::new(),
             dashboard_pass: String::new(),
@@ -5741,7 +4801,6 @@ impl Default for KernelConfig {
             stable_prefix_mode: false,
             web: WebConfig::default(),
             fallback_providers: Vec::new(),
-            credential_pools: Vec::new(),
             llm: LlmConfig::default(),
             browser: BrowserConfig::default(),
             extensions: ExtensionsConfig::default(),
@@ -5759,10 +4818,6 @@ impl Default for KernelConfig {
             max_cron_jobs: default_max_cron_jobs(),
             cron_session_max_tokens: None,
             cron_session_max_messages: None,
-            cron_session_warn_fraction: default_cron_session_warn_fraction(),
-            cron_session_warn_total_tokens: default_cron_session_warn_total_tokens(),
-            cron_session_compaction_mode: CronCompactionMode::default(),
-            cron_session_compaction_keep_recent: default_cron_session_compaction_keep_recent(),
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),
             bindings: Vec::new(),
@@ -5771,7 +4826,6 @@ impl Default for KernelConfig {
             canvas: CanvasConfig::default(),
             tts: TtsConfig::default(),
             docker: DockerSandboxConfig::default(),
-            tool_exec: crate::tool_exec::ToolExecConfig::default(),
             pairing: PairingConfig::default(),
             auth_profiles: BTreeMap::new(),
             thinking: None,
@@ -5788,10 +4842,8 @@ impl Default for KernelConfig {
             sidecar_channels: Vec::new(),
             proxy: ProxyConfig::default(),
             prompt_caching: default_prompt_caching(),
-            prompt_cache: PromptCacheConfig::default(),
             session: SessionConfig::default(),
             compaction: CompactionTomlConfig::default(),
-            gateway_compression: GatewayCompressionConfig::default(),
             queue: QueueConfig::default(),
             task_board: TaskBoardConfig::default(),
             external_auth: ExternalAuthConfig::default(),
@@ -5819,7 +4871,7 @@ impl Default for KernelConfig {
             update_channel: UpdateChannel::default(),
             rate_limit: RateLimitConfig::default(),
             tool_timeout_secs: default_tool_timeout_secs(),
-            tool_timeouts: std::collections::BTreeMap::new(),
+            tool_timeouts: std::collections::HashMap::new(),
             max_upload_size_bytes: default_max_upload_size_bytes(),
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
@@ -5827,10 +4879,7 @@ impl Default for KernelConfig {
             terminal: TerminalConfig::default(),
             tool_invoke: ToolInvokeConfig::default(),
             parallel_tools: ParallelToolsConfig::default(),
-            tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
-            workflow_default_total_timeout_secs: None,
-            background: BackgroundConfig::default(),
         }
     }
 }
@@ -5922,10 +4971,6 @@ impl std::fmt::Debug for KernelConfig {
             .field(
                 "fallback_providers",
                 &format!("{} provider(s)", self.fallback_providers.len()),
-            )
-            .field(
-                "credential_pools",
-                &format!("{} pool(s)", self.credential_pools.len()),
             )
             .field("browser", &self.browser)
             .field("extensions", &self.extensions)
@@ -6100,29 +5145,10 @@ pub struct MemoryConfig {
     /// stay forever, leaking embedding storage — see #3467).
     #[serde(default = "default_soft_delete_retention_days")]
     pub soft_delete_retention_days: u64,
-    /// Maximum number of pooled SQLite connections served by the memory
-    /// substrate (#3378 follow-up). The pre-pool design serialised every
-    /// SQLite call through a single `Mutex<Connection>`; the r2d2 pool
-    /// removes that bottleneck but introduces a new ceiling — too low and
-    /// the trigger lane / channel bridges / cron / audit / idempotency
-    /// callers contend on `pool.get()`, too high and per-connection page
-    /// caches add up (each connection holds at most ~2 MiB via
-    /// `PRAGMA cache_size=-2000`). The default of 8 matches
-    /// `queue.concurrency.trigger_lane` so the lane semaphore, not the
-    /// pool, is the limiting factor under typical workloads. Bump in
-    /// lockstep with `trigger_lane` if you raise that, or lower for
-    /// memory-constrained deployments. Pool exhaustion is surfaced via
-    /// the `librefang_memory_pool_get_failed_total{store=...}` counter.
-    #[serde(default = "default_memory_pool_size")]
-    pub pool_size: u32,
 }
 
 fn default_soft_delete_retention_days() -> u64 {
     30
-}
-
-fn default_memory_pool_size() -> u32 {
-    8
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
@@ -6168,129 +5194,8 @@ impl Default for MemoryConfig {
             vector_backend: None,
             vector_store_url: None,
             soft_delete_retention_days: default_soft_delete_retention_days(),
-            pool_size: default_memory_pool_size(),
         }
     }
-}
-
-/// Operating mode for the memory wiki (issue #3329).
-///
-/// * `Isolated` (default) — own vault under `vault_path`, populated only by
-///   explicit `wiki_write` calls. No coupling to the memory substrate.
-/// * `Bridge` — read shared artifacts from the memory substrate through the
-///   public seams. Reserved for follow-up; v1 returns
-///   `WikiError::ModeNotImplemented`.
-/// * `UnsafeLocal` — same-machine escape hatch that points at an existing
-///   filesystem path (e.g. an Obsidian vault). Reserved for follow-up.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryWikiMode {
-    #[default]
-    Isolated,
-    Bridge,
-    UnsafeLocal,
-}
-
-/// Markdown render flavor for vault pages (issue #3329).
-///
-/// * `Native` — plain Markdown links: `[topic](topic.md)`.
-/// * `Obsidian` — Obsidian / Logseq wiki-link syntax: `[[topic]]`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum MemoryWikiRenderMode {
-    #[default]
-    Native,
-    Obsidian,
-}
-
-/// Which `wiki_write` calls actually land on disk.
-///
-/// * `Tagged` (default) — only writes that pass an explicit `topic` tag are
-///   accepted, matching v1 acceptance criteria. Other writes are rejected
-///   with `WikiError::InvalidTopic`.
-/// * `All` — accept every write the kernel forwards. Useful in testing or
-///   in `unsafe_local` mode where the agent already speaks vault semantics.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryWikiIngestFilter {
-    #[default]
-    Tagged,
-    All,
-}
-
-/// Memory wiki configuration (issue #3329). **Off by default** — set
-/// `enabled = true` to opt in.
-///
-/// ```toml
-/// [memory_wiki]
-/// enabled = false
-/// mode = "isolated"                    # isolated | bridge | unsafe_local
-/// vault_path = "~/.librefang/wiki/main"
-/// render_mode = "native"               # native | obsidian
-/// ingest_filter = "tagged"             # tagged | all
-/// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MemoryWikiConfig {
-    /// Master switch. When `false` (default), the wiki is not constructed
-    /// and the `wiki_*` builtin tools all return a `Disabled` error.
-    pub enabled: bool,
-    /// Operating mode (see `MemoryWikiMode`). v1 wires `Isolated`; the
-    /// other variants return `ModeNotImplemented` until follow-up PRs.
-    pub mode: MemoryWikiMode,
-    /// Filesystem location of the vault root. Defaults to
-    /// `<librefang_home>/wiki/main`. The `~` prefix is honoured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vault_path: Option<PathBuf>,
-    /// Markdown render flavor for cross-references (`[[topic]]` placeholders).
-    pub render_mode: MemoryWikiRenderMode,
-    /// Whether the vault accepts every `wiki_write` or only ones with an
-    /// explicit topic tag.
-    pub ingest_filter: MemoryWikiIngestFilter,
-}
-
-impl MemoryWikiConfig {
-    /// Resolve the effective vault root against the kernel's home
-    /// directory. Honours the leading `~` and `~/...` forms (current
-    /// user's home directory) on `vault_path`; falls back to
-    /// `<librefang_home>/wiki/main` when `vault_path` is unset, where
-    /// `<librefang_home>` is the **caller-supplied** `home_dir` rather
-    /// than the env-derived `LIBREFANG_HOME`. That matters for embedded
-    /// or test profiles whose `KernelConfig.home_dir` deliberately
-    /// points somewhere other than `~/.librefang` — the wiki must not
-    /// leak data across profiles.
-    ///
-    /// `~user/...` (POSIX user-name expansion) is **not** honoured —
-    /// only the bare `~` and `~/...` forms are. Set the path explicitly
-    /// with no `~` prefix when targeting another user's home.
-    pub fn resolved_vault_path(&self, home_dir: &std::path::Path) -> PathBuf {
-        if let Some(path) = &self.vault_path {
-            return expand_tilde(path);
-        }
-        home_dir.join("wiki").join("main")
-    }
-}
-
-/// Expand a leading `~` or `~/...` to the current user's home directory.
-/// Other forms (including `~user/...`) are returned unchanged — see
-/// [`MemoryWikiConfig::resolved_vault_path`] for the rationale.
-fn expand_tilde(path: &std::path::Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if let Some(rest) = raw.strip_prefix("~/") {
-        return dirs::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(rest);
-    }
-    if raw.as_ref() == "~" {
-        return dirs::home_dir().unwrap_or_else(std::env::temp_dir);
-    }
-    path.to_path_buf()
 }
 
 /// Time-based memory decay configuration.
@@ -6401,14 +5306,103 @@ impl std::fmt::Debug for NetworkConfig {
 
 /// Channel bridge configuration.
 ///
-/// Every channel runs as a sidecar (`[[sidecar_channels]]` — see
-/// [`SidecarChannelConfig`]); the per-vendor in-process fields that
-/// used to live here (`telegram`, `slack`, `whatsapp`, …, each typed
-/// `OneOrMany<*Config>`) are gone. What remains are the shared
-/// file-transfer caps + download dir that every channel honours.
+/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.telegram]`)
+/// and multi-instance (`[[channels.telegram]]`) TOML syntax for multi-bot routing.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
+    /// Telegram bot configuration(s).
+    pub telegram: OneOrMany<TelegramConfig>,
+    /// Discord bot configuration(s).
+    pub discord: OneOrMany<DiscordConfig>,
+    /// Slack bot configuration(s).
+    pub slack: OneOrMany<SlackConfig>,
+    /// WhatsApp Cloud API configuration(s).
+    pub whatsapp: OneOrMany<WhatsAppConfig>,
+    /// Signal (via signal-cli) configuration(s).
+    pub signal: OneOrMany<SignalConfig>,
+    /// Matrix protocol configuration(s).
+    pub matrix: OneOrMany<MatrixConfig>,
+    /// Email (IMAP/SMTP) configuration(s).
+    pub email: OneOrMany<EmailConfig>,
+    /// Microsoft Teams configuration(s).
+    pub teams: OneOrMany<TeamsConfig>,
+    /// Mattermost configuration(s).
+    pub mattermost: OneOrMany<MattermostConfig>,
+    /// IRC configuration(s).
+    pub irc: OneOrMany<IrcConfig>,
+    /// Google Chat configuration(s).
+    pub google_chat: OneOrMany<GoogleChatConfig>,
+    /// Twitch chat configuration(s).
+    pub twitch: OneOrMany<TwitchConfig>,
+    /// Rocket.Chat configuration(s).
+    pub rocketchat: OneOrMany<RocketChatConfig>,
+    /// Zulip configuration(s).
+    pub zulip: OneOrMany<ZulipConfig>,
+    /// XMPP/Jabber configuration(s).
+    pub xmpp: OneOrMany<XmppConfig>,
+    // Wave 3 — High-value channels
+    /// LINE Messaging API configuration(s).
+    pub line: OneOrMany<LineConfig>,
+    /// Viber Bot API configuration(s).
+    pub viber: OneOrMany<ViberConfig>,
+    /// Facebook Messenger configuration(s).
+    pub messenger: OneOrMany<MessengerConfig>,
+    /// Reddit API configuration(s).
+    pub reddit: OneOrMany<RedditConfig>,
+    /// Mastodon Streaming API configuration(s).
+    pub mastodon: OneOrMany<MastodonConfig>,
+    /// Bluesky/AT Protocol configuration(s).
+    pub bluesky: OneOrMany<BlueskyConfig>,
+    /// Feishu/Lark Open Platform configuration(s).
+    pub feishu: OneOrMany<FeishuConfig>,
+    /// Revolt (Discord-like) configuration(s).
+    pub revolt: OneOrMany<RevoltConfig>,
+    // Wave 4 — Enterprise & community channels
+    /// Nextcloud Talk configuration(s).
+    pub nextcloud: OneOrMany<NextcloudConfig>,
+    /// Guilded bot configuration(s).
+    pub guilded: OneOrMany<GuildedConfig>,
+    /// Keybase chat configuration(s).
+    pub keybase: OneOrMany<KeybaseConfig>,
+    /// Threema Gateway configuration(s).
+    pub threema: OneOrMany<ThreemaConfig>,
+    /// Nostr relay configuration(s).
+    pub nostr: OneOrMany<NostrConfig>,
+    /// Webex bot configuration(s).
+    pub webex: OneOrMany<WebexConfig>,
+    /// Pumble bot configuration(s).
+    pub pumble: OneOrMany<PumbleConfig>,
+    /// Flock bot configuration(s).
+    pub flock: OneOrMany<FlockConfig>,
+    /// Twist API configuration(s).
+    pub twist: OneOrMany<TwistConfig>,
+    // Wave 5 — Niche & differentiating channels
+    /// Mumble text chat configuration(s).
+    pub mumble: OneOrMany<MumbleConfig>,
+    /// DingTalk robot configuration(s).
+    pub dingtalk: OneOrMany<DingTalkConfig>,
+    /// QQ Bot API v2 configuration(s).
+    pub qq: OneOrMany<QqConfig>,
+    /// Discourse forum configuration(s).
+    pub discourse: OneOrMany<DiscourseConfig>,
+    /// Gitter streaming configuration(s).
+    pub gitter: OneOrMany<GitterConfig>,
+    /// ntfy.sh pub/sub configuration(s).
+    pub ntfy: OneOrMany<NtfyConfig>,
+    /// Gotify notification configuration(s).
+    pub gotify: OneOrMany<GotifyConfig>,
+    /// Generic webhook configuration(s).
+    pub webhook: OneOrMany<WebhookConfig>,
+    /// Voice channel (WebSocket + STT/TTS) configuration(s).
+    pub voice: OneOrMany<VoiceConfig>,
+    /// LinkedIn messaging configuration(s).
+    pub linkedin: OneOrMany<LinkedInConfig>,
+    /// WeChat personal account (iLink) configuration(s).
+    pub wechat: OneOrMany<WeChatConfig>,
+    /// WeCom/WeChat Work configuration(s).
+    pub wecom: OneOrMany<WeComConfig>,
+
     // --- Global file-download settings ---
     /// Maximum file size in bytes for channel file downloads (default: 50 MB).
     #[serde(default = "default_file_download_max_bytes")]
@@ -6418,35 +5412,10 @@ pub struct ChannelsConfig {
     /// When `None`, defaults to `std::env::temp_dir()/librefang_uploads`.
     #[serde(default)]
     pub file_download_dir: Option<String>,
-
-    // --- Global file-upload settings ---
-    /// Maximum file size in bytes for channel file uploads (bot → server),
-    /// applied uniformly by the Matrix and Telegram adapters before sending
-    /// outbound media (default: 50 MB).
-    ///
-    /// Distinct from `file_download_max_bytes` (inbound: server → agent →
-    /// disk). An operator who wants a larger inbound budget but a smaller
-    /// outbound budget — or vice versa — must set both independently. The
-    /// 50 MiB default matches both the Matrix homeserver convention and
-    /// Telegram's bot API ceiling, so omitting the field leaves behaviour
-    /// unchanged from the pre-#4882 hardcoded constants.
-    #[serde(default = "default_file_upload_max_bytes")]
-    pub file_upload_max_bytes: u64,
 }
 
 /// Default max file download size: 50 MB.
 fn default_file_download_max_bytes() -> u64 {
-    50 * 1024 * 1024
-}
-
-/// Default max file upload size: 50 MB.
-///
-/// Same numeric value as the download default but a separate function so
-/// the two can drift if the protocol ceilings ever diverge (Matrix's
-/// theoretical event-size limit is much higher than Telegram's bot API
-/// 50 MiB, but the conservative shared default protects operators from
-/// surprises on the smaller-cap side).
-fn default_file_upload_max_bytes() -> u64 {
     50 * 1024 * 1024
 }
 
@@ -6460,9 +5429,52 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
+            telegram: OneOrMany::default(),
+            discord: OneOrMany::default(),
+            slack: OneOrMany::default(),
+            whatsapp: OneOrMany::default(),
+            signal: OneOrMany::default(),
+            matrix: OneOrMany::default(),
+            email: OneOrMany::default(),
+            teams: OneOrMany::default(),
+            mattermost: OneOrMany::default(),
+            irc: OneOrMany::default(),
+            google_chat: OneOrMany::default(),
+            twitch: OneOrMany::default(),
+            rocketchat: OneOrMany::default(),
+            zulip: OneOrMany::default(),
+            xmpp: OneOrMany::default(),
+            line: OneOrMany::default(),
+            viber: OneOrMany::default(),
+            messenger: OneOrMany::default(),
+            reddit: OneOrMany::default(),
+            mastodon: OneOrMany::default(),
+            bluesky: OneOrMany::default(),
+            feishu: OneOrMany::default(),
+            revolt: OneOrMany::default(),
+            nextcloud: OneOrMany::default(),
+            guilded: OneOrMany::default(),
+            keybase: OneOrMany::default(),
+            threema: OneOrMany::default(),
+            nostr: OneOrMany::default(),
+            webex: OneOrMany::default(),
+            pumble: OneOrMany::default(),
+            flock: OneOrMany::default(),
+            twist: OneOrMany::default(),
+            mumble: OneOrMany::default(),
+            dingtalk: OneOrMany::default(),
+            qq: OneOrMany::default(),
+            discourse: OneOrMany::default(),
+            gitter: OneOrMany::default(),
+            ntfy: OneOrMany::default(),
+            gotify: OneOrMany::default(),
+            webhook: OneOrMany::default(),
+            voice: OneOrMany::default(),
+            linkedin: OneOrMany::default(),
+            wechat: OneOrMany::default(),
+            wecom: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
-            file_upload_max_bytes: default_file_upload_max_bytes(),
         }
     }
 }
@@ -6487,85 +5499,1858 @@ impl ChannelsConfig {
     }
 }
 
-// whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
-// the in-process `WhatsAppConfig` + `[channels.whatsapp]` block were
-// removed in this migration. See SIDECAR_CATALOG in
-// librefang-api/src/routes/channels.rs.
+/// Telegram channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct TelegramConfig {
+    /// Env var name holding the bot token (NOT the token itself).
+    pub bot_token_env: String,
+    /// Telegram user IDs allowed to interact (empty = allow all).
+    /// Accepts strings for consistency; numeric TOML integers are coerced to strings.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Polling interval in seconds.
+    pub poll_interval_secs: u64,
+    /// Custom Telegram Bot API base URL for proxies or mirrors.
+    /// Defaults to `https://api.telegram.org` when not set.
+    #[serde(default)]
+    pub api_url: Option<String>,
+    /// Initial backoff in seconds on API failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on API failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// Long-poll timeout in seconds sent to getUpdates (default: 30).
+    #[serde(default = "default_telegram_long_poll_timeout_secs")]
+    pub long_poll_timeout_secs: u64,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+    /// Message coalescing window in milliseconds for Telegram-specific
+    /// ergonomics (#4145). When set, messages from the same sender arriving
+    /// within this window are buffered and dispatched to the agent as a
+    /// single batched context. This prevents out-of-order processing in the
+    /// common pattern where a user forwards a message and immediately follows
+    /// up with a comment.
+    ///
+    /// This is a thin alias for [`ChannelOverrides::message_debounce_ms`]:
+    /// if `overrides.message_debounce_ms` is non-zero it wins; otherwise the
+    /// value here is applied. `Some(0)` explicitly disables coalescing.
+    /// `None` (default) leaves behavior unchanged.
+    #[serde(default)]
+    pub message_coalesce_window_ms: Option<u64>,
+    /// Thread-based agent routing for forum topics.
+    ///
+    /// Maps Telegram `message_thread_id` (as string) to an agent name.
+    /// Messages in a matched thread are routed to that agent instead of
+    /// the `default_agent`. Unmatched threads fall back to normal routing.
+    ///
+    /// ```toml
+    /// [channels.telegram.thread_routes]
+    /// "12345" = "research-agent"
+    /// "67890" = "coding-agent"
+    /// ```
+    #[serde(default)]
+    pub thread_routes: std::collections::HashMap<String, String>,
+}
 
-// signal migrated to a sidecar (librefang.sidecar.adapters.signal);
-// the in-process `SignalConfig` + `[channels.signal]` block were
-// removed in this migration. See SIDECAR_CATALOG in
-// librefang-api/src/routes/channels.rs.
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
+            allowed_users: vec![],
+            account_id: None,
+            default_agent: None,
+            poll_interval_secs: 1,
+            api_url: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
+            long_poll_timeout_secs: default_telegram_long_poll_timeout_secs(),
+            overrides: ChannelOverrides::default(),
+            message_coalesce_window_ms: None,
+            thread_routes: std::collections::HashMap::new(),
+        }
+    }
+}
 
-// matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
-// the in-process `MatrixConfig` + `[channels.matrix]` block were
-// removed in this migration. See SIDECAR_CATALOG in
-// librefang-api/src/routes/channels.rs.
+impl TelegramConfig {
+    /// Returns a [`ChannelOverrides`] with the Telegram-specific
+    /// `message_coalesce_window_ms` alias applied to
+    /// [`ChannelOverrides::message_debounce_ms`].
+    ///
+    /// Resolution rules (#4145):
+    /// 1. If `overrides.message_debounce_ms` is non-zero, it wins.
+    /// 2. Otherwise, if `message_coalesce_window_ms` is `Some`, that value
+    ///    is copied into `message_debounce_ms` (including `Some(0)`, which
+    ///    is a no-op since the existing field is already 0).
+    /// 3. Otherwise the unmodified clone of `overrides` is returned.
+    pub fn effective_overrides(&self) -> ChannelOverrides {
+        let mut ov = self.overrides.clone();
+        if ov.message_debounce_ms == 0 {
+            if let Some(window) = self.message_coalesce_window_ms {
+                ov.message_debounce_ms = window;
+            }
+        }
+        ov
+    }
+}
 
-// email migrated to a sidecar (librefang.sidecar.adapters.email);
-// the in-process `EmailConfig` + `[channels.email]` block were
-// removed in this migration. See SIDECAR_CATALOG in
-// librefang-api/src/routes/channels.rs.
+/// Discord channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct DiscordConfig {
+    /// Env var name holding the bot token (NOT the token itself).
+    pub bot_token_env: String,
+    /// Guild (server) IDs allowed to interact (empty = allow all).
+    /// Accepts strings for consistency with other channel configs.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_guilds: Vec<String>,
+    /// User IDs allowed to interact (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Gateway intents bitmask (default: 37376 = GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT).
+    pub intents: u64,
+    /// Ignore messages from other bots (default: true).
+    /// Set to false to allow bot-to-bot interactions in multi-agent setups.
+    #[serde(default = "default_true")]
+    pub ignore_bots: bool,
+    /// Custom text patterns that trigger the bot (case-insensitive contains match).
+    /// When any pattern matches the message content, the bot treats it as if it was mentioned.
+    /// Example: `["hey bot", "!ask"]`
+    #[serde(default)]
+    pub mention_patterns: Vec<String>,
+    /// Initial backoff in seconds on WebSocket failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on WebSocket failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
 
-// teams migrated to a sidecar (librefang.sidecar.adapters.teams);
-// the in-process `TeamsConfig` + `[channels.teams]` block were removed
-// in this migration. See SIDECAR_CATALOG in
-// librefang-api/src/routes/channels.rs.
+impl Default for DiscordConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_env: "DISCORD_BOT_TOKEN".to_string(),
+            allowed_guilds: vec![],
+            allowed_users: vec![],
+            account_id: None,
+            default_agent: None,
+            intents: 37376,
+            ignore_bots: true,
+            mention_patterns: vec![],
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
 
-// mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
-// the in-process `MattermostConfig` + `[channels.mattermost]` block were
-// removed in this migration. See SIDECAR_CATALOG in
-// librefang-api/src/routes/channels.rs.
+/// Slack channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct SlackConfig {
+    /// Env var name holding the app-level token (xapp-) for Socket Mode.
+    pub app_token_env: String,
+    /// Env var name holding the bot token (xoxb-) for REST API.
+    pub bot_token_env: String,
+    /// Channel IDs allowed to interact (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_channels: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Whether to disable link unfurling (preview expansion) in sent messages.
+    /// When set to `false`, Slack will not expand link previews.
+    /// When `None` (default), Slack uses its own default behavior.
+    #[serde(default)]
+    pub unfurl_links: Option<bool>,
+    /// Initial backoff in seconds on WebSocket failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on WebSocket failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+    /// When true, bot replies are posted as top-level channel messages instead
+    /// of threaded replies. Defaults to `None` (i.e. use normal threading).
+    #[serde(default)]
+    pub force_flat_replies: Option<bool>,
+}
 
-// GoogleChatConfig removed — google_chat migrated to a sidecar
-// (librefang.sidecar.adapters.google_chat). Service-account JSON now
-// lives in `[sidecar_channels.env] GOOGLE_CHAT_SERVICE_ACCOUNT_JSON`
-// (the full JSON blob, secret-routed via secrets.env); space IDs in
-// `GOOGLE_CHAT_SPACE_IDS` (CSV); webhook port in
-// `GOOGLE_CHAT_WEBHOOK_PORT`; multi-bot id in
-// `GOOGLE_CHAT_ACCOUNT_ID`. See SIDECAR_CATALOG in
-// librefang-api/src/routes/channels.rs.
+impl Default for SlackConfig {
+    fn default() -> Self {
+        Self {
+            app_token_env: "SLACK_APP_TOKEN".to_string(),
+            bot_token_env: "SLACK_BOT_TOKEN".to_string(),
+            allowed_channels: vec![],
+            account_id: None,
+            default_agent: None,
+            unfurl_links: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
+            overrides: ChannelOverrides::default(),
+            force_flat_replies: None,
+        }
+    }
+}
 
-// zulip migrated to an out-of-process sidecar adapter
-// (librefang.sidecar.adapters.zulip); the in-process `ZulipConfig`
-// + `[channels.zulip]` block were removed in this migration.
+/// WhatsApp Cloud API channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct WhatsAppConfig {
+    /// Env var name holding the access token (Cloud API mode).
+    pub access_token_env: String,
+    /// Env var name holding the webhook verify token (Cloud API mode).
+    pub verify_token_env: String,
+    /// WhatsApp Business phone number ID (Cloud API mode).
+    pub phone_number_id: String,
+    /// Port to listen for webhook callbacks (Cloud API mode).
+    pub webhook_port: u16,
+    /// Env var name holding the WhatsApp Web gateway URL (QR/Web mode).
+    /// When set, outgoing messages are routed through the gateway instead of Cloud API.
+    pub gateway_url_env: String,
+    /// Allowed phone numbers (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Owner phone numbers for owner-routing mode (digits only, no '+' prefix).
+    /// When set, messages from non-owner numbers are forwarded to the first
+    /// owner number with sender context, and the sender receives an auto-ack.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub owner_numbers: Vec<String>,
+    /// Conversation tracker TTL in hours (Web gateway mode).
+    /// Active stranger conversations expire after this period of inactivity.
+    #[serde(default = "default_conversation_ttl_hours")]
+    pub conversation_ttl_hours: u32,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+fn default_conversation_ttl_hours() -> u32 {
+    24
+}
+
+fn default_local_probe_interval_secs() -> u64 {
+    60
+}
+
+impl Default for WhatsAppConfig {
+    fn default() -> Self {
+        Self {
+            access_token_env: "WHATSAPP_ACCESS_TOKEN".to_string(),
+            verify_token_env: "WHATSAPP_VERIFY_TOKEN".to_string(),
+            phone_number_id: String::new(),
+            webhook_port: 8443,
+            gateway_url_env: "WHATSAPP_WEB_GATEWAY_URL".to_string(),
+            allowed_users: vec![],
+            account_id: None,
+            default_agent: None,
+            owner_numbers: vec![],
+            conversation_ttl_hours: default_conversation_ttl_hours(),
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Signal channel adapter configuration (via signal-cli REST API).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct SignalConfig {
+    /// URL of the signal-cli REST API (e.g., "http://localhost:8080").
+    pub api_url: String,
+    /// Registered phone number.
+    pub phone_number: String,
+    /// Allowed phone numbers (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Poll interval in seconds for checking new messages (default: 2).
+    #[serde(default = "default_signal_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Optional API key sent as `Authorization: Bearer <api_key>` on every request.
+    /// If absent, requests are sent without an Authorization header.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses.
+    /// Defaults to `false`; set to `true` only when signal-cli runs on localhost.
+    #[serde(default)]
+    pub allow_local: bool,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for SignalConfig {
+    fn default() -> Self {
+        Self {
+            api_url: "http://localhost:8080".to_string(),
+            phone_number: String::new(),
+            allowed_users: vec![],
+            account_id: None,
+            default_agent: None,
+            poll_interval_secs: default_signal_poll_interval_secs(),
+            api_key: None,
+            allow_local: false,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Matrix protocol channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MatrixConfig {
+    /// Matrix homeserver URL (e.g., `"https://matrix.org"`).
+    pub homeserver_url: String,
+    /// Bot user ID (e.g., "@librefang:matrix.org").
+    pub user_id: String,
+    /// Env var name holding the access token.
+    pub access_token_env: String,
+    /// Room IDs to listen in (empty = all joined rooms).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_rooms: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Whether to auto-accept room invites (default: false).
+    #[serde(default)]
+    pub auto_accept_invites: bool,
+    /// Initial backoff in seconds on sync failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on sync failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for MatrixConfig {
+    fn default() -> Self {
+        Self {
+            homeserver_url: "https://matrix.org".to_string(),
+            user_id: String::new(),
+            access_token_env: "MATRIX_ACCESS_TOKEN".to_string(),
+            allowed_rooms: vec![],
+            account_id: None,
+            default_agent: None,
+            auto_accept_invites: false,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Email (IMAP/SMTP) channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct EmailConfig {
+    /// IMAP server host.
+    pub imap_host: String,
+    /// IMAP port (993 for TLS).
+    pub imap_port: u16,
+    /// SMTP server host.
+    pub smtp_host: String,
+    /// SMTP port (587 for STARTTLS).
+    pub smtp_port: u16,
+    /// Email address (used for both IMAP and SMTP).
+    pub username: String,
+    /// Env var name holding the password.
+    pub password_env: String,
+    /// Poll interval in seconds.
+    pub poll_interval_secs: u64,
+    /// IMAP folders to monitor.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub folders: Vec<String>,
+    /// Only process emails from these senders (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_senders: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            imap_host: String::new(),
+            imap_port: 993,
+            smtp_host: String::new(),
+            smtp_port: 587,
+            username: String::new(),
+            password_env: "EMAIL_PASSWORD".to_string(),
+            poll_interval_secs: 30,
+            folders: vec!["INBOX".to_string()],
+            allowed_senders: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Microsoft Teams (Bot Framework v3) channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct TeamsConfig {
+    /// Azure Bot App ID.
+    pub app_id: String,
+    /// Env var name holding the app password.
+    pub app_password_env: String,
+    /// Env var name holding the outgoing webhook security token (base64-encoded).
+    /// Used for HMAC-SHA256 verification of inbound webhook requests.
+    /// Required by default; setting `signature_required = false` opts out (dev only).
+    #[serde(default)]
+    pub security_token_env: String,
+    /// Reject adapter startup unless a security token is configured (default `true`).
+    /// Setting to `false` is strongly discouraged — webhook becomes a public endpoint.
+    #[serde(default = "default_true")]
+    pub signature_required: bool,
+    /// Port for the incoming webhook.
+    pub webhook_port: u16,
+    /// Allowed tenant IDs (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_tenants: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for TeamsConfig {
+    fn default() -> Self {
+        Self {
+            app_id: String::new(),
+            app_password_env: "TEAMS_APP_PASSWORD".to_string(),
+            security_token_env: "TEAMS_SECURITY_TOKEN".to_string(),
+            signature_required: true,
+            webhook_port: 3978,
+            allowed_tenants: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Mattermost channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MattermostConfig {
+    /// Mattermost server URL (e.g., `"https://mattermost.example.com"`).
+    pub server_url: String,
+    /// Env var name holding the bot token.
+    pub token_env: String,
+    /// Allowed channel IDs (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_channels: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Initial backoff in seconds on WebSocket failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on WebSocket failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for MattermostConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            token_env: "MATTERMOST_TOKEN".to_string(),
+            allowed_channels: vec![],
+            account_id: None,
+            default_agent: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// IRC channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct IrcConfig {
+    /// IRC server hostname.
+    pub server: String,
+    /// IRC server port.
+    pub port: u16,
+    /// Bot nickname.
+    pub nick: String,
+    /// Env var name holding the server password (optional).
+    pub password_env: Option<String>,
+    /// Channels to join (e.g., `["#librefang", "#general"]`).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub channels: Vec<String>,
+    /// Use TLS (requires tokio-native-tls).
+    pub use_tls: bool,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Initial backoff in seconds on connection failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on connection failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for IrcConfig {
+    fn default() -> Self {
+        Self {
+            server: "irc.libera.chat".to_string(),
+            port: 6667,
+            nick: "librefang".to_string(),
+            password_env: None,
+            channels: vec![],
+            use_tls: false,
+            account_id: None,
+            default_agent: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Google Chat channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct GoogleChatConfig {
+    /// Env var name holding the service account JSON key.
+    pub service_account_env: String,
+    /// Path to a Google service account JSON key file (alternative to env var).
+    /// When set, JWT authentication is used to obtain OAuth2 access tokens.
+    #[serde(default)]
+    pub service_account_key_path: Option<String>,
+    /// Space IDs to listen in.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub space_ids: Vec<String>,
+    /// Port for the incoming webhook.
+    pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for GoogleChatConfig {
+    fn default() -> Self {
+        Self {
+            service_account_env: "GOOGLE_CHAT_SERVICE_ACCOUNT".to_string(),
+            service_account_key_path: None,
+            space_ids: vec![],
+            webhook_port: 8444,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Twitch chat channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct TwitchConfig {
+    /// Env var name holding the OAuth token.
+    pub oauth_token_env: String,
+    /// Twitch channels to join (without #).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub channels: Vec<String>,
+    /// Bot nickname.
+    pub nick: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for TwitchConfig {
+    fn default() -> Self {
+        Self {
+            oauth_token_env: "TWITCH_OAUTH_TOKEN".to_string(),
+            channels: vec![],
+            nick: "librefang".to_string(),
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Rocket.Chat channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RocketChatConfig {
+    /// Rocket.Chat server URL.
+    pub server_url: String,
+    /// Env var name holding the auth token.
+    pub token_env: String,
+    /// User ID for the bot.
+    pub user_id: String,
+    /// Allowed channel IDs (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_channels: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for RocketChatConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            token_env: "ROCKETCHAT_TOKEN".to_string(),
+            user_id: String::new(),
+            allowed_channels: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Zulip channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ZulipConfig {
+    /// Zulip server URL.
+    pub server_url: String,
+    /// Bot email address.
+    pub bot_email: String,
+    /// Env var name holding the API key.
+    pub api_key_env: String,
+    /// Streams to listen in.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub streams: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for ZulipConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            bot_email: String::new(),
+            api_key_env: "ZULIP_API_KEY".to_string(),
+            streams: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// XMPP/Jabber channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct XmppConfig {
+    /// JID (e.g., "bot@jabber.org").
+    pub jid: String,
+    /// Env var name holding the password.
+    pub password_env: String,
+    /// XMPP server hostname (defaults to JID domain).
+    pub server: String,
+    /// XMPP server port.
+    pub port: u16,
+    /// MUC rooms to join.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub rooms: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for XmppConfig {
+    fn default() -> Self {
+        Self {
+            jid: String::new(),
+            password_env: "XMPP_PASSWORD".to_string(),
+            server: String::new(),
+            port: 5222,
+            rooms: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
 
 // ── Wave 3 channel configs ─────────────────────────────────────────
-// line migrated to a sidecar (librefang.sidecar.adapters.line); see
-// SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-// feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
-// the in-process `FeishuConfig` + `[channels.feishu]` block were
-// removed in this migration.
 
-// WeCom (`WeComConfig` / `WeComMode`) migrated to a sidecar
-// (librefang.sidecar.adapters.wecom); see SIDECAR_CATALOG in
-// librefang-api/src/routes/channels.rs. The legacy callback mode
-// (HTTP webhook + AES-CBC-256 inbound payload decryption) is NOT
-// ported — Python stdlib has no AES, and the sidecar SDK is
-// stdlib-only by policy. Operators on callback mode must switch
-// the bot to WebSocket mode in the WeCom admin console.
+/// LINE Messaging API channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct LineConfig {
+    /// Env var name holding the channel secret.
+    pub channel_secret_env: String,
+    /// Env var name holding the channel access token.
+    pub access_token_env: String,
+    /// Port for the incoming webhook.
+    pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
 
-// wechat migrated to a sidecar (librefang.sidecar.adapters.wechat); the
-// in-process `WeChatConfig` + `[channels.wechat]` block were removed in
-// this migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+impl Default for LineConfig {
+    fn default() -> Self {
+        Self {
+            channel_secret_env: "LINE_CHANNEL_SECRET".to_string(),
+            access_token_env: "LINE_CHANNEL_ACCESS_TOKEN".to_string(),
+            webhook_port: 8450,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Viber Bot API channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ViberConfig {
+    /// Env var name holding the auth token.
+    pub auth_token_env: String,
+    /// Webhook URL for receiving messages.
+    pub webhook_url: String,
+    /// Port for the incoming webhook.
+    pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for ViberConfig {
+    fn default() -> Self {
+        Self {
+            auth_token_env: "VIBER_AUTH_TOKEN".to_string(),
+            webhook_url: String::new(),
+            webhook_port: 8451,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Facebook Messenger Platform channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MessengerConfig {
+    /// Env var name holding the page access token.
+    pub page_token_env: String,
+    /// Env var name holding the webhook verify token.
+    pub verify_token_env: String,
+    /// Env var name holding the Facebook App Secret.
+    /// Used for HMAC-SHA1 verification of incoming webhook POST requests
+    /// via `X-Hub-Signature`. If absent or empty, verification is skipped
+    /// with a warning (backwards compatibility).
+    #[serde(default)]
+    pub app_secret_env: String,
+    /// Port for the incoming webhook.
+    pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for MessengerConfig {
+    fn default() -> Self {
+        Self {
+            page_token_env: "MESSENGER_PAGE_TOKEN".to_string(),
+            verify_token_env: "MESSENGER_VERIFY_TOKEN".to_string(),
+            app_secret_env: "MESSENGER_APP_SECRET".to_string(),
+            webhook_port: 8452,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Reddit API channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RedditConfig {
+    /// Reddit app client ID.
+    pub client_id: String,
+    /// Env var name holding the client secret.
+    pub client_secret_env: String,
+    /// Reddit bot username.
+    pub username: String,
+    /// Env var name holding the bot password.
+    pub password_env: String,
+    /// Subreddits to monitor.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub subreddits: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for RedditConfig {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            client_secret_env: "REDDIT_CLIENT_SECRET".to_string(),
+            username: String::new(),
+            password_env: "REDDIT_PASSWORD".to_string(),
+            subreddits: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Mastodon Streaming API channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MastodonConfig {
+    /// Mastodon instance URL (e.g., `"https://mastodon.social"`).
+    pub instance_url: String,
+    /// Env var name holding the access token.
+    pub access_token_env: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for MastodonConfig {
+    fn default() -> Self {
+        Self {
+            instance_url: String::new(),
+            access_token_env: "MASTODON_ACCESS_TOKEN".to_string(),
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Bluesky/AT Protocol channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct BlueskyConfig {
+    /// Bluesky identifier (handle or DID).
+    pub identifier: String,
+    /// Env var name holding the app password.
+    pub app_password_env: String,
+    /// PDS service URL.
+    pub service_url: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for BlueskyConfig {
+    fn default() -> Self {
+        Self {
+            identifier: String::new(),
+            app_password_env: "BLUESKY_APP_PASSWORD".to_string(),
+            service_url: "https://bsky.social".to_string(),
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Feishu/Lark Open Platform channel adapter configuration.
+///
+/// Feishu (CN) and Lark (international) share the same API — set `region` to
+/// `"intl"` for Lark or `"cn"` (default) for Feishu. The `receive_mode` field
+/// controls whether the adapter uses a webhook HTTP server or a long-lived
+/// WebSocket connection (default) to receive events.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct FeishuConfig {
+    /// Feishu app ID.
+    pub app_id: String,
+    /// Env var name holding the app secret.
+    pub app_secret_env: String,
+    /// API region: `"cn"` for Feishu (default) or `"intl"` for Lark.
+    #[serde(default)]
+    pub region: String,
+    /// How to receive inbound events: `"websocket"` (default) or `"webhook"`.
+    #[serde(default = "default_receive_mode")]
+    pub receive_mode: String,
+    /// Port for the incoming webhook (only used when `receive_mode = "webhook"`).
+    pub webhook_port: u16,
+    /// Verification token for webhook event validation (webhook mode only).
+    #[serde(default)]
+    pub verification_token: Option<String>,
+    /// Encrypt key for webhook event decryption (webhook mode only).
+    #[serde(default)]
+    pub encrypt_key: Option<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+fn default_receive_mode() -> String {
+    "websocket".to_string()
+}
+
+impl Default for FeishuConfig {
+    fn default() -> Self {
+        Self {
+            app_id: String::new(),
+            app_secret_env: "FEISHU_APP_SECRET".to_string(),
+            region: "cn".to_string(),
+            receive_mode: "websocket".to_string(),
+            webhook_port: 8453,
+            verification_token: None,
+            encrypt_key: None,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Connection mode for the WeCom intelligent bot adapter.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WeComMode {
+    /// WebSocket long-connection (no public endpoint required).
+    #[default]
+    Websocket,
+    /// URL callback (requires a publicly reachable HTTP endpoint).
+    Callback,
+}
+
+/// WeCom intelligent bot adapter configuration.
+///
+/// Supports two connection modes:
+/// - `websocket` (default): connects to `wss://openws.work.weixin.qq.com`
+/// - `callback`: starts an HTTP server to receive message callbacks
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct WeComConfig {
+    /// Bot ID obtained from the WeCom admin console.
+    pub bot_id: String,
+    /// Env var name holding the bot secret.
+    pub secret_env: String,
+    /// Connection mode: "websocket" (default) or "callback".
+    pub mode: WeComMode,
+    /// Port for the callback HTTP server (only used in callback mode).
+    pub webhook_port: u16,
+    /// Env var name holding the callback verification token (callback mode only).
+    pub token_env: Option<String>,
+    /// Env var name holding the EncodingAESKey (callback mode only).
+    pub encoding_aes_key_env: Option<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for WeComConfig {
+    fn default() -> Self {
+        Self {
+            bot_id: String::new(),
+            secret_env: "WECOM_BOT_SECRET".to_string(),
+            mode: WeComMode::default(),
+            webhook_port: 8454,
+            token_env: None,
+            encoding_aes_key_env: None,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// WeChat personal account (iLink protocol) adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct WeChatConfig {
+    /// Env var name holding the bot token from a previous QR login session.
+    /// If the env var is set and non-empty, the adapter skips QR login.
+    pub bot_token_env: String,
+    /// Allowed user IDs (empty = allow all). Format: `{hash}@im.wechat`.
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Initial backoff in seconds on API failures (default: 2).
+    #[serde(default = "default_channel_initial_backoff_2s")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on API failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for WeChatConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_env: "WECHAT_BOT_TOKEN".to_string(),
+            allowed_users: vec![],
+            account_id: None,
+            default_agent: None,
+            initial_backoff_secs: default_channel_initial_backoff_2s(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Revolt (Discord-like) channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RevoltConfig {
+    /// Env var name holding the bot token.
+    pub bot_token_env: String,
+    /// Revolt API URL (set to your self-hosted instance URL if not using revolt.chat).
+    pub api_url: String,
+    /// Revolt WebSocket URL (set to your self-hosted instance WS URL if not using revolt.chat).
+    pub ws_url: String,
+    /// Restrict to specific channel IDs (empty = all channels the bot is in).
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for RevoltConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_env: "REVOLT_BOT_TOKEN".to_string(),
+            api_url: "https://api.revolt.chat".to_string(),
+            ws_url: "wss://ws.revolt.chat".to_string(),
+            allowed_channels: Vec::new(),
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
 
 // ── Wave 4 channel configs ─────────────────────────────────────────
-// webex migrated to a sidecar (librefang.sidecar.adapters.webex); see
-// SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+
+/// Nextcloud Talk channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct NextcloudConfig {
+    /// Nextcloud server URL.
+    pub server_url: String,
+    /// Env var name holding the auth token.
+    pub token_env: String,
+    /// Room tokens to listen in (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_rooms: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for NextcloudConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            token_env: "NEXTCLOUD_TOKEN".to_string(),
+            allowed_rooms: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Guilded bot channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct GuildedConfig {
+    /// Env var name holding the bot token.
+    pub bot_token_env: String,
+    /// Server IDs to listen in (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub server_ids: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for GuildedConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_env: "GUILDED_BOT_TOKEN".to_string(),
+            server_ids: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Keybase chat channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct KeybaseConfig {
+    /// Keybase username.
+    pub username: String,
+    /// Env var name holding the paper key.
+    pub paperkey_env: String,
+    /// Team names to listen in (empty = all DMs).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_teams: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for KeybaseConfig {
+    fn default() -> Self {
+        Self {
+            username: String::new(),
+            paperkey_env: "KEYBASE_PAPERKEY".to_string(),
+            allowed_teams: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Threema Gateway channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ThreemaConfig {
+    /// Threema Gateway ID.
+    pub threema_id: String,
+    /// Env var name holding the API secret.
+    pub secret_env: String,
+    /// Port for the incoming webhook.
+    pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for ThreemaConfig {
+    fn default() -> Self {
+        Self {
+            threema_id: String::new(),
+            secret_env: "THREEMA_SECRET".to_string(),
+            webhook_port: 8454,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Nostr relay channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct NostrConfig {
+    /// Env var name holding the private key (nsec or hex).
+    pub private_key_env: String,
+    /// Relay URLs to connect to.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub relays: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for NostrConfig {
+    fn default() -> Self {
+        Self {
+            private_key_env: "NOSTR_PRIVATE_KEY".to_string(),
+            relays: vec!["wss://relay.damus.io".to_string()],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Webex bot channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct WebexConfig {
+    /// Env var name holding the bot token.
+    pub bot_token_env: String,
+    /// Room IDs to listen in (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_rooms: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for WebexConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_env: "WEBEX_BOT_TOKEN".to_string(),
+            allowed_rooms: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Pumble bot channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct PumbleConfig {
+    /// Env var name holding the bot token.
+    pub bot_token_env: String,
+    /// Port for the incoming webhook.
+    pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for PumbleConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_env: "PUMBLE_BOT_TOKEN".to_string(),
+            webhook_port: 8455,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Flock bot channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct FlockConfig {
+    /// Env var name holding the bot token.
+    pub bot_token_env: String,
+    /// Port for the incoming webhook.
+    pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for FlockConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_env: "FLOCK_BOT_TOKEN".to_string(),
+            webhook_port: 8456,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Twist API v3 channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct TwistConfig {
+    /// Env var name holding the API token.
+    pub token_env: String,
+    /// Workspace ID.
+    pub workspace_id: String,
+    /// Channel IDs to listen in (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_channels: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for TwistConfig {
+    fn default() -> Self {
+        Self {
+            token_env: "TWIST_TOKEN".to_string(),
+            workspace_id: String::new(),
+            allowed_channels: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
 
 // ── Wave 5 channel configs ─────────────────────────────────────────
-// dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk); the
-// in-process `DingTalkConfig` + `DingTalkReceiveMode` + `[channels.dingtalk]`
-// block were removed in this migration. See SIDECAR_CATALOG in
-// librefang-api/src/routes/channels.rs.
 
-// qq migrated to a sidecar (librefang.sidecar.adapters.qq); the
-// in-process `QqConfig` + `[channels.qq]` block were removed in this
-// migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+/// Mumble text chat channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MumbleConfig {
+    /// Mumble server hostname.
+    pub host: String,
+    /// Mumble server port.
+    pub port: u16,
+    /// Bot username.
+    pub username: String,
+    /// Env var name holding the server password.
+    pub password_env: String,
+    /// Channel to join.
+    pub channel: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
 
-// webhook migrated to a sidecar (librefang.sidecar.adapters.webhook); the
-// in-process `WebhookConfig` + `[channels.webhook]` block were removed in
-// this migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+impl Default for MumbleConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 64738,
+            username: "librefang".to_string(),
+            password_env: "MUMBLE_PASSWORD".to_string(),
+            channel: String::new(),
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// How the DingTalk adapter receives inbound events.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum DingTalkReceiveMode {
+    /// HTTP webhook server (requires public IP / reverse proxy).
+    Webhook,
+    /// Long-lived WebSocket connection via DingTalk Stream protocol (default).
+    #[default]
+    Stream,
+}
+
+/// DingTalk Robot API channel adapter configuration.
+///
+/// Supports two receive modes:
+/// - **Stream** (default): Uses `app_key` / `app_secret` to open a long-lived
+///   WebSocket connection via the DingTalk Stream protocol. No public IP needed.
+/// - **Webhook** (legacy): HTTP server that receives callback POST requests.
+///   Requires `access_token` and `secret` for HMAC-SHA256 verification.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct DingTalkConfig {
+    /// How to receive inbound messages (stream or webhook).
+    pub receive_mode: DingTalkReceiveMode,
+    // -- Stream mode credentials --
+    /// Env var name holding the DingTalk app key (stream mode).
+    pub app_key_env: String,
+    /// Env var name holding the DingTalk app secret (stream mode).
+    pub app_secret_env: String,
+    // -- Webhook mode credentials (legacy) --
+    /// Env var name holding the webhook access token.
+    pub access_token_env: String,
+    /// Env var name holding the signing secret.
+    pub secret_env: String,
+    /// Port for the incoming webhook (webhook mode only).
+    pub webhook_port: u16,
+    /// Robot code for sending messages via the Open API (stream mode).
+    /// If empty, falls back to app_key.
+    #[serde(default)]
+    pub robot_code: Option<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for DingTalkConfig {
+    fn default() -> Self {
+        Self {
+            receive_mode: DingTalkReceiveMode::default(),
+            app_key_env: "DINGTALK_APP_KEY".to_string(),
+            app_secret_env: "DINGTALK_APP_SECRET".to_string(),
+            access_token_env: "DINGTALK_ACCESS_TOKEN".to_string(),
+            secret_env: "DINGTALK_SECRET".to_string(),
+            webhook_port: 8457,
+            robot_code: None,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// QQ Bot API v2 channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct QqConfig {
+    /// QQ Bot application ID.
+    pub app_id: String,
+    /// Env var name holding the app secret (NOT the secret itself).
+    pub app_secret_env: String,
+    /// QQ user IDs allowed to interact (empty = allow all).
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for QqConfig {
+    fn default() -> Self {
+        Self {
+            app_id: String::new(),
+            app_secret_env: "QQ_BOT_APP_SECRET".to_string(),
+            allowed_users: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Discourse forum channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct DiscourseConfig {
+    /// Discourse base URL.
+    pub base_url: String,
+    /// Env var name holding the API key.
+    pub api_key_env: String,
+    /// API username.
+    pub api_username: String,
+    /// Category slugs to monitor.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub categories: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for DiscourseConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key_env: "DISCOURSE_API_KEY".to_string(),
+            api_username: "system".to_string(),
+            categories: vec![],
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Gitter Streaming API channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct GitterConfig {
+    /// Env var name holding the auth token.
+    pub token_env: String,
+    /// Room ID to listen in.
+    pub room_id: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for GitterConfig {
+    fn default() -> Self {
+        Self {
+            token_env: "GITTER_TOKEN".to_string(),
+            room_id: String::new(),
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// ntfy.sh pub/sub channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct NtfyConfig {
+    /// ntfy server URL.
+    pub server_url: String,
+    /// Topic to subscribe/publish to.
+    pub topic: String,
+    /// Env var name holding the auth token (optional for public topics).
+    pub token_env: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for NtfyConfig {
+    fn default() -> Self {
+        Self {
+            server_url: "https://ntfy.sh".to_string(),
+            topic: String::new(),
+            token_env: "NTFY_TOKEN".to_string(),
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Gotify WebSocket channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct GotifyConfig {
+    /// Gotify server URL.
+    pub server_url: String,
+    /// Env var name holding the app token (for sending).
+    pub app_token_env: String,
+    /// Env var name holding the client token (for receiving).
+    pub client_token_env: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for GotifyConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            app_token_env: "GOTIFY_APP_TOKEN".to_string(),
+            client_token_env: "GOTIFY_CLIENT_TOKEN".to_string(),
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Generic webhook channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct WebhookConfig {
+    /// Env var name holding the HMAC signing secret.
+    pub secret_env: String,
+    /// Port to listen for incoming webhooks.
+    pub listen_port: u16,
+    /// URL to POST outgoing messages to.
+    pub callback_url: Option<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+    /// When true, incoming POST bodies are forwarded directly to the delivery
+    /// target channel without invoking the LLM or any agent. Requires
+    /// `deliver` to be set to a valid channel name (not "log").
+    #[serde(default)]
+    pub deliver_only: bool,
+    /// Target channel name for direct delivery (e.g. "telegram", "discord").
+    /// Required when `deliver_only` is true.
+    #[serde(default)]
+    pub deliver: Option<String>,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            secret_env: "WEBHOOK_SECRET".to_string(),
+            listen_port: 8460,
+            callback_url: None,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+            deliver_only: false,
+            deliver: None,
+        }
+    }
+}
+
+/// Voice channel adapter configuration.
+///
+/// Runs a WebSocket server that accepts audio streams, transcribes via STT,
+/// sends text to the agent, and returns synthesized speech via TTS.
+///
+/// ```toml
+/// [channels.voice]
+/// listen_port = 4546
+/// api_key_env = "OPENAI_API_KEY"
+/// stt_url = "https://api.openai.com"
+/// tts_url = "https://api.openai.com"
+/// tts_voice = "alloy"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct VoiceConfig {
+    /// WebSocket server listen port (default: 4546).
+    pub listen_port: u16,
+    /// Env var name holding the API key for STT/TTS services.
+    pub api_key_env: String,
+    /// Base URL for the STT (Speech-to-Text) API.
+    pub stt_url: String,
+    /// Base URL for the TTS (Text-to-Speech) API.
+    pub tts_url: String,
+    /// TTS voice name (default: "alloy").
+    pub tts_voice: String,
+    /// Audio buffer threshold in bytes before triggering STT (default: 32768).
+    pub buffer_threshold: usize,
+    /// Unique identifier for this voice instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route voice messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: 4546,
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            stt_url: "https://api.openai.com".to_string(),
+            tts_url: "https://api.openai.com".to_string(),
+            tts_voice: "alloy".to_string(),
+            buffer_threshold: 32768,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// LinkedIn Messaging API channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct LinkedInConfig {
+    /// Env var name holding the OAuth2 access token.
+    pub access_token_env: String,
+    /// Organization ID for messaging.
+    pub organization_id: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for LinkedInConfig {
+    fn default() -> Self {
+        Self {
+            access_token_env: "LINKEDIN_ACCESS_TOKEN".to_string(),
+            organization_id: String::new(),
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
 
 /// Terminal / CLI access control configuration.
 ///
@@ -6749,123 +7534,61 @@ impl Default for ParallelToolsConfig {
     }
 }
 
-/// Tool-result context budget and artifact spill configuration.
-///
-/// Controls what happens when a tool returns a very large payload.  The primary
-/// mechanism shipped in #3347 1/N is **artifact spill**: responses larger than
-/// `spill_threshold_bytes` are written to `~/.librefang/data/artifacts/` and
-/// the agent receives a compact stub with a handle it can pass to
-/// `read_artifact` to retrieve the content in chunks.
-///
-/// `max_bytes_per_turn` enforces a per-turn cumulative byte cap (#3347 2/N).
-/// `history_fold_after_turns` triggers tool-result history summarisation via
-/// the aux-LLM channel (#3347 3/N) — falls back to byte truncation when no
-/// aux-LLM is configured.
-/// `artifact_max_age_days` evicts stale spill artifacts at daemon startup
-/// (#3347 4/N).  Set to `0` to disable eviction entirely.
-///
-/// ```toml
-/// [tool_results]
-/// spill_threshold_bytes    = 16384        # 16 KB — spill to artifact store above this
-/// max_artifact_bytes       = 67108864     # 64 MiB — per-artifact write cap
-/// max_bytes_per_turn       = 50000        # cumulative byte cap across all tool results in one turn
-/// history_fold_after_turns = 8            # fold stale tool results after this many turns
-/// artifact_max_age_days    = 30           # evict spill artifacts older than this on startup; 0 disables
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(default)]
-pub struct ToolResultsConfig {
-    /// Spill threshold in bytes.  Tool results larger than this are written to
-    /// the artifact store; the agent receives a stub with a `read_artifact`
-    /// handle instead of the raw payload.  Default: 16 384 bytes (16 KB).
-    #[serde(default = "default_spill_threshold_bytes")]
-    pub spill_threshold_bytes: u64,
-    /// Maximum bytes for a single artifact write.  Spill is skipped (falling
-    /// back to truncation) when a tool result exceeds this cap, preventing a
-    /// single oversized response from filling the artifact store.
-    /// Default: 67 108 864 bytes (64 MiB).
-    #[serde(default = "default_max_artifact_bytes")]
-    pub max_artifact_bytes: u64,
-    /// Cumulative byte cap across all tool results in a single LLM turn
-    /// (#3347 2/N).  When the running total would exceed this, the next
-    /// result is escalated to artifact spill (or tail truncation if spill
-    /// fails).  Resets between assistant turns.  Default: 50 000 bytes.
-    #[serde(default = "default_max_bytes_per_turn")]
-    pub max_bytes_per_turn: u64,
-    /// Fold (summarise via aux-LLM) stale tool results after this many turns
-    /// (#3347 3/N).  Tool-result messages older than this threshold have
-    /// each `ContentBlock::ToolResult.content` rewritten in place to a
-    /// compact `[history-fold] <summary>` stub before the next LLM call.
-    /// `tool_use_id` / `tool_name` / `is_error` / `status` are preserved so
-    /// every assistant `tool_use` block keeps its matching `tool_result`
-    /// (provider APIs reject mismatched ids with 400). Falls back to a
-    /// static `[summarisation unavailable]` stub when no aux-LLM is
-    /// configured or the aux call fails, so stale payload is always
-    /// removed from context.  Default: 8 turns.
-    #[serde(default = "default_history_fold_after_turns")]
-    pub history_fold_after_turns: u32,
-    /// Minimum number of newly-stale tool-result messages required to
-    /// trigger a fold pass.  Without a batch threshold a long-running
-    /// session would drag exactly one new message across the staleness
-    /// boundary every turn and pay an aux-LLM round-trip per turn just to
-    /// fold a single message.  Skipping until at least N have accumulated
-    /// amortises that cost.  Set to `1` to fold every turn (no batching);
-    /// `0` is treated as `1`.  Default: 4.
-    #[serde(default = "default_fold_min_batch_size")]
-    pub fold_min_batch_size: u32,
-    /// Evict spill artifacts older than this many days at daemon startup
-    /// (#3347 4/N).  The artifact store grows unbounded otherwise — every
-    /// large tool result writes a content-addressed file under
-    /// `~/.librefang/data/artifacts/` and the original
-    /// `read_artifact` handle in the message history is the only thing
-    /// pinning it.  After history compaction or a long agent lifetime
-    /// those handles are no longer reachable, but the bytes remain on
-    /// disk.  GC runs once per daemon boot, fire-and-forget.
-    /// Set to `0` to disable eviction entirely.  Default: 30 days.
-    #[serde(default = "default_artifact_max_age_days")]
-    pub artifact_max_age_days: u32,
-}
-
-fn default_spill_threshold_bytes() -> u64 {
-    16_384
-}
-
-fn default_max_artifact_bytes() -> u64 {
-    64 * 1024 * 1024
-}
-
-fn default_max_bytes_per_turn() -> u64 {
-    50_000
-}
-
-fn default_history_fold_after_turns() -> u32 {
-    8
-}
-
-fn default_fold_min_batch_size() -> u32 {
-    4
-}
-
-fn default_artifact_max_age_days() -> u32 {
-    30
-}
-
-impl Default for ToolResultsConfig {
-    fn default() -> Self {
-        Self {
-            spill_threshold_bytes: default_spill_threshold_bytes(),
-            max_artifact_bytes: default_max_artifact_bytes(),
-            max_bytes_per_turn: default_max_bytes_per_turn(),
-            history_fold_after_turns: default_history_fold_after_turns(),
-            fold_min_batch_size: default_fold_min_batch_size(),
-            artifact_max_age_days: default_artifact_max_age_days(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telegram_message_coalesce_window_default_is_none() {
+        let tg = TelegramConfig::default();
+        assert!(tg.message_coalesce_window_ms.is_none());
+        // Backward compat: effective overrides leaves debounce disabled.
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
+    }
+
+    #[test]
+    fn telegram_message_coalesce_window_alias_fills_debounce() {
+        let tg = TelegramConfig {
+            message_coalesce_window_ms: Some(2000),
+            ..Default::default()
+        };
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 2000);
+    }
+
+    #[test]
+    fn telegram_explicit_overrides_debounce_wins_over_alias() {
+        let tg = TelegramConfig {
+            message_coalesce_window_ms: Some(2000),
+            overrides: ChannelOverrides {
+                message_debounce_ms: 500,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // The explicit `overrides.message_debounce_ms` is non-zero, so the
+        // alias must NOT clobber it.
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 500);
+    }
+
+    #[test]
+    fn telegram_message_coalesce_window_zero_keeps_disabled() {
+        let tg = TelegramConfig {
+            message_coalesce_window_ms: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
+    }
+
+    #[test]
+    fn telegram_message_coalesce_window_parses_from_toml() {
+        let toml_str = r#"
+            bot_token_env = "TG"
+            message_coalesce_window_ms = 1500
+        "#;
+        let tg: TelegramConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(tg.message_coalesce_window_ms, Some(1500));
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 1500);
+    }
 
     #[test]
     fn test_session_config_defaults_backward_compatible() {
@@ -7502,59 +8225,5 @@ rule_sets = ["browser_handles", "pii_baseline"]
             cfg.otlp_export_disabled(true),
             "empty endpoint is the explicit opt-out path even when stack is up"
         );
-    }
-
-    // ----- BudgetConfig::default_burst_ratio parse-time validation -----
-
-    #[test]
-    fn default_burst_ratio_accepts_zero_and_unit_range() {
-        for v in [0.0_f32, 0.01, 0.2, 0.5, 1.0] {
-            let toml_str = format!("default_burst_ratio = {v}");
-            let cfg: BudgetConfig = toml::from_str(&toml_str)
-                .unwrap_or_else(|e| panic!("expected accept for {v}: {e}"));
-            assert!((cfg.default_burst_ratio - v).abs() < f32::EPSILON);
-        }
-    }
-
-    #[test]
-    fn default_burst_ratio_rejects_negative_at_parse_time() {
-        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = -0.5")
-            .expect_err("negative ratio must be rejected at parse time");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("default_burst_ratio") && msg.contains("[0.0, 1.0]"),
-            "error must explain the constraint, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn default_burst_ratio_rejects_above_one_at_parse_time() {
-        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = 2.5")
-            .expect_err("ratio > 1.0 must be rejected at parse time");
-        assert!(err.to_string().contains("default_burst_ratio"));
-    }
-
-    #[test]
-    fn default_burst_ratio_rejects_nan_at_parse_time() {
-        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = nan")
-            .expect_err("NaN must be rejected at parse time");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("default_burst_ratio") && msg.contains("finite"),
-            "error must explain the constraint, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn default_burst_ratio_rejects_infinity_at_parse_time() {
-        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = inf")
-            .expect_err("infinity must be rejected at parse time");
-        assert!(err.to_string().contains("finite"));
-    }
-
-    #[test]
-    fn default_burst_ratio_defaults_to_zero_when_missing() {
-        let cfg: BudgetConfig = toml::from_str("").unwrap();
-        assert_eq!(cfg.default_burst_ratio, 0.0);
     }
 }

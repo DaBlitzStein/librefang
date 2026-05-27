@@ -20,7 +20,7 @@ export function Sparkline({
   className = "",
 }: SparklineProps) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
-  if (!data || data.length < 2) return null;
+  if (!data || data.length === 0) return null;
   const max = Math.max(...data);
   const min = Math.min(...data);
   const range = max - min || 1;

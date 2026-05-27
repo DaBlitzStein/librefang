@@ -152,24 +152,6 @@ pub struct DeferredToolExecution {
     pub exec_policy: Option<crate::config::ExecPolicy>,
     pub sender_id: Option<String>,
     pub channel: Option<String>,
-    /// Platform conversation id the original message arrived on:
-    /// Telegram `chat_id`, Discord `channel_id`, WhatsApp JID, etc.
-    /// Distinct from `sender_id` for group conversations — in a DM
-    /// they happen to coincide, in a group the human's `sender_id`
-    /// is the user's platform_id while `chat_id` names the group.
-    /// Populated by `tool_runner::dispatch.rs` from the agent_loop's
-    /// `SenderContext.chat_id` when present; `None` otherwise.
-    ///
-    /// Approval-resume routing (`bridge.rs::start_approval_listener`
-    /// fast path, `kernel::wake_agent_after_approval`) prefers
-    /// `chat_id` over `sender_id` so a group-chat-originated tool
-    /// call gets its `[Approve] [Deny]` keyboard AND its eventual
-    /// agent response back in the originating group, not in the
-    /// approver's DM with the bot. Falls back to `sender_id` when
-    /// `chat_id` is absent (DM path; pre-PR clients that never
-    /// emitted the field; in-process non-channel sources).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chat_id: Option<String>,
     pub workspace_root: Option<std::path::PathBuf>,
     /// `true` when the approval was demanded by the per-user RBAC gate
     /// (`UserToolGate::NeedsApproval`) rather than the standard
@@ -180,22 +162,6 @@ pub struct DeferredToolExecution {
     /// tool surface (RBAC M3, issue #3054 Phase 2).
     #[serde(default, skip_serializing_if = "is_false")]
     pub force_human: bool,
-    /// LibreFang `SessionId` the deferred tool will resume in. Threaded
-    /// through so a daemon-restart `Allow once` (v36 deferred-payload
-    /// restore path) can rebuild `ToolExecContext.session_id` and route
-    /// the resumed tool through the *original* editor's `acp_fs_client`
-    /// / `acp_terminal_client` rather than silently falling back to
-    /// local fs / local shell (#3313 review).
-    ///
-    /// `Option<_>` + `#[serde(default)]` so:
-    ///
-    /// 1. Surfaces that don't track session ids (synchronous
-    ///    `request_approval`) just leave it `None`.
-    /// 2. Pre-existing v36 rows persisted before this field was added
-    ///    deserialise cleanly with `None` — they fall back to local-fs
-    ///    routing on resume, which is the historical behaviour.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<crate::agent::SessionId>,
 }
 
 #[inline]
@@ -225,13 +191,6 @@ pub enum AgentLoopSignal {
         result_content: String,
         result_is_error: bool,
         result_status: ToolExecutionStatus,
-    },
-    /// An async task registered earlier by this session has reached a
-    /// terminal state. The kernel injects this into the originating
-    /// `(agent, session)` so the runtime can surface the result on the
-    /// next (or current) turn. Refs #4983.
-    TaskCompleted {
-        event: crate::task::TaskCompletionEvent,
     },
 }
 
@@ -1162,10 +1121,8 @@ mod tests {
             }),
             sender_id: Some("user-123".to_string()),
             channel: Some("telegram".to_string()),
-            chat_id: Some("group-456".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
             force_human: false,
-            session_id: None,
         };
         let json = serde_json::to_string(&deferred).unwrap();
         let deserialized: DeferredToolExecution = serde_json::from_str(&json).unwrap();

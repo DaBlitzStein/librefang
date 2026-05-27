@@ -258,18 +258,7 @@ impl MessageContent {
                         _ => None,
                     };
                     if let Some(mt) = media {
-                        // Phrase the placeholder so an LLM, on re-reading the
-                        // session, infers "I already received and analyzed this
-                        // image earlier in this thread" rather than the literal
-                        // "[Image previously processed]" which a model can
-                        // mistake for "no image was delivered". The model
-                        // saying "I did not receive any image" is the symptom
-                        // we are guarding against here.
-                        let placeholder = format!(
-                            "[Image ({mt}) — already received and analyzed by you (the assistant) earlier in this conversation; \
-                             the raw bytes were removed from history to save context tokens. Your earlier turn in this thread \
-                             contains your analysis of this image — refer to it rather than claiming the image is missing.]"
-                        );
+                        let placeholder = format!("[Image ({mt}) previously processed]");
                         *block = ContentBlock::Text {
                             text: placeholder,
                             provider_metadata: None,
@@ -344,32 +333,17 @@ pub enum StopReason {
 }
 
 /// Token usage information from an LLM call.
-///
-/// **Convention**: `input_tokens` is the TOTAL prompt token count *including*
-/// any cached portion. `cache_read_input_tokens` and
-/// `cache_creation_input_tokens` are subsets of `input_tokens` that the
-/// provider re-priced (0.1x for reads, 1.25x for writes).
-///
-/// This matches the OpenAI / Groq / DeepSeek wire shape directly.
-/// Anthropic's API reports `input_tokens` as new-input-only with the two
-/// cache buckets reported separately
-/// (https://docs.anthropic.com/en/api/messages#response-usage); the
-/// Anthropic driver normalizes at the boundary so downstream consumers
-/// (`burst_tokens`, `librefang-kernel-metering::estimate_cost_from_rates`)
-/// can rely on a single shape.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// Total prompt tokens for this call, including any cached portion.
+    /// Tokens used for the input/prompt.
     pub input_tokens: u64,
     /// Tokens generated in the output.
     pub output_tokens: u64,
-    /// Tokens written to the prompt cache during this call (subset of
-    /// `input_tokens`). Anthropic `cache_creation_input_tokens`.
+    /// Tokens written to the prompt cache (Anthropic `cache_creation_input_tokens`).
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
-    /// Tokens read from the prompt cache (subset of `input_tokens`).
-    /// Anthropic `cache_read_input_tokens`,
-    /// OpenAI `prompt_tokens_details.cached_tokens`.
+    /// Tokens read from the prompt cache (Anthropic `cache_read_input_tokens`,
+    /// OpenAI `prompt_tokens_details.cached_tokens`).
     #[serde(default)]
     pub cache_read_input_tokens: u64,
 }
@@ -378,24 +352,6 @@ impl TokenUsage {
     /// Total tokens used.
     pub fn total(&self) -> u64 {
         self.input_tokens + self.output_tokens
-    }
-
-    /// Tokens that count against burst / per-minute rate limits.
-    ///
-    /// Represents tokens the model actually processed this turn —
-    /// excludes prompt-cache reads (charged at ~10% of input rate, not
-    /// re-processed by the model) but keeps cache writes (charged at
-    /// 1.25x — still go through the model). Issue #4943.
-    ///
-    /// Relies on the workspace convention documented on [`TokenUsage`]:
-    /// `input_tokens` is the TOTAL prompt count, with cache_read /
-    /// cache_creation as subsets. So subtracting only `cache_read`
-    /// leaves cache_creation counted (correct) and the non-cached
-    /// portion counted (correct).
-    pub fn burst_tokens(&self) -> u64 {
-        self.input_tokens
-            .saturating_sub(self.cache_read_input_tokens)
-            + self.output_tokens
     }
 
     /// Prompt-cache hit ratio: `cache_read / (cache_read + cache_creation)`.
@@ -649,7 +605,7 @@ mod tests {
         // Image block should now be a text placeholder
         assert!(!content.has_images());
         let text = content.text_content();
-        assert!(text.contains("[Image (image/jpeg) — already received and analyzed"));
+        assert!(text.contains("[Image (image/jpeg) previously processed]"));
         // Original text should still be present
         assert!(text.contains("What is this?"));
     }
@@ -718,7 +674,7 @@ mod tests {
         assert!(content.strip_images());
         assert!(!content.has_images());
         let text = content.text_content();
-        assert!(text.contains("[Image (image/jpeg) — already received and analyzed"));
+        assert!(text.contains("[Image (image/jpeg) previously processed]"));
     }
 
     #[test]
@@ -747,8 +703,8 @@ mod tests {
         assert!(content.strip_images());
         assert!(!content.has_images());
         let text = content.text_content();
-        assert!(text.contains("[Image (image/png) — already received and analyzed"));
-        assert!(text.contains("[Image (image/jpeg) — already received and analyzed"));
+        assert!(text.contains("[Image (image/png) previously processed]"));
+        assert!(text.contains("[Image (image/jpeg) previously processed]"));
         assert!(text.contains("between"));
     }
 

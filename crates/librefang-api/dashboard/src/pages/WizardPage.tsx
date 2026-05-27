@@ -6,8 +6,9 @@ import type { ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { useProviders } from "../lib/queries/providers";
 import {
+  useSetProviderKey,
+  useTestProvider,
   useSetDefaultProvider,
-  useValidateProviderKey,
 } from "../lib/mutations/providers";
 import { useQuickInit } from "../lib/mutations/overview";
 import { Card } from "../components/ui/Card";
@@ -33,7 +34,8 @@ export function WizardPage() {
   const [done, setDone] = useState(false);
 
   const providersQuery = useProviders();
-  const validateProviderMutation = useValidateProviderKey();
+  const setProviderKeyMutation = useSetProviderKey();
+  const testProviderMutation = useTestProvider();
   const setDefaultProviderMutation = useSetDefaultProvider();
   const quickInitMutation = useQuickInit();
 
@@ -60,13 +62,17 @@ export function WizardPage() {
   const needsReplaceConfirm = existingKeyWorking && typingNewKey && !confirmReplace;
   const isValidatedSelection = !!providerId && validatedProviderId === providerId;
 
-  const validateProvider = useMutation({
-    mutationFn: () =>
-      validateProviderMutation.mutateAsync({
-        providerId,
-        apiKey,
-        requiresKey,
-      }),
+  const setKeyMutation = useMutation({
+    mutationFn: async () => {
+      if (!providerId) throw new Error("no_provider");
+      if (requiresKey && apiKey.trim()) {
+        await setProviderKeyMutation.mutateAsync({ id: providerId, key: apiKey.trim() });
+      }
+      const test = await testProviderMutation.mutateAsync(providerId);
+      if (test.status !== "ok" && test.status !== "success") {
+        throw new Error(test.message || "test_failed");
+      }
+    },
     onSuccess: () => {
       setValidatedProviderId(providerId);
       addToast(t("wizard.provider_connected"), "success");
@@ -126,14 +132,10 @@ export function WizardPage() {
       </div>
 
       <Card padding="lg" className="rounded-3xl">
-        <div role="list" className="flex justify-between items-center mb-8">
+        <div className="flex justify-between items-center mb-8">
           {[1, 2, 3].map((s) => (
             <div key={s} className="flex items-center gap-2 flex-1 last:flex-none">
-              <div
-                role="listitem"
-                aria-current={step === s ? "step" : undefined}
-                className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-black transition-colors ${step >= s ? "bg-brand text-white" : "bg-main text-text-dim border border-border-subtle"}`}
-              >
+              <div className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-black transition-colors ${step >= s ? "bg-brand text-white" : "bg-main text-text-dim border border-border-subtle"}`}>
                 {step > s ? <CheckCircle2 className="h-4 w-4" /> : s}
               </div>
               {s < 3 && <div className={`h-1 flex-1 rounded-full ${step > s ? "bg-brand" : "bg-border-subtle"}`} />}
@@ -172,7 +174,7 @@ export function WizardPage() {
                     >
                       <div className="flex flex-col">
                         <span className="text-sm font-bold text-text-main">{p.display_name || p.id}</span>
-                        <span className="text-[11px] text-text-dim">{p.id}{p.model_count ? ` · ${t("wizard.model_count", { count: p.model_count })}` : ""}</span>
+                        <span className="text-[11px] text-text-dim">{p.id}{p.model_count ? ` · ${p.model_count} models` : ""}</span>
                       </div>
                       {ready ? (
                         <Badge variant="success">{t("wizard.provider_ready")}</Badge>
@@ -213,7 +215,7 @@ export function WizardPage() {
               <Input
                 label={t("wizard.api_key_label")}
                 type="password"
-                placeholder={t("wizard.api_key_placeholder")}
+                placeholder="sk-..."
                 leftIcon={<Key className="h-4 w-4" />}
                 value={apiKey}
                 onChange={(e) => {
@@ -254,9 +256,9 @@ export function WizardPage() {
               </label>
             )}
 
-            {validateProvider.isError && (
+            {setKeyMutation.isError && (
               <p className="text-xs text-error mt-3 font-medium">
-                {(validateProvider.error as Error)?.message}
+                {(setKeyMutation.error as Error)?.message}
               </p>
             )}
           </div>
@@ -305,12 +307,12 @@ export function WizardPage() {
             <Button
               variant="primary"
               rightIcon={<ArrowRight className="h-4 w-4" />}
-              isLoading={validateProvider.isPending}
+              isLoading={setKeyMutation.isPending}
               disabled={
                 (requiresKey && !apiKey.trim() && !isProviderAvailable(selectedProvider?.auth_status))
                 || needsReplaceConfirm
               }
-              onClick={() => validateProvider.mutate()}
+              onClick={() => setKeyMutation.mutate()}
             >
               {t("wizard.connect")}
             </Button>

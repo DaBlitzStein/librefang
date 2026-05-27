@@ -173,15 +173,12 @@ pub struct LibreFang {
     pub budget: Arc<BudgetResource>,
     pub channels: Arc<ChannelsResource>,
     pub extensions: Arc<ExtensionsResource>,
-    pub goals: Arc<GoalsResource>,
     pub hands: Arc<HandsResource>,
-    pub inbox: Arc<InboxResource>,
     pub mcp: Arc<McpResource>,
     pub memory: Arc<MemoryResource>,
     pub models: Arc<ModelsResource>,
     pub network: Arc<NetworkResource>,
     pub pairing: Arc<PairingResource>,
-    pub plugins: Arc<PluginsResource>,
     pub proactive_memory: Arc<ProactiveMemoryResource>,
     pub sessions: Arc<SessionsResource>,
     pub skills: Arc<SkillsResource>,
@@ -207,15 +204,12 @@ impl LibreFang {
             budget: Arc::new(BudgetResource::new(base_url.clone(), client.clone())),
             channels: Arc::new(ChannelsResource::new(base_url.clone(), client.clone())),
             extensions: Arc::new(ExtensionsResource::new(base_url.clone(), client.clone())),
-            goals: Arc::new(GoalsResource::new(base_url.clone(), client.clone())),
             hands: Arc::new(HandsResource::new(base_url.clone(), client.clone())),
-            inbox: Arc::new(InboxResource::new(base_url.clone(), client.clone())),
             mcp: Arc::new(McpResource::new(base_url.clone(), client.clone())),
             memory: Arc::new(MemoryResource::new(base_url.clone(), client.clone())),
             models: Arc::new(ModelsResource::new(base_url.clone(), client.clone())),
             network: Arc::new(NetworkResource::new(base_url.clone(), client.clone())),
             pairing: Arc::new(PairingResource::new(base_url.clone(), client.clone())),
-            plugins: Arc::new(PluginsResource::new(base_url.clone(), client.clone())),
             proactive_memory: Arc::new(ProactiveMemoryResource::new(
                 base_url.clone(),
                 client.clone(),
@@ -264,18 +258,6 @@ impl A2AResource {
             &self.base_url,
             reqwest::Method::GET,
             &format!("/api/a2a/agents/{}", id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn a2a_approve_external(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/a2a/agents/{}/approve", id),
             None,
             &[],
         )
@@ -419,30 +401,6 @@ impl AgentsResource {
         .await
     }
 
-    pub async fn list_agent_identities(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/agents/identities".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn reset_agent_identity(&self, name: &str, confirm: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/agents/identities/{}/reset", name),
-            None,
-            &[("confirm", confirm)],
-        )
-        .await
-    }
-
     pub async fn get_agent(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -455,14 +413,14 @@ impl AgentsResource {
         .await
     }
 
-    pub async fn kill_agent(&self, id: &str, confirm: Option<&str>) -> Result<Value> {
+    pub async fn kill_agent(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
             &format!("/api/agents/{}", id),
             None,
-            &[("confirm", confirm)],
+            &[],
         )
         .await
     }
@@ -1098,89 +1056,6 @@ impl ApprovalsResource {
         .await
     }
 
-    pub async fn audit_log(
-        &self,
-        limit: Option<&str>,
-        offset: Option<&str>,
-        agent_id: Option<&str>,
-        tool_name: Option<&str>,
-    ) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/approvals/audit".to_string(),
-            None,
-            &[
-                ("limit", limit),
-                ("offset", offset),
-                ("agent_id", agent_id),
-                ("tool_name", tool_name),
-            ],
-        )
-        .await
-    }
-
-    pub async fn batch_resolve(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/approvals/batch".to_string(),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn approval_count(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/approvals/count".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn list_approvals_for_session(&self, session_id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/approvals/session/{}", session_id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn approve_all_for_session(&self, session_id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/approvals/session/{}/approve_all", session_id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn reject_all_for_session(&self, session_id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/approvals/session/{}/reject_all", session_id),
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn get_approval(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -1199,18 +1074,6 @@ impl ApprovalsResource {
             &self.base_url,
             reqwest::Method::POST,
             &format!("/api/approvals/{}/approve", id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn modify_request(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/approvals/{}/modify", id),
             Some(data),
             &[],
         )
@@ -1523,30 +1386,6 @@ impl BudgetResource {
         .await
     }
 
-    pub async fn provider_budget_list(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/budget/providers".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn update_provider_budget(&self, provider_id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::PUT,
-            &format!("/api/budget/providers/{}", provider_id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
     pub async fn user_budget_ranking(&self, limit: Option<&str>) -> Result<Value> {
         do_req(
             &self.client,
@@ -1564,30 +1403,6 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/budget/users/{}", user_id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn update_user_budget(&self, user_id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::PUT,
-            &format!("/api/budget/users/{}", user_id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn delete_user_budget(&self, user_id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::DELETE,
             &format!("/api/budget/users/{}", user_id),
             None,
             &[],
@@ -1613,18 +1428,6 @@ impl BudgetResource {
             &self.base_url,
             reqwest::Method::GET,
             &"/api/usage/by-model".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn usage_by_model_performance(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/usage/by-model/performance".to_string(),
             None,
             &[],
         )
@@ -1681,18 +1484,6 @@ impl ChannelsResource {
         .await
     }
 
-    pub async fn list_channel_registry(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/channels/registry".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn reload_channels(&self) -> Result<Value> {
         do_req(
             &self.client,
@@ -1705,25 +1496,85 @@ impl ChannelsResource {
         .await
     }
 
-    pub async fn configure_sidecar_channel(&self, name: &str, data: Value) -> Result<Value> {
+    pub async fn wechat_qr_start(&self) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/channels/sidecar/{}/configure", name),
+            &"/api/channels/wechat/qr/start".to_string(),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn wechat_qr_status(&self, qr_code: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &"/api/channels/wechat/qr/status".to_string(),
+            None,
+            &[("qr_code", qr_code)],
+        )
+        .await
+    }
+
+    pub async fn whatsapp_qr_start(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &"/api/channels/whatsapp/qr/start".to_string(),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn whatsapp_qr_status(&self, session_id: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &"/api/channels/whatsapp/qr/status".to_string(),
+            None,
+            &[("session_id", session_id)],
+        )
+        .await
+    }
+
+    pub async fn configure_channel(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &format!("/api/channels/{}/configure", name),
             Some(data),
             &[],
         )
         .await
     }
 
-    pub async fn get_channel_qr(&self, name: &str) -> Result<Value> {
+    pub async fn remove_channel(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/channels/{}/qr", name),
+            reqwest::Method::DELETE,
+            &format!("/api/channels/{}/configure", name),
             None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn test_channel(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &format!("/api/channels/{}/test", name),
+            Some(data),
             &[],
         )
         .await
@@ -1785,32 +1636,6 @@ impl ExtensionsResource {
             &self.base_url,
             reqwest::Method::GET,
             &format!("/api/extensions/{}", name),
-            None,
-            &[],
-        )
-        .await
-    }
-}
-
-// ── Goals ──
-
-#[derive(Debug, Clone)]
-pub struct GoalsResource {
-    base_url: String,
-    client: Client,
-}
-
-impl GoalsResource {
-    fn new(base_url: String, client: Client) -> Self {
-        Self { base_url, client }
-    }
-
-    pub async fn list_goal_templates(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/goals/templates".to_string(),
             None,
             &[],
         )
@@ -1951,18 +1776,6 @@ impl HandsResource {
         .await
     }
 
-    pub async fn uninstall_hand(&self, hand_id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::DELETE,
-            &format!("/api/hands/{}", hand_id),
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn activate_hand(&self, hand_id: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,
@@ -1999,30 +1812,6 @@ impl HandsResource {
         .await
     }
 
-    pub async fn get_hand_manifest(&self, hand_id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/hands/{}/manifest", hand_id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn set_hand_secret(&self, hand_id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/hands/{}/secret", hand_id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
     pub async fn get_hand_settings(&self, hand_id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -2042,32 +1831,6 @@ impl HandsResource {
             reqwest::Method::PUT,
             &format!("/api/hands/{}/settings", hand_id),
             Some(data),
-            &[],
-        )
-        .await
-    }
-}
-
-// ── Inbox ──
-
-#[derive(Debug, Clone)]
-pub struct InboxResource {
-    base_url: String,
-    client: Client,
-}
-
-impl InboxResource {
-    fn new(base_url: String, client: Client) -> Self {
-        Self { base_url, client }
-    }
-
-    pub async fn inbox_status(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/inbox/status".to_string(),
-            None,
             &[],
         )
         .await
@@ -2195,42 +1958,6 @@ impl McpResource {
         .await
     }
 
-    pub async fn auth_revoke(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::DELETE,
-            &format!("/api/mcp/servers/{}/auth/revoke", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn auth_start(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/mcp/servers/{}/auth/start", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn auth_status(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/mcp/servers/{}/auth/status", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn reconnect_mcp_server_handler(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -2238,18 +1965,6 @@ impl McpResource {
             reqwest::Method::POST,
             &format!("/api/mcp/servers/{}/reconnect", name),
             None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn patch_mcp_server_taint(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::PATCH,
-            &format!("/api/mcp/servers/{}/taint", name),
-            Some(data),
             &[],
         )
         .await
@@ -2352,30 +2067,6 @@ impl MemoryResource {
         )
         .await
     }
-
-    pub async fn memory_config_get(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/memory/config".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn memory_config_patch(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::PATCH,
-            &"/api/memory/config".to_string(),
-            Some(data),
-            &[],
-        )
-        .await
-    }
 }
 
 // ── Models ──
@@ -2409,18 +2100,6 @@ impl ModelsResource {
             &self.base_url,
             reqwest::Method::POST,
             &"/api/catalog/update".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn list_credential_pools(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/credential-pools".to_string(),
             None,
             &[],
         )
@@ -2571,18 +2250,6 @@ impl ModelsResource {
         .await
     }
 
-    pub async fn enable_provider(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/providers/{}/enable", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn set_provider_key(&self, name: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,
@@ -2716,26 +2383,14 @@ impl NetworkResource {
         .await
     }
 
-    pub async fn network_trusted_peers(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/network/trusted-peers".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn list_peers(&self, offset: Option<&str>, limit: Option<&str>) -> Result<Value> {
+    pub async fn list_peers(&self) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &"/api/peers".to_string(),
             None,
-            &[("offset", offset), ("limit", limit)],
+            &[],
         )
         .await
     }
@@ -2827,320 +2482,6 @@ impl PairingResource {
     }
 }
 
-// ── Plugins ──
-
-#[derive(Debug, Clone)]
-pub struct PluginsResource {
-    base_url: String,
-    client: Client,
-}
-
-impl PluginsResource {
-    fn new(base_url: String, client: Client) -> Self {
-        Self { base_url, client }
-    }
-
-    pub async fn context_engine_chain(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/context-engine/chain".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn context_engine_config(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/context-engine/config".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn context_engine_health(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/context-engine/health".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn context_engine_metrics(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/context-engine/metrics".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn context_engine_sandbox_policy(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/context-engine/sandbox-policy".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn context_engine_traces(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/context-engine/traces".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn list_plugins(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/plugins".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn plugin_doctor(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/plugins/doctor".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn install_plugin(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/plugins/install".to_string(),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn list_plugin_registries(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/plugins/registries".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn scaffold_plugin(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/plugins/scaffold".to_string(),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn uninstall_plugin(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/plugins/uninstall".to_string(),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn get_plugin(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/plugins/{}", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn plugin_advanced_config(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/plugins/{}/advanced-config", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn disable_plugin(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/plugins/{}/disable", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn enable_plugin(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/plugins/{}/enable", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn plugin_env(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/plugins/{}/env", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn install_plugin_deps(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/plugins/{}/install-deps", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn lint_plugin(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/plugins/{}/lint", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn prewarm_plugin(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/plugins/{}/prewarm", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn reload_plugin(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/plugins/{}/reload", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn sign_plugin(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/plugins/{}/sign", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn plugin_status(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/plugins/{}/status", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn test_plugin_hook(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/plugins/{}/test-hook", name),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn upgrade_plugin(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/plugins/{}/upgrade", name),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-}
-
 // ── ProactiveMemory ──
 
 #[derive(Debug, Clone)]
@@ -3225,18 +2566,6 @@ impl ProactiveMemoryResource {
         .await
     }
 
-    pub async fn memory_count_agent(&self, id: &str, level: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/count", id),
-            None,
-            &[("level", level)],
-        )
-        .await
-    }
-
     pub async fn memory_duplicates(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -3285,40 +2614,6 @@ impl ProactiveMemoryResource {
         .await
     }
 
-    pub async fn memory_query_relations(
-        &self,
-        id: &str,
-        source: Option<&str>,
-        relation: Option<&str>,
-        target: Option<&str>,
-    ) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/relations", id),
-            None,
-            &[
-                ("source", source),
-                ("relation", relation),
-                ("target", target),
-            ],
-        )
-        .await
-    }
-
-    pub async fn memory_store_relations(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/memory/agents/{}/relations", id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
     pub async fn memory_search_agent(
         &self,
         id: &str,
@@ -3348,36 +2643,12 @@ impl ProactiveMemoryResource {
         .await
     }
 
-    pub async fn memory_bulk_delete(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/memory/bulk-delete".to_string(),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
     pub async fn memory_cleanup(&self) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
             &"/api/memory/cleanup".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn memory_decay(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/memory/decay".to_string(),
             None,
             &[],
         )
@@ -3506,29 +2777,6 @@ impl SessionsResource {
         .await
     }
 
-    pub async fn search_sessions(
-        &self,
-        q: Option<&str>,
-        agent_id: Option<&str>,
-        limit: Option<&str>,
-        offset: Option<&str>,
-    ) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/sessions/search".to_string(),
-            None,
-            &[
-                ("q", q),
-                ("agent_id", agent_id),
-                ("limit", limit),
-                ("offset", offset),
-            ],
-        )
-        .await
-    }
-
     pub async fn get_session(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -3559,18 +2807,6 @@ impl SessionsResource {
             &self.base_url,
             reqwest::Method::PUT,
             &format!("/api/sessions/{}/label", id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn patch_session_model(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::PATCH,
-            &format!("/api/sessions/{}/model", id),
             Some(data),
             &[],
         )
@@ -3699,78 +2935,6 @@ impl SkillsResource {
         .await
     }
 
-    pub async fn list_pending_candidates(&self, agent: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/skills/pending".to_string(),
-            None,
-            &[("agent", agent)],
-        )
-        .await
-    }
-
-    pub async fn show_pending_candidate(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/skills/pending/{}", id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn approve_pending_candidate(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/skills/pending/{}/approve", id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn reject_pending_candidate(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/skills/pending/{}/reject", id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn list_skill_registry(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/skills/registry".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn reload_skills(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/skills/reload".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn uninstall_skill(&self, data: Value) -> Result<Value> {
         do_req(
             &self.client,
@@ -3779,102 +2943,6 @@ impl SkillsResource {
             &"/api/skills/uninstall".to_string(),
             Some(data),
             &[],
-        )
-        .await
-    }
-
-    pub async fn get_skill_detail(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/skills/{}", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn evolve_delete_skill(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/delete", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn evolve_write_file(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/file", name),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn evolve_remove_file(&self, name: &str, path: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::DELETE,
-            &format!("/api/skills/{}/evolve/file", name),
-            None,
-            &[("path", path)],
-        )
-        .await
-    }
-
-    pub async fn evolve_patch_skill(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/patch", name),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn evolve_rollback_skill(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/rollback", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn evolve_update_skill(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/update", name),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn get_supporting_file(&self, name: &str, path: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/skills/{}/file", name),
-            None,
-            &[("path", path)],
         )
         .await
     }
@@ -4001,35 +3069,6 @@ impl SystemResource {
         .await
     }
 
-    pub async fn check(
-        &self,
-        user: Option<&str>,
-        action: Option<&str>,
-        channel: Option<&str>,
-    ) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/authz/check".to_string(),
-            None,
-            &[("user", user), ("action", action), ("channel", channel)],
-        )
-        .await
-    }
-
-    pub async fn effective_permissions(&self, user_id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/authz/effective/{}", user_id),
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn create_backup(&self) -> Result<Value> {
         do_req(
             &self.client,
@@ -4132,18 +3171,6 @@ impl SystemResource {
             &self.base_url,
             reqwest::Method::GET,
             &"/api/config".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn export_config(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/config/export".to_string(),
             None,
             &[],
         )
@@ -4389,18 +3416,6 @@ impl SystemResource {
         .await
     }
 
-    pub async fn get_agent_template_toml(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/templates/{}/toml", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn version(&self) -> Result<Value> {
         do_req(
             &self.client,
@@ -4542,30 +3557,6 @@ impl UsersResource {
         .await
     }
 
-    pub async fn get_user_policy(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/users/{}/policy", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn update_user_policy(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::PUT,
-            &format!("/api/users/{}/policy", name),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
     pub async fn rotate_user_key(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -4649,18 +3640,6 @@ impl WorkflowsResource {
             reqwest::Method::POST,
             &"/api/cron/jobs".to_string(),
             Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn get_cron_job(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/cron/jobs/{}", id),
-            None,
             &[],
         )
         .await
@@ -4846,46 +3825,6 @@ impl WorkflowsResource {
         .await
     }
 
-    pub async fn list_workflow_templates(
-        &self,
-        q: Option<&str>,
-        category: Option<&str>,
-    ) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/workflow-templates".to_string(),
-            None,
-            &[("q", q), ("category", category)],
-        )
-        .await
-    }
-
-    pub async fn get_workflow_template(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/workflow-templates/{}", id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn instantiate_template(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/workflow-templates/{}/instantiate", id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
     pub async fn list_workflows(&self) -> Result<Value> {
         do_req(
             &self.client,
@@ -4910,78 +3849,6 @@ impl WorkflowsResource {
         .await
     }
 
-    pub async fn get_workflow_run(&self, run_id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/workflows/runs/{}", run_id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn cancel_workflow_run(&self, run_id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/workflows/runs/{}/cancel", run_id),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn operator_action_workflow_run(&self, run_id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/workflows/runs/{}/operator", run_id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn pause_workflow_run(&self, run_id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/workflows/runs/{}/pause", run_id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn resume_workflow_run(&self, run_id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/workflows/runs/{}/resume", run_id),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn get_workflow(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/workflows/{}", id),
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn update_workflow(&self, id: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,
@@ -5001,18 +3868,6 @@ impl WorkflowsResource {
             reqwest::Method::DELETE,
             &format!("/api/workflows/{}", id),
             None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn dry_run_workflow(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/workflows/{}/dry-run", id),
-            Some(data),
             &[],
         )
         .await

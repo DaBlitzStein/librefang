@@ -10,7 +10,7 @@ use crate::llm_driver::{
 use crate::rate_limit_tracker::RateLimitSnapshot;
 use async_trait::async_trait;
 use futures::StreamExt;
-use librefang_types::config::{PromptCacheStrategy, ResponseFormat};
+use librefang_types::config::ResponseFormat;
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
@@ -27,12 +27,6 @@ pub struct AnthropicDriver {
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
-    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
-    /// headers on outbound requests. Mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
-    /// trace headers are emitted regardless of whether `CompletionRequest`'s
-    /// caller-id fields are populated.
-    emit_caller_trace_headers: bool,
 }
 
 impl AnthropicDriver {
@@ -71,20 +65,7 @@ impl AnthropicDriver {
             base_url,
             client,
             request_timeout_secs,
-            emit_caller_trace_headers: true,
         }
-    }
-
-    /// Override the trace-header emission flag (mirrors
-    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
-    /// meaning the three `x-librefang-{agent,session,step}-id` headers are
-    /// emitted on every request that has those fields populated. Pass `false`
-    /// to suppress them entirely — useful when the upstream rejects unknown
-    /// headers or when an operator has opted out via config. Non-trace
-    /// `extra_headers` are unaffected by this flag.
-    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
-        self.emit_caller_trace_headers = emit;
-        self
     }
 }
 
@@ -305,37 +286,17 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         append_response_format_instructions(&mut system_text, rf);
     }
 
-    // Resolve the breakpoint strategy + TTL (#4970). The master switch
-    // is `request.prompt_caching`: when `false`, no markers are written
-    // anywhere regardless of the strategy. When `true`, the per-request
-    // override `prompt_cache_strategy` selects the placement; if absent
-    // we fall back to the historical default (`system_and_3`).
-    let strategy = if request.prompt_caching {
-        request
-            .prompt_cache_strategy
-            .unwrap_or_else(PromptCacheStrategy::default_strategy)
-    } else {
-        PromptCacheStrategy::Disabled
-    };
-    // TTL is meaningful only when at least one marker will be written;
-    // resolve it eagerly so call sites can pass a copy down without
-    // re-checking the master switch.
-    let cache_ttl = if strategy.is_disabled() {
-        None
-    } else {
+    // Resolve cache TTL once. `None` here means caching is disabled for
+    // this request and no markers should be written anywhere.
+    let cache_ttl = if request.prompt_caching {
         Some(CacheTtl::from_request_field(request.cache_ttl))
+    } else {
+        None
     };
 
     // Build the system field: structured blocks with cache_control when
-    // the strategy marks the system block, plain string otherwise. The
-    // strategy decides; `cache_ttl` is `None` only when we won't mark
-    // anything, so the two travel together.
-    let system_marker_ttl = if strategy.marks_system() {
-        cache_ttl
-    } else {
-        None
-    };
-    let system = system_text.map(|text| build_system_value(&text, system_marker_ttl));
+    // prompt caching is enabled, plain string otherwise.
+    let system = system_text.map(|text| build_system_value(&text, cache_ttl));
 
     // Build API messages, filtering out system messages.
     let mut api_messages: Vec<ApiMessage> = request
@@ -345,14 +306,11 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         .map(convert_message)
         .collect();
 
-    // Build tools. Only `SystemAndN` stamps the last tool — `SystemOnly`
-    // stops at the system block, so tool schemas (which are also
-    // stable) deliberately stay outside the cached prefix in that mode.
-    // Without this distinction `SystemOnly` would silently behave like
-    // `SystemAndN(0)` and quietly consume the tools-last breakpoint.
+    // Build tools. When caching is on, stamp the last tool so Anthropic
+    // caches the (system + tools) prefix as a single unit — without this
+    // the multi-KB tool schemas would be rewritten on every call.
     let tool_count = request.tools.len();
     let has_tools = tool_count > 0;
-    let stamp_tools_last = matches!(strategy, PromptCacheStrategy::SystemAndN(_)) && has_tools;
     let api_tools: Vec<ApiTool> = request
         .tools
         .iter()
@@ -364,21 +322,22 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
                 description: t.description.clone(),
                 input_schema: t.input_schema.clone(),
                 cache_control: match cache_ttl {
-                    Some(ttl) if is_last && stamp_tools_last => Some(ttl.to_marker()),
+                    Some(ttl) if is_last => Some(ttl.to_marker()),
                     _ => None,
                 },
             }
         })
         .collect();
 
-    // Apply the rolling-window message markers per the resolved
-    // strategy. Anthropic allows at most 4 `cache_control` breakpoints
-    // per request, counted across system + tools + messages. The helper
-    // is responsible for clipping the effective N to whatever budget
-    // remains after the system + tools-last markers have been spent
-    // (most-stable-first order).
+    // Apply system_and_3 rolling-window markers on the message list.
+    // Anthropic allows up to 4 cache_control breakpoints per request,
+    // counted across system + tools + messages. We've already used 1 for
+    // system and (when present) 1 for the last tool, leaving 2-3 slots
+    // for the trailing messages. This is what makes mid-conversation
+    // tool_use/tool_result rounds cache-eligible — the previous turn's
+    // tail enters the prefix instead of being re-billed every call.
     if let Some(ttl) = cache_ttl {
-        apply_cache_markers(&mut api_messages, strategy, stamp_tools_last, ttl);
+        apply_cache_markers_system_and_3(&mut api_messages, has_tools, ttl);
     }
 
     // Anthropic requires budget_tokens >= 1024 for extended thinking.
@@ -461,15 +420,6 @@ impl LlmDriver for AnthropicDriver {
             if request_uses_1h_cache(&request) {
                 req_builder = req_builder.header("anthropic-beta", ANTHROPIC_1H_CACHE_BETA);
             }
-            // Merge per-request caller-identity (`x-librefang-*`) trace headers.
-            // Empty extra_headers slice — Anthropic driver has no operator-level
-            // extras escape-hatch today; the slice is kept for API symmetry with
-            // OpenAI and to allow future addition without changing call-site shape.
-            req_builder = req_builder.headers(super::trace_headers::build_trace_header_map(
-                &[],
-                &request,
-                self.emit_caller_trace_headers,
-            ));
             let mut req_builder = req_builder.json(&api_request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
@@ -618,13 +568,6 @@ impl LlmDriver for AnthropicDriver {
             if request_uses_1h_cache(&request) {
                 req_builder = req_builder.header("anthropic-beta", ANTHROPIC_1H_CACHE_BETA);
             }
-            // Merge per-request caller-identity (`x-librefang-*`) trace headers
-            // on the streaming path — mirrors the non-streaming path above.
-            req_builder = req_builder.headers(super::trace_headers::build_trace_header_map(
-                &[],
-                &request,
-                self.emit_caller_trace_headers,
-            ));
             let mut req_builder = req_builder.json(&api_request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
@@ -765,21 +708,16 @@ impl LlmDriver for AnthropicDriver {
 
                     match event_type.as_str() {
                         "message_start" => {
-                            // Anthropic delivers all three usage buckets in
-                            // one message_start event. Read them locally,
-                            // then normalize: see #4958 / the non-streaming
-                            // builder at convert_response — input_tokens
-                            // on the workspace-side TokenUsage is the TOTAL
-                            // prompt including cache, but Anthropic's API
-                            // reports it as new-input-only.
                             let u = &json["message"]["usage"];
-                            let new_input = u["input_tokens"].as_u64().unwrap_or(0);
-                            let cache_creation =
-                                u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-                            let cache_read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
-                            usage.input_tokens = new_input + cache_read + cache_creation;
-                            usage.cache_creation_input_tokens = cache_creation;
-                            usage.cache_read_input_tokens = cache_read;
+                            if let Some(it) = u["input_tokens"].as_u64() {
+                                usage.input_tokens = it;
+                            }
+                            if let Some(ct) = u["cache_creation_input_tokens"].as_u64() {
+                                usage.cache_creation_input_tokens = ct;
+                            }
+                            if let Some(cr) = u["cache_read_input_tokens"].as_u64() {
+                                usage.cache_read_input_tokens = cr;
+                            }
                         }
                         "content_block_start" => {
                             let block = &json["content_block"];
@@ -983,7 +921,6 @@ impl LlmDriver for AnthropicDriver {
                 stop_reason,
                 tool_calls,
                 usage,
-                actual_provider: None,
             });
         }
 
@@ -1110,45 +1047,23 @@ fn request_uses_1h_cache(req: &CompletionRequest) -> bool {
     req.prompt_caching && matches!(req.cache_ttl, Some("1h"))
 }
 
-/// Apply rolling-window cache markers on the trailing messages,
-/// honoring the [`PromptCacheStrategy`] from the caller (#4970).
+/// Apply `system_and_3` rolling-window cache markers on the trailing
+/// messages.
 ///
 /// Anthropic allows at most 4 `cache_control` breakpoints per request,
-/// counted across system + tools + messages combined. The accounting
-/// is done in **most-stable-first** order:
-///
-/// 1. System block (always consumed when the strategy is not
-///    `Disabled` — caller is responsible for stamping it).
-/// 2. Tools-last marker (consumed when `tools_stamped` is true).
-/// 3. Trailing message markers — this function fills the remaining
-///    slots from the tail of the message list, newest first, so the
-///    cached prefix always covers the maximum amount of recent
-///    history.
-///
-/// `strategy` controls how many trailing-message markers are wanted
-/// before the cap kicks in:
-/// - `Disabled` — function is a no-op (caller should never reach here).
-/// - `SystemOnly` — function is a no-op; messages stay outside the
-///   cached prefix.
-/// - `SystemAndN(n)` — wants up to `n` markers, then clipped to the
-///   remaining slots (`4 - 1 - tools_stamped`).
-fn apply_cache_markers(
+/// counted across system + tools + messages. The system block always
+/// consumes 1; the tools-last marker consumes another when tools are
+/// non-empty. This function fills the remaining slots from the tail of
+/// the message list — newest first, so the cached prefix always covers
+/// the maximum amount of recent history.
+fn apply_cache_markers_system_and_3(
     api_messages: &mut [ApiMessage],
-    strategy: PromptCacheStrategy,
-    tools_stamped: bool,
+    has_tools: bool,
     ttl: CacheTtl,
 ) {
-    let want = strategy.message_window();
-    if want == 0 || api_messages.is_empty() {
-        return;
-    }
-    // System always consumes one slot when we reach this function (the
-    // helper is only called for `SystemAndN`, which marks the system).
-    // Tools-last consumes another when stamped.
-    let used_outside = 1usize + if tools_stamped { 1 } else { 0 };
-    let remaining = PromptCacheStrategy::ANTHROPIC_BREAKPOINT_CAP.saturating_sub(used_outside);
-    let budget = want.min(remaining);
-    if budget == 0 {
+    let used_outside = 1usize + if has_tools { 1 } else { 0 }; // system [+ tools]
+    let remaining = 4usize.saturating_sub(used_outside); // 2 or 3
+    if remaining == 0 || api_messages.is_empty() {
         return;
     }
     let marker = ttl.to_marker();
@@ -1157,10 +1072,10 @@ fn apply_cache_markers(
     // landed. Empty `Blocks` (e.g. messages whose only content was a
     // Thinking block, filtered by `convert_message`) are skipped without
     // consuming the budget — otherwise the rolling window silently
-    // shrinks below its target and the promised cache reuse is not
-    // realised.
+    // shrinks below its 2-3 message target and the promised cache reuse
+    // is not realised.
     for msg in api_messages.iter_mut().rev() {
-        if stamped >= budget {
+        if stamped >= remaining {
             break;
         }
         if try_stamp_block_with_marker(msg, &marker) {
@@ -1273,26 +1188,24 @@ fn convert_message(msg: &Message) -> ApiMessage {
                         cache_control: None,
                     }),
                     ContentBlock::Thinking { .. } => None,
-                    ContentBlock::ImageFile { media_type, path } => {
-                        match tokio::task::block_in_place(|| std::fs::read(path)) {
-                            Ok(bytes) => {
-                                use base64::Engine;
-                                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                                Some(ApiContentBlock::Image {
-                                    source: ApiImageSource {
-                                        source_type: "base64".to_string(),
-                                        media_type: media_type.clone(),
-                                        data,
-                                    },
-                                    cache_control: None,
-                                })
-                            }
-                            Err(e) => {
-                                warn!(path = %path, error = %e, "ImageFile missing, skipping");
-                                None
-                            }
+                    ContentBlock::ImageFile { media_type, path } => match std::fs::read(path) {
+                        Ok(bytes) => {
+                            use base64::Engine;
+                            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            Some(ApiContentBlock::Image {
+                                source: ApiImageSource {
+                                    source_type: "base64".to_string(),
+                                    media_type: media_type.clone(),
+                                    data,
+                                },
+                                cache_control: None,
+                            })
                         }
-                    }
+                        Err(e) => {
+                            warn!(path = %path, error = %e, "ImageFile missing, skipping");
+                            None
+                        }
+                    },
                     ContentBlock::Unknown => None,
                 })
                 .collect();
@@ -1353,21 +1266,11 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
         stop_reason,
         tool_calls,
         usage: TokenUsage {
-            // Normalize to the workspace convention used by
-            // `librefang-kernel-metering` and `TokenUsage::burst_tokens`:
-            // `input_tokens` = TOTAL prompt tokens including the cached
-            // portion. Anthropic's API reports `input_tokens` as the NEW
-            // input only with cache_read / cache_creation as separate
-            // buckets, so add them in here at the boundary. Tracking
-            // issue: #4958.
-            input_tokens: api.usage.input_tokens
-                + api.usage.cache_read_input_tokens
-                + api.usage.cache_creation_input_tokens,
+            input_tokens: api.usage.input_tokens,
             output_tokens: api.usage.output_tokens,
             cache_creation_input_tokens: api.usage.cache_creation_input_tokens,
             cache_read_input_tokens: api.usage.cache_read_input_tokens,
         },
-        actual_provider: None,
     }
 }
 
@@ -1381,54 +1284,6 @@ mod tests {
         let msg = Message::user("Hello");
         let api_msg = convert_message(&msg);
         assert_eq!(api_msg.role, "user");
-    }
-
-    /// Regression: `ContentBlock::ImageFile` paths must be read via
-    /// `tokio::task::block_in_place` so a multi-MB image read does not
-    /// stall the tokio worker pool. The base64-encoded bytes in the
-    /// resulting `ApiContentBlock::Image` must match the bytes on disk.
-    ///
-    /// Wrap with `flavor = "multi_thread"` so `block_in_place` does not
-    /// panic on a single-threaded runtime.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn convert_message_imagefile_reads_bytes_without_blocking_worker() {
-        use base64::Engine;
-        use std::io::Write;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("img.png");
-        // Minimal PNG magic + a few payload bytes — drivers do not
-        // validate format, they only base64-encode the file contents.
-        let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
-        std::fs::File::create(&path)
-            .and_then(|mut f| f.write_all(&bytes))
-            .expect("write png");
-
-        let msg = Message {
-            role: Role::User,
-            content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
-                media_type: "image/png".to_string(),
-                path: path.to_string_lossy().into_owned(),
-            }]),
-            pinned: false,
-            timestamp: None,
-        };
-        let api_msg = convert_message(&msg);
-        let blocks = match api_msg.content {
-            ApiContent::Blocks(b) => b,
-            ApiContent::Text(_) => panic!("expected Blocks content"),
-        };
-        let img = blocks
-            .into_iter()
-            .find_map(|b| match b {
-                ApiContentBlock::Image { source, .. } => Some(source),
-                _ => None,
-            })
-            .expect("ApiContentBlock::Image present");
-        assert_eq!(img.source_type, "base64");
-        assert_eq!(img.media_type, "image/png");
-        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        assert_eq!(img.data, expected, "encoded bytes must round-trip");
     }
 
     #[test]
@@ -1627,14 +1482,10 @@ mod tests {
             thinking: None,
             prompt_caching: true,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_request = build_anthropic_request(&request);
         assert_eq!(api_request.tools.len(), 2);
@@ -1669,14 +1520,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_request = build_anthropic_request(&request);
         assert!(api_request.tools[0].cache_control.is_none());
@@ -1719,14 +1566,10 @@ mod tests {
             thinking: None,
             prompt_caching: true,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_request = build_anthropic_request(&request);
         // Trailing 3 must carry the marker.
@@ -1773,14 +1616,10 @@ mod tests {
             thinking: None,
             prompt_caching: true,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_request = build_anthropic_request(&request);
         // Last 2 messages carry the marker.
@@ -1824,14 +1663,10 @@ mod tests {
             thinking: None,
             prompt_caching: true,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_request = build_anthropic_request(&request);
         let last = api_request.messages.last().expect("has last message");
@@ -1864,14 +1699,10 @@ mod tests {
             thinking: None,
             prompt_caching: true,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_request = build_anthropic_request(&request);
         let system = api_request.system.expect("system field set");
@@ -1908,14 +1739,10 @@ mod tests {
             thinking: None,
             prompt_caching: true,
             cache_ttl: Some("1h"),
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         // HTTP-layer header gate.
         assert!(request_uses_1h_cache(&request));
@@ -1954,14 +1781,10 @@ mod tests {
             thinking: None,
             prompt_caching: true,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         assert!(!request_uses_1h_cache(&request));
         let api_request = build_anthropic_request(&request);
@@ -1990,14 +1813,10 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_request = build_anthropic_request(&request);
         let last = api_request.messages.last().expect("has last message");
@@ -2048,12 +1867,7 @@ mod tests {
                 content: ApiContent::Text("u3".to_string()),
             },
         ];
-        apply_cache_markers(
-            &mut api_messages,
-            librefang_types::config::PromptCacheStrategy::SystemAndN(3),
-            false,
-            CacheTtl::Short,
-        );
+        apply_cache_markers_system_and_3(&mut api_messages, false, CacheTtl::Short);
 
         // Index 4 (newest) — stamped.
         assert!(
@@ -2111,14 +1925,10 @@ mod tests {
             thinking: None,
             prompt_caching: true,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_request = build_anthropic_request(&request);
         let mut total = 0usize;
@@ -2174,12 +1984,7 @@ mod tests {
                 content: ApiContent::Blocks(vec![]),
             })
             .collect();
-        apply_cache_markers(
-            &mut api_messages,
-            librefang_types::config::PromptCacheStrategy::SystemAndN(3),
-            false,
-            CacheTtl::Short,
-        );
+        apply_cache_markers_system_and_3(&mut api_messages, false, CacheTtl::Short);
 
         for (i, msg) in api_messages.iter().enumerate() {
             assert!(
@@ -2205,339 +2010,12 @@ mod tests {
             thinking: None,
             prompt_caching: true,
             cache_ttl: None,
-            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let api_request = build_anthropic_request(&request);
         assert!(api_request.tools.is_empty());
-    }
-
-    // ───────────────────────────────────────────────────────────────────
-    // Strategy plumbing tests (#4970).
-    //
-    // These guard the new `PromptCacheStrategy` overrides on
-    // `CompletionRequest::prompt_cache_strategy`. They live alongside
-    // the existing system_and_3 fixtures rather than in a separate
-    // module so the helpers (`last_block_cache_control`,
-    // `build_anthropic_request`) are reused without re-importing.
-    // ───────────────────────────────────────────────────────────────────
-
-    fn strategy_request(
-        msgs: Vec<Message>,
-        tools: Vec<ToolDefinition>,
-        strategy: Option<PromptCacheStrategy>,
-        prompt_caching: bool,
-    ) -> CompletionRequest {
-        CompletionRequest {
-            model: "claude-sonnet-4-5".to_string(),
-            messages: std::sync::Arc::new(msgs),
-            tools: std::sync::Arc::new(tools),
-            max_tokens: 100,
-            temperature: 0.0,
-            system: Some("sys".to_string()),
-            thinking: None,
-            prompt_caching,
-            cache_ttl: None,
-            prompt_cache_strategy: strategy,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-        }
-    }
-
-    /// `Disabled` explicitly suppresses every marker, even when the
-    /// master switch (`prompt_caching`) is on. Guards the precedence
-    /// the runtime relies on for per-request overrides.
-    #[test]
-    fn strategy_disabled_emits_no_markers() {
-        let tool = ToolDefinition {
-            name: "alpha".into(),
-            description: "x".into(),
-            input_schema: serde_json::json!({"type":"object"}),
-        };
-        let req = strategy_request(
-            vec![Message::user("u1"), Message::assistant("a1")],
-            vec![tool],
-            Some(PromptCacheStrategy::Disabled),
-            true,
-        );
-        let api = build_anthropic_request(&req);
-        // System is in the shorthand-string form, not the structured
-        // block form — that branch is only taken when a marker would
-        // be attached.
-        assert!(
-            api.system.as_ref().unwrap().is_string(),
-            "system must stay as plain string when strategy is Disabled",
-        );
-        // Tools have no cache_control.
-        assert!(api.tools.iter().all(|t| t.cache_control.is_none()));
-        // Messages have no cache_control.
-        for (i, m) in api.messages.iter().enumerate() {
-            assert!(
-                last_block_cache_control(m).is_none(),
-                "message[{i}] must not be marked under Disabled",
-            );
-        }
-    }
-
-    /// `SystemOnly` marks the system block but leaves tool schemas and
-    /// every message in the unmarked prefix. Distinguishes the strategy
-    /// from `SystemAndN(0)` (which would have spent the tools-last
-    /// breakpoint).
-    #[test]
-    fn strategy_system_only_marks_only_system() {
-        let tool = ToolDefinition {
-            name: "alpha".into(),
-            description: "x".into(),
-            input_schema: serde_json::json!({"type":"object"}),
-        };
-        let req = strategy_request(
-            vec![Message::user("u1"), Message::assistant("a1")],
-            vec![tool],
-            Some(PromptCacheStrategy::SystemOnly),
-            true,
-        );
-        let api = build_anthropic_request(&req);
-        // System is upgraded to block form with a marker.
-        let sys_arr = api
-            .system
-            .as_ref()
-            .and_then(|v| v.as_array())
-            .expect("system in array form");
-        assert_eq!(sys_arr[0]["cache_control"]["type"], "ephemeral");
-        // Tools-last is NOT marked — the strategy stops at the system block.
-        assert!(api.tools[0].cache_control.is_none());
-        // No message is marked.
-        for (i, m) in api.messages.iter().enumerate() {
-            assert!(
-                last_block_cache_control(m).is_none(),
-                "message[{i}] must not be marked under SystemOnly",
-            );
-        }
-    }
-
-    /// `SystemAndN(0)` marks system + tools-last but zero messages.
-    /// Verifies the helper distinguishes "tools requested, no messages"
-    /// from `SystemOnly` (which leaves tools unmarked).
-    #[test]
-    fn strategy_system_and_zero_marks_tools_but_no_messages() {
-        let tool = ToolDefinition {
-            name: "alpha".into(),
-            description: "x".into(),
-            input_schema: serde_json::json!({"type":"object"}),
-        };
-        let req = strategy_request(
-            vec![Message::user("u1"), Message::assistant("a1")],
-            vec![tool],
-            Some(PromptCacheStrategy::SystemAndN(0)),
-            true,
-        );
-        let api = build_anthropic_request(&req);
-        assert!(api.system.as_ref().unwrap().is_array(), "system marked");
-        assert!(
-            api.tools[0].cache_control.is_some(),
-            "tools-last must be marked when strategy is SystemAndN(_)",
-        );
-        for m in &api.messages {
-            assert!(last_block_cache_control(m).is_none());
-        }
-    }
-
-    /// `SystemAndN(8)` requests 8 trailing-message markers but Anthropic
-    /// only allows 4 breakpoints total. With system + tools-last
-    /// already claimed, only 2 message slots remain. Guards the
-    /// most-stable-first clipping order required by the issue spec.
-    #[test]
-    fn strategy_system_and_n_clips_to_4_breakpoint_cap() {
-        let tool = ToolDefinition {
-            name: "alpha".into(),
-            description: "x".into(),
-            input_schema: serde_json::json!({"type":"object"}),
-        };
-        let req = strategy_request(
-            vec![
-                Message::user("u1"),
-                Message::assistant("a1"),
-                Message::user("u2"),
-                Message::assistant("a2"),
-                Message::user("u3"),
-                Message::assistant("a3"),
-                Message::user("u4"),
-                Message::assistant("a4"),
-                Message::user("u5 (last)"),
-            ],
-            vec![tool],
-            Some(PromptCacheStrategy::SystemAndN(8)),
-            true,
-        );
-        let api = build_anthropic_request(&req);
-
-        // Count marker total across system + tools + messages — must
-        // be ≤ 4 (Anthropic's hard cap). The cap is enforced silently
-        // by the driver; this assertion catches any future refactor
-        // that exceeds it.
-        let mut total = 0usize;
-        if api
-            .system
-            .as_ref()
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|b| b.get("cache_control"))
-            .is_some()
-        {
-            total += 1;
-        }
-        for t in &api.tools {
-            if t.cache_control.is_some() {
-                total += 1;
-            }
-        }
-        for m in &api.messages {
-            if last_block_cache_control(m).is_some() {
-                total += 1;
-            }
-        }
-        assert_eq!(
-            total,
-            PromptCacheStrategy::ANTHROPIC_BREAKPOINT_CAP,
-            "must saturate exactly 4 breakpoints",
-        );
-
-        // Most-stable-first: system + tools-last are always marked.
-        assert!(api.system.as_ref().unwrap().is_array());
-        assert!(api.tools[0].cache_control.is_some());
-
-        // Only the two newest messages are marked.
-        for i in api.messages.len() - 2..api.messages.len() {
-            assert!(
-                last_block_cache_control(&api.messages[i]).is_some(),
-                "tail message[{i}] must be marked",
-            );
-        }
-        for i in 0..api.messages.len() - 2 {
-            assert!(
-                last_block_cache_control(&api.messages[i]).is_none(),
-                "older message[{i}] must NOT be marked",
-            );
-        }
-    }
-
-    /// `prompt_cache_strategy = None` falls back to the historical
-    /// default (`system_and_3`). This is the path used by every
-    /// existing call site that hasn't been migrated to set the field
-    /// explicitly — it must keep behaving identically to pre-#4970.
-    #[test]
-    fn strategy_none_falls_back_to_system_and_3() {
-        let tool = ToolDefinition {
-            name: "alpha".into(),
-            description: "x".into(),
-            input_schema: serde_json::json!({"type":"object"}),
-        };
-        let msgs = vec![
-            Message::user("u1"),
-            Message::assistant("a1"),
-            Message::user("u2"),
-            Message::assistant("a2"),
-            Message::user("u3 (last)"),
-        ];
-        let req = strategy_request(msgs.clone(), vec![tool.clone()], None, true);
-        let api_default = build_anthropic_request(&req);
-
-        let req_explicit = strategy_request(
-            msgs,
-            vec![tool],
-            Some(PromptCacheStrategy::SystemAndN(3)),
-            true,
-        );
-        let api_explicit = build_anthropic_request(&req_explicit);
-
-        // The two requests must serialize to byte-identical bodies on
-        // the cache_control surface. Compare by extracting all marker
-        // positions.
-        fn positions(req: &ApiRequest) -> Vec<bool> {
-            let mut out = Vec::new();
-            for m in &req.messages {
-                out.push(last_block_cache_control(m).is_some());
-            }
-            out
-        }
-        assert_eq!(positions(&api_default), positions(&api_explicit));
-    }
-
-    /// Master switch (`prompt_caching = false`) wins over any explicit
-    /// strategy. Even when the caller asks for `SystemAndN(3)`, the
-    /// driver must emit nothing — operators rely on this for the
-    /// global kill-switch.
-    #[test]
-    fn master_switch_off_suppresses_strategy() {
-        let req = strategy_request(
-            vec![Message::user("u1"), Message::assistant("a1")],
-            vec![],
-            Some(PromptCacheStrategy::SystemAndN(3)),
-            false,
-        );
-        let api = build_anthropic_request(&req);
-        assert!(api.system.as_ref().unwrap().is_string());
-        for m in &api.messages {
-            assert!(last_block_cache_control(m).is_none());
-        }
-    }
-
-    /// Snapshot-style assertion on the JSON shape of a fully-marked
-    /// request. Captures the wire format Anthropic actually receives,
-    /// so any refactor that subtly changes the marker shape (the
-    /// `{"type":"ephemeral"}` literal, the `cache_control` key
-    /// placement) is caught by a literal-string compare.
-    #[test]
-    fn strategy_system_and_3_snapshot_json_shape() {
-        let tool = ToolDefinition {
-            name: "alpha".into(),
-            description: "first".into(),
-            input_schema: serde_json::json!({"type":"object"}),
-        };
-        let req = strategy_request(
-            vec![Message::user("hi"), Message::assistant("hello")],
-            vec![tool],
-            Some(PromptCacheStrategy::SystemAndN(3)),
-            true,
-        );
-        let api = build_anthropic_request(&req);
-        let body = serde_json::to_value(&api).unwrap();
-
-        // System marker present.
-        assert_eq!(
-            body["system"][0]["cache_control"],
-            serde_json::json!({"type":"ephemeral"}),
-            "system block carries ephemeral marker",
-        );
-        // Tools-last marker present.
-        assert_eq!(
-            body["tools"][0]["cache_control"],
-            serde_json::json!({"type":"ephemeral"}),
-            "tools[last] carries ephemeral marker",
-        );
-        // Both messages (only 2 fit in the remaining budget) carry
-        // markers on their LAST content block.
-        for i in 0..2 {
-            let last_block = body["messages"][i]["content"]
-                .as_array()
-                .and_then(|a| a.last())
-                .expect("messages must be in block form when marked");
-            assert_eq!(
-                last_block["cache_control"],
-                serde_json::json!({"type":"ephemeral"}),
-                "message[{i}] last block carries ephemeral marker",
-            );
-        }
     }
 }

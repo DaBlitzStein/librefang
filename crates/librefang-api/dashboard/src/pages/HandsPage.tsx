@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
@@ -62,7 +62,6 @@ import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from "../lib/
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useCronJobs } from "../lib/queries/runtime";
-import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 
 
 
@@ -547,15 +546,11 @@ function HandSettingsEditor({
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
-  const saveOkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setDraft({});
     setSaveOk(false);
     setSaveError(null);
-    return () => {
-      if (saveOkTimerRef.current) clearTimeout(saveOkTimerRef.current);
-    };
   }, [settings]);
 
   const saveMutation = useUpdateHandSettings();
@@ -594,8 +589,7 @@ function HandSettingsEditor({
           setSaveOk(true);
           setSaveError(null);
           setDraft({});
-          if (saveOkTimerRef.current) clearTimeout(saveOkTimerRef.current);
-          saveOkTimerRef.current = setTimeout(() => setSaveOk(false), 2500);
+          setTimeout(() => setSaveOk(false), 2500);
         },
         onError: (err: Error) => {
           setSaveError(err.message || String(err));
@@ -1232,17 +1226,10 @@ const HandCard = React.memo(function HandCard({
 export function HandsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
-  const [pendingHandId, setPendingHandId] = useState<string | null>(null);
-  const [pendingInstanceId, setPendingInstanceId] = useState<string | null>(null);
+  const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [detailHand, setDetailHand] = useState<HandDefinitionItem | null>(null);
-  const [confirmDialog, setConfirmDialog] = useState<{
-    title: string;
-    message: string;
-    onConfirm: () => void;
-    tone?: "destructive";
-  } | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -1260,9 +1247,9 @@ export function HandsPage() {
   const hands = handsQuery.data ?? [];
   const instances = activeQuery.data ?? [];
 
-  const handleChat = useCallback((instanceId: string, handName?: string) => {
+  const handleChat = useCallback((instanceId: string) => {
     const inst = instances.find((i) => i.instance_id === instanceId);
-    navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId, handName } });
+    navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
   }, [instances, navigate]);
 
   const activeInstanceIds = useMemo(() => instances.map(i => i.instance_id).filter(Boolean), [instances]);
@@ -1301,23 +1288,15 @@ export function HandsPage() {
   }, [hands]);
 
   // Active hands paired with their definitions — used by the running strip
-  const handById = useMemo(() => {
-    const map = new Map<string, HandDefinitionItem>();
-    for (const h of hands) {
-      map.set(h.id, h);
-    }
-    return map;
-  }, [hands]);
-
   const activeHandPairs = useMemo(
     () =>
       instances
         .map((inst) => ({
           instance: inst,
-          hand: handById.get(inst.hand_id ?? ""),
+          hand: hands.find((h) => h.id === inst.hand_id),
         }))
         .filter((x): x is { instance: HandInstanceItem; hand: HandDefinitionItem } => x.hand != null),
-    [instances, handById],
+    [instances, hands],
   );
 
   // Filtered hands for the catalog grid — all hands pass, active sort first
@@ -1344,7 +1323,7 @@ export function HandsPage() {
   }, [hands, search, selectedCategory, activeHandIds]);
 
   async function handleActivate(id: string) {
-    setPendingHandId(id);
+    setPendingId(id);
     try {
       await activateMutation.mutateAsync(id);
       addToast(t("common.success"), "success");
@@ -1352,12 +1331,12 @@ export function HandsPage() {
       const msg = e instanceof Error ? e.message : t("common.error");
       addToast(msg, "error");
     } finally {
-      setPendingHandId(null);
+      setPendingId(null);
     }
   }
 
   async function handleDeactivate(id: string) {
-    setPendingInstanceId(id);
+    setPendingId(id);
     try {
       await deactivateMutation.mutateAsync(id);
       addToast(t("common.success"), "success");
@@ -1366,36 +1345,30 @@ export function HandsPage() {
       const msg = e instanceof Error ? e.message : t("common.error");
       addToast(msg, "error");
     } finally {
-      setPendingInstanceId(null);
+      setPendingId(null);
     }
   }
 
-  function handleUninstall(handId: string) {
-    setConfirmDialog({
-      title: t("hands.uninstall", { defaultValue: "Uninstall" }),
-      message: t("hands.uninstall_confirm", {
-        defaultValue: "Uninstall this hand? Its HAND.toml and workspace files will be deleted. This cannot be undone.",
-      }),
-      tone: "destructive",
-      onConfirm: async () => {
-        setConfirmDialog(null);
-        setPendingHandId(handId);
-        try {
-          await uninstallMutation.mutateAsync(handId);
-          addToast(t("common.success"), "success");
-          setDetailHand(null);
-        } catch (e: unknown) {
-          const msg = e instanceof Error ? e.message : t("common.error");
-          addToast(msg, "error");
-        } finally {
-          setPendingHandId(null);
-        }
-      },
+  async function handleUninstall(handId: string) {
+    const confirmMsg = t("hands.uninstall_confirm", {
+      defaultValue: "Uninstall this hand? Its HAND.toml and workspace files will be deleted. This cannot be undone.",
     });
+    if (!window.confirm(confirmMsg)) return;
+    setPendingId(handId);
+    try {
+      await uninstallMutation.mutateAsync(handId);
+      addToast(t("common.success"), "success");
+      setDetailHand(null);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : t("common.error");
+      addToast(msg, "error");
+    } finally {
+      setPendingId(null);
+    }
   }
 
   async function handlePause(id: string) {
-    setPendingInstanceId(id);
+    setPendingId(id);
     try {
       await pauseMutation.mutateAsync(id);
       addToast(t("common.success"), "success");
@@ -1403,12 +1376,12 @@ export function HandsPage() {
       const msg = e instanceof Error ? e.message : t("common.error");
       addToast(msg, "error");
     } finally {
-      setPendingInstanceId(null);
+      setPendingId(null);
     }
   }
 
   async function handleResume(id: string) {
-    setPendingInstanceId(id);
+    setPendingId(id);
     try {
       await resumeMutation.mutateAsync(id);
       addToast(t("common.success"), "success");
@@ -1416,7 +1389,7 @@ export function HandsPage() {
       const msg = e instanceof Error ? e.message : t("common.error");
       addToast(msg, "error");
     } finally {
-      setPendingInstanceId(null);
+      setPendingId(null);
     }
   }
 
@@ -1480,7 +1453,7 @@ export function HandsPage() {
                 onChat={handleChat}
                 onDeactivate={handleDeactivate}
                 onDetail={setDetailHand}
-                isPending={pendingInstanceId === instance.instance_id}
+                isPending={pendingId === instance.instance_id}
               />
             ))}
           </div>
@@ -1570,7 +1543,7 @@ export function HandsPage() {
                 onDeactivate={(id) => handleDeactivate(id)}
                 onDetail={setDetailHand}
                 onChat={handleChat}
-                isPending={pendingHandId === h.id || (instance ? pendingInstanceId === instance.instance_id : false)}
+                isPending={pendingId === h.id || (instance ? pendingId === instance.instance_id : false)}
               />
             );
           })}
@@ -1591,18 +1564,10 @@ export function HandsPage() {
           onResume={handleResume}
           onChat={handleChat}
           onUninstall={handleUninstall}
-          isPending={pendingHandId === detailHandLatest.id || (!!detailInstance && pendingInstanceId === detailInstance.instance_id)}
+          isPending={pendingId === detailHandLatest.id}
         />
       )}
 
-      <ConfirmDialog
-        isOpen={confirmDialog !== null}
-        title={confirmDialog?.title ?? ""}
-        message={confirmDialog?.message ?? ""}
-        tone={confirmDialog?.tone}
-        onConfirm={() => confirmDialog?.onConfirm()}
-        onClose={() => setConfirmDialog(null)}
-      />
     </div>
   );
 }

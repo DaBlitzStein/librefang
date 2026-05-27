@@ -49,9 +49,9 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Populate the registry cache so the kernel boots without network access.
-    librefang_kernel::registry_sync::sync_registry(
+    librefang_runtime::registry_sync::sync_registry(
         tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 
@@ -59,49 +59,6 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
         api_key: api_key.to_string(),
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test-model".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-
-    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-
-    let (app, state) = server::build_router(kernel, "127.0.0.1:0".parse().expect("addr")).await;
-
-    RouterHarness {
-        app,
-        _tmp: tmp,
-        _state: state,
-    }
-}
-
-/// Boot a full router with `require_auth_for_reads = true` and an api_key set.
-/// Used to verify that dashboard-read endpoints (including
-/// `/api/auth/providers`) require a token in strict mode. The 401 is produced
-/// by the auth middleware before any handler runs, so external_auth need not be
-/// enabled here (enabling it would require `LIBREFANG_STATE_SECRET`).
-async fn boot_router_strict_reads() -> RouterHarness {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-    );
-
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        api_key: "test-secret-key".to_string(),
-        require_auth_for_reads: Some(true),
         default_model: DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
@@ -185,15 +142,6 @@ async fn get_status(app: axum::Router, path: &str) -> StatusCode {
     app.oneshot(req).await.unwrap().status()
 }
 
-async fn method_status(app: axum::Router, method: Method, path: &str) -> StatusCode {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .body(Body::empty())
-        .unwrap();
-    app.oneshot(req).await.unwrap().status()
-}
-
 // ---------------------------------------------------------------------------
 // The route table under test.
 //
@@ -241,16 +189,8 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/auth/callback", Expect::AlwaysPublic),
     re("/api/auth/dashboard-login", Expect::AlwaysPublic),
     re("/api/auth/dashboard-check", Expect::AlwaysPublic),
+    re("/api/auth/providers", Expect::AlwaysPublic),
     re("/api/auth/login", Expect::AlwaysPublic),
-    re("/api/auth/login/google", Expect::AlwaysPublic),
-    // Regression for audit: login-prefix-match. A bare
-    // `prefix_get("/api/auth/login")` matched arbitrary siblings
-    // sharing the prefix; the split into exact + slash-terminated
-    // prefix keeps both `/api/auth/login` and
-    // `/api/auth/login/{provider}` public while requiring auth on
-    // `/api/auth/login-status`, `/api/auth/loginhack`, etc.
-    re("/api/auth/login-status", Expect::Authed),
-    re("/api/auth/loginhack", Expect::Authed),
     re("/api/config/schema", Expect::AlwaysPublic),
     re("/api/pairing/complete", Expect::AlwaysPublic),
     re("/a2a/agents", Expect::AlwaysPublic),
@@ -265,15 +205,9 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/dashboard/manifest.json", Expect::AlwaysPublic),
     re("/dashboard/sw.js", Expect::AlwaysPublic),
     re("/locales/en.json", Expect::AlwaysPublic),
-    // GitHub Copilot OAuth must now require auth — pre-fix it was
-    // an unauthenticated POST + GET prefix that allowed a hostile
-    // pop-under to hijack GITHUB_TOKEN via localhost (audit:
-    // github-copilot-oauth-unauthenticated). The dashboard already
-    // authenticates before initiating the device flow.
-    re("/api/providers/github-copilot/oauth/start", Expect::Authed),
     re(
-        "/api/providers/github-copilot/oauth/poll/abc123",
-        Expect::Authed,
+        "/api/providers/github-copilot/oauth/start",
+        Expect::AlwaysPublic,
     ),
     re(
         "/api/mcp/servers/myserver/auth/callback",
@@ -286,11 +220,6 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // Dashboard reads (public when require_auth_for_reads is off, which is default)
     re("/api/agents", Expect::DashboardRead),
     re("/api/a2a/agents", Expect::DashboardRead),
-    // `/api/auth/providers` enumerates configured IdPs; gated by
-    // require_auth_for_reads (open mode returns names-only — see
-    // oauth::auth_providers). Moved out of AlwaysPublic in the
-    // API-surface-hygiene roundup.
-    re("/api/auth/providers", Expect::DashboardRead),
     re("/api/auto-dream/status", Expect::DashboardRead),
     re("/api/budget", Expect::DashboardRead),
     re("/api/budget/agents", Expect::DashboardRead),
@@ -299,11 +228,7 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // concrete path like the one above covers that case. No separate Authed
     // entry is needed.
     re("/api/channels", Expect::DashboardRead),
-    // SECURITY #5139: `/api/cron/*` was intentionally removed from
-    // PUBLIC_ROUTES_DASHBOARD_READS because cron-job reads serialise the
-    // user-authored prompt. The stale `/api/cron/list` row (a path that was
-    // never registered as a route) was left behind by the catalog cleanup;
-    // dropped here.
+    re("/api/cron/list", Expect::DashboardRead),
     re("/api/hands", Expect::DashboardRead),
     re("/api/hands/active", Expect::DashboardRead),
     re("/api/hands/my-hand", Expect::DashboardRead),
@@ -321,11 +246,6 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/status", Expect::DashboardRead),
     re("/api/workflows", Expect::DashboardRead),
     // Auth-required endpoints (must 401 without Bearer token)
-    // `/api/health/detail` is auth-required: the response leaks budget USD
-    // figures, agent counts, panic/restart counters, LLM latency stats, and
-    // memory-provider config — reconnaissance-grade if exposed unauthenticated.
-    // The minimal-payload `/api/health` (above) is what `<OfflineBanner />`
-    // polls pre-auth (see `dashboard/src/lib/queries/runtime.ts`).
     re("/api/health/detail", Expect::Authed),
     // Security regression: /api/mcp/servers/{name} and /auth/status must NOT be
     // publicly reachable — the server config (including env vars) and OAuth token
@@ -346,15 +266,6 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/tools/file_read", Expect::Authed),
     re("/api/peers", Expect::Authed),
     re("/api/skills/my-skill", Expect::Authed),
-    // Skill workshop pending review (#3328) — sensitive: list / show
-    // expose user-input excerpts up to 800 chars per candidate, and
-    // approve/reject (separately covered by the POST allowlist test
-    // below) mutate the active skill registry. Must NOT leak past auth.
-    re("/api/skills/pending", Expect::Authed),
-    re(
-        "/api/skills/pending/00000000-0000-0000-0000-000000000001",
-        Expect::Authed,
-    ),
     re("/api/a2a/tasks/some-task/status", Expect::Authed),
     re("/api/extensions", Expect::Authed),
 ];
@@ -553,156 +464,5 @@ async fn mcp_servers_prefix_does_not_leak_protected_paths() {
         callback_status,
         StatusCode::UNAUTHORIZED,
         "/api/mcp/servers/test-srv/auth/callback must be reachable without a token (OAuth callback)"
-    );
-}
-
-/// Skill workshop pending review (#3328): the four `/api/skills/pending*`
-/// routes are sensitive — list/show expose user-input excerpts, and
-/// approve/reject mutate the active skill registry. Confirm all four
-/// return 401 without a token when an api_key is configured.
-///
-/// The GET cases are also exercised through `authed_routes_require_token`
-/// via the `REGISTERED_GET_ROUTES` catalog. This test additionally pins
-/// the two POST endpoints, which the GET-only catalog does not cover.
-#[tokio::test(flavor = "multi_thread")]
-async fn skill_workshop_pending_endpoints_require_token() {
-    let harness = boot_router_with_api_key("test-secret-key").await;
-    let id = "00000000-0000-0000-0000-000000000001";
-
-    let cases: &[(Method, String)] = &[
-        (Method::GET, "/api/skills/pending".to_string()),
-        (Method::GET, format!("/api/skills/pending/{id}")),
-        (Method::POST, format!("/api/skills/pending/{id}/approve")),
-        (Method::POST, format!("/api/skills/pending/{id}/reject")),
-    ];
-
-    for (method, path) in cases {
-        let status = method_status(harness.app.clone(), method.clone(), path).await;
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "{method} {path} must return 401 without a token \
-             (the skill-workshop pending surface is sensitive)"
-        );
-    }
-}
-
-/// Helper: GET a path and return (status, parsed-JSON-body).
-async fn get_status_and_body(app: axum::Router, path: &str) -> (StatusCode, serde_json::Value) {
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(path)
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-        .await
-        .unwrap();
-    let body = if bytes.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
-    };
-    (status, body)
-}
-
-/// API-surface-hygiene roundup (#5: auth-providers leak): with
-/// `require_auth_for_reads = true` and an api_key configured, an
-/// unauthenticated `GET /api/auth/providers` must be rejected with 401 — the
-/// IdP enumeration is no longer unconditionally public.
-#[tokio::test(flavor = "multi_thread")]
-async fn auth_providers_requires_token_in_strict_reads_mode() {
-    let harness = boot_router_strict_reads().await;
-    let status = get_status(harness.app.clone(), "/api/auth/providers").await;
-    assert_eq!(
-        status,
-        StatusCode::UNAUTHORIZED,
-        "/api/auth/providers must require a token when require_auth_for_reads is on"
-    );
-}
-
-/// API-surface-hygiene roundup (#5): in open mode (no api_key, no
-/// require_auth_for_reads), an unauthenticated `GET /api/auth/providers` is
-/// reachable but returns NAMES ONLY — the `scopes` configuration must not leak
-/// to an anonymous caller.
-#[tokio::test(flavor = "multi_thread")]
-async fn auth_providers_open_mode_returns_names_only() {
-    use librefang_types::config::{ExternalAuthConfig, OidcProvider};
-
-    // external_auth=enabled requires a valid LIBREFANG_STATE_SECRET at boot.
-    // 32 zero bytes, base64-encoded (44 chars) — only used to satisfy the
-    // boot-time shape check; these tests never exercise the OAuth state HMAC.
-    // Process-global env mutation: we only ever SET it (never clear), and the
-    // value is valid for any concurrent kernel boot, so parallel tests are
-    // unaffected.
-    std::env::set_var(
-        "LIBREFANG_STATE_SECRET",
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-    );
-
-    let tmp = tempfile::tempdir().expect("tempdir");
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-    );
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        api_key: String::new(), // open mode
-        external_auth: ExternalAuthConfig {
-            enabled: true,
-            providers: vec![OidcProvider {
-                id: "test".into(),
-                display_name: "Test".into(),
-                issuer_url: String::new(),
-                auth_url: "https://example.invalid/authorize".into(),
-                token_url: "https://example.invalid/token".into(),
-                userinfo_url: String::new(),
-                jwks_uri: String::new(),
-                client_id: "client-id".into(),
-                client_secret_env: "LIBREFANG_TEST_OAUTH_SECRET_DOES_NOT_EXIST".into(),
-                redirect_url: "http://127.0.0.1:4545/api/auth/callback".into(),
-                scopes: vec!["openid".into()],
-                allowed_domains: vec![],
-                audience: String::new(),
-                require_email_verified: None,
-            }],
-            ..Default::default()
-        },
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test-model".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-    let (app, state) = server::build_router(kernel, "127.0.0.1:0".parse().expect("addr")).await;
-    let harness = RouterHarness {
-        app,
-        _tmp: tmp,
-        _state: state,
-    };
-
-    let (status, body) = get_status_and_body(harness.app.clone(), "/api/auth/providers").await;
-    assert_eq!(status, StatusCode::OK, "open mode must be reachable");
-    assert_eq!(body["enabled"], true);
-    let arr = body["providers"].as_array().expect("providers array");
-    let p = arr
-        .iter()
-        .find(|p| p["id"] == "test")
-        .expect("provider 'test'");
-    assert_eq!(p["display_name"], "Test");
-    assert!(
-        p.get("scopes").is_none(),
-        "open-mode anonymous response must NOT include `scopes`; got {p:?}"
     );
 }

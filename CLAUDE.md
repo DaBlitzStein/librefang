@@ -4,25 +4,18 @@
 
 The very first action in any task that will edit files **must** be:
 ```bash
-test -d "$(git rev-parse --show-toplevel)/.git" && echo main || echo linked
+pwd && git rev-parse --git-dir
 ```
-- prints `main` → you are in the **main worktree**. **Stop.** Run
-  `git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main`
-  and continue all work from that path.
-- prints `linked` → you are in a **linked worktree**. Continue.
-
-Why this test: git stores the main worktree's `.git` as a directory,
-and a linked worktree's `.git` as a small text file pointing at
-`<main>/.git/worktrees/<name>`. So `[ -d <toplevel>/.git ]` is true
-exactly in the main worktree. This is the same check
-`.claude/hooks/forbid-main-worktree.sh` uses internally; do not
-substitute `git rev-parse --git-dir` (its output is path-shape and
-varies with cwd) or path-matching against `pwd` (every developer's
-clone lives somewhere different).
-
-The `forbid-main-worktree` hook (`.claude/hooks/forbid-main-worktree.sh`)
-will block edits and mutating git commands targeted at the main tree if
-you forget — but the hook is a safety net, not your plan.
+If `pwd` ends in `/Workspace/libre/librefang` (or wherever the user keeps the
+main clone) **and** `git rev-parse --git-dir` prints `.git` (a directory, not
+a `gitdir: ...` file), you are in the main worktree. **Stop.** Run:
+```bash
+git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main
+```
+and continue all work from that path. The `forbid-main-worktree` hook
+(`.claude/hooks/forbid-main-worktree.sh`) will block edits and mutating git
+commands targeted at the main tree if you forget — but the hook is a safety
+net, not your plan.
 
 ### Other AI safety hooks (`.claude/hooks/`)
 
@@ -38,6 +31,7 @@ you forget — but the hook is a safety net, not your plan.
   `/Users`, `/usr`, `/etc`, `/var`, `/opt`, …)
 - Daemon launches: `librefang start`, `target/{debug,release}/librefang start|daemon`
   (port 4545 contention with the user's session — Live Integration Testing is human-only)
+- `cargo add` / `cargo remove` / `cargo upgrade` (deps need explicit user OK)
 
 `session-start-worktree-check.sh` (SessionStart) emits a banner telling
 the model whether the session started in the main tree or a linked worktree,
@@ -52,11 +46,9 @@ giving defense in depth on top of the Claude Code PreToolUse layer.
   duplicate-`[Unreleased]` guard; CHANGELOG `(@user)` attribution check on
   staged additions to `[Unreleased]` (#3400); `detect-secrets` scan against
   `.secrets.baseline` (soft-warn if not installed). Target: < 2s.
-- `pre-push` — refuses direct pushes to `main` / `master` and exits in
-  &lt; 100ms. Heavy verification (clippy, openapi/SDK drift) intentionally
-  lives in CI rather than gating every push — see #4532 for the
-  rationale. Skip the branch guard for a maintainer hotfix with
-  `LIBREFANG_PREPUSH_SKIP=1`.
+- `pre-push` — `cargo clippy --workspace --all-targets -- -D warnings`;
+  OpenAPI / SDK drift detection — fails the push if `openapi.json` or
+  generated SDKs are stale. Expected 30-90s on a warm cache.
 - `commit-msg` — rejects commit messages containing Claude / Anthropic
   attribution (catches heredocs and `git commit -F file` that the PreToolUse
   Bash hook cannot see).
@@ -74,21 +66,19 @@ yet.
 LibreFang is an open-source Agent Operating System written in Rust (24 crates in `crates/`, plus `xtask/`).
 - Config: `~/.librefang/config.toml`
 - Default API: `http://127.0.0.1:4545`
-- CLI binary: `target/release/librefang` on Linux/macOS,
-  `target/release/librefang.exe` on Windows (debug builds at the
-  matching `target/debug/` path)
+- CLI binary: `target/release/librefang.exe` (or `target/debug/librefang.exe`)
 
 ### Crate map
-- **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-import`
+- **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-migrate`
 - **Kernel**: `librefang-kernel` (orchestration), `librefang-kernel-handle` (trait used by runtime to call kernel without circular dep), `librefang-kernel-router`, `librefang-kernel-metering`
-- **Runtime**: `librefang-runtime` (agent loop, tools, plugins, OAuth, WASM sandbox), `librefang-runtime-mcp`, `librefang-runtime-audit`, `librefang-runtime-media`, `librefang-runtime-sandbox-docker`
+- **Runtime**: `librefang-runtime` (agent loop, tools, plugins), `librefang-runtime-mcp`, `librefang-runtime-oauth`, `librefang-runtime-wasm`
 - **LLM drivers**: `librefang-llm-driver` (trait + error types — interface only) and `librefang-llm-drivers` (concrete provider impls: anthropic, openai, gemini, …)
 - **Memory**: `librefang-memory` (SQLite substrate)
 - **Surface**: `librefang-api` (HTTP server + dashboard SPA bundled at `crates/librefang-api/dashboard/`), `librefang-cli`, `librefang-desktop`
 - **Extensibility**: `librefang-skills`, `librefang-hands`, `librefang-extensions`, `librefang-channels`
 
 ## Build & Verify Workflow
-**Do NOT run `cargo build` or `cargo run` locally.**
+**Do NOT run `cargo build`, `cargo run`, or `cargo install` locally.**
 **`cargo test` is allowed only when scoped with `-p <crate>` / `--package <crate>`** —
 the unscoped, workspace-wide form is blocked because it contends with the user's
 other sessions on the shared `target/` directory. Full workspace build / test
@@ -101,72 +91,23 @@ cargo clippy --workspace --all-targets -- -D warnings  # Zero warnings
 cargo test -p <crate>                                  # Only when verifying behavior in one crate
 ```
 
-### CI test lanes (refs #3696)
-
-CI splits tests into two separate jobs so a unit failure surfaces quickly:
-
-- **Unit-fast** (`Test / Unit (lib+bin)`, ~2 min): `cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast`
-  — lib and binary unit tests only; no integration test binaries. Run this locally for quick iteration.
-- **Integration** (`Test / Ubuntu (shard N/4)`, ~10-20 min): sharded across 4 Ubuntu runners via
-  `--partition hash:N/4`; also single jobs on macOS and Windows. Runs all `--tests` targets.
-
-The unit-fast lane uses nextest's `-E 'kind(lib) | kind(bin)'` filter rather
-than `--lib --bins` because the latter errors with "no library targets found"
-when a `-p <crate>` selector targets a binary-only crate
-(`librefang-cli`, `librefang-desktop`). The expression form matches whichever
-kinds the selected crates actually have, so the selective CI lane stays green
-when a PR touches only `librefang-cli/main.rs` (or when a stale-base diff
-drags it in).
-
-Local equivalents:
-```bash
-# Fast lane — unit tests only:
-cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast
-
-# Full validation — integration tests (mirrors the Ubuntu shard lane):
-cargo nextest run --workspace --no-fail-fast
-```
-
-### Verifying without a native toolchain (Docker)
-
-When the host has no native `cargo` (e.g. a macOS box where Rust was never
-installed), do **not** declare a change unverified — run the build inside the
-repo's sanctioned dev image (`Dockerfile.rust-dev`, kept in sync with CI's
-Linux package set). It compiles into a **named volume**, never the host's
-shared `target/`, so it does not contend with the user's sessions and the
-"don't run cargo locally" rule still holds.
-
-```bash
-# 1. Build the dev image once (cached afterwards):
-docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
-
-# 2. Run any scoped cargo command through it. CARGO_HOME / CARGO_TARGET_DIR
-#    point at named volumes (isolated from the host); reuse them across runs
-#    so deps compile once. Set PATH explicitly — a login shell ('bash -l')
-#    drops the image's /usr/local/cargo/bin from PATH.
-docker run --rm \
-  -v "$(git rev-parse --show-toplevel)":/work \
-  -v librefang-cargo:/cargo -v librefang-target:/target \
-  -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -w /work \
-  librefang-rust-dev:latest \
-  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; cargo test -p librefang-api --lib'
-```
-
-Scope is still mandatory: `-p <crate>` (or the `kind(lib)|kind(bin)` nextest
-filter), never the unscoped workspace form. The container runs **Linux only**
-— it cannot reproduce a Windows/macOS-specific failure, so for a
-platform-divergent bug write a platform-independent regression test (resolve a
-nonexistent path rather than relying on a host path like `/etc` existing — see
-#5716) or hand the exact command to the human for the missing OS.
-
 ## MANDATORY: Integration Testing (refs #3721)
 
 **Primary verification is automated.** The repo has comprehensive
 `#[tokio::test]` integration coverage in `crates/librefang-api/tests/`,
-landed via the #3571 PR series (~30 PRs). Every major route domain is
-exercised against a real axum router via `TestServer` (see
-`start_test_server*` in `tests/api_integration_test.rs`); the canonical
-list is `ls crates/librefang-api/tests/`. CI runs these on every push.
+landed via the #3571 PR series (~30 PRs). Every major route domain —
+`agents`, `a2a`, `approvals`, `audit`, `authz`, `auto-dream`, `budget`,
+`channels` (incl. webhooks), `config`, `goals`, `hands`, `hooks`,
+`inbox`, `mcp_auth`, `media`, `memory`, `network`/`peers`/`comms`,
+`oauth`, `pairing`/`backup`, `plugins`, `profiles`/`templates`,
+`prompts`, `providers`/`models`, `skills`, `terminal`, `tools`/`sessions`,
+`v1` (OpenAI compat), `workflows` — is exercised against a real axum
+router via `TestServer` (see `start_test_server*` in
+`tests/api_integration_test.rs`). Plus dedicated files:
+`auth_public_allowlist.rs`, `daemon_lifecycle_test.rs`, `load_test.rs`,
+`mcp_oauth_flow_test.rs`, `openapi_spec_test.rs`, `pairing_test.rs`,
+`tools_invoke_test.rs`, `totp_flow_test.rs`, `users_test.rs`. CI runs
+these on every push.
 
 ### What you MUST do for any route / wiring change
 
@@ -194,13 +135,12 @@ port 4545, both blocked by `.claude/hooks/`. Prepare commands and
 payloads for the user; they paste output back.
 
 ```bash
-# Stop any running daemon:
-#   Linux/macOS:        pkill -f librefang ; sleep 3
-#   Windows / Git Bash: tasklist | grep -i librefang && taskkill //PID <pid> //F && sleep 3
+# Stop any running daemon (Windows / Git Bash):
+tasklist | grep -i librefang && taskkill //PID <pid> //F && sleep 3
 
-# Build + start with provider key (binary suffix is .exe only on Windows):
+# Build + start with provider key:
 cargo build --release -p librefang-cli
-GROQ_API_KEY=<key> target/release/librefang start &
+GROQ_API_KEY=<key> target/release/librefang.exe start &
 sleep 6 && curl -s http://127.0.0.1:4545/api/health
 
 # Real LLM round-trip + side-effect check:
@@ -210,7 +150,8 @@ curl -s -X POST "http://127.0.0.1:4545/api/agents/$AGENT_ID/message" \
 curl -s http://127.0.0.1:4545/api/budget          # cost should have increased
 curl -s http://127.0.0.1:4545/api/budget/agents   # per-agent spend visible
 
-# Cleanup: same OS-specific kill command as above.
+# Cleanup:
+taskkill //PID <pid> //F
 ```
 
 The daemon command is `start` (not `daemon`).
@@ -242,10 +183,10 @@ The daemon command is `start` (not `daemon`).
 - **Auth middleware allowlist**: Unauthenticated endpoints must be added to the `is_public` allowlist in `middleware.rs` — NOT by reordering routes in `server.rs`. The auth layer applies to all routes.
 - **Docker callback URLs**: Never bind ephemeral localhost ports for OAuth callbacks in daemon code — the port is unreachable from outside Docker. Route callbacks through the API server's existing port instead.
 - **MCP OAuth flow**: Entirely UI-driven — daemon only detects 401 and sets `NeedsAuth` state. PKCE + callback handled by API layer (`routes/mcp_auth.rs`). Dynamic Client Registration (RFC 7591) used when server has `registration_endpoint` but no `client_id`.
-- `session_mode` in `AgentManifest` (agent.toml, **not** config.toml) controls whether automated invocations reuse the persistent session (`"persistent"`, default) or create a fresh one (`"new"`). Per-trigger override via `Trigger.session_mode: Option<SessionMode>`. Per-cron override via `CronJob.session_mode: Option<SessionMode>`. Resolution order: per-trigger / per-job override > agent manifest default. Session resolution lives in `execute_llm_agent` (grep `kernel/mod.rs` for the function).
+- `session_mode` in `AgentManifest` (agent.toml, **not** config.toml) controls whether automated invocations reuse the persistent session (`"persistent"`, default) or create a fresh one (`"new"`). Per-trigger override via `Trigger.session_mode: Option<SessionMode>`. Per-cron override via `CronJob.session_mode: Option<SessionMode>`. Resolution order: per-trigger / per-job override > agent manifest default. Session resolution in `execute_llm_agent` (`kernel/mod.rs` ~6959).
   - **Honors `session_mode`**: event triggers, `agent_send`, **cron jobs** (since #3597 / #3657 — see below).
-  - **Ignores `session_mode`**: channel messages (always `SessionId::for_channel(agent,"<channel>:<chat>")`), forks (forced `Persistent` to preserve prompt cache).
-  - **Cron + `session_mode`** (resolution helper: `cron::cron_fire_session_override`):
+  - **Ignores `session_mode`**: channel messages (always `SessionId::for_channel(agent,"<channel>:<chat>")`), forks (forced `Persistent` at ~5543 to preserve prompt cache).
+  - **Cron + `session_mode`** (resolution at `kernel/mod.rs` ~13609, helper `cron::cron_fire_session_override`):
     - Effective mode = per-job `CronJob.session_mode` > agent manifest `session_mode` > historical `Persistent`.
     - `Persistent` (or unset): the cron tick synthesizes `SenderContext{channel:"cron"}` and `send_message_full` derives `SessionId::for_channel(agent,"cron")`, so all fires of all cron jobs for that agent share one `(agent,"cron")` persistent session (historical behaviour, prompt-cache reuse).
     - `New`: `cron_fire_session_override` returns an explicit `SessionId::for_cron_run(agent, "<job_id>:<rfc3339_fire_time>")` which is passed as `session_id_override` into `send_message_full`. The override path wins over the channel-derived branch, so each fire lands on its own deterministic, isolated session — prior fires never leak into the current run, and the persistent `(agent,"cron")` session stays untouched.
@@ -253,32 +194,10 @@ The daemon command is `start` (not `daemon`).
 - **Message-history trim cap** is configurable per-agent
   (`agent.toml: max_history_messages`) and globally
   (`config.toml: max_history_messages`). Default is
-  `DEFAULT_MAX_HISTORY_MESSAGES = 60`; values below
+  `DEFAULT_MAX_HISTORY_MESSAGES = 40`; values below
   `MIN_HISTORY_MESSAGES = 4` are clamped up with a warning.
   Resolution: agent override > kernel config > compiled default. See
   `docs/architecture/message-history-trimming.md`.
-- **Per-agent `proactive_memory` / `skill_workshop` / `compaction`
-  overrides live in `agent.toml`, NOT `config.toml`** (#5476).
-  `KernelConfig` has no `agents` field, so a block like:
-  ```toml
-  # ~/.librefang/config.toml — silently ignored, NOT honoured
-  [agents.my-agent.proactive_memory]
-  auto_memorize = true
-  ```
-  parses but never feeds into any `AgentManifest`. The kernel emits a
-  targeted `WARN` at boot and on `POST /api/config/reload` pointing
-  operators at the correct surface (see
-  `KernelConfig::detect_misplaced_per_agent_overrides`); the
-  load-bearing path is the agent's own manifest:
-  ```toml
-  # ~/.librefang/workspaces/agents/my-agent/agent.toml — per-agent override
-  [proactive_memory]
-  auto_memorize = true
-  ```
-  Same shape for `[skill_workshop]` and `[compaction]`. Inside a
-  `HAND.toml` the override sits under `[agents.<name>.<key>]`, which
-  *is* read because `HandManifest` does have an `agents` table —
-  `config.toml` does not.
 - **Trigger dispatch concurrency** has three layered caps, scoped to
   the **trigger dispatcher only** (`agent_send`, channel bridges, and
   cron still serialize at the existing per-agent / per-session locks
@@ -296,163 +215,15 @@ The daemon command is `start` (not `daemon`).
   up a new cap, **kill the agent and let it respawn** (or restart the
   daemon); an in-place activate/status flip will silently keep the old
   cap. See `docs/architecture/trigger-dispatch-concurrency.md`.
-- **Config hot-reload classification**: which `KernelConfig` fields
-  hot-reload, which require a restart, and which are read-live/noop is
-  decided by `build_reload_plan` in
-  `crates/librefang-kernel/src/config_reload.rs`. The canonical
-  ops-facing reference table (one row per field, derived from that
-  function and drift-guarded by a test) lives at
-  `docs/operations/config-reload.md` — consult it before assuming a
-  config edit takes effect on `POST /api/config/reload`.
-- **Skill workshop** (#3328) passively captures teaching signals from
-  successful turns into draft skills under
-  `~/.librefang/skills/pending/<agent>/<uuid>.toml`. **Default-OFF —
-  opt-in per agent** by setting `[skill_workshop] enabled = true` in
-  the agent's manifest (`agent.toml`, or the matching `[agents.<name>]`
-  section of a `HAND.toml`). Once enabled, the conservative knob set
-  applies by default: `auto_capture = true`,
-  `review_mode = "heuristic"` (no LLM call),
-  `approval_policy = "pending"` (every candidate waits for human
-  approve / reject), `max_pending = 20`. Source of truth is
-  `SkillWorkshopConfig::default()` in
-  `crates/librefang-types/src/agent.rs` — `enabled: false` per the
-  original #3328 acceptance criteria.
-  Three signals — `ExplicitInstruction` ("from now on always …"),
-  `UserCorrection` ("no, do it like …"), `RepeatedToolPattern` (same
-  tool sequence ≥ 3 turns). Approval routes through
-  `evolution::create_skill`, so the prompt-injection scan runs at both
-  `save_candidate` and `approve_candidate` — every artefact visible to
-  the agent has crossed the same security boundary as a marketplace
-  skill. LLM refinement (`review_mode="threshold_llm"`) uses the
-  dedicated `AuxTask::SkillWorkshopReview` slot and the cheap-tier
-  provider chain; when no cheap-tier credentials are configured the
-  workshop returns `Indeterminate` rather than billing the operator's
-  primary provider, blocking a financial-DoS regression. UUID
-  validation guards every storage entry that addresses files by id, so
-  a non-UUID id never reaches `Path::join`. CLI: `librefang skill
-  pending list / show / approve / reject`. HTTP:
-  `GET/POST /api/skills/pending[…]`. Dashboard:
-  `PendingSkillsSection` on the Skills page. See
-  `docs/architecture/skill-workshop.md`.
 
 ## Git Conventions
+**Never include "generated by Claude Code" in commit messages** — omit the Co-Authored-By footer entirely
 - **Format**: Use conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
-- **No AI / Claude attribution** in commit messages, PR bodies, or
-  comments — see "Commit & PR hygiene" under GitHub Collaboration below
-  for the canonical rule (the `commit-msg` hook enforces it server-side
-  too).
 - **Worktree**: Use `git worktree add` on an external disk for new features; fall back to `/tmp/librefang-<feature>` only if no external disk is available. Never develop on the main worktree
-- **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. Anything left in the worktree counts as real work — including a regenerated `Cargo.lock` after rebase. Commit it together with the rest of the change; do not `git checkout` it away.
-
-## GitHub Collaboration & Wait Policy
-
-LibreFang is an open-source project with heavy AI-assistant traffic. The
-rules below codify the boundaries summarised in `AGENTS.md` ("AI Agent
-Collaboration") so that maintainers stay in control of their own PRs and
-issue threads.
-
-### Touching other people's work
-
-- **Don't close PRs or issues opened by others** unless the user (the
-  maintainer) directly instructs you to. By default, post a comment
-  recommending closure with the linking commit / PR and let the
-  maintainer pull the trigger. When directed to close, the close
-  comment must state the substantive reason (review bugs, superseded
-  by, scope mismatch) so the original author understands what went
-  wrong — do not attribute the close to "AI" / "Claude", the reason
-  itself is what matters.
-- **Force-push only to your own branches, only before review.** Once a
-  reviewer has loaded the diff, prefer fixup commits or a follow-up PR
-  over rewriting history. Force-push to `main` / `master` is blocked by
-  `guard-bash-safety.sh` and requires explicit user OK regardless.
-- **Don't reassign, re-label, or re-milestone** issues / PRs you did not
-  open unless directed. Self-assigning a triage label or adding
-  `needs-review` is auto-OK; flipping `priority` / `release` labels is
-  not.
-
-### Commit & PR hygiene
-
-- **No Claude / Anthropic / AI attribution** in commit messages, PR
-  bodies, or issue comments. The `commit-msg` git hook rejects matching
-  strings; the PreToolUse Bash hook catches the inline-flag form. Don't
-  try to route around either — the rule exists because attribution
-  pollutes `git log` and signals provenance the project does not want to
-  imply.
-- **One PR ↔ one issue (or one tight cluster).** Don't bundle unrelated
-  refactors with the requested change. If you find a real problem
-  out-of-scope, open a separate issue or follow-up PR; mention it in the
-  current PR's "Out-of-scope follow-ups" section.
-- **Fix what you found — don't punt it to a "follow-up".** Anything you
-  noticed while reading or writing the code in this PR is in-scope by
-  definition: review nits, mismatched HTTP status codes, missing log
-  fields, redundant lookups, stale comments, type-shape inconsistencies,
-  small clippy noise. Treat the phrases "follow-up", "long-term
-  improvement", "next PR", "future cleanup", "out-of-scope follow-up
-  issue", "leave for later" as red flags in your own review or summary
-  output — they almost always mean "I saw the problem and decided to
-  defer the work". The bar to defer: would fixing it require touching a
-  *different* crate or domain than the one you're already in? If no, fix
-  it in this PR. If yes, surface the question to the human reviewer with
-  the concrete trade-off and ask before deferring; don't decide
-  unilaterally. The same rule applies when you re-evaluate a deferred
-  item and decide it's a "non-issue" — you must back that decision with
-  the file/line evidence that contradicts the original concern, in the
-  same response. "I looked again and it's fine" without evidence is
-  another form of punting.
-- **PR body must enumerate** the substantive changes, the verification
-  performed (integration test names, `cargo check --workspace --lib`
-  output, scoped `cargo test -p <crate>` runs), and any deferred work.
-  Bullet form, no marketing prose.
-
-### CI wait policy
-
-CI is shared infrastructure and frequently slow. Polling it from an AI
-session burns turns without producing information.
-
-- **Total polling budget: ~5 minutes, in 60–270s chunks.** Anthropic's
-  prompt cache TTL is 5 minutes, so keep each wake-up inside that
-  window to keep the cache warm; ~300s is the worst case (cache miss
-  without amortizing). Don't reach for 1200s+ "save my turns" waits
-  here — that violates the 5 min total cap and reintroduces the long
-  `gh run watch` / sleep behaviour the policy is meant to prevent.
-  After the total budget is spent, push, leave the run URL in the PR
-  / report, and **stop**. (Long waits *are* appropriate elsewhere —
-  e.g. an autonomous-loop tick polling for an external job — just not
-  for in-session CI polling.)
-- **Don't pre-emptively re-run a check** that has not yet failed. Only
-  retry after a recorded failure, and only once.
-- **Don't open follow-up issues or pivot the plan** while waiting for CI
-  or review. If you cannot make further progress without information you
-  do not have, the correct action is to report status and yield — not to
-  invent more work.
-- **Don't add reviewers, flip `ready-for-review`, or `gh pr ready`** on
-  someone else's behalf, and don't re-request review on your own PR
-  unless a maintainer has explicitly asked you to ping them. Maintainers
-  pull work into their queue; AI agents do not push it onto theirs.
-
-### Issue / PR comment etiquette
-
-- **At most two follow-up comments** on the same thread without human
-  input. After that, stop and wait — repeated AI-generated pings on a
-  silent thread are noise, not progress.
-- **Don't comment on threads you have no action on.** "Looks good"
-  drive-bys from an AI account add nothing.
-- **When you reply, link evidence:** commit SHAs, file paths, test
-  names. No vibes-only comments.
-
-### Conflict resolution
-
-- **Latest maintainer intent wins.** When rebasing or resolving merge
-  conflicts that touch a human-authored hunk, keep the maintainer's
-  edit. If the two sides genuinely disagree, surface the conflict in the
-  PR body and ask — don't silently pick the smaller diff.
-- **Preserve both sides' intent** during conflict resolution. Dropping a
-  hunk because "it'll be reapplied later" is how regressions land.
+- **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. If the dirty changes aren't real work (e.g., stale `Cargo.lock` after rebase on an already-merged branch), discard them with `git checkout` instead of half-committing
 
 ## Common Gotchas
-- Windows: `librefang.exe` may be locked if the daemon is running —
-  use `cargo check --lib` or kill the daemon first. (Linux / macOS
-  let you overwrite a running binary, so this is not an issue there.)
+- `librefang.exe` may be locked if daemon is running — use `--lib` flag or kill daemon first
 - `PeerRegistry` is `Option<PeerRegistry>` on kernel but `Option<Arc<PeerRegistry>>` on `AppState` — wrap with `.as_ref().map(|r| Arc::new(r.clone()))`
 - Config fields added to `KernelConfig` struct MUST also be added to the `Default` impl or build fails
 - `AgentLoopResult` field is `.response` not `.response_text`
@@ -460,6 +231,5 @@ session burns turns without producing information.
 - When adding `Option<Arc<dyn Trait>>` fields to structs that derive `Serialize`/`Deserialize`/`Clone`/`Debug`, mark them `#[serde(skip)]` and implement the affected traits manually
 - `ErrorTranslator` (from `RequestLanguage`) is `!Send` — any `.await` must happen AFTER `drop(t)`, or the axum handler will fail with a cryptic `Handler<_, _>` trait bound error
 - `LIBREFANG_VAULT_KEY` env var must base64-decode to exactly 32 bytes (use `openssl rand -base64 32` which gives 44 chars). 32 ASCII chars ≠ 32 bytes.
-- `CLAUDE_CODE_HOME` env var overrides the home directory used by the `claude-code` driver when it spawns the Anthropic `claude` CLI subprocess. **LibreFang-private contract — the Anthropic CLI itself does not read this variable**; the driver resolves it kernel-side and projects the value onto the platform-native home var (`$HOME` on Unix, `%USERPROFILE%` on Windows) before spawn. Distinct from the existing `LIBREFANG_HOME` (which relocates the daemon's data dir — see `crates/librefang-kernel/src/config.rs:librefang_home`); the two never share a value. Containers that drop privileges to a numeric uid without a matching passwd entry inherit a placeholder home (`/nonexistent` on glibc, `/var/empty` on BSD/Alpine, `/dev/null` on some hardened images) — set `CLAUDE_CODE_HOME` in the orchestrator manifest / kernel-boot wrapper so the spawned CLI can find `~/.claude/.credentials.json`. The override is unused when the inherited platform home already resolves to a real on-disk directory; when it is set but points at a non-directory the driver emits a `WARN` log and falls back to the inherited platform home rather than honouring the broken override.
 - When parallel agents modify the same crate, `Option::None` defaults for new fields will silently compile but disable features. Always write integration tests at the injection site, not just the implementation site.
 - On Windows: use `taskkill //PID <pid> //F` (double slashes in MSYS2/Git Bash)

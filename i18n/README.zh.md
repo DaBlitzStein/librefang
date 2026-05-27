@@ -122,7 +122,7 @@ librefang-extensions        25 个 MCP 模板、AES-256-GCM 保险库、OAuth2 P
 librefang-wire              OFP P2P 协议、HMAC-SHA256 双向认证
 librefang-cli               CLI、守护进程管理、TUI 控制台、MCP 服务器模式
 librefang-desktop           Tauri 2.0 原生应用（托盘、通知、快捷键）
-librefang-import            OpenClaw、LangChain、AutoGPT 导入/迁移引擎
+librefang-migrate           OpenClaw、LangChain、AutoGPT 迁移引擎
 librefang-http              共享 HTTP 客户端构建器、代理、TLS 回退（fallback）
 librefang-testing           测试基础设施：模拟（mock）内核、模拟 LLM 驱动程序以及 API 路由测试工具
 librefang-telemetry         的 OpenTelemetry + Prometheus 指标埋点（instrumentation）
@@ -130,7 +130,9 @@ librefang-llm-driver        的 LLM 驱动程序 trait 及共享类型
 librefang-llm-drivers       trait 的具体 LLM 提供商驱动程序（anthropic、openai、gemini 等）
 librefang-runtime-mcp       运行时的 MCP（Model Context Protocol）客户端
 librefang-kernel-handle     内核进行进程内调用的 KernelHandle trait
+librefang-runtime-wasm      运行时的 WASM 技能沙盒（sandbox）
 librefang-kernel-router     内核的 Hand/Template 路由引擎
+librefang-runtime-oauth     运行时驱动程序的 OAuth 流程（ChatGPT、GitHub Copilot）
 librefang-kernel-metering   内核的成本计量和配额执行
 xtask                       构建自动化
 ```
