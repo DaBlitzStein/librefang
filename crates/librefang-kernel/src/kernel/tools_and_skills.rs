@@ -586,7 +586,10 @@ impl LibreFangKernel {
             "- The approach involved 5+ steps that could benefit future similar tasks\n",
             "- The user's preferred method differs from the obvious approach\n",
             "- The agent used 3+ different tools in a sequence to accomplish a goal\n",
-            "- The conversation involved a multi-step procedure that could be reused\n\n",
+            "- The conversation involved a multi-step procedure that could be reused\n",
+            "- The agent used an existing skill but had to work around a limitation\n",
+            "- The agent discovered a better approach than what a skill prescribes\n",
+            "- Error handling or edge cases were found during execution\n\n",
             "Choose exactly ONE of these JSON responses:\n",
             "```json\n",
             "{\"action\": \"create\", \"name\": \"skill-name\", \"description\": \"one-line desc\", ",
@@ -737,10 +740,85 @@ impl LibreFangKernel {
         let action = parsed["action"].as_str().unwrap_or("skip");
         let review_author = format!("reviewer:agent:{triggering_agent_id}");
 
+        // Resolve auto_evolve_mode from the agent's manifest. Controlled
+        // (default) routes all mutations through the pending queue for
+        // human approval; Free applies them directly.
+        let evolution_mode = kernel_weak
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .and_then(|kernel| {
+                kernel
+                    .agents
+                    .registry
+                    .get(triggering_agent_id)
+                    .map(|e| e.manifest.auto_evolve_mode)
+            })
+            .unwrap_or_default();
+
         // Helper: lift an `Ok(result)` into a hot-reload + return.
         let do_reload = || {
             if let Some(kernel) = kernel_weak.as_ref().and_then(|w| w.upgrade()) {
                 kernel.reload_skills();
+            }
+        };
+
+        // Helper: save a mutation as a pending candidate for human
+        // approval (Controlled mode). Builds a CandidateSkill from the
+        // reviewer's JSON fields and routes through the workshop's
+        // save_candidate pipeline (security scan, dedup, cap enforcement).
+        let save_as_pending = |action_label: &str,
+                               name: &str,
+                               description: &str,
+                               prompt_context: &str|
+         -> Result<(), ReviewError> {
+            let kernel = kernel_weak
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .ok_or_else(|| {
+                    ReviewError::Permanent("Kernel dropped before save_as_pending".to_string())
+                })?;
+            let candidate = crate::skill_workshop::candidate::CandidateSkill {
+                id: uuid::Uuid::new_v4().to_string(),
+                agent_id: triggering_agent_id.to_string(),
+                session_id: None,
+                captured_at: chrono::Utc::now(),
+                source: crate::skill_workshop::candidate::CaptureSource::ExplicitInstruction {
+                    trigger: format!("auto_evolve:{action_label}"),
+                },
+                name: name.to_string(),
+                description: description.to_string(),
+                prompt_context: prompt_context.to_string(),
+                provenance: crate::skill_workshop::candidate::Provenance {
+                    user_message_excerpt: String::new(),
+                    assistant_response_excerpt: None,
+                    turn_index: 0,
+                },
+            };
+            let skills_root = kernel.home_dir().join("skills");
+            match crate::skill_workshop::storage::save_candidate(&skills_root, &candidate, 50, None)
+            {
+                Ok(true) => {
+                    tracing::info!(
+                        skill = name,
+                        "Background review (controlled): pending candidate written for '{action_label}'"
+                    );
+                    Ok(())
+                }
+                Ok(false) => {
+                    tracing::debug!(
+                        skill = name,
+                        "Background review (controlled): candidate deduped or cap=0"
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        skill = name,
+                        error = %e,
+                        "Background review (controlled): failed to save pending candidate"
+                    );
+                    Err(ReviewError::Permanent(format!("save_as_pending: {e}")))
+                }
             }
         };
 
@@ -795,6 +873,18 @@ impl LibreFangKernel {
                     ReviewError::Permanent("Missing 'changelog' in update response".to_string())
                 })?;
 
+                // Controlled mode does not support updates yet — the
+                // pending queue only has CREATE semantics. Log and fall
+                // through to the direct path.
+                if evolution_mode == librefang_types::agent::EvolutionMode::Controlled {
+                    tracing::warn!(
+                        skill = name,
+                        "Background skill review: controlled mode does not support \
+                         skill updates yet; applying directly"
+                    );
+                }
+
+                // Free mode: apply directly.
                 let kernel = kernel_weak
                     .as_ref()
                     .and_then(|w| w.upgrade())
@@ -826,7 +916,7 @@ impl LibreFangKernel {
                     Some(&review_author),
                 ) {
                     Ok(result) => {
-                        tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "💾 Background review: updated skill");
+                        tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "Background review (free): updated skill");
                         do_reload();
                         Ok(())
                     }
@@ -868,6 +958,18 @@ impl LibreFangKernel {
                     ReviewError::Permanent("Missing 'changelog' in patch response".to_string())
                 })?;
 
+                // Controlled mode does not support patches yet — the
+                // pending queue only has CREATE semantics. Log and fall
+                // through to the direct path.
+                if evolution_mode == librefang_types::agent::EvolutionMode::Controlled {
+                    tracing::warn!(
+                        skill = name,
+                        "Background skill review: controlled mode does not support \
+                         skill patches yet; applying directly"
+                    );
+                }
+
+                // Free mode: apply directly.
                 let kernel = kernel_weak
                     .as_ref()
                     .and_then(|w| w.upgrade())
@@ -901,7 +1003,7 @@ impl LibreFangKernel {
                     Some(&review_author),
                 ) {
                     Ok(result) => {
-                        tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "💾 Background review: patched skill");
+                        tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "Background review (free): patched skill");
                         do_reload();
                         Ok(())
                     }
@@ -952,45 +1054,85 @@ impl LibreFangKernel {
                     .map(|e| e.manifest.skill_workshop)
                     .unwrap_or_default();
 
-                let candidate = Self::build_reviewer_candidate(
-                    triggering_agent_id,
+                // Controlled mode: route creates through pending queue.
+                if evolution_mode == librefang_types::agent::EvolutionMode::Controlled {
+                    let candidate = Self::build_reviewer_candidate(
+                        triggering_agent_id,
+                        name,
+                        description,
+                        prompt_context,
+                        &safe_response_summary,
+                    );
+                    match crate::skill_workshop::storage::save_candidate(
+                        skills_dir,
+                        &candidate,
+                        workshop_cfg.max_pending,
+                        workshop_cfg.max_pending_age_days,
+                    ) {
+                        Ok(true) => {
+                            tracing::info!(
+                                skill = name,
+                                agent = %triggering_agent_id,
+                                "Background skill review: queued '{}' as pending draft for human approval",
+                                name
+                            );
+                            return Ok(());
+                        }
+                        Ok(false) => {
+                            tracing::debug!(
+                                skill = name,
+                                "Background skill review: pending save skipped (duplicate or max_pending=0)"
+                            );
+                            return Ok(());
+                        }
+                        Err(crate::skill_workshop::storage::WorkshopError::SecurityBlocked(msg)) => {
+                            return Err(ReviewError::Permanent(format!("security_blocked: {msg}")));
+                        }
+                        Err(crate::skill_workshop::storage::WorkshopError::Io(e)) => {
+                            return Err(ReviewError::Transient(format!("save_candidate io: {e}")));
+                        }
+                        Err(e) => {
+                            tracing::debug!(skill = name, error = %e, "Background skill review: pending save failed");
+                            return Err(ReviewError::Permanent(format!("save_candidate: {e}")));
+                        }
+                    }
+                }
+
+                // Free mode: apply directly.
+                let tags: Vec<String> = parsed["tags"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                match librefang_skills::evolution::create_skill(
+                    skills_dir,
                     name,
                     description,
                     prompt_context,
-                    &safe_response_summary,
-                );
-
-                match crate::skill_workshop::storage::save_candidate(
-                    skills_dir,
-                    &candidate,
-                    workshop_cfg.max_pending,
-                    workshop_cfg.max_pending_age_days,
+                    tags,
+                    Some(&review_author),
                 ) {
-                    Ok(true) => {
+                    Ok(result) => {
                         tracing::info!(
                             skill = name,
-                            agent = %triggering_agent_id,
-                            "Background skill review: queued '{}' as pending draft for human approval",
-                            name
+                            "Background skill review (free): created skill '{}'",
+                            result.skill_name
                         );
+                        do_reload();
                         Ok(())
                     }
-                    Ok(false) => {
-                        tracing::debug!(
-                            skill = name,
-                            "Background skill review: pending save skipped (duplicate or max_pending=0)"
-                        );
+                    Err(librefang_skills::SkillError::AlreadyInstalled(_)) => {
+                        tracing::debug!(skill = name, "Skill already exists — skipping creation");
                         Ok(())
                     }
-                    Err(crate::skill_workshop::storage::WorkshopError::SecurityBlocked(msg)) => {
+                    Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
                         Err(ReviewError::Permanent(format!("security_blocked: {msg}")))
                     }
-                    Err(crate::skill_workshop::storage::WorkshopError::Io(e)) => {
-                        Err(ReviewError::Transient(format!("save_candidate io: {e}")))
+                    Err(librefang_skills::SkillError::Io(e)) => {
+                        Err(ReviewError::Transient(format!("create_skill io: {e}")))
                     }
                     Err(e) => {
-                        tracing::debug!(skill = name, error = %e, "Background skill review: pending save failed");
-                        Err(ReviewError::Permanent(format!("save_candidate: {e}")))
+                        tracing::debug!(skill = name, error = %e, "Background skill creation failed");
+                        Err(ReviewError::Permanent(format!("create_skill: {e}")))
                     }
                 }
             }

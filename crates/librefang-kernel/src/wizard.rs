@@ -200,6 +200,7 @@ impl SetupWizard {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            auto_evolve_mode: librefang_types::agent::EvolutionMode::default(),
             channel_overrides: None,
             max_history_messages: None,
             max_concurrent_invocations: None,

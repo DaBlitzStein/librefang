@@ -561,6 +561,30 @@ pub enum WebSearchAugmentationMode {
     Always,
 }
 
+/// Controls whether auto_evolve skill mutations require human approval.
+///
+/// Used alongside `auto_evolve = true` on `AgentManifest` to decide
+/// whether the background skill review pipeline applies mutations
+/// directly (free) or routes them through the pending queue for human
+/// approval (controlled). This is separate from `SkillWorkshopConfig`
+/// — the workshop handles passive capture from conversation turns,
+/// while `auto_evolve` + `EvolutionMode` govern the background LLM
+/// reviewer that runs after each turn.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolutionMode {
+    /// All mutations (create, update, patch) go through the pending
+    /// queue for human approval before taking effect.
+    Controlled,
+    /// Mutations apply directly without approval. The agent evolves
+    /// autonomously. Default — preserves pre-existing behavior for
+    /// agents that already opted into `auto_evolve = true`.
+    #[default]
+    Free,
+}
+
 /// The current lifecycle state of an agent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1245,6 +1269,15 @@ pub struct AgentManifest {
     /// the background LLM budget or concurrency semaphore after a turn.
     #[serde(default = "default_true")]
     pub auto_evolve: bool,
+    /// Whether auto_evolve mutations require approval (`controlled`, default)
+    /// or apply directly (`free`). Only meaningful when `auto_evolve = true`.
+    ///
+    /// - `Controlled` (default): all mutations (create, update, patch) go
+    ///   through the pending queue for human approval before taking effect.
+    /// - `Free`: mutations apply directly without approval. The agent
+    ///   evolves autonomously.
+    #[serde(default)]
+    pub auto_evolve_mode: EvolutionMode,
     /// Per-agent channel behavior overrides (dm_policy, group_policy, etc.).
     /// When set, these take priority over the channel-level `ChannelOverrides`
     /// for this specific agent. Follows the same pattern as `exec_policy`.
@@ -1562,6 +1595,7 @@ impl Default for AgentManifest {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            auto_evolve_mode: EvolutionMode::default(),
             max_concurrent_invocations: None,
             channel_overrides: None,
             max_history_messages: None,

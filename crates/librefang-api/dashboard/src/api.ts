@@ -308,6 +308,8 @@ export interface AgentItem {
   identity?: AgentIdentity;
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
+  auto_evolve?: boolean;
+  auto_evolve_mode?: "controlled" | "free";
   /** UUID of the parent agent that spawned this one, if any.
    *  Wire field emitted by `GET /api/agents` is `parent_agent_id`; the raw
    *  `AgentEntry` serde form is `parent`. Both are accepted so the type is
@@ -1248,6 +1250,10 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
+  /** Skill-evolution mutation policy. `free` (default) applies create
+   *  mutations directly; `controlled` routes create mutations to the
+   *  pending approval queue. */
+  auto_evolve_mode?: "controlled" | "free";
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
@@ -1308,6 +1314,7 @@ export async function patchAgentConfig(
     provider?: string;
     temperature?: number;
     web_search_augmentation?: "off" | "auto" | "always";
+    auto_evolve_mode?: "controlled" | "free";
   },
 ): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(

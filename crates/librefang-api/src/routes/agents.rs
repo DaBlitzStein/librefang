@@ -866,6 +866,8 @@ pub(crate) fn enrich_agent_json(
             "color": e.identity.color,
         },
         "web_search_augmentation": e.manifest.web_search_augmentation,
+        "auto_evolve": e.manifest.auto_evolve,
+        "auto_evolve_mode": e.manifest.auto_evolve_mode,
         "parent_agent_id": e.parent.as_ref().map(|p| p.to_string()),
         "children": e.children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
         "session_id": e.session_id.0.to_string(),
@@ -2895,6 +2897,8 @@ pub async fn get_agent(
             "fallback_models": entry.manifest.fallback_models,
             "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
+            "auto_evolve": entry.manifest.auto_evolve,
+            "auto_evolve_mode": entry.manifest.auto_evolve_mode,
         })),
     )
         .into_response()
@@ -5041,6 +5045,9 @@ pub struct PatchAgentConfigRequest {
     /// Web search augmentation mode: "off", "auto", or "always".
     #[schema(value_type = Option<String>)]
     pub web_search_augmentation: Option<librefang_types::agent::WebSearchAugmentationMode>,
+    /// Auto-evolve mode: "controlled" (pending queue) or "free" (auto-apply).
+    #[schema(value_type = Option<String>)]
+    pub auto_evolve_mode: Option<librefang_types::agent::EvolutionMode>,
 }
 
 /// PATCH /api/agents/{id}/config — Hot-update agent name, description, system prompt, and identity.
@@ -5303,6 +5310,21 @@ pub async fn patch_agent_config(
             .kernel
             .agent_registry()
             .update_web_search_augmentation(agent_id, mode)
+            .is_err()
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    }
+
+    // Update auto_evolve_mode (controlled / free)
+    if let Some(mode) = req.auto_evolve_mode {
+        if state
+            .kernel
+            .agent_registry()
+            .update_auto_evolve_mode(agent_id, mode)
             .is_err()
         {
             return (
