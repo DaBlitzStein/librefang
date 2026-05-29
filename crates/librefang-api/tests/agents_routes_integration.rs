@@ -1648,3 +1648,49 @@ async fn test_patch_agent_auto_evolve_persists() {
         body["auto_evolve"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// PATCH /api/agents/{id}/config — auto_evolve_mode field
+//
+// Pins the contract: PATCHing auto_evolve_mode must persist and be reflected
+// in the subsequent GET, confirming the manifest field round-trips through
+// the registry. Default stays `free`.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_config_auto_evolve_mode() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "evolve-mode-test");
+
+    // PATCH to controlled
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({"auto_evolve_mode": "controlled"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["auto_evolve_mode"], "controlled");
+
+    // PATCH back to free
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({"auto_evolve_mode": "free"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["auto_evolve_mode"], "free");
+}

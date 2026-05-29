@@ -789,8 +789,16 @@ impl LibreFangKernel {
                 description: description.to_string(),
                 prompt_context: prompt_context.to_string(),
                 provenance: crate::skill_workshop::candidate::Provenance {
-                    user_message_excerpt: String::new(),
-                    assistant_response_excerpt: None,
+                    user_message_excerpt: safe_response_summary
+                        .chars()
+                        .take(crate::skill_workshop::candidate::PROVENANCE_EXCERPT_MAX_CHARS)
+                        .collect(),
+                    assistant_response_excerpt: Some(
+                        trace_summary
+                            .chars()
+                            .take(crate::skill_workshop::candidate::PROVENANCE_EXCERPT_MAX_CHARS)
+                            .collect(),
+                    ),
                     turn_index: 0,
                 },
             };
@@ -1085,7 +1093,9 @@ impl LibreFangKernel {
                             );
                             return Ok(());
                         }
-                        Err(crate::skill_workshop::storage::WorkshopError::SecurityBlocked(msg)) => {
+                        Err(crate::skill_workshop::storage::WorkshopError::SecurityBlocked(
+                            msg,
+                        )) => {
                             return Err(ReviewError::Permanent(format!("security_blocked: {msg}")));
                         }
                         Err(crate::skill_workshop::storage::WorkshopError::Io(e)) => {
@@ -1101,7 +1111,11 @@ impl LibreFangKernel {
                 // Free mode: apply directly.
                 let tags: Vec<String> = parsed["tags"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 match librefang_skills::evolution::create_skill(
                     skills_dir,

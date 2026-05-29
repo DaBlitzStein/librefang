@@ -3814,4 +3814,29 @@ model = "claude-3-haiku-20240307"
             "explicit `session_mode = \"New\"` must error, not fall back to None / Persistent: {err}"
         );
     }
+
+    #[test]
+    fn evolution_mode_default_is_free() {
+        assert_eq!(EvolutionMode::default(), EvolutionMode::Free);
+    }
+
+    #[test]
+    fn evolution_mode_serde_roundtrip() {
+        for (variant, expected) in [
+            (EvolutionMode::Free, "\"free\""),
+            (EvolutionMode::Controlled, "\"controlled\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let back: EvolutionMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+        let toml_str = "auto_evolve_mode = \"controlled\"\n";
+        #[derive(serde::Deserialize)]
+        struct W {
+            auto_evolve_mode: EvolutionMode,
+        }
+        let w: W = toml::from_str(toml_str).unwrap();
+        assert_eq!(w.auto_evolve_mode, EvolutionMode::Controlled);
+    }
 }
