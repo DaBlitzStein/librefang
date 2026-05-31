@@ -553,6 +553,19 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Append a single skill to an agent's allowlist (no-op if already present).
+    pub fn add_skill(&self, id: AgentId, skill_name: String) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            if !entry.manifest.skills.contains(&skill_name) {
+                entry.manifest.skills.push(skill_name);
+                entry.manifest.skills_disabled = false;
+                entry.last_active = chrono::Utc::now();
+            }
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's channel allowlist.
     pub fn update_channels(&self, id: AgentId, channels: Vec<String>) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {

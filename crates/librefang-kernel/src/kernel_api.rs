@@ -452,6 +452,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     // ====================================================================
 
     fn reload_skills(&self);
+    fn add_skill_to_agent(&self, agent_id: &str, skill_name: &str) -> LibreFangResult<()>;
     fn model_catalog_load(
         &self,
     ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>>;
@@ -1236,6 +1237,23 @@ impl KernelApi for LibreFangKernel {
     // -- Skills / driver caches / model catalog --
     fn reload_skills(&self) {
         Self::reload_skills(self);
+    }
+    fn add_skill_to_agent(&self, agent_id: &str, skill_name: &str) -> LibreFangResult<()> {
+        let id = self
+            .agents
+            .registry
+            .find_by_name(agent_id)
+            .map(|e| e.id)
+            .or_else(|| {
+                agent_id
+                    .parse::<uuid::Uuid>()
+                    .ok()
+                    .map(librefang_types::agent::AgentId)
+            })
+            .ok_or_else(|| {
+                librefang_types::error::LibreFangError::AgentNotFound(agent_id.to_string())
+            })?;
+        self.agents.registry.add_skill(id, skill_name.to_string())
     }
     fn model_catalog_load(
         &self,
