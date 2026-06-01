@@ -8036,6 +8036,9 @@ fn cmd_skill_pending(sub: PendingCommands) {
                     librefang_kernel::skill_workshop::CaptureSource::RepeatedToolPattern {
                         ..
                     } => "tool_pattern",
+                    librefang_kernel::skill_workshop::CaptureSource::AutoEvolveReview {
+                        ..
+                    } => "auto_evolve",
                 };
                 println!(
                     "{:<38}  {:<18}  {:<22}  {}",
