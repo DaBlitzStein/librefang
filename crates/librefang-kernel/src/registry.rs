@@ -496,6 +496,20 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's auto_evolve_mode (Controlled / Free).
+    pub fn update_auto_evolve_mode(
+        &self,
+        id: AgentId,
+        mode: librefang_types::agent::EvolutionMode,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.auto_evolve_mode = mode;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's schedule mode (Reactive / Periodic / Proactive /
     /// Continuous). Mutates the manifest only — the kernel-level wrapper
     /// `LibreFangKernel::set_agent_schedule` is what callers should use to

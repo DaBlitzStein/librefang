@@ -561,6 +561,33 @@ pub enum WebSearchAugmentationMode {
     Always,
 }
 
+/// Controls whether auto_evolve skill mutations require human approval.
+///
+/// Used alongside `auto_evolve = true` on `AgentManifest` to decide
+/// whether the background skill review pipeline applies mutations
+/// directly (free, the default) or routes proposed creations through
+/// the pending queue for human approval (controlled). This is separate
+/// from `SkillWorkshopConfig` — the workshop handles passive capture
+/// from conversation turns, while `auto_evolve` + `EvolutionMode` govern
+/// the background LLM reviewer that runs after each turn.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolutionMode {
+    /// `create` mutations route to the pending approval queue so an
+    /// operator reviews each proposed skill before it loads into the
+    /// active registry. `update`/`patch` are not yet supported in this
+    /// mode (the pending queue is create-only) and are skipped with a
+    /// warning rather than applied.
+    Controlled,
+    /// Mutations apply directly without approval. The agent evolves
+    /// autonomously. Default — preserves the prior behavior of agents
+    /// that already opted into `auto_evolve = true`.
+    #[default]
+    Free,
+}
+
 /// The current lifecycle state of an agent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1245,6 +1272,18 @@ pub struct AgentManifest {
     /// the background LLM budget or concurrency semaphore after a turn.
     #[serde(default = "default_true")]
     pub auto_evolve: bool,
+    /// Policy for how `auto_evolve` mutations are applied. Defaults to
+    /// `free`. Only meaningful when `auto_evolve = true`.
+    ///
+    /// - `Free` (default): mutations apply directly without approval,
+    ///   preserving the prior `auto_evolve = true` behavior — the agent
+    ///   evolves autonomously.
+    /// - `Controlled`: `create` mutations route to the pending approval
+    ///   queue so an operator reviews each proposed skill before it loads.
+    ///   `update`/`patch` are not yet supported in controlled mode (the
+    ///   pending queue is create-only) and are skipped with a warning.
+    #[serde(default)]
+    pub auto_evolve_mode: EvolutionMode,
     /// Per-agent channel behavior overrides (dm_policy, group_policy, etc.).
     /// When set, these take priority over the channel-level `ChannelOverrides`
     /// for this specific agent. Follows the same pattern as `exec_policy`.
@@ -1562,6 +1601,7 @@ impl Default for AgentManifest {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            auto_evolve_mode: EvolutionMode::default(),
             max_concurrent_invocations: None,
             channel_overrides: None,
             max_history_messages: None,
@@ -3778,6 +3818,42 @@ model = "claude-3-haiku-20240307"
         assert!(
             err.to_string().contains("unknown variant"),
             "explicit `session_mode = \"New\"` must error, not fall back to None / Persistent: {err}"
+        );
+    }
+
+    #[test]
+    fn evolution_mode_default_is_free() {
+        assert_eq!(EvolutionMode::default(), EvolutionMode::Free);
+    }
+
+    #[test]
+    fn evolution_mode_serde_roundtrip() {
+        for (variant, expected) in [
+            (EvolutionMode::Free, "\"free\""),
+            (EvolutionMode::Controlled, "\"controlled\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let back: EvolutionMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+        let toml_str = "auto_evolve_mode = \"controlled\"\n";
+        #[derive(serde::Deserialize)]
+        struct W {
+            auto_evolve_mode: EvolutionMode,
+        }
+        let w: W = toml::from_str(toml_str).unwrap();
+        assert_eq!(w.auto_evolve_mode, EvolutionMode::Controlled);
+    }
+
+    #[test]
+    fn evolution_mode_rejects_unknown_variant() {
+        // An unrecognized mode must error rather than silently falling
+        // back to the default — a typo'd manifest should surface loudly.
+        let err = serde_json::from_str::<EvolutionMode>("\"semi-auto\"").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unknown auto_evolve_mode must error, got: {err}"
         );
     }
 }

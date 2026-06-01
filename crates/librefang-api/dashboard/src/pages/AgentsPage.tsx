@@ -2371,6 +2371,45 @@ export function AgentsPage() {
                 </div>
               </section>
 
+              {/* Skill Evolution Mode */}
+              {detailAgent.auto_evolve && (
+                <section>
+                  <h4 className="text-sm font-semibold mb-2">
+                    {t("agents.skill_evolution", { defaultValue: "Skill Evolution" })}
+                  </h4>
+                  <div className="rounded-lg bg-main border border-border-subtle p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm">{t("agents.evolution_mode", { defaultValue: "Evolution Mode" })}</p>
+                        <p className="text-xs text-text-dim mt-0.5 leading-relaxed">
+                          {t("agents.evolution_mode_hint", { defaultValue: "Whether skill mutations require human approval or apply automatically" })}
+                        </p>
+                      </div>
+                      <select
+                        value={detailAgent.auto_evolve_mode || "controlled"}
+                        onChange={e => {
+                          const mode = e.target.value as "controlled" | "free";
+                          // auto_evolve_mode is a manifest-level setting, always
+                          // use the standard config PATCH (not hand-runtime).
+                          patchAgentConfigMutation.mutate(
+                            { agentId: detailAgent.id, config: { auto_evolve_mode: mode } },
+                            {
+                              onSuccess: async () => {
+                                await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+                              },
+                            },
+                          );
+                        }}
+                        className="w-36 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right shrink-0"
+                      >
+                        <option value="controlled">{t("agents.evolution_controlled", { defaultValue: "Controlled" })}</option>
+                        <option value="free">{t("agents.evolution_free", { defaultValue: "Free" })}</option>
+                      </select>
+                    </div>
+                  </div>
+                </section>
+              )}
+
               {/* Capabilities */}
               {detailAgent.capabilities && (
                 <section>
