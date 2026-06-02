@@ -26,6 +26,7 @@ _16 PRs from 2 contributors since v2026.5.30-beta.15._
 - Move getpgrp to the x86_64-only seccomp block to unbreak aarch64 (#5929) (@houko)
 - Patch rand (0.8.6/0.9.3) and link-preview-js (4.0.1) security advisories (#5934) (@houko)
 - Migrate ssh-backend to russh 0.61.1 (clears 5 RustSec advisories) (#5935) (@houko)
+- Enforce per-provider hourly token/cost budgets pre-dispatch so the fallback chain skips an over-cap provider instead of spending far past the cap (#5980) (@DaBlitzStein)
 
 ### Changed
 
