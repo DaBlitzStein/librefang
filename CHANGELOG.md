@@ -640,6 +640,14 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Fixed
 
+- **runtime(history_fold): omitted-summary stub no longer makes the agent re-issue the same tool call** (#5978) (@DaBlitzStein).
+  When the summariser model omitted a stale `tool_use_id` from an otherwise-successful batch, the folded block was overwritten with the static stub `[history-fold] [summarisation unavailable]`, discarding the real prior tool result; the model read that as "result not available yet" and re-issued the identical call, producing an endless `memory_recall` loop that left the agent unable to read its own memory.
+  Omitted ids now preserve a preview-truncated copy of the original tool result (`[result preserved — summarisation omitted] …`), the fold prompt mandates one summary per id, and the genuine-failure stub is reworded to explicitly close the call.
+
+- **runtime(loop_guard): a blocked duplicate tool call no longer aborts the whole turn and panics the agent** (#5979) (@DaBlitzStein).
+  A `LoopGuardVerdict::Block` result carried `ToolExecutionStatus::Error`, which is a hard error: it aborted the remaining tool batch and counted toward the consecutive-all-failed threshold, so three blocked iterations exited the streaming loop and recorded an agent panic.
+  The block now carries the soft `Denied` status (and `is_soft_error_content` recognises the loop-guard messages), so a blocked repeat is a gentle "you are repeating yourself" signal that leaves the rest of the turn intact instead of crashing it.
+
 - **kernel(cron): day-of-week now follows the POSIX convention (`0` and `7` both mean Sunday)** instead of the `cron` crate's 1-7 mapping (#5966) (@DaBlitzStein).
   Sunday-only schedules like `0 16 * * 0` were previously rejected as unschedulable, and numeric weekday ranges such as `1-5` silently shifted by one day (firing Sun-Thu instead of Mon-Fri).
   The 5/6-field expression is now remapped at the single conversion site before it reaches the crate, so `0`/`7` resolve to Sunday and `1-5` fires Monday through Friday as written.

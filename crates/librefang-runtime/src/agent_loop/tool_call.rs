@@ -488,12 +488,21 @@ pub(super) async fn execute_single_tool_call_inner(
             } else {
                 warn!(tool = %tool_call.name, "Tool call blocked by loop guard");
             }
+            // A loop-guard Block is a SOFT signal: it tells the model it is
+            // repeating an identical call, it does NOT mean the tool failed.
+            // Classify it as `Denied` (already a soft error per
+            // `ToolExecutionStatus::is_soft_error()`) so it does not abort the
+            // remaining tool batch nor count toward MAX_CONSECUTIVE_ALL_FAILED.
+            // Treating it as a hard `Error` aborted the whole turn and the
+            // iteration counted as an all-failed pass, exiting the loop and
+            // recording an agent panic — the endless-loop-then-panic in #5979.
+            // `is_error` stays true so renderers still flag the block visibly.
             return Ok(ExecutedToolCall {
                 result: librefang_types::tool::ToolResult {
                     tool_use_id: tool_call.id.clone(),
                     content: msg.clone(),
                     is_error: true,
-                    status: librefang_types::tool::ToolExecutionStatus::Error,
+                    status: librefang_types::tool::ToolExecutionStatus::Denied,
                     ..Default::default()
                 },
                 final_content: msg.clone(),

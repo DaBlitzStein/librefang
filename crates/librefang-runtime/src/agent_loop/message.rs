@@ -179,6 +179,27 @@ pub(super) fn is_soft_error_content(content: &str) -> bool {
         || content.contains(ERR_SYMLINK_LEAF)
         || content.contains("arguments were truncated")
         || is_parameter_error_content(content)
+        || is_loop_guard_block_content(content)
+}
+
+/// Detect a loop-guard `Block` (or circuit-break) message. A blocked
+/// DUPLICATE call is a SOFT signal — it tells the model it is repeating
+/// itself, not that the tool genuinely failed — so it must NOT abort the
+/// remaining tool batch nor count toward the consecutive-all-failed abort
+/// threshold (issue #5979). This is the belt-and-suspenders companion to
+/// setting `ToolExecutionStatus::Denied` on the block result in
+/// `tool_call.rs`; matching on the message text keeps the classification
+/// correct even on any path where the typed status is lost (e.g. a result
+/// reconstructed from persisted content). The substrings below are the
+/// stable markers every `LoopGuardVerdict::Block` message carries — see
+/// `loop_guard.rs`. The `CircuitBreak` verdict is deliberately excluded:
+/// it returns `Err(LibreFangError::Internal)` (a hard, intentional
+/// loop-exit) rather than a `ToolResult`, so its message never reaches a
+/// tool-result content path — and softening it would defeat the breaker.
+pub(super) fn is_loop_guard_block_content(content: &str) -> bool {
+    content.contains("Blocked: tool")
+        || content.contains("returning identical results repeatedly")
+        || content.contains("Ping-pong detected")
 }
 
 /// Detect tool errors that are caused by the LLM sending wrong/missing parameters.
@@ -524,5 +545,151 @@ mod safe_trim_session_repair_tests {
              got {:?} — this is the regression the audit closed",
             session[0].role
         );
+    }
+}
+
+/// Issue #5979: a loop-guard `Block` must be a SOFT signal — it must not
+/// abort the remaining tool batch nor count toward the consecutive-all-failed
+/// abort path that records an agent panic.
+#[cfg(test)]
+mod loop_guard_soft_classification_tests {
+    use super::*;
+    use crate::agent_loop::tool_call::ToolResultOutcomeSummary;
+    use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
+    use librefang_types::message::ContentBlock;
+    use librefang_types::tool::ToolExecutionStatus;
+
+    /// Drive a real `LoopGuard` until it emits a count-based `Block`, then
+    /// assert the block message is recognised by `is_soft_error_content`.
+    #[test]
+    fn loop_guard_count_block_message_is_soft() {
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        let params = serde_json::json!({"command": "memory_recall"});
+        // block_threshold = 5 → the 5th identical call blocks.
+        let mut blocked: Option<String> = None;
+        for _ in 0..6 {
+            if let LoopGuardVerdict::Block(msg) = guard.check("memory_recall", &params) {
+                blocked = Some(msg);
+                break;
+            }
+        }
+        let msg = blocked.expect("loop guard must eventually Block an identical call");
+        assert!(
+            is_soft_error_content(&msg),
+            "loop-guard Block message must classify as a soft error so it does \
+             not abort the batch / panic the agent (issue #5979): {msg:?}"
+        );
+    }
+
+    /// The outcome-based `Block` message (the duplicate-result path that the
+    /// stuck `memory_recall` agent actually hit) must also be soft.
+    #[test]
+    fn loop_guard_outcome_block_message_is_soft() {
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        let params = serde_json::json!({"query": "who am i"});
+        let result = "<identical memory payload>";
+        // outcome_block_threshold = 3 → after 3 identical outcomes the next
+        // check() auto-blocks.
+        guard.record_outcome("memory_recall", &params, result);
+        guard.record_outcome("memory_recall", &params, result);
+        guard.record_outcome("memory_recall", &params, result);
+        let verdict = guard.check("memory_recall", &params);
+        let msg = match verdict {
+            LoopGuardVerdict::Block(msg) => msg,
+            other => panic!("expected outcome-based Block, got {other:?}"),
+        };
+        assert!(
+            is_soft_error_content(&msg),
+            "outcome-based loop-guard Block must classify as soft: {msg:?}"
+        );
+    }
+
+    /// The `Denied` status the block result carries (set in tool_call.rs) is
+    /// soft per the typed classifier, so the outcome summary does not count
+    /// the block as a hard failure even with `is_error: true`.
+    #[test]
+    fn denied_block_result_is_not_a_hard_failure() {
+        let blocks = vec![ContentBlock::ToolResult {
+            tool_use_id: "tid_block".to_string(),
+            tool_name: "memory_recall".to_string(),
+            content: "Blocked: tool 'memory_recall' called 5 times with identical parameters. \
+                      Try a different approach or different parameters."
+                .to_string(),
+            is_error: true,
+            status: ToolExecutionStatus::Denied,
+            approval_request_id: None,
+        }];
+        let summary = ToolResultOutcomeSummary::from_blocks(&blocks);
+        assert_eq!(
+            summary.hard_error_count, 0,
+            "a Denied loop-guard block must not count as a hard failure"
+        );
+        // Status alone is enough; the content matcher is the second guard.
+        assert!(ToolExecutionStatus::Denied.is_soft_error());
+        assert!(is_loop_guard_block_content(
+            "Blocked: tool 'x' called 5 times with identical parameters."
+        ));
+    }
+
+    /// A turn containing one blocked (soft) call plus another pending tool
+    /// result must NOT register a hard failure that would trip the abort
+    /// path — the second call's success keeps the iteration productive.
+    #[test]
+    fn blocked_call_plus_pending_call_not_all_failed() {
+        let blocks = vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "tid_block".to_string(),
+                tool_name: "memory_recall".to_string(),
+                content: "Blocked: tool 'memory_recall' is returning identical results \
+                          repeatedly. The current approach is not working — try something \
+                          different."
+                    .to_string(),
+                is_error: true,
+                status: ToolExecutionStatus::Denied,
+                approval_request_id: None,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "tid_ok".to_string(),
+                tool_name: "shell_exec".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                status: ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            },
+        ];
+        let summary = ToolResultOutcomeSummary::from_blocks(&blocks);
+        assert_eq!(summary.hard_error_count, 0);
+        assert_eq!(summary.success_count, 1);
+    }
+
+    /// N consecutive blocked-only iterations must NOT trip the
+    /// MAX_CONSECUTIVE_ALL_FAILED panic/exit path: each blocked-only
+    /// iteration yields `hard_error_count == 0`, so the consecutive counter
+    /// is reset to 0 every time (`success_count == 0 && hard_error_count > 0`
+    /// is false), never reaching the threshold.
+    #[test]
+    fn consecutive_blocked_only_iterations_do_not_trip_abort() {
+        use crate::agent_loop::tool_call::update_consecutive_hard_failures;
+        let mut consecutive_all_failed: u32 = 0;
+        for _ in 0..10 {
+            let blocks = vec![ContentBlock::ToolResult {
+                tool_use_id: "tid_block".to_string(),
+                tool_name: "memory_recall".to_string(),
+                content: "Blocked: tool 'memory_recall' called 5 times with identical \
+                          parameters."
+                    .to_string(),
+                is_error: true,
+                status: ToolExecutionStatus::Denied,
+                approval_request_id: None,
+            }];
+            let summary = ToolResultOutcomeSummary::from_blocks(&blocks);
+            let hard = update_consecutive_hard_failures(&mut consecutive_all_failed, summary);
+            assert_eq!(hard, 0, "blocked-only iteration must report 0 hard errors");
+            assert_eq!(
+                consecutive_all_failed, 0,
+                "blocked-only iterations must keep consecutive_all_failed at 0, \
+                 never approaching MAX_CONSECUTIVE_ALL_FAILED (issue #5979)"
+            );
+        }
     }
 }
