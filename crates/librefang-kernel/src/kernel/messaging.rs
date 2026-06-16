@@ -387,7 +387,8 @@ impl LibreFangKernel {
         // same mapping `sidecar_default_agent` in channel_sender.rs uses
         // for the inverted lookup.
         cfg.sidecar_channels.iter().find_map(|sc| {
-            if sc.agent.as_deref() != Some(agent_name.as_str()) {
+            let named_agent = sc.agent.as_deref();
+            if named_agent != Some(agent_name.as_str()) {
                 return None;
             }
             let channel = sc.channel_type.clone().unwrap_or_else(|| sc.name.clone());

@@ -166,6 +166,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         session_id: SessionId,
         kind: TaskKind,
+        chat_id: Option<String>,
     ) -> TaskHandle {
         let mut guard = self.events.async_tasks.lock();
 
@@ -219,6 +220,7 @@ impl LibreFangKernel {
             handle: handle.clone(),
             agent_id,
             session_id,
+            chat_id,
         };
         guard.insert(handle.id, entry);
         debug!(
@@ -339,7 +341,12 @@ impl LibreFangKernel {
         // agent processes the result without the operator having to
         // poke it manually. Detached so the workflow that called
         // `complete_async_task` returns immediately.
-        let woken = self.spawn_wake_idle_turn(entry.agent_id, entry.session_id, &event);
+        let woken = self.spawn_wake_idle_turn(
+            entry.agent_id,
+            entry.session_id,
+            &event,
+            entry.chat_id.clone(),
+        );
         info!(
             task_id = %task_id,
             agent_id = %entry.agent_id,
@@ -382,6 +389,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         session_id: SessionId,
         event: &TaskCompletionEvent,
+        chat_id: Option<String>,
     ) -> bool {
         let kernel_arc = match self.self_handle.get().and_then(|w| w.upgrade()) {
             Some(arc) => arc,
@@ -443,25 +451,66 @@ impl LibreFangKernel {
             };
 
             let handle = kernel_arc.kernel_handle();
+            let sender_ctx = kernel_arc.resolve_agent_home_channel(agent_id);
+            if sender_ctx.is_some() {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    channel = ?sender_ctx.as_ref().map(|c| &c.channel),
+                    "Async task wake-idle: resolved home channel, turn will have sender context"
+                );
+            } else {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "Async task wake-idle: NO home channel resolved, response will NOT be sent to any channel"
+                );
+            }
             match kernel_arc
                 .send_message_full(
                     agent_id,
                     &body,
                     handle,
                     None,
-                    None,
+                    sender_ctx.as_ref(),
                     None,
                     None,
                     Some(session_id),
                 )
                 .await
             {
-                Ok(_) => {
+                Ok(result) => {
                     tracing::debug!(
                         agent_id = %agent_id,
                         session_id = %session_id,
                         "Async task wake-idle turn completed"
                     );
+                    // Forward the agent's response to the home channel so
+                    // the user actually sees the result. Without this the
+                    // response is produced inside the loop but discarded
+                    // by the spawn — the bridge is not in the call path.
+                    if let Some(ctx) = sender_ctx.as_ref() {
+                        if !result.response.is_empty() {
+                            if let Some(ref peer_id) = chat_id {
+                                let _ = librefang_runtime::kernel_handle::ChannelSender::send_channel_message(
+                                    kernel_arc.as_ref(),
+                                    &ctx.channel,
+                                    peer_id,
+                                    &result.response,
+                                    None,
+                                    ctx.account_id.as_deref(),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    tracing::warn!(
+                                        agent_id = %agent_id,
+                                        channel = %ctx.channel,
+                                        peer = %peer_id,
+                                        error = %e,
+                                        "Async task wake-idle: failed to forward response to channel"
+                                    );
+                                });
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
