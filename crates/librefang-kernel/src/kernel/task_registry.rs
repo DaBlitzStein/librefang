@@ -451,7 +451,10 @@ impl LibreFangKernel {
             };
 
             let handle = kernel_arc.kernel_handle();
-            let sender_ctx = kernel_arc.resolve_agent_home_channel(agent_id);
+            let mut sender_ctx = kernel_arc.resolve_agent_home_channel(agent_id);
+            if let (Some(ref mut ctx), Some(ref cid)) = (sender_ctx.as_mut(), chat_id.as_ref()) {
+                ctx.chat_id = Some(cid.clone());
+            }
             if sender_ctx.is_some() {
                 tracing::warn!(
                     agent_id = %agent_id,
@@ -478,9 +481,11 @@ impl LibreFangKernel {
                 .await
             {
                 Ok(result) => {
-                    tracing::debug!(
+                    tracing::warn!(
                         agent_id = %agent_id,
                         session_id = %session_id,
+                        has_chat_id = chat_id.is_some(),
+                        response_len = result.response.len(),
                         "Async task wake-idle turn completed"
                     );
                     // Forward the agent's response to the home channel so

@@ -2600,6 +2600,11 @@ impl LibreFangKernel {
                         "sender_chat_id".to_string(),
                         serde_json::Value::String(cid.clone()),
                     );
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        chat_id = %cid,
+                        "Stamped sender_chat_id into manifest metadata"
+                    );
                 }
             }
             // #5227: stamp the chat-qualified scope derived via the same
