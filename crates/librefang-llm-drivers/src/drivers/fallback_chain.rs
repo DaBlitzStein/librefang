@@ -598,7 +598,6 @@ mod tests {
                 ..Default::default()
             },
             actual_provider: None,
-            actual_model: None,
         }
     }
 

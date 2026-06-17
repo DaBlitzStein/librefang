@@ -1402,9 +1402,7 @@ export function ProvidersPage() {
     && !config.keyInput.trim()
     && config.urlInput === (config.provider.base_url || "")
     && config.proxyInput === (config.provider.proxy_url || "");
-  // testKey() clears keyInput after saving, making isUnchanged true — keep Save enabled when the last test passed.
-  const testedOk = config.testResult?.ok === true;
-  const saveDisabled = !config.provider || config.saving || config.testing || (isUnchanged && !testedOk);
+  const saveDisabled = !config.provider || config.saving || config.testing || isUnchanged;
   // Local providers (Ollama / vLLM / LM Studio) declare `key_required: false`
   // — for them, the Test button must NOT require a key, otherwise users have
   // no way to verify their custom base_url. Issue #3138.

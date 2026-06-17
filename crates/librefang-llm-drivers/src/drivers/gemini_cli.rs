@@ -266,7 +266,6 @@ impl LlmDriver for GeminiCliDriver {
                 ..Default::default()
             },
             actual_provider: None,
-            actual_model: None,
         })
     }
 

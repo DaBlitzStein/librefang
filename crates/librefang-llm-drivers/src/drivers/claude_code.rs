@@ -1132,7 +1132,6 @@ impl LlmDriver for ClaudeCodeDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
-                actual_model: None,
             });
         }
 
@@ -1158,7 +1157,6 @@ impl LlmDriver for ClaudeCodeDriver {
                 ..Default::default()
             },
             actual_provider: None,
-            actual_model: None,
         })
     }
 
@@ -1605,7 +1603,6 @@ impl LlmDriver for ClaudeCodeDriver {
             tool_calls: Vec::new(),
             usage: final_usage,
             actual_provider: None,
-            actual_model: None,
         })
     }
 

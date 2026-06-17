@@ -740,7 +740,6 @@ fn convert_response(resp: ConverseResponse) -> Result<CompletionResponse, LlmErr
             cache_read_input_tokens: resp.usage.cache_read_input_tokens,
         },
         actual_provider: None,
-        actual_model: None,
     })
 }
 
