@@ -11,6 +11,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use librefang_channels::types::SenderContext;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::task::{TaskHandle, TaskId};
 use librefang_types::tool::AgentLoopSignal;
@@ -40,10 +41,11 @@ pub(crate) struct PendingTask {
     /// Session that registered the task — the originating turn's
     /// session. Pairs with `agent_id` as the injection-channel key.
     pub session_id: SessionId,
-    /// Channel recipient id (e.g. Telegram user id) for forwarding the
-    /// wake-idle response back to the right conversation. Threaded
-    /// from the caller's `SenderContext.chat_id` at registration time.
-    pub chat_id: Option<String>,
+    /// Full sender context captured at registration time so the
+    /// wake-idle path can route the response back to the exact
+    /// conversation that originated the request — no reconstruction
+    /// from home-channel config needed.
+    pub sender_ctx: Option<librefang_channels::types::SenderContext>,
 }
 
 /// Focused event-bus + injection-channel API.
