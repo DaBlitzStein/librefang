@@ -372,7 +372,7 @@ impl GoalRunner {
     /// goal persistence, and the rate-limit circuit breaker.
     ///
     /// Replaces any existing run for the same goal.
-    pub fn start<F, Fut, S, Sfut>(
+    pub fn start<F, Fut, S, Sfut, L>(
         &self,
         goal_id: GoalId,
         agent_id: AgentId,
@@ -380,6 +380,7 @@ impl GoalRunner {
         substrate: Arc<MemorySubstrate>,
         send_message: F,
         spawn_sub_agent: S,
+        on_learnings_captured: L,
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
     ) where
@@ -387,6 +388,7 @@ impl GoalRunner {
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
         S: Fn(String) -> Sfut + Send + Sync + 'static,
         Sfut: std::future::Future<Output = Option<AgentId>> + Send + 'static,
+        L: Fn(Vec<String>) + Send + Sync + 'static,
     {
         // Hold `start_lock` for the whole stop→gen→spawn→insert sequence so a
         // concurrent `start()` for the same goal cannot observe the empty slot
@@ -439,6 +441,7 @@ impl GoalRunner {
                 substrate,
                 send_message,
                 spawn_sub_agent,
+                on_learnings_captured,
                 loop_state,
                 loop_stop,
                 shutdown_rx,
@@ -609,13 +612,14 @@ impl GoalRunner {
 /// The run loop body. Extracted as a free function so tests can drive it with a
 /// fake `send_message` and an in-memory substrate.
 #[allow(clippy::too_many_arguments)]
-async fn run_loop<F, Fut, S, Sfut>(
+async fn run_loop<F, Fut, S, Sfut, L>(
     goal_id: GoalId,
     agent_id: AgentId,
     max_iterations: u32,
     substrate: Arc<MemorySubstrate>,
     send_message: F,
     spawn_sub_agent: S,
+    on_learnings_captured: L,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -625,6 +629,7 @@ async fn run_loop<F, Fut, S, Sfut>(
     Fut: std::future::Future<Output = Result<String, String>> + Send,
     S: Fn(String) -> Sfut + Send + Sync,
     Sfut: std::future::Future<Output = Option<AgentId>> + Send,
+    L: Fn(Vec<String>) + Send + Sync,
 {
     let mut iteration: u32 = 0;
     let mut rate_limit_streak: u32 = 0;
@@ -859,6 +864,10 @@ async fn run_loop<F, Fut, S, Sfut>(
             info!(goal_id = %goal_id, count = accumulated_learnings.len(),
                   "Persisted goal learnings to shared memory");
         }
+        // Caller hook: push learnings into proactive memory so the agent
+        // recalls them in future conversations, and trigger auto_evolve
+        // to refine prompts from what was discovered.
+        on_learnings_captured(accumulated_learnings.clone());
     }
     info!(goal_id = %goal_id, phase = %final_phase, "Goal run ended");
 }
@@ -966,6 +975,7 @@ mod tests {
             substrate.clone(),
             send,
             |_: String| async { None },
+            |_| {},
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1013,6 +1023,7 @@ mod tests {
             substrate.clone(),
             send,
             |_: String| async { None },
+            |_| {},
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1067,6 +1078,7 @@ mod tests {
             substrate.clone(),
             send,
             |_: String| async { None },
+            |_| {},
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1104,6 +1116,7 @@ mod tests {
             substrate.clone(),
             send,
             |_: String| async { None },
+            |_| {},
             state.clone(),
             Arc::new(AtomicBool::new(true)),
             rx,
@@ -1138,6 +1151,7 @@ mod tests {
             substrate.clone(),
             send,
             |_: String| async { None },
+            |_| {},
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1173,6 +1187,7 @@ mod tests {
             substrate.clone(),
             send,
             |_: String| async { None },
+            |_| {},
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1237,6 +1252,7 @@ mod tests {
             substrate.clone(),
             send,
             |_: String| async { None },
+            |_| {},
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1293,6 +1309,7 @@ mod tests {
             substrate.clone(),
             send,
             |_: String| async { None },
+            |_| {},
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1559,6 +1576,7 @@ mod tests {
                     sub1,
                     s1,
                     |_: String| async { None },
+                    |_| {},
                     None,
                     None,
                 );
@@ -1571,6 +1589,7 @@ mod tests {
                     sub2,
                     s2,
                     |_: String| async { None },
+                    |_| {},
                     None,
                     None,
                 );
