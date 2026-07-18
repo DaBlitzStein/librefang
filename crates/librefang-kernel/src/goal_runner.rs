@@ -372,6 +372,7 @@ impl GoalRunner {
     /// goal persistence, and the rate-limit circuit breaker.
     ///
     /// Replaces any existing run for the same goal.
+    #[allow(clippy::too_many_arguments)]
     pub fn start<F, Fut, S, Sfut, L>(
         &self,
         goal_id: GoalId,
@@ -762,8 +763,6 @@ async fn run_loop<F, Fut, S, Sfut, L>(
 
                 let new_status = if parsed.done && passes_verification {
                     Some(GoalStatus::Completed)
-                } else if !passes_verification {
-                    Some(GoalStatus::InProgress) // keep going, verifier blocked this iteration
                 } else {
                     Some(GoalStatus::InProgress)
                 };
