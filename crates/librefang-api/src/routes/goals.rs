@@ -200,8 +200,13 @@ pub async fn start_goal_run(
                 schedule: librefang_types::agent::ScheduleMode::Reactive,
                 session_mode: librefang_types::agent::SessionMode::New,
                 model: librefang_types::agent::ModelConfig {
-                    provider: "deepseek".into(),
-                    model: "deepseek-v4-pro".into(),
+                    // "default" resolves to the operator's actually-configured
+                    // default provider/model (see messaging.rs's "default"
+                    // sentinel handling). A hardcoded provider here would fail
+                    // outright for any operator who hasn't configured that
+                    // specific provider's API key.
+                    provider: "default".into(),
+                    model: "default".into(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -261,8 +266,11 @@ pub async fn start_goal_run(
             schedule: librefang_types::agent::ScheduleMode::Reactive,
             session_mode: librefang_types::agent::SessionMode::New,
             model: librefang_types::agent::ModelConfig {
-                provider: "deepseek".into(),
-                model: "deepseek-v4-pro".into(),
+                // See the worker auto-spawn above: "default" resolves to the
+                // operator's configured default provider/model instead of
+                // requiring a specific provider's API key to be present.
+                provider: "default".into(),
+                model: "default".into(),
                 ..Default::default()
             },
             ..Default::default()

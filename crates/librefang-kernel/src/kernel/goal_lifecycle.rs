@@ -92,8 +92,12 @@ impl LibreFangKernel {
                     schedule: librefang_types::agent::ScheduleMode::Reactive,
                     session_mode: SessionMode::New,
                     model: ModelConfig {
-                        provider: "deepseek".into(),
-                        model: "deepseek-v4-pro".into(),
+                        // "default" resolves to the operator's actually-
+                        // configured default provider/model (see
+                        // messaging.rs's "default" sentinel handling), rather
+                        // than requiring a specific provider's API key.
+                        provider: "default".into(),
+                        model: "default".into(),
                         ..Default::default()
                     },
                     ..Default::default()
