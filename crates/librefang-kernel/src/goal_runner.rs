@@ -758,21 +758,13 @@ async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
                     }
                 }
 
-                let new_status = if parsed.done && passes_verification {
-                    Some(GoalStatus::Completed)
-                } else {
-                    Some(GoalStatus::InProgress)
-                };
-                let new_progress = if parsed.done && passes_verification {
-                    Some(100)
-                } else {
-                    parsed.progress
-                };
-                patch_goal(&substrate, goal_id, new_progress, new_status);
-
                 // Evaluator model: a separate cheap model judges whether the
                 // goal condition is met (Claude Code /goal pattern). This
                 // replaces blind trust in the agent's self-reported GOAL_DONE.
+                // Computed BEFORE patch_goal below so an evaluator-judged
+                // completion (parsed.done == false but evaluator says YES)
+                // is actually reflected in the goal's persisted status /
+                // progress, not just the run's terminal phase.
                 let evaluator_done = if passes_verification {
                     match evaluate_goal(goal.description.clone(), reply.clone()).await {
                         Ok(true) => {
@@ -788,6 +780,15 @@ async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
                 } else {
                     false
                 };
+
+                let is_done = (parsed.done || evaluator_done) && passes_verification;
+                let new_status = if is_done {
+                    Some(GoalStatus::Completed)
+                } else {
+                    Some(GoalStatus::InProgress)
+                };
+                let new_progress = if is_done { Some(100) } else { parsed.progress };
+                patch_goal(&substrate, goal_id, new_progress, new_status);
 
                 // Release before persist_run: state()'s try_lock returns None (→ running:false) while held.
                 let snapshot = {
