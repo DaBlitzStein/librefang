@@ -2312,3 +2312,42 @@ fn load_overrides_keeps_existing_on_parse_failure() {
         "a malformed overrides.json must not silently drop existing overrides (#5137)"
     );
 }
+#[test]
+fn managed_everyapi_registration_is_auto_detected_and_builtin() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api-cn.everyapi.ai/v1"));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert_eq!(provider.base_url, "https://api-cn.everyapi.ai/v1");
+    assert_eq!(provider.auth_status, AuthStatus::AutoDetected);
+    assert!(!provider.is_custom);
+}
+
+#[test]
+fn managed_everyapi_registration_honors_suppression() {
+    let mut catalog = ModelCatalog::default();
+    catalog.suppress_provider("everyapi");
+    assert!(!catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+    assert!(catalog.get_provider("everyapi").is_none());
+}
+
+#[test]
+fn explicit_url_converts_managed_everyapi_to_custom() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+    assert!(catalog.set_provider_url("everyapi", "https://relay.example/v1"));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert_eq!(provider.base_url, "https://relay.example/v1");
+    assert_eq!(provider.auth_status, AuthStatus::Configured);
+    assert!(provider.is_custom);
+}
+
+#[test]
+fn explicit_everyapi_registration_survives_without_a_registry_entry() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_explicit_everyapi("https://relay.example/v1/", "MY_EVERYAPI_KEY", true));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert_eq!(provider.base_url, "https://relay.example/v1");
+    assert_eq!(provider.api_key_env, "MY_EVERYAPI_KEY");
+    assert_eq!(provider.auth_status, AuthStatus::Configured);
+    assert!(provider.is_custom);
+}

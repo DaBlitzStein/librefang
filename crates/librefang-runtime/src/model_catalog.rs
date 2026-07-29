@@ -455,6 +455,17 @@ impl ModelCatalog {
                 continue;
             }
 
+            // Managed EveryAPI credentials live behind EveryAPI's local credential-process command rather than in a LibreFang env var.
+            // Preserve the successful boot/runtime discovery marker across unrelated catalog re-detection passes.
+            // The API refresh path owns demotion when the credential process later disappears.
+            if provider.id == "everyapi"
+                && provider.auth_status == AuthStatus::AutoDetected
+                && !suppressed
+                && !provider.is_custom
+            {
+                continue;
+            }
+
             if !provider.key_required {
                 if suppressed {
                     // User explicitly hid this provider. Holding it as
@@ -1068,6 +1079,12 @@ impl ModelCatalog {
     pub fn set_provider_url(&mut self, provider: &str, url: &str) -> bool {
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
             p.base_url = url.to_string();
+            // Repointing an auto-managed EveryAPI entry is an explicit user override.
+            // Stop replacing its endpoint with the CLI-managed URL.
+            if provider == "everyapi" && !p.is_custom {
+                p.is_custom = true;
+                p.auth_status = AuthStatus::Configured;
+            }
             true
         } else {
             // Custom provider — add a new entry so it appears in /api/providers
@@ -1092,6 +1109,95 @@ impl ModelCatalog {
             self.detect_auth();
             true
         }
+    }
+
+    /// Register or refresh the built-in EveryAPI provider discovered through EveryAPI's local credential process.
+    ///
+    /// User-created provider entries and explicit suppression always win.
+    /// Returns `true` only when managed registration is active.
+    pub fn ensure_managed_everyapi(&mut self, base_url: &str) -> bool {
+        const PROVIDER_ID: &str = "everyapi";
+        if self.suppressed_providers.contains(PROVIDER_ID) {
+            return false;
+        }
+        let base_url = base_url.trim().trim_end_matches('/');
+        if base_url.is_empty() {
+            return false;
+        }
+        if let Some(provider) = self.providers.iter_mut().find(|p| p.id == PROVIDER_ID) {
+            if provider.is_custom {
+                return false;
+            }
+            provider.base_url = base_url.to_string();
+            provider.auth_status = AuthStatus::AutoDetected;
+            return true;
+        }
+        self.providers.push(ProviderInfo {
+            id: PROVIDER_ID.to_string(),
+            display_name: "EveryAPI".to_string(),
+            api_key_env: "EVERYAPI_API_KEY".to_string(),
+            base_url: base_url.to_string(),
+            key_required: true,
+            auth_status: AuthStatus::AutoDetected,
+            model_count: 0,
+            signup_url: Some("https://everyapi.ai".to_string()),
+            regions: std::collections::HashMap::new(),
+            media_capabilities: Vec::new(),
+            available_models: Vec::new(),
+            is_custom: false,
+            proxy_url: None,
+        });
+        true
+    }
+
+    /// Register an explicitly configured EveryAPI endpoint/key source.
+    /// Unlike CLI-managed discovery, this entry is custom and is never rewritten from the EveryAPI credential process.
+    pub fn ensure_explicit_everyapi(
+        &mut self,
+        base_url: &str,
+        api_key_env: &str,
+        credential_present: bool,
+    ) -> bool {
+        const PROVIDER_ID: &str = "everyapi";
+        if self.suppressed_providers.contains(PROVIDER_ID) {
+            return false;
+        }
+        let base_url = base_url.trim().trim_end_matches('/');
+        let api_key_env = api_key_env.trim();
+        if base_url.is_empty() || api_key_env.is_empty() {
+            return false;
+        }
+        if let Some(provider) = self.providers.iter_mut().find(|p| p.id == PROVIDER_ID) {
+            provider.base_url = base_url.to_string();
+            provider.api_key_env = api_key_env.to_string();
+            provider.auth_status = if credential_present {
+                AuthStatus::Configured
+            } else {
+                AuthStatus::Missing
+            };
+            provider.is_custom = true;
+            return true;
+        }
+        self.providers.push(ProviderInfo {
+            id: PROVIDER_ID.to_string(),
+            display_name: "EveryAPI".to_string(),
+            api_key_env: api_key_env.to_string(),
+            base_url: base_url.to_string(),
+            key_required: true,
+            auth_status: if credential_present {
+                AuthStatus::Configured
+            } else {
+                AuthStatus::Missing
+            },
+            model_count: 0,
+            signup_url: Some("https://everyapi.ai".to_string()),
+            regions: std::collections::HashMap::new(),
+            media_capabilities: Vec::new(),
+            available_models: Vec::new(),
+            is_custom: true,
+            proxy_url: None,
+        });
+        true
     }
 
     /// Apply a batch of provider URL overrides from config.
