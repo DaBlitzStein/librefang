@@ -1326,3 +1326,321 @@ restart_initial_backoff_ms = \"eighty-eighty\"
          pre-#5186 downstream symptom); got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/ready (#6633)
+//
+// `/api/health` and `/api/ready` answer two different questions and must not
+// be conflated: liveness ("is the process responsive?") never fails over a
+// recoverable dependency outage, readiness ("can it accept work?") does. The
+// tests below pin both halves of that contract over the real router, plus the
+// public reachability a kubelet-issued probe depends on.
+// ---------------------------------------------------------------------------
+
+/// An env var name no environment sets. Pointing `embedding_api_key_env` at it
+/// makes the Cohere embedding driver fail construction with `MissingApiKey`
+/// deterministically, without the test mutating process-global environment
+/// state that parallel tests share.
+const ABSENT_EMBEDDING_KEY_ENV: &str = "LIBREFANG_TEST_ABSENT_EMBEDDING_KEY_6633";
+
+/// Extract one named entry from the `checks` array of a health/ready payload.
+fn ready_check<'a>(body: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    body.get("checks")
+        .and_then(|c| c.as_array())
+        .and_then(|checks| {
+            checks
+                .iter()
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+        })
+        .unwrap_or_else(|| panic!("no '{name}' check in payload: {body}"))
+}
+
+/// The probe must be reachable with no credential — a kubelet holds none, and
+/// a 401 would pin the pod out of Service endpoints permanently. The harness
+/// boots with `api_key` set, so this also proves the route is in the
+/// `is_public` allowlist rather than merely unauthenticated by accident.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_is_public_and_reports_ready_on_a_healthy_kernel() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(json.get("status").and_then(|s| s.as_str()), Some("ready"));
+
+    let database = ready_check(&json, "database");
+    assert_eq!(database.get("status").and_then(|s| s.as_str()), Some("ok"));
+    assert_eq!(
+        database.get("required").and_then(|r| r.as_bool()),
+        Some(true)
+    );
+
+    // No `embedding_provider` is configured in the default harness, so boot
+    // takes the auto-detect path. Whether a driver materialises depends on
+    // the ambient environment of the machine running the test — the point of
+    // the contract is that it must not decide readiness either way.
+    let embedding = ready_check(&json, "embedding");
+    assert_eq!(
+        embedding.get("required").and_then(|r| r.as_bool()),
+        Some(false),
+        "an unpinned embedding provider is an optional enhancement, not a \
+         readiness requirement: {json}"
+    );
+}
+
+/// The readiness payload reaches unauthenticated callers, so it must not carry
+/// the reconnaissance surface that keeps `/api/health/detail` behind auth.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_payload_withholds_diagnostics_from_anonymous_callers() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let object = json.as_object().expect("payload is an object");
+    // Sorted, because `serde_json::Map` preserves insertion order here and the
+    // assertion is about which keys exist, not the order they serialize in.
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["checks", "status"],
+        "the readiness payload is deliberately minimal — adding a top-level \
+         field means auditing it for disclosure first: {json}"
+    );
+
+    // Guard the specific values that made `/api/health/detail` auth-only.
+    let rendered = String::from_utf8_lossy(&body);
+    for leak in [
+        env!("CARGO_PKG_VERSION"),
+        "uptime",
+        "panic",
+        "restart",
+        "agent_count",
+        "provider",
+        "model",
+        "budget",
+    ] {
+        assert!(
+            !rendered.contains(leak),
+            "readiness payload must not disclose '{leak}': {rendered}"
+        );
+    }
+}
+
+/// When the operator pins a specific embedding provider and the daemon cannot
+/// construct it, the deployment is not serving the memory semantics that were
+/// asked for: readiness fails. Liveness must be unaffected in the same boot —
+/// that separation is the whole reason `/api/ready` exists rather than
+/// `/api/health` returning 503.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_fails_but_health_stays_200_when_a_pinned_embedding_driver_is_missing() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        config.memory.fts_only = Some(false);
+        config.memory.embedding_provider = Some("cohere".to_string());
+        config.memory.embedding_api_key_env = Some(ABSENT_EMBEDDING_KEY_ENV.to_string());
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a pinned-but-unavailable embedding provider must fail readiness; \
+         body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        json.get("status").and_then(|s| s.as_str()),
+        Some("not_ready")
+    );
+    let embedding = ready_check(&json, "embedding");
+    assert_eq!(
+        embedding.get("required").and_then(|r| r.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        embedding.get("status").and_then(|s| s.as_str()),
+        Some("error")
+    );
+    // The database is fine; only the pinned dependency failed.
+    assert_eq!(
+        ready_check(&json, "database")
+            .get("status")
+            .and_then(|s| s.as_str()),
+        Some("ok")
+    );
+
+    let (health_status, health_body) = send(h.app.clone(), anon_get("/api/health")).await;
+    assert_eq!(
+        health_status,
+        StatusCode::OK,
+        "liveness must not fail for a readiness-only outage — a 503 here \
+         would make Kubernetes restart-loop the pod; body: {}",
+        String::from_utf8_lossy(&health_body)
+    );
+}
+
+/// `fts_only` switches vector search off, so boot never builds an embedding
+/// driver at all. A leftover `embedding_provider` in the same config must not
+/// then be read as an unmet requirement — the mode wins.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_ignores_a_stale_embedding_provider_in_fts_only_mode() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        config.memory.fts_only = Some(true);
+        config.memory.embedding_provider = Some("cohere".to_string());
+        config.memory.embedding_api_key_env = Some(ABSENT_EMBEDDING_KEY_ENV.to_string());
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "fts_only is a supported mode, not a degraded one; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(json.get("status").and_then(|s| s.as_str()), Some("ready"));
+    let embedding = ready_check(&json, "embedding");
+    assert_eq!(
+        embedding.get("required").and_then(|r| r.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        embedding.get("status").and_then(|s| s.as_str()),
+        Some("skipped")
+    );
+}
+
+/// `"auto"` is the documented way to say "probe the environment, fall back to
+/// text search" — an explicit statement that no particular provider is
+/// promised. It must behave like an unset provider, not like a pin.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_treats_auto_embedding_provider_as_optional() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        config.memory.fts_only = Some(false);
+        config.memory.embedding_provider = Some("auto".to_string());
+        config.memory.embedding_api_key_env = Some(ABSENT_EMBEDDING_KEY_ENV.to_string());
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an 'auto' provider promises nothing specific, so its absence cannot \
+         fail readiness; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        ready_check(&json, "embedding")
+            .get("required")
+            .and_then(|r| r.as_bool()),
+        Some(false)
+    );
+}
+
+/// Readiness must answer for the process that is running, not for whatever
+/// `config.toml` says right now.
+///
+/// `POST /api/config/reload` swaps the entire live `KernelConfig` whenever the
+/// plan carries any hot action, and a `[memory]` change is classified
+/// `restart_required` — the embedding driver is built once at boot and never
+/// rebuilt. So an operator edit that adds `memory.embedding_provider`
+/// alongside any hot-reloadable field would, if the probe read the requirement
+/// from `config_ref()`, introduce a requirement against a driver that can
+/// never appear. Readiness would sit at 503 forever while the daemon served
+/// traffic perfectly well, and Kubernetes would hold the pod out of Service
+/// endpoints with no path back except a manual restart: a config-file edit
+/// turned into an outage.
+///
+/// `AppState::readiness_requires_embedding` snapshots the requirement at boot
+/// to keep both halves of the comparison from the same point in time.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_ignores_an_embedding_provider_introduced_by_a_later_config_reload() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    // Baseline: nothing pinned at boot, so readiness does not depend on an
+    // embedding driver.
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        ready_check(&json, "embedding")
+            .get("required")
+            .and_then(|r| r.as_bool()),
+        Some(false),
+        "precondition: the harness pins no provider at boot"
+    );
+
+    // Land a config.toml that pins an unsatisfiable embedding provider AND
+    // touches a hot-reloadable field. The second part matters: `should_store_config`
+    // only swaps the live config when the plan carries a hot action or a
+    // no-op change, so a memory-only edit would not swap at all and the test
+    // would pass for the wrong reason.
+    let on_disk = format!(
+        "log_level = \"debug\"\n\
+         max_history_messages = 42\n\
+         [memory]\n\
+         fts_only = false\n\
+         embedding_provider = \"cohere\"\n\
+         embedding_api_key_env = \"{ABSENT_EMBEDDING_KEY_ENV}\"\n"
+    );
+    std::fs::write(h.home.join("config.toml"), on_disk).expect("write config.toml");
+
+    let reload = Request::builder()
+        .method(Method::POST)
+        .uri("/api/config/reload")
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::empty())
+        .unwrap();
+    let (reload_status, reload_body) = send(h.app.clone(), reload).await;
+    assert_eq!(
+        reload_status,
+        StatusCode::OK,
+        "reload should succeed (partially): {}",
+        String::from_utf8_lossy(&reload_body)
+    );
+    let reload_json: serde_json::Value =
+        serde_json::from_slice(&reload_body).expect("reload body is JSON");
+    // Sanity-check that this edit really is the restart-required shape the
+    // regression depends on. If a future reload-plan change made `[memory]`
+    // hot-reloadable, this assertion fails loudly and the snapshot rationale
+    // above needs revisiting — rather than the test silently going vacuous.
+    assert_eq!(
+        reload_json
+            .get("restart_required")
+            .and_then(|r| r.as_bool()),
+        Some(true),
+        "a [memory] edit must still be restart_required for this regression to \
+         be meaningful: {reload_json}"
+    );
+
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a config reload must not be able to fail readiness for a driver the \
+         running process was never asked to build; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        ready_check(&json, "embedding")
+            .get("required")
+            .and_then(|r| r.as_bool()),
+        Some(false),
+        "the requirement is a boot-time property: {json}"
+    );
+}
