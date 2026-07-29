@@ -197,7 +197,74 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     {
         return true;
     }
+    // #6631: every plugin route that can put plugin-controlled code on an execution path is Owner-only.
+    // Same reasoning as `/api/hands/{id}/install-deps` above — Admin is "config write" by design and must not be able to turn that into "run attacker-supplied code as the daemon user".
+    //
+    // Deliberately NOT gated, and each for a reason:
+    //   * every GET (list / detail / status / doctor / lint / env / registries, and the context-engine reads) — reads stay at the Admin gate.
+    //   * `POST /api/plugins/uninstall` and `POST /api/plugins/{name}/disable` REMOVE code from the execution path.
+    //     Gating them to Owner would stop an Admin from shutting a malicious plugin off during an incident, which makes the system less safe, not more.
+    //   * `POST /api/plugins/scaffold` writes a template into the plugins dir and executes nothing.
+    if *method == axum::http::Method::POST && plugin_route_executes_plugin_code(path) {
+        return true;
+    }
     false
+}
+
+/// Does this `POST /api/plugins/...` path let plugin-controlled code run?
+///
+/// Split out from `is_owner_only_write` so the set is enumerable in one place and directly unit-testable against the route list in `routes::plugins`.
+fn plugin_route_executes_plugin_code(path: &str) -> bool {
+    // Fetches an attacker-nominated git repo / registry entry into the plugins dir.
+    // Nothing runs during the clone itself, but this is the step that introduces the code, and the issue names source installation explicitly.
+    if path == "/api/plugins/install" {
+        return true;
+    }
+    // Same fetch as `/install`, plus it resolves the dependency graph and installs every unresolved dependency too — the identical capability through a second top-level path, so it needs its own exact-match check rather than falling through the `{name}/<action>` split below (this path has no `{name}` segment).
+    if path == "/api/plugins/install-with-deps" {
+        return true;
+    }
+    // Batch form of the per-plugin `reload` action below: pre-warms one or more plugins by calling the same `plugin_manager::reload_plugin`, just without a `{name}` segment to match on.
+    if path == "/api/plugins/prewarm" {
+        return true;
+    }
+    // `POST /api/plugins/batch` dispatches on a body field (`{"operation": "...", "plugins": [...]}`) and accepts `enable` and `sign` — both Owner-only as per-plugin actions below.
+    // The auth layer sees only method and path, so there is no way to gate the dangerous operations and admit the safe ones here: leaving the path open would let an Admin reach `enable` and `sign` through it, in bulk, and defeat those gates entirely.
+    //
+    // The cost is that an Admin loses the batch convenience for `disable` and `lint`.
+    // That does not weaken incident response — the per-plugin `{name}/disable` stays at Admin precisely so a malicious plugin can be shut off, and doing that one at a time is still available.
+    // Splitting the route by operation (or moving the role check into the handler, where the body is visible) would restore the convenience; that is a larger change than closing the bypass and is not required to close it.
+    if path == "/api/plugins/batch" {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix("/api/plugins/") else {
+        return false;
+    };
+    // Only `{name}/<action>` shapes below; `{name}` alone is a GET.
+    let Some((_name, action)) = rest.split_once('/') else {
+        return false;
+    };
+    matches!(
+        action,
+        // Runs npm / pip / bundler / composer, so package lifecycle scripts and build dependencies execute under the daemon UID.
+        "install-deps"
+            // Invokes a hook directly — the most direct execution path there is.
+            | "test-hook"
+            // Also invokes the hook directly, via `run_hook_json` in a loop — `runs` executions per request rather than one, so it is `test-hook` with a multiplier, not a measurement of something already running.
+            | "benchmark"
+            // Pulls new code over the existing plugin from registry or git.
+            | "upgrade"
+            // Puts the plugin's hooks back in the dispatch path, so the next matching event runs its code.
+            | "enable"
+            // Evicts the persistent hook subprocesses, so an edited script is picked up on the next call.
+            // The reload itself executes nothing; it is how edited code goes live.
+            | "reload"
+            // Same underlying `reload_plugin` call as `reload` above, invoked to warm persistent hook subprocesses ahead of the first real call rather than in response to an edit.
+            | "prewarm"
+            // Recomputes and writes `[integrity]` hashes into plugin.toml.
+            // Load-time verification (`plugin_manager`) rejects a hook whose hash no longer matches, so re-signing is what makes a tampered script loadable again — a trust assertion, not a read.
+            | "sign"
+    )
 }
 
 /// Minimum [`UserRole`] required for a privileged GET endpoint, or `None`
@@ -1845,6 +1912,184 @@ mod tests {
         }
     }
 
+    /// #6631: an Admin who obtains credentials must not be able to install a plugin and then run its code as the daemon user.
+    /// Every plugin route that puts plugin-controlled code on an execution path is Owner-only.
+    #[test]
+    fn admin_cannot_reach_plugin_routes_that_execute_plugin_code() {
+        let post = axum::http::Method::POST;
+        for path in [
+            "/api/plugins/install",
+            "/api/plugins/install-with-deps",
+            "/api/plugins/prewarm",
+            // Dispatches on a body field and accepts `enable` / `sign`, so leaving it open reaches those gates in bulk.
+            "/api/plugins/batch",
+            "/api/plugins/evil/install-deps",
+            "/api/plugins/evil/test-hook",
+            // `run_hook_json` in a loop — `test-hook` with a multiplier.
+            "/api/plugins/evil/benchmark",
+            "/api/plugins/evil/upgrade",
+            "/api/plugins/evil/enable",
+            "/api/plugins/evil/reload",
+            "/api/plugins/evil/prewarm",
+            "/api/plugins/evil/sign",
+        ] {
+            assert!(
+                !user_role_allows_request(UserRole::Admin, &post, path),
+                "Admin must NOT be allowed to POST {path} — it can execute \
+                 plugin-controlled code under the daemon UID"
+            );
+            assert!(
+                user_role_allows_request(UserRole::Owner, &post, path),
+                "Owner must still be allowed to POST {path}"
+            );
+            for role in [UserRole::Viewer, UserRole::User] {
+                assert!(
+                    !user_role_allows_request(role, &post, path),
+                    "{role} must NOT be allowed to POST {path}"
+                );
+            }
+        }
+    }
+
+    /// The complement, and the part that is easy to get wrong: gating too much is also a security regression.
+    /// An Admin must keep the ability to shut a malicious plugin off during an incident, and reads must stay readable.
+    #[test]
+    fn admin_retains_plugin_routes_that_remove_or_only_read_code() {
+        let post = axum::http::Method::POST;
+        for path in [
+            // These REMOVE code from the execution path.
+            // Owner-gating them would leave an Admin unable to respond to a compromise.
+            "/api/plugins/uninstall",
+            "/api/plugins/evil/disable",
+            // Writes a template; executes nothing.
+            "/api/plugins/scaffold",
+        ] {
+            assert!(
+                user_role_allows_request(UserRole::Admin, &post, path),
+                "Admin must retain POST {path} — gating it makes incident \
+                 response harder without preventing code execution"
+            );
+        }
+
+        let get = axum::http::Method::GET;
+        for path in [
+            "/api/plugins",
+            "/api/plugins/registries",
+            "/api/plugins/doctor",
+            "/api/plugins/evil",
+            "/api/plugins/evil/status",
+            "/api/plugins/evil/lint",
+            "/api/plugins/evil/env",
+            "/api/context-engine/metrics",
+        ] {
+            assert!(
+                user_role_allows_request(UserRole::Admin, &get, path),
+                "Admin must retain GET {path}"
+            );
+        }
+    }
+
+    /// Fail-closed completeness guard for the plugin authorization surface.
+    ///
+    /// The original #6631 fix enumerated the Owner-only set by reading `routes::plugins::router()` by hand, and missed `install-with-deps`, `prewarm` (both forms), `batch`, and `benchmark` — each a path to a capability that was already gated elsewhere.
+    /// Adding those individually fixes the instances; it does nothing about the next route someone adds.
+    ///
+    /// So this reflects the actual route table out of the source and requires every `POST /plugins/...` to appear in exactly one of two explicit lists.
+    /// A new route is a test failure until someone classifies it, which is the opposite of the silent-admission default that caused the misses.
+    #[test]
+    fn every_plugin_post_route_is_explicitly_classified() {
+        const PLUGINS_SRC: &str = include_str!("routes/plugins.rs");
+
+        // Routes that must stay reachable by Admin, each with its reason.
+        // Anything here is a deliberate decision, not an oversight.
+        const ADMIN_ALLOWED: &[&str] = &[
+            // Removes code from the execution path — Owner-gating it would block incident response.
+            "/plugins/uninstall",
+            "/plugins/{name}/disable",
+            // Writes a template into the plugins dir; executes nothing.
+            "/plugins/scaffold",
+            // Static validation of manifest and hook-script structure.
+            "/plugins/{name}/lint",
+            // Reads context-engine metrics for an already-running plugin.
+            "/plugins/{name}/health",
+        ];
+
+        // Pull the `router()` body so unrelated route strings elsewhere in the file cannot leak in.
+        let body_start = PLUGINS_SRC
+            .find("pub fn router()")
+            .expect("router() must exist in routes/plugins.rs");
+        let body = &PLUGINS_SRC[body_start..];
+        let body_end = body
+            .find("\n}\n")
+            .expect("router() body must terminate at a column-0 brace");
+        let body = &body[..body_end];
+
+        // Each `.route(` chunk holds one path literal and its method calls.
+        // Formatting splits these across lines, so operate per chunk rather than per line.
+        let mut unclassified = Vec::new();
+        let mut seen_post = 0usize;
+        for chunk in body.split(".route(").skip(1) {
+            let Some(path_start) = chunk.find('"') else {
+                continue;
+            };
+            let after = &chunk[path_start + 1..];
+            let Some(path_len) = after.find('"') else {
+                continue;
+            };
+            let route_path = &after[..path_len];
+            if !route_path.starts_with("/plugins") {
+                continue; // context-engine reads live in the same router
+            }
+            // Only the method calls for THIS route: stop at the next `.route(` boundary, which `split` already did for us.
+            if !after[path_len..].contains("routing::post") {
+                continue;
+            }
+            seen_post += 1;
+
+            let full = format!("/api{route_path}");
+            let owner_only = plugin_route_executes_plugin_code(&full);
+            let admin_ok = ADMIN_ALLOWED.contains(&route_path);
+
+            if owner_only == admin_ok {
+                // Either both (contradictory) or neither (unclassified).
+                unclassified.push(format!(
+                    "{route_path} (owner_only={owner_only}, in ADMIN_ALLOWED={admin_ok})"
+                ));
+            }
+        }
+
+        assert!(
+            seen_post >= 10,
+            "parsed only {seen_post} POST plugin routes — the extraction \
+             probably broke rather than the router shrinking that much"
+        );
+        assert!(
+            unclassified.is_empty(),
+            "these POST /plugins routes are not classified exactly once. Each \
+             must either execute plugin-controlled code (add it to \
+             `plugin_route_executes_plugin_code`) or be safe for Admin (add it \
+             to ADMIN_ALLOWED here, with the reason):\n  {}",
+            unclassified.join("\n  ")
+        );
+    }
+
+    /// The Owner-only predicate keys on the action segment, so a plugin whose *name* happens to look like an action must not be mis-gated, and a deeper path must not slip through.
+    #[test]
+    fn plugin_owner_gate_matches_the_action_segment_not_the_name() {
+        let post = axum::http::Method::POST;
+        // `{name}` = "install-deps", action = "disable" → not Owner-only.
+        assert!(
+            user_role_allows_request(UserRole::Admin, &post, "/api/plugins/install-deps/disable"),
+            "the gate must read the action segment, not any segment"
+        );
+        // Single-segment tail: `strip_prefix` leaves "enable" with no `/`, so there is no action segment and the predicate must fall through rather than treating the name as an action.
+        // No POST route is registered at this shape today (`/plugins/{name}` is GET-only), so this is a predicate boundary rather than a reachable request — the point is that a future `POST /api/plugins/{name}` cannot be silently Owner-gated by a name that collides with an action.
+        assert!(
+            user_role_allows_request(UserRole::Admin, &post, "/api/plugins/enable"),
+            "a single trailing segment carries no action, so the gate must not fire"
+        );
+    }
+
     #[test]
     fn test_user_role_admin_cannot_modify_config() {
         // Admin must be blocked from kernel-wide config mutations.
@@ -2132,13 +2377,23 @@ mod tests {
             "Admin must still be allowed to POST {check} (read-only sibling)"
         );
 
-        // Suffix-only matches must not over-restrict — e.g. a stray
-        // `/install-deps` outside `/api/hands/` (none today, but guard
-        // against future additions tripping the gate).
-        let other = "/api/plugins/foo/install-deps";
+        // Suffix-only matches must not over-restrict: the hands rule requires its own `/api/hands/` prefix, so a `/install-deps` elsewhere is not caught BY IT.
+        // Isolating that needs a path under neither prefix.
+        //
+        // This assertion used `/api/plugins/foo/install-deps` as the example and asserted Admin could reach it.
+        // That was only ever meant to prove the hands rule was not over-broad, but it pinned the plugin route as Admin-reachable — which is exactly the privilege boundary #6631 reported: an Admin could install a plugin and then run its package lifecycle scripts as the daemon user.
+        // Plugin install-deps is now Owner-only through its own rule, so the example moved.
+        let other = "/api/skills/some-skill/install-deps";
         assert!(
             user_role_allows_request(UserRole::Admin, &post, other),
-            "Admin must still be allowed to POST plugin install-deps ({other})"
+            "the hands rule must require its own prefix rather than matching \
+             any /install-deps suffix ({other})"
+        );
+        // And the plugin sibling is Owner-only, deliberately — asserted here as well as in the #6631 tests so a future edit to this test cannot quietly restore the old expectation.
+        let plugin_deps = "/api/plugins/foo/install-deps";
+        assert!(
+            !user_role_allows_request(UserRole::Admin, &post, plugin_deps),
+            "Admin must NOT reach {plugin_deps} (#6631)"
         );
     }
 

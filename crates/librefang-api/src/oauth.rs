@@ -403,7 +403,7 @@ struct TokenResponse {
 #[derive(Debug, Clone)]
 struct StoredTokens {
     /// The OAuth2 access token (stored for future introspection/revocation).
-    #[allow(dead_code)]
+    /// Load-bearing since #6629: `find_by_access_token` matches on this to prove a refresh caller owns the session it is refreshing, so it is no longer dead code.
     access_token: String,
     /// Optional refresh token for obtaining new access tokens.
     refresh_token: Option<String>,
@@ -457,29 +457,25 @@ impl TokenStore {
         write.remove(sub);
     }
 
-    /// Find a stored entry by provider ID, evicting expired entries along the way.
-    async fn find_by_provider(&self, provider_id: &str) -> Option<(String, StoredTokens)> {
-        let mut write = self.inner.write().await;
-        let now = std::time::Instant::now();
-
-        // Evict expired entries.
-        write.retain(|_sub, entry| now.duration_since(entry.stored_at) <= TOKEN_STORE_TTL);
-
-        write
-            .iter()
-            .find(|(_sub, entry)| entry.provider_id == provider_id)
-            .map(|(sub, entry)| (sub.clone(), entry.clone()))
-    }
-
-    /// Find any stored entry that has a refresh token, evicting expired
-    /// entries first.
+    /// Find the stored entry whose access token the caller presented (#6629).
     ///
-    /// Returns the refresh token as a non-optional `String` so callers cannot
-    /// reach for `.unwrap()` on `entry.refresh_token` (audit:
-    /// `oauth-refresh-error-body-token-leak`, sub-finding "unwrap on
-    /// refresh_token"). The `Some(..)` arm is itself the proof that a refresh
-    /// token is present — the invariant lives in the type, not in a comment.
-    async fn find_any_with_refresh(&self) -> Option<(String, String, StoredTokens)> {
+    /// This replaced `find_by_provider` and `find_any_with_refresh`, which selected *an* entry matching a provider — or literally any entry with a refresh token — without checking that it belonged to the caller.
+    /// Since the route is reachable by any Admin, that let one caller refresh another local user's upstream session and receive their credentials, with every scope that token had been granted.
+    ///
+    /// Ownership is proven by presenting the access token the callback returned to that client.
+    /// There is no lesser predicate available here: the store is keyed by upstream OIDC subject with no record of which local user owns an entry, and a caller-supplied `sub` or `provider` is an assertion rather than proof.
+    ///
+    /// Comparison is constant-time.
+    /// A short-circuiting `==` over a `HashMap` scan leaks how many leading bytes matched, which for a remotely-guessable-in-principle credential is a distinguisher worth denying; `subtle::ConstantTimeEq` costs nothing at these lengths.
+    ///
+    /// Returns the refresh token as a non-optional `String` so callers cannot reach for `.unwrap()` on `entry.refresh_token` (audit: `oauth-refresh-error-body-token-leak`, sub-finding "unwrap on refresh_token").
+    /// The `Some(..)` arm is itself the proof that a refresh token is present — the invariant lives in the type, not in a comment.
+    async fn find_by_access_token(
+        &self,
+        access_token: &str,
+    ) -> Option<(String, String, StoredTokens)> {
+        use subtle::ConstantTimeEq;
+
         let mut write = self.inner.write().await;
         let now = std::time::Instant::now();
 
@@ -487,6 +483,14 @@ impl TokenStore {
         write.retain(|_sub, entry| now.duration_since(entry.stored_at) <= TOKEN_STORE_TTL);
 
         write.iter().find_map(|(sub, entry)| {
+            // Length differs → cannot match.
+            // `ct_eq` requires equal lengths anyway, and the length of an IdP-issued token is not a secret.
+            if entry.access_token.len() != access_token.len() {
+                return None;
+            }
+            if !bool::from(entry.access_token.as_bytes().ct_eq(access_token.as_bytes())) {
+                return None;
+            }
             entry
                 .refresh_token
                 .clone()
@@ -1362,9 +1366,18 @@ pub async fn auth_introspect(
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct RefreshRequest {
     /// The refresh token obtained from the initial login callback.
-    /// If omitted, the server looks up a stored refresh token from the token store.
+    ///
+    /// When omitted, `access_token` must be supplied instead — the server no longer searches the token store for "some" stored session (#6629).
     #[serde(default)]
     pub refresh_token: Option<String>,
+    /// The access token this caller received from its own login callback, proving which stored session it owns (#6629).
+    ///
+    /// The callback returns the upstream access token to the client but keeps the refresh token server-side, so a client legitimately has no refresh token of its own to present.
+    /// Presenting the access token it *was* given is what lets the server resolve the matching entry without letting the caller name someone else's session: the value is high-entropy, issued by the identity provider, and never disclosed by any read route.
+    ///
+    /// An expired access token still matches — entries live in the store for 24 h regardless of the access token's own lifetime, which is exactly the state a caller is in when it needs to refresh.
+    #[serde(default)]
+    pub access_token: Option<String>,
     /// Optional provider hint (if the user logged in with a specific provider).
     #[serde(default)]
     pub provider: Option<String>,
@@ -1386,10 +1399,14 @@ struct RefreshResponse {
 
 /// POST /api/auth/refresh — Exchange a refresh token for a new access token.
 ///
-/// When the access token expires, clients can call this endpoint with the
-/// refresh token received during login instead of forcing a full re-authorization.
-/// If the request body omits `refresh_token`, the server looks up the token store
-/// for a previously stored refresh token (from the OAuth callback).
+/// When the access token expires, clients call this instead of forcing a full re-authorization, presenting either:
+///
+/// * `refresh_token` — one the client holds itself, or
+/// * `access_token` — the one its own login callback returned, which identifies the stored session whose server-side refresh token should be used.
+///
+/// There is no third path.
+/// The endpoint used to fall back to scanning the token store for any entry matching a `provider` hint, or for literally any entry with a refresh token, and it is reachable by any Admin — so a caller could refresh a *different* local user's upstream session and be handed their credentials, with every scope that token carried.
+/// Both fallbacks are gone (#6629); a request that proves nothing gets a 400.
 #[utoipa::path(post, path = "/api/auth/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, description = "New access token", body = crate::types::JsonObject), (status = 400, description = "Missing or invalid refresh token"), (status = 502, description = "Token refresh failed")))]
 pub async fn auth_refresh(
     State(state): State<Arc<AppState>>,
@@ -1418,56 +1435,40 @@ pub async fn auth_refresh(
             None
         };
         (rt.clone(), None::<String>, provider.cloned())
-    } else if let Some(ref pid) = req.provider {
-        // No refresh token in request, but provider given — look up from store.
-        match TOKEN_STORE.find_by_provider(pid).await {
-            Some((sub, entry)) => match entry.refresh_token {
-                Some(rt) => {
-                    let provider = providers.iter().find(|p| p.id == *pid).cloned();
-                    (rt, Some(sub), provider)
-                }
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "error": "No refresh token stored for this provider"
-                        })),
-                    )
-                        .into_response();
-                }
-            },
+    } else if let Some(ref at) = req.access_token {
+        // No refresh token, but the caller presented the access token it was issued — resolve the entry that token belongs to, and only that one (#6629).
+        // The pre-fix code took a `provider` hint (or nothing at all) and selected an arbitrary matching entry, so an Admin could refresh another local user's upstream session and receive their credentials.
+        match TOKEN_STORE.find_by_access_token(at).await {
+            Some((sub, refresh_token, entry)) => {
+                let provider = providers
+                    .iter()
+                    .find(|p| p.id == entry.provider_id)
+                    .cloned();
+                (refresh_token, Some(sub), provider)
+            }
             None => {
+                // Deliberately one message for "no such session", "that session has no refresh token", and "it expired out of the store".
+                // Distinguishing them would turn this route into an oracle for which access tokens the daemon has seen.
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
-                        "error": "No stored session found for this provider"
+                        "error": "No refreshable session matches the supplied access_token"
                     })),
                 )
                     .into_response();
             }
         }
     } else {
-        // Neither refresh token nor provider — try to find any stored refresh token.
-        match TOKEN_STORE.find_any_with_refresh().await {
-            Some((sub, refresh_token, entry)) => {
-                let provider = providers
-                    .iter()
-                    .find(|p| p.id == entry.provider_id)
-                    .cloned();
-                // `find_any_with_refresh` hands back the refresh token directly,
-                // so there is no Option to unwrap here.
-                (refresh_token, Some(sub), provider)
-            }
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "No refresh token provided and none found in token store"
-                    })),
-                )
-                    .into_response();
-            }
-        }
+        // Neither credential supplied.
+        // There is deliberately no fallback: any store lookup that is not keyed on something the caller proved it owns hands out someone else's tokens (#6629).
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Provide either 'refresh_token', or the 'access_token' \
+                          issued to this session so the server can identify it"
+            })),
+        )
+            .into_response();
     };
 
     let Some(provider) = provider else {
@@ -2303,6 +2304,140 @@ mod tests {
             !resolved[0].require_email_verified,
             "explicit per-provider override must beat global"
         );
+    }
+
+    // ── #6629: refresh must only ever resolve the caller's own session ──
+    //
+    // `TOKEN_STORE` is a process-global `LazyLock<HashMap>` keyed by upstream OIDC subject, with no record of which local user owns an entry.
+    // The two lookups that `auth_refresh` used to fall back on — `find_by_provider` and `find_any_with_refresh` — therefore selected *an* entry rather than the caller's, and the route is reachable by any Admin.
+    // These tests pin the replacement: the only way to reach a stored refresh token is to present the access token that session was issued.
+    //
+    // Two subjects are seeded into the one global store, which is exactly the "two users" condition the issue asks to be proven — the interesting property is cross-selection, and that lives in this map.
+
+    fn seeded_tokens(access: &str, refresh: &str, provider: &str) -> StoredTokens {
+        StoredTokens {
+            access_token: access.to_string(),
+            refresh_token: Some(refresh.to_string()),
+            expires_at: None,
+            provider_id: provider.to_string(),
+            stored_at: std::time::Instant::now(),
+        }
+    }
+
+    // Token values are per-test locals, never shared constants.
+    // `TOKEN_STORE` is a process-global `LazyLock` and libtest runs these on parallel threads, so two tests seeding the SAME access-token value under different subjects would race: `find_by_access_token` does a `find_map` over a `HashMap` and could return either subject, failing whichever test asserted on the other one.
+    // Distinct values per test keep them independent without serializing the suite.
+    //
+    // Within a test, values share a length so the constant-time comparison is actually exercised rather than short-circuited on the length check, and differ in their prefix so a mismatch cannot pass by coincidence.
+
+    #[tokio::test]
+    async fn refresh_lookup_resolves_only_the_presented_sessions_own_tokens() {
+        let victim_access = "t1-victim-access-aaaaaaaaaaaaaaaaaaaa";
+        let victim_refresh = "t1-victim-refresh-aaaaaaaaaaaaaaaaaaa";
+        let attacker_access = "t1-attackr-access-bbbbbbbbbbbbbbbbbbb";
+        let attacker_refresh = "t1-attackr-refresh-bbbbbbbbbbbbbbbbbb";
+
+        TOKEN_STORE
+            .store(
+                "sub-t1-victim-6629",
+                seeded_tokens(victim_access, victim_refresh, "google"),
+            )
+            .await;
+        TOKEN_STORE
+            .store(
+                "sub-t1-attacker-6629",
+                seeded_tokens(attacker_access, attacker_refresh, "google"),
+            )
+            .await;
+
+        // Each side resolves its own refresh token.
+        let (sub, refresh, _) = TOKEN_STORE
+            .find_by_access_token(victim_access)
+            .await
+            .expect("the victim's own access token must resolve its session");
+        assert_eq!(sub, "sub-t1-victim-6629");
+        assert_eq!(refresh, victim_refresh);
+
+        let (sub, refresh, _) = TOKEN_STORE
+            .find_by_access_token(attacker_access)
+            .await
+            .expect("the attacker's own session still resolves — that is fine");
+        assert_eq!(sub, "sub-t1-attacker-6629");
+        // The whole point: presenting your own access token never yields someone else's refresh token, even with both in one store under the same provider.
+        assert_eq!(refresh, attacker_refresh);
+        assert_ne!(
+            refresh, victim_refresh,
+            "cross-user selection — this is the #6629 vulnerability"
+        );
+
+        TOKEN_STORE.remove("sub-t1-victim-6629").await;
+        TOKEN_STORE.remove("sub-t1-attacker-6629").await;
+    }
+
+    #[tokio::test]
+    async fn refresh_lookup_rejects_an_unknown_or_guessed_access_token() {
+        let real_access = "t2-real-access-cccccccccccccccccccccc";
+
+        TOKEN_STORE
+            .store(
+                "sub-t2-lonely-6629",
+                seeded_tokens(real_access, "t2-real-refresh-ccccccccccccccccccc", "google"),
+            )
+            .await;
+
+        for wrong in [
+            // Nothing like it.
+            "completely-unrelated-token-value-xxxxx",
+            // A near-miss of the same length: the shared prefix must not help.
+            "t2-real-access-ccccccccccccccccccccZ",
+            // A prefix of the real value.
+            "t2-real-access",
+            // Empty.
+            "",
+        ] {
+            assert!(
+                TOKEN_STORE.find_by_access_token(wrong).await.is_none(),
+                "access token {wrong:?} must not resolve any session"
+            );
+        }
+
+        // Sanity: the real value still resolves, so the loop above is rejecting wrong inputs rather than the lookup being broken outright.
+        assert!(
+            TOKEN_STORE
+                .find_by_access_token(real_access)
+                .await
+                .is_some(),
+            "the seeded access token must still resolve — otherwise the \
+             negative assertions above prove nothing"
+        );
+
+        TOKEN_STORE.remove("sub-t2-lonely-6629").await;
+    }
+
+    /// An entry with no refresh token must not be resolvable — otherwise the caller gets an entry it cannot use and the handler would have to unwrap an `Option` that is only sometimes populated.
+    #[tokio::test]
+    async fn refresh_lookup_skips_sessions_without_a_refresh_token() {
+        let access = "t3-norefresh-access-dddddddddddddddddd";
+
+        TOKEN_STORE
+            .store(
+                "sub-t3-norefresh-6629",
+                StoredTokens {
+                    access_token: access.to_string(),
+                    refresh_token: None,
+                    expires_at: None,
+                    provider_id: "google".to_string(),
+                    stored_at: std::time::Instant::now(),
+                },
+            )
+            .await;
+
+        assert!(
+            TOKEN_STORE.find_by_access_token(access).await.is_none(),
+            "a session with no stored refresh token has nothing to hand back"
+        );
+
+        TOKEN_STORE.remove("sub-t3-norefresh-6629").await;
     }
 
     #[tokio::test]
