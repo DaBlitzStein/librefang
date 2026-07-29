@@ -2851,7 +2851,13 @@
       "decisions": {
         "approved": "Схвалено",
         "denied": "Відхилено",
-        "edited": "Змінено"
+        "edited": "Змінено",
+        "pending": "Очікує",
+        "timedOut": "Час вичерпано",
+        "skipped": "Пропущено",
+        "unknown": "Невідомий статус",
+        "aria": "Рішення: {{label}}",
+        "unknownAria": "Нерозпізнане рішення: {{value}}"
       },
       "cols": {
         "decision": "Рішення",
