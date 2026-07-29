@@ -2681,7 +2681,8 @@
     "verifier_agent_id": "审核员",
     "no_agent_selected": "自动生成（留空）",
     "progress": "进度",
-    "status": "状态"
+    "status": "状态",
+    "loop_badge": "循环"
   },
   "sessions": {
     "title": "会话",

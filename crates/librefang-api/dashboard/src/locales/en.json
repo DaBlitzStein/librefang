@@ -2716,7 +2716,8 @@
     "verifier_agent_id": "Reviewer",
     "no_agent_selected": "Auto-spawn (leave empty)",
     "progress": "Progress",
-    "status": "Status"
+    "status": "Status",
+    "loop_badge": "Loop"
   },
   "sessions": {
     "title": "Sessions",

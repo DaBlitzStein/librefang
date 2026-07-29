@@ -2718,7 +2718,8 @@
     "verifier_agent_id": "Ревʼювер",
     "no_agent_selected": "Автостворення (залиште порожнім)",
     "progress": "Прогрес",
-    "status": "Статус"
+    "status": "Статус",
+    "loop_badge": "Цикл"
   },
   "sessions": {
     "title": "Сесії",
