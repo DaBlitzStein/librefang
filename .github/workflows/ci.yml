@@ -260,7 +260,6 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
-            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
       # A workflow file that fails to parse cannot report that it failed to parse: GitHub records a run with no jobs, it never appears in a PR's check rollup, and nothing goes red.
@@ -804,7 +803,6 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
-            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
             libdbus-1-dev libsecret-1-dev pkg-config
@@ -883,7 +881,6 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
-            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
       - name: Build tests
@@ -1066,7 +1063,7 @@ jobs:
           sudo apt-get install -y \
             libdbus-1-dev libsecret-1-dev pkg-config \
             libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf
+            librsvg2-dev patchelf
       - name: Cargo check (aarch64-native)
         run: cargo check --workspace --all-targets
 

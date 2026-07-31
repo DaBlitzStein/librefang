@@ -56,11 +56,6 @@
           cairo
           gdk-pixbuf
           pango
-          # tray-icon dlopens libayatana-appindicator3.so.1 at runtime, not
-          # a link dep. wrapGAppsHook3 + gappsWrapperArgs in the desktop
-          # derivation below puts this lib dir on LD_LIBRARY_PATH so the
-          # dlopen resolves (#3052, #3192).
-          libayatana-appindicator
         ]);
 
         # Filter source to include Rust files plus non-Rust assets needed at compile time
@@ -158,25 +153,11 @@
           nativeBuildInputs = nativeBuildInputs
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
               pkgs.copyDesktopItems
-              # wrapGAppsHook3 injects LD_LIBRARY_PATH (via gappsWrapperArgs
-              # below) and the GTK runtime env (XDG_DATA_DIRS,
-              # GIO_MODULE_DIR, GSETTINGS_SCHEMA_DIR, …) the webview needs.
+              # wrapGAppsHook3 injects the GTK runtime env (XDG_DATA_DIRS, GIO_MODULE_DIR, GSETTINGS_SCHEMA_DIR, …) the webview needs.
               pkgs.wrapGAppsHook3
             ];
           desktopItems = pkgs.lib.optionals pkgs.stdenv.isLinux [ librefangDesktopItem ];
-          # tray-icon → libappindicator-sys dlopens
-          # `libayatana-appindicator3.so.1` at runtime with no DT_NEEDED
-          # entry. patchelf --add-rpath writes DT_RUNPATH, which ld.so only
-          # consults for DT_NEEDED deps — never for dlopen string lookups —
-          # so the previous RPATH fix (#3052) never actually worked, the
-          # tray icon silently failed to appear on NixOS (#3192). Wrapping
-          # with gappsWrapperArgs prepends the appindicator lib dir to
-          # LD_LIBRARY_PATH so the dlopen call resolves.
-          preFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-            gappsWrapperArgs+=(
-              --prefix LD_LIBRARY_PATH : "${pkgs.libayatana-appindicator}/lib"
-            )
-          '';
+
           postInstall =
             let
               # `128x128@2x.png` contains an `@`, which is not a legal
@@ -362,7 +343,7 @@
             pname = "librefang";
           };
         }
-        # The desktop derivation — Tauri link step, `wrapGAppsHook3`, `copyDesktopItems`, the hicolor icon installs and the `libayatana-appindicator` `LD_LIBRARY_PATH` fix above — used to be reachable only through `packages`, so a regression in the packaging logic passed `nix flake check` and only the CI matrix leg caught it.
+        # The desktop derivation — Tauri link step, `wrapGAppsHook3`, `copyDesktopItems` and the hicolor icon installs — used to be reachable only through `packages`, so a regression in the packaging logic passed `nix flake check` and only the CI matrix leg caught it.
         # Gated on Linux: `checks` is evaluated for every system `eachDefaultSystem` covers, and darwin has no GTK / webview stack (`desktopBuildInputs` is empty there).
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           inherit librefang-desktop;
