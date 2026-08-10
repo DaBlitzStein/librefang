@@ -81,6 +81,8 @@ def main():
     assert_in('"error": format!("stream error: {}", e)', rs, "rust-stream-transport-error")
     assert_not_in("while let Some(Ok(chunk))", rs, "rust-no-silent-stream-error")
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
+    assert_in('"error": fmt.Sprintf("new request: %v", err)', go, "go-stream-request-error")
+    assert_not_in("req, _ := http.NewRequest", go, "go-no-discarded-stream-request-error")
     assert_in('buffer = b""', py, "python-byte-buffer")
     assert_in('lines = buffer.split(b"\\n")', py, "python-byte-line-split")
     assert_in("line = line.decode().strip()", py, "python-decode-complete-line")
