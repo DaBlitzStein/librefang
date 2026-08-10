@@ -392,7 +392,17 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                             "description": "Shell commands to allow (permanent spawn only)."
                         }
                     },
-                    "required": []
+                    "required": ["message"],
+                    "anyOf": [
+                        {
+                            "required": ["message"],
+                            "description": "Ephemeral spawn: message is the task to execute."
+                        },
+                        {
+                            "required": ["name", "system_prompt"],
+                            "description": "Permanent spawn: name and system_prompt define the new agent."
+                        }
+                    ]
                 }),
             },
             ToolDefinition {

@@ -278,6 +278,33 @@ pub(super) async fn tool_agent_spawn(
             )));
         }
 
+        // Enforce parent's tool allowlist on the ephemeral worker, same as the
+        // permanent-agent path below. An unrestricted parent (None) passes
+        // through the caller's requested tools unfiltered.
+        let requested_tools: Option<Vec<String>> = input["tools"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+        let tools = match (parent_allowed_tools, requested_tools) {
+            (Some(allowed), Some(ref req)) if !req.is_empty() => {
+                let filtered: Vec<String> = req
+                    .iter()
+                    .filter(|t| allowed.iter().any(|a| a == *t))
+                    .cloned()
+                    .collect();
+                if filtered.is_empty() && !req.is_empty() {
+                    return Err(ToolError::PermissionDenied(
+                        "None of the requested tools are allowed by the parent agent's tool list"
+                            .to_string(),
+                    ));
+                }
+                Some(filtered)
+            }
+            (Some(_), _) => None,
+            (None, tools) => tools,
+        };
+
         let request = librefang_types::agent::EphemeralSpawnRequest {
             system_prompt: input["system_prompt"].as_str().map(String::from),
             agent_type: input["agent_type"].as_str().map(String::from),
@@ -296,11 +323,7 @@ pub(super) async fn tool_agent_spawn(
                     serde_json::from_value(v.clone()).ok()
                 }
             }),
-            tools: input["tools"].as_array().map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            }),
+            tools,
             skills: input["skills"].as_array().map(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str().map(String::from))

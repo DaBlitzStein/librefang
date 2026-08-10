@@ -399,11 +399,15 @@ fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
         "provider": m.model.provider,
         "model": m.model.model,
         "tools": m.capabilities.tools,
-        "skills": serde_json::Value::Array(vec![]),
+        "skills": m.capabilities.skills,
     })
 }
 
 /// Build a minimal `agent.toml` from the dashboard's JSON shape.
+/// Uses `toml::to_string_pretty` on a constructed `AgentManifest` so every
+/// caller-supplied string (name, description, system_prompt, provider, model)
+/// is properly escaped — no `format!` interpolation raw-dropping untrusted
+/// input into TOML string literals.
 fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
     let name = v["name"].as_str().unwrap_or("unnamed");
     let desc = v["description"].as_str().unwrap_or("");
@@ -411,18 +415,48 @@ fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
         .as_str()
         .unwrap_or("You are a helpful AI agent.");
     let provider = v["provider"].as_str().unwrap_or("default");
-    let model = v["model"].as_str().unwrap_or("default");
-    let tools: Vec<&str> = v["tools"]
+    let model_name = v["model"].as_str().unwrap_or("default");
+    let tools: Vec<String> = v["tools"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|t| t.as_str()).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
-    let tools_toml: Vec<String> = tools.iter().map(|t| format!("\"{}\"", t)).collect();
-    format!(
-        "name = \"{name}\"\ndescription = \"{desc}\"\n\n[model]\nprovider = \"{provider}\"\nmodel = \"{model}\"\nsystem_prompt = \"{prompt}\"\n\n[capabilities]\ntools = [{tools}]\n",
-        name = name, desc = desc, provider = provider, model = model,
-        prompt = prompt, tools = tools_toml.join(", "),
-    )
+    let skills: Vec<String> = v["skills"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let manifest = librefang_types::agent::AgentManifest {
+        name: name.to_string(),
+        description: desc.to_string(),
+        model: librefang_types::agent::AgentModelConfig {
+            provider: provider.to_string(),
+            model: model_name.to_string(),
+            system_prompt: prompt.to_string(),
+            ..Default::default()
+        },
+        capabilities: librefang_types::agent::AgentCapabilities {
+            tools,
+            skills,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    toml::to_string_pretty(&manifest).unwrap_or_else(|_| {
+        // Fallback for round-trip safety — the TOML serializer should always
+        // succeed.
+        "[capabilities]\ntools = []\n\n[model]\nmodel = \"default\"\nprovider = \"default\"\nsystem_prompt = \"\"\n"
+            .to_string()
+    })
 }
 
 /// GET /api/agent-types/:name — Get one agent type's parsed manifest.

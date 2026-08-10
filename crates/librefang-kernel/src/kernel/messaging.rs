@@ -942,6 +942,10 @@ impl LibreFangKernel {
         let max_iter = request.max_iterations.or(cfg.agent_max_iterations);
         let start_time = std::time::Instant::now();
 
+        // Resolve skills from request (same shape as tools: Vec<String> names)
+        let skills: Option<Vec<String>> =
+            request.skills.as_ref().filter(|s| !s.is_empty()).cloned();
+
         let result = run_agent_loop(
             &manifest,
             &request.message,
@@ -949,19 +953,19 @@ impl LibreFangKernel {
             &self.memory.substrate,
             driver,
             &tools,
-            None, // no kernel handle
-            None, // no skills
-            None, // no MCP
-            None, // no web
-            None, // no browser
-            None, // no embeddings
-            None, // no workspace root
-            None, // no phase callback
-            None, // no media engine
-            None, // no media drivers
-            None, // no TTS
-            None, // no docker
-            None, // no hooks
+            None,   // no kernel handle
+            skills, // ephemeral may carry skill names
+            None,   // no MCP
+            None,   // no web
+            None,   // no browser
+            None,   // no embeddings
+            None,   // no workspace root
+            None,   // no phase callback
+            None,   // no media engine
+            None,   // no media drivers
+            None,   // no TTS
+            None,   // no docker
+            None,   // no hooks
             ctx_window,
             None, // no process manager
             None, // no checkpoint manager
@@ -1051,6 +1055,20 @@ impl LibreFangKernel {
         request: &librefang_types::agent::EphemeralSpawnRequest,
     ) -> KernelResult<librefang_types::agent::AgentManifest> {
         let mut manifest = if let Some(ref type_name) = request.agent_type {
+            // Path-traversal guard: only [A-Za-z0-9_-] for <name>.toml
+            if type_name.is_empty()
+                || type_name.len() > 64
+                || !type_name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(KernelError::LibreFang(LibreFangError::InvalidParameter(
+                    format!(
+                        "agent_type '{type_name}' contains disallowed characters — \
+                         only [A-Za-z0-9_-] permitted"
+                    ),
+                )));
+            }
             // Load from ~/.librefang/templates/<name>.toml
             let templates_dir = self.home_dir_boot.join("templates");
             let path = templates_dir.join(format!("{type_name}.toml"));

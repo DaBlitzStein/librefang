@@ -638,15 +638,6 @@ pub enum AgentState {
     Crashed,
 }
 
-/// Agent lifecycle: permanent (full workspace + DB) or ephemeral (no persistence).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentLifecycle {
-    #[default]
-    Permanent,
-    Ephemeral,
-}
-
 /// Permission-based operational mode for an agent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
