@@ -27,8 +27,16 @@ except ValueError:
 
 def decode_str(s, enc=None):
     if isinstance(s, bytes):
-        return s.decode(enc or "utf-8", errors="ignore")
+        try:
+            return s.decode(enc or "utf-8", errors="ignore")
+        except LookupError:
+            return s.decode("utf-8", errors="ignore")
     return s or ""
+
+
+def decode_subject(raw_subject):
+    """Decode every plain and RFC 2047-encoded segment in a subject."""
+    return "".join(decode_str(part, enc) for part, enc in decode_header(raw_subject or ""))
 
 
 def decode_payload(payload, part):
@@ -151,9 +159,7 @@ def main():
             print(f"ERROR: fetch failed: {e}", file=sys.stderr)
             sys.exit(1)
 
-        raw_subject = msg["Subject"] or ""
-        subject_raw, enc = decode_header(raw_subject)[0]
-        subject = decode_str(subject_raw, enc)
+        subject = decode_subject(msg["Subject"])
         body = get_body(msg)
 
         print(f"SUBJECT: {subject}")
