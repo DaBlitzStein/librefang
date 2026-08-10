@@ -399,7 +399,7 @@ fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
         "provider": m.model.provider,
         "model": m.model.model,
         "tools": m.capabilities.tools,
-        "skills": m.capabilities.skills,
+        "skills": m.skills,
     })
 }
 
@@ -437,15 +437,15 @@ fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
     let manifest = librefang_types::agent::AgentManifest {
         name: name.to_string(),
         description: desc.to_string(),
-        model: librefang_types::agent::AgentModelConfig {
+        skills,
+        model: librefang_types::agent::ModelConfig {
             provider: provider.to_string(),
             model: model_name.to_string(),
             system_prompt: prompt.to_string(),
             ..Default::default()
         },
-        capabilities: librefang_types::agent::AgentCapabilities {
+        capabilities: librefang_types::agent::ManifestCapabilities {
             tools,
-            skills,
             ..Default::default()
         },
         ..Default::default()
