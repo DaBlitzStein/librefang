@@ -94,6 +94,16 @@ def search_folder(mail, folder, sender):
         return []
 
 
+def fetched_message_bytes(data):
+    """Return RFC822 bytes from the expected IMAP FETCH response shape."""
+    if not data or not isinstance(data[0], tuple) or len(data[0]) < 2:
+        raise ValueError("malformed IMAP FETCH response")
+    message_bytes = data[0][1]
+    if not isinstance(message_bytes, bytes):
+        raise ValueError("malformed IMAP FETCH response")
+    return message_bytes
+
+
 def logout_quietly(mail):
     """Close an IMAP session without masking the original outcome."""
     try:
@@ -154,7 +164,7 @@ def main():
         # Fetch the latest email
         try:
             _, data = mail.fetch(found_ids[-1], "(RFC822)")
-            msg = email.message_from_bytes(data[0][1])
+            msg = email.message_from_bytes(fetched_message_bytes(data))
         except Exception as e:
             print(f"ERROR: fetch failed: {e}", file=sys.stderr)
             sys.exit(1)
