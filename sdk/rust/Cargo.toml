@@ -19,5 +19,5 @@ authors = ["LibreFang Team"]
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "charset", "http2", "system-proxy"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-thiserror = "1"
+thiserror = "2"
 futures = "0.3"
