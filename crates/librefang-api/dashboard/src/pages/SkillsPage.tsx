@@ -464,7 +464,7 @@ function MarketplaceDetailModal({
   onInstall: () => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
-  const isPending = pendingId === skill.slug;
+  const isPending = pendingId === `${source}:${skill.slug}`;
   return (
     <DrawerPanel isOpen onClose={onClose} title={skill.name} size="md">
       <div className="p-5 space-y-4">
@@ -1839,7 +1839,12 @@ export function SkillsPage() {
     slug: string,
     src: MarketplaceSource,
   ) => {
-    setInstallingId(slug);
+    // Dedup key: `${source}:${slug}` so two skills with the same slug
+    // from different marketplaces don't collide, and the match in
+    // installPending is unambiguous (#6699).
+    const installKey = `${src}:${slug}`;
+    if (installingId === installKey) return; // already installing this exact skill
+    setInstallingId(installKey);
     const hand = targetHand || undefined;
     const opts = {
       onSuccess: () => {
@@ -2157,7 +2162,7 @@ export function SkillsPage() {
                   description={entry.description}
                   tags={entry.tags}
                   isInstalled={entry.is_installed}
-                  installPending={installingId === entry.name}
+                  installPending={installingId === `fanghub:${entry.name}`}
                   source="fanghub"
                   sourceSlug={entry.slug}
                   hubBadge={<HubBadge hub="fanghub" />}
@@ -2176,7 +2181,7 @@ export function SkillsPage() {
                   stars={entry.stars}
                   downloads={entry.downloads}
                   isInstalled={entry.is_installed}
-                  installPending={installingId === entry.slug}
+                  installPending={installingId === `${entry._hub}:${entry.slug}`}
                   source={entry._hub}
                   sourceSlug={entry.slug}
                   hubBadge={<HubBadge hub={entry._hub} />}
@@ -2291,13 +2296,13 @@ export function SkillsPage() {
               <Button
                 variant="primary"
                 className="w-full"
-                disabled={installingId === detailsFangHub.name}
+                disabled={installingId === `fanghub:${detailsFangHub.name}`}
                 onClick={() => {
                   if (detailsFangHub) handleInstall(detailsFangHub.name, "fanghub");
                 }}
-                leftIcon={installingId === detailsFangHub.name ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                leftIcon={installingId === `fanghub:${detailsFangHub.name}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
               >
-                {installingId === detailsFangHub.name ? t("skills.installing") : t("skills.install")}
+                {installingId === `fanghub:${detailsFangHub.name}` ? t("skills.installing") : t("skills.install")}
               </Button>
             )}
           </div>
