@@ -392,8 +392,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                             "description": "Shell commands to allow (permanent spawn only)."
                         }
                     },
-                    "required": ["message"],
-                    "anyOf": [
+                    "oneOf": [
                         {
                             "required": ["message"],
                             "description": "Ephemeral spawn: message is the task to execute."
