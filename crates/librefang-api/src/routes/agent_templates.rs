@@ -271,18 +271,12 @@ pub async fn get_agent_template(
         .join("agents");
     let agent_path = agents_dir.join(&name).join("agent.toml");
 
-    let manifest_path = if template_path.exists() {
-        template_path
+    let (manifest_path, source) = if template_path.exists() {
+        (template_path, "template")
     } else if agent_path.exists() {
-        agent_path
+        (agent_path, "agent")
     } else {
         return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
-    };
-
-    let source = if manifest_path == template_path {
-        "template"
-    } else {
-        "agent"
     };
 
     match std::fs::read_to_string(&manifest_path) {
