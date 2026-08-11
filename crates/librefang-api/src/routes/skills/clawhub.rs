@@ -489,6 +489,8 @@ pub async fn clawhub_install(
             let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
+            } else if matches!(e, librefang_skills::SkillError::YamlParse(_)) {
+                StatusCode::BAD_REQUEST
             } else if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else if matches!(e, librefang_skills::SkillError::Network(_)) {
@@ -837,6 +839,8 @@ pub async fn clawhub_cn_install(
             let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
+            } else if matches!(e, librefang_skills::SkillError::YamlParse(_)) {
+                StatusCode::BAD_REQUEST
             } else if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else if matches!(e, librefang_skills::SkillError::Network(_)) {
