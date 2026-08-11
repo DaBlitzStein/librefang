@@ -283,25 +283,20 @@ pub async fn get_agent_template(
         Ok(content) => match toml::from_str::<AgentManifest>(&content) {
             Ok(manifest) => (
                 StatusCode::OK,
-                Json(serde_json::json!({
-                    "name": name,
-                    "source": source,
-                    "manifest": {
-                        "name": manifest.name,
-                        "description": manifest.description,
-                        "module": manifest.module,
-                        "tags": manifest.tags,
-                        "model": {
-                            "provider": manifest.model.provider,
-                            "model": manifest.model.model,
-                        },
-                        "capabilities": {
-                            "tools": manifest.capabilities.tools,
-                            "network": manifest.capabilities.network,
-                        },
-                    },
-                    "manifest_toml": content,
-                })),
+                Json({
+                    let mut v = manifest_to_agent_type(&name, &manifest);
+                    v.as_object_mut().map(|o| {
+                        o.insert(
+                            "source".to_string(),
+                            serde_json::Value::String(source.to_string()),
+                        );
+                        o.insert(
+                            "manifest_toml".to_string(),
+                            serde_json::Value::String(content),
+                        );
+                    });
+                    v
+                }),
             ),
             Err(e) => {
                 tracing::warn!("Invalid template manifest for '{name}': {e}");

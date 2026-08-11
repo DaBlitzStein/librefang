@@ -2164,7 +2164,7 @@ export function SkillsPage() {
                   isInstalled={entry.is_installed}
                   installPending={installingId === `fanghub:${entry.name}`}
                   source="fanghub"
-                  sourceSlug={entry.slug}
+                  sourceSlug={entry.name}
                   hubBadge={<HubBadge hub="fanghub" />}
                   onInstall={() => handleInstall(entry.name, "fanghub")}
                   onViewDetail={() => setDetailsFangHub(entry as FangHubSkill)}
