@@ -23,9 +23,14 @@ struct Harness {
     app: Router,
     _state: Arc<AppState>,
     _test: TestAppState,
+    _tmp: tempfile::TempDir,
 }
 
 async fn boot() -> Harness {
+    // Isolate from the real home directory so tests don't touch
+    // ~/.librefang/templates (#6931 review).
+    let tmp = tempfile::tempdir().expect("tempdir for agent-types test");
+    std::env::set_var("LIBREFANG_HOME", tmp.path());
     let (state, test) = MockKernelBuilder::default()
         .build_app_state()
         .await
@@ -38,6 +43,7 @@ async fn boot() -> Harness {
         app,
         _state: state.into(),
         _test: test,
+        _tmp: tmp,
     }
 }
 

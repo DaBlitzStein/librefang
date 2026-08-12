@@ -248,6 +248,7 @@ pub async fn list_agent_templates() -> impl IntoResponse {
     });
 
     Json(serde_json::json!({
+        "templates": templates,
         "items": templates,
         "total": templates.len(),
     }))
@@ -368,25 +369,18 @@ pub async fn get_agent_template_toml(
 }
 
 // ---------------------------------------------------------------------------
-// Agent type CRUD endpoints
+// Agent template CRUD endpoints
 // ---------------------------------------------------------------------------
 //
-// Agent types are the named templates consumed by the ephemeral-worker spawn
-// path (`EphemeralSpawnRequest.agent_type`). They live as `<name>.toml`
-// manifests under `~/.librefang/templates/` — the same directory the kernel
-// reads in `resolve_ephemeral_manifest`. These endpoints let the dashboard
-// manage that directory; the read-only `/templates` endpoints above serve a
-// different source (per-agent workspace manifests).
+// Templates are named manifests consumed by the ephemeral-worker spawn path
+// (`EphemeralSpawnRequest.agent_type`). They live as `<name>.toml` under
+// `~/.librefang/templates/`. Write operations are wired into `/api/templates`
+// in the unified `router()` above; the read endpoints serve both sources.
 
-/// Directory holding agent-type manifests (`~/.librefang/templates/`).
+/// Directory holding agent-template manifests (`~/.librefang/templates/`).
 fn agent_types_dir() -> std::path::PathBuf {
     super::system::librefang_home().join("templates")
 }
-
-/// Routes for the agent-type CRUD domain, merged from `server.rs`.
-// ── agent_types_router removed — CRUD now lives on /api/templates via router() above.
-// The create_template / update_template / delete_template handlers are defined below
-// and wired into the unified router().
 
 /// Flatten a manifest into the JSON shape the dashboard expects.
 fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
@@ -511,6 +505,11 @@ pub async fn update_agent_type(
     if validate_template_name(&name).is_err() {
         return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
     }
+
+    // Pin the manifest name to the URL path segment — the body's
+    // "name" field is advisory; the path is authoritative (#6931 review).
+    let mut body = body;
+    body["name"] = serde_json::Value::String(name.clone());
 
     let toml_content = agent_type_json_to_toml(&body);
 
