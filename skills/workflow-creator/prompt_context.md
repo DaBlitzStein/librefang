@@ -79,19 +79,21 @@ Ask the user which agents they have, then design:
       "name": "style-check",
       "agent": "code-reviewer",
       "prompt_template": "Check the code style and conventions in {{input}}. Report any violations.",
+      "output_var": "style_check",
       "error_mode": "skip"
     },
     {
       "name": "run-tests",
       "agent": "test-runner",
       "prompt_template": "Run the test suite on {{input}}. Report failures.",
+      "output_var": "test_results",
       "depends_on": ["style-check"],
       "error_mode": "fail"
     },
     {
       "name": "summarize",
       "agent": "assistant",
-      "prompt_template": "Summarize the review results. Style check: {{style-check}}. Tests: {{run-tests}}. Provide a verdict: approved or changes requested.",
+      "prompt_template": "Summarize the review results. Style check: {{style_check}}. Tests: {{test_results}}. Provide a verdict: approved or changes requested.",
       "depends_on": ["style-check", "run-tests"]
     }
   ],
@@ -112,6 +114,7 @@ Ask the user which agents they have, then design:
       "name": "search",
       "agent": "researcher",
       "prompt_template": "Search for the latest news and developments about {{topic}} from the past 24 hours.",
+      "output_var": "search",
       "timeout_secs": 300
     },
     {
