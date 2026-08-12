@@ -8,6 +8,7 @@
 
 use super::error::{Error, Result};
 use super::types::{ApiResponse, GetFileResult, PollResult, SendMessageResult, UpdatesResponse};
+use bytes::Bytes;
 use reqwest::header::{HeaderValue, RETRY_AFTER};
 use reqwest::Client;
 use serde::Serialize;
@@ -16,6 +17,9 @@ use std::time::Duration;
 
 pub const DEFAULT_LONGPOLL_TIMEOUT_SECS: u64 = 30;
 pub const SEND_TIMEOUT_SECS: u64 = 30;
+/// Conservative throughput floor used to extend multipart request deadlines.
+/// The fixed send timeout remains the connection/base budget; uploads receive one extra second per 64 KB of payload.
+const MULTIPART_BYTES_PER_SECOND: usize = 64_000;
 /// Extra buffer added to the long-poll server-side timeout to derive the reqwest per-request deadline. Telegram sometimes returns a few hundred milliseconds after the server timeout elapses.
 pub const LONGPOLL_CLIENT_BUFFER_SECS: u64 = 5;
 pub const RETRY_AFTER_DEFAULT_SECS: u64 = 5;
@@ -478,10 +482,14 @@ impl BotClient {
         thread_id: Option<i64>,
     ) -> Result<Value> {
         let url = format!("{}/{method}", self.api_root);
-        // reqwest::multipart::Form consumes its parts when sent. To support the rare 429 retry without keeping a streamable body, we clone `bytes` for each attempt; the trade-off is ~1 extra Vec<u8> heap copy on the happy path in exchange for a working retry path without async-body rewinding.
+        let bytes = shared_upload_bytes(bytes);
+        let request_timeout = multipart_timeout(bytes.len());
+        let byte_len = bytes.len() as u64;
+        // Forms consume their parts.
+        // Bytes is reference-counted, so rebuilding a part for the rare 429 retry shares the upload allocation instead of copying the full attachment on every attempt.
         for attempt in 0..2 {
-            let mut part =
-                reqwest::multipart::Part::bytes(bytes.clone()).file_name(filename.clone());
+            let mut part = reqwest::multipart::Part::stream_with_length(bytes.clone(), byte_len)
+                .file_name(filename.clone());
             if let Some(mt) = mime_type.as_ref() {
                 part = part
                     .mime_str(mt)
@@ -496,7 +504,13 @@ impl BotClient {
             if let Some(t) = thread_id {
                 form = form.text("message_thread_id", t.to_string());
             }
-            let resp = self.http.post(&url).multipart(form).send().await?;
+            let resp = self
+                .http
+                .post(&url)
+                .timeout(request_timeout)
+                .multipart(form)
+                .send()
+                .await?;
             let status = resp.status();
             let retry_after_header = resp.headers().get(RETRY_AFTER).cloned();
             let body = resp.text().await?;
@@ -544,6 +558,15 @@ impl BotClient {
         }
         Err(retry_loop_exhausted(method))
     }
+}
+
+fn shared_upload_bytes(bytes: Vec<u8>) -> Bytes {
+    Bytes::from(bytes)
+}
+
+fn multipart_timeout(byte_len: usize) -> Duration {
+    let transfer_secs = u64::try_from(byte_len / MULTIPART_BYTES_PER_SECOND).unwrap_or(u64::MAX);
+    Duration::from_secs(SEND_TIMEOUT_SECS.saturating_add(transfer_secs))
 }
 
 fn retry_loop_exhausted(method: &str) -> Error {
@@ -605,6 +628,22 @@ mod tests {
         let body = r#"{"ok":false,"parameters":{"retry_after":7}}"#;
         assert_eq!(body_retry_after(body), Some(7));
         assert_eq!(body_retry_after("not-json"), None);
+    }
+
+    #[test]
+    fn multipart_retry_bytes_share_the_same_allocation() {
+        let upload = shared_upload_bytes(vec![1_u8; 1024]);
+        let retry = upload.clone();
+        assert_eq!(upload.as_ptr(), retry.as_ptr());
+        assert_eq!(upload.len(), retry.len());
+    }
+
+    #[test]
+    fn multipart_timeout_scales_with_payload_size() {
+        assert_eq!(multipart_timeout(0), Duration::from_secs(30));
+        assert_eq!(multipart_timeout(63_999), Duration::from_secs(30));
+        assert_eq!(multipart_timeout(64_000), Duration::from_secs(31));
+        assert_eq!(multipart_timeout(64_000_000), Duration::from_secs(1_030));
     }
 
     #[test]
