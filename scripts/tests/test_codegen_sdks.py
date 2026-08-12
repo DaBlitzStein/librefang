@@ -64,7 +64,8 @@ def main():
     assert_in("InvokeTool(name string, data map[string]interface{}, query map[string]string)", go, "go-invoke_tool-sig")
     assert_in("pub async fn invoke_tool(&self, name: &str, data: Value, agent_id: Option<&str>)", rs, "rust-invoke_tool-sig")
     assert_in('#[tokio::main(flavor = "current_thread")]', rs, "rust-doc-current-thread-runtime")
-    assert_in("Self::with_client(base_url, Client::new())", rs, "rust-default-client-delegation")
+    assert_in("Self::with_client(base_url, client)", rs, "rust-default-client-delegation")
+    assert_in(".connect_timeout(DEFAULT_CONNECT_TIMEOUT)", rs, "rust-default-client-connect-timeout")
     assert_in("pub fn with_client(base_url: impl Into<String>, client: Client) -> Self", rs, "rust-custom-client-constructor")
 
     # Stream correctness
@@ -73,6 +74,7 @@ def main():
     assert_in("Vec<u8>", rs, "rust-byte-buffer")
     assert_not_in("from_utf8_lossy(&chunk)", rs, "rust-no-lossy-chunk")
     assert_in('"status": status', rs, "rust-error-event-status")
+    assert_in(".timeout(DEFAULT_REQUEST_TIMEOUT)", rs, "rust-request-timeout")
     assert_in("mpsc::channel(STREAM_CHANNEL_CAPACITY)", rs, "rust-bounded-stream-channel")
     assert_not_in("mpsc::unbounded_channel()", rs, "rust-no-unbounded-stream-channel")
     assert rs.count("_ = tx.closed() => return") == 3, "all stream network waits must cancel on receiver drop"
