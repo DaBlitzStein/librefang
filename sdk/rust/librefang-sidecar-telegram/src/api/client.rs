@@ -158,9 +158,7 @@ impl BotClient {
                 });
             }
         }
-        unreachable!(
-            "call_json loop body either returns or `continue`s; the for-2 range cannot exhaust"
-        )
+        Err(retry_loop_exhausted(method))
     }
 
     pub async fn call_typed<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(
@@ -535,8 +533,14 @@ impl BotClient {
                 });
             }
         }
-        unreachable!("send_multipart loop body either returns or `continue`s; the for-2 range cannot exhaust")
+        Err(retry_loop_exhausted(method))
     }
+}
+
+fn retry_loop_exhausted(method: &str) -> Error {
+    Error::Other(format!(
+        "Telegram API retry loop exhausted unexpectedly for method {method}"
+    ))
 }
 
 /// Resolve any 429 delay using HTTP delta-seconds first, then Telegram's JSON value, then the conservative local default.
@@ -592,5 +596,17 @@ mod tests {
         let body = r#"{"ok":false,"parameters":{"retry_after":7}}"#;
         assert_eq!(body_retry_after(body), Some(7));
         assert_eq!(body_retry_after("not-json"), None);
+    }
+
+    #[test]
+    fn exhausted_retry_loop_is_a_recoverable_method_error() {
+        let error = retry_loop_exhausted("sendDocument");
+        match error {
+            Error::Other(message) => {
+                assert!(message.contains("sendDocument"));
+                assert!(message.contains("retry loop exhausted"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 }
