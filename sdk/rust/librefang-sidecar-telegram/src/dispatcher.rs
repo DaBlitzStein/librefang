@@ -5,6 +5,7 @@
 
 use crate::api::types::{InlineKeyboardAction as TgAction, InlineKeyboardButton as TgButton};
 use crate::api::{BotClient, Error, Result};
+use crate::format::chunk::utf16_len;
 use crate::format::{format_and_sanitize, format_sanitize_and_chunk};
 use serde_json::{json, Value};
 
@@ -19,6 +20,14 @@ fn parse_message_id(value: &Value) -> Option<i64> {
 }
 /// Maximum FileData byte count we'll accept on the wire before erroring. Sized at 64 MiB — comfortably above cloud Bot API's 50 MB document ceiling and well below any plausible RAM exhaustion budget. Anything larger is either a producer bug or an attempt to OOM the sidecar.
 const FILE_DATA_BYTE_CAP: usize = 64 * 1024 * 1024;
+/// Bot API `sendPoll` question length bounds, 1-300 UTF-16 code units (<https://core.telegram.org/bots/api#sendpoll>).
+const POLL_QUESTION_MIN_UTF16: usize = 1;
+const POLL_QUESTION_MAX_UTF16: usize = 300;
+/// Bot API `sendPoll` per-option text length bounds, 1-100 UTF-16 code units.
+const POLL_OPTION_MIN_UTF16: usize = 1;
+const POLL_OPTION_MAX_UTF16: usize = 100;
+/// Bot API `sendPoll` explanation length bound, 0-200 UTF-16 code units.
+const POLL_EXPLANATION_MAX_UTF16: usize = 200;
 
 /// Telegram returned `400 Bad Request: can't parse entities ...`. Used by every HTML-parse-mode call to decide whether to fall back to plain text.
 pub(crate) fn is_parse_entities_error(e: &Error) -> bool {
@@ -42,6 +51,91 @@ fn required_coordinate(payload: &Value, key: &str) -> Result<f64> {
         .get(key)
         .and_then(Value::as_f64)
         .ok_or_else(|| Error::Other(format!("Location.{key} missing or not a JSON number")))
+}
+
+/// Extract and length-validate the poll question, 1-300 UTF-16 code units (Bot API `sendPoll`).
+fn validated_poll_question(payload: &Value) -> Result<&str> {
+    let question = payload
+        .get("question")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Other("Poll.question missing".into()))?;
+    let len = utf16_len(question);
+    if !(POLL_QUESTION_MIN_UTF16..=POLL_QUESTION_MAX_UTF16).contains(&len) {
+        return Err(Error::Other(format!(
+            "Poll.question must be between {POLL_QUESTION_MIN_UTF16} and {POLL_QUESTION_MAX_UTF16} UTF-16 code units, got {len}"
+        )));
+    }
+    Ok(question)
+}
+
+/// Length-validate an optional poll explanation, 0-200 UTF-16 code units (Bot API `sendPoll`).
+fn validated_poll_explanation(payload: &Value) -> Result<Option<&str>> {
+    match payload.get("explanation").and_then(Value::as_str) {
+        Some(explanation) => {
+            let len = utf16_len(explanation);
+            if len > POLL_EXPLANATION_MAX_UTF16 {
+                return Err(Error::Other(format!(
+                    "Poll.explanation must be at most {POLL_EXPLANATION_MAX_UTF16} UTF-16 code units, got {len}"
+                )));
+            }
+            Ok(Some(explanation))
+        }
+        None => Ok(None),
+    }
+}
+
+fn validated_poll(payload: &Value) -> Result<(Vec<Value>, bool, Option<u32>)> {
+    let raw_options = payload
+        .get("options")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::Other("Poll.options missing or not a JSON array".into()))?;
+    if !(2..=10).contains(&raw_options.len()) {
+        return Err(Error::Other(
+            "Poll.options must contain between 2 and 10 answers".into(),
+        ));
+    }
+    let options = raw_options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let text = option.as_str().ok_or_else(|| {
+                Error::Other(format!("Poll.options[{index}] must be a JSON string"))
+            })?;
+            let len = utf16_len(text);
+            if !(POLL_OPTION_MIN_UTF16..=POLL_OPTION_MAX_UTF16).contains(&len) {
+                return Err(Error::Other(format!(
+                    "Poll.options[{index}] must be between {POLL_OPTION_MIN_UTF16} and {POLL_OPTION_MAX_UTF16} UTF-16 code units, got {len}"
+                )));
+            }
+            Ok(json!({"text": text}))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let is_quiz = payload
+        .get("is_quiz")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let correct = match payload.get("correct_option_id") {
+        Some(value) => {
+            let raw = value.as_u64().ok_or_else(|| {
+                Error::Other("Poll.correct_option_id must be a non-negative integer".into())
+            })?;
+            Some(u32::try_from(raw).map_err(|_| {
+                Error::Other("Poll.correct_option_id exceeds the supported integer range".into())
+            })?)
+        }
+        None => None,
+    };
+    if is_quiz && correct.is_none() {
+        return Err(Error::Other(
+            "Poll.correct_option_id is required for quiz polls".into(),
+        ));
+    }
+    if correct.is_some_and(|index| index as usize >= options.len()) {
+        return Err(Error::Other(
+            "Poll.correct_option_id is outside the options array".into(),
+        ));
+    }
+    Ok((options, is_quiz, correct))
 }
 
 /// Truncate a raw (un-formatted) caption to the Bot API limit for the plain-text fallback.
@@ -511,29 +605,9 @@ pub async fn dispatch_content(
             }
         }
         "Poll" => {
-            let question = payload
-                .get("question")
-                .and_then(Value::as_str)
-                .ok_or_else(|| Error::Other("Poll.question missing".into()))?;
-            let options: Vec<Value> = payload
-                .get("options")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| json!({"text": s}))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let is_quiz = payload
-                .get("is_quiz")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let correct = payload
-                .get("correct_option_id")
-                .and_then(Value::as_u64)
-                .map(|n| n as u32);
-            let explanation = payload.get("explanation").and_then(Value::as_str);
+            let question = validated_poll_question(payload)?;
+            let (options, is_quiz, correct) = validated_poll(payload)?;
+            let explanation = validated_poll_explanation(payload)?;
             client
                 .send_poll(
                     chat_id,
@@ -813,6 +887,91 @@ mod tests {
             let error = required_coordinate(&malformed, "lat").expect_err("invalid latitude");
             assert!(error.to_string().contains("Location.lat"));
         }
+    }
+
+    #[test]
+    fn poll_options_and_quiz_answer_are_validated_locally() {
+        for malformed in [
+            json!({}),
+            json!({"options": []}),
+            // Telegram's Bot API requires at least 2 options; a single-option poll must be
+            // rejected locally rather than forwarded to a request Telegram will 400 on.
+            json!({"options": ["only"]}),
+            json!({"options": ["a", 2]}),
+            // Telegram's Bot API caps options at 10; 11 must be rejected.
+            json!({"options": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"]}),
+            // Telegram's Bot API requires each option to be 1-100 UTF-16 code units;
+            // an empty or oversize option must be rejected locally.
+            json!({"options": ["", "b"]}),
+            json!({"options": ["a".repeat(101), "b".to_string()]}),
+            json!({"options": ["only"], "is_quiz": true}),
+            json!({"options": ["a", "b"], "is_quiz": true, "correct_option_id": 2}),
+            json!({"options": ["a", "b"], "is_quiz": true, "correct_option_id": "1"}),
+            json!({"options": ["a", "b"], "is_quiz": true, "correct_option_id": u64::from(u32::MAX) + 1}),
+        ] {
+            assert!(validated_poll(&malformed).is_err());
+        }
+
+        let (options, is_quiz, correct) = validated_poll(&json!({
+            "options": ["a", "b"],
+            "is_quiz": true,
+            "correct_option_id": 1
+        }))
+        .expect("valid quiz");
+        assert_eq!(options, vec![json!({"text": "a"}), json!({"text": "b"})]);
+        assert!(is_quiz);
+        assert_eq!(correct, Some(1));
+
+        // Exactly 10 options (the upper bound) and exactly 2 (the lower bound) must both
+        // pass local validation as regular (non-quiz) polls.
+        let ten_options: Vec<String> = (1..=10).map(|n| n.to_string()).collect();
+        let (options, is_quiz, correct) =
+            validated_poll(&json!({"options": ten_options})).expect("valid regular poll (max)");
+        assert_eq!(options.len(), 10);
+        assert!(!is_quiz);
+        assert_eq!(correct, None);
+
+        let (_, is_quiz, correct) =
+            validated_poll(&json!({"options": ["a", "b"]})).expect("valid regular poll (min)");
+        assert!(!is_quiz);
+        assert_eq!(correct, None);
+
+        // Exactly 100 UTF-16 code units (the upper bound) and exactly 1 (the lower bound)
+        // must both pass local validation.
+        let (options, _, _) = validated_poll(&json!({
+            "options": ["a".repeat(100), "b".to_string()]
+        }))
+        .expect("valid option lengths at bounds");
+        assert_eq!(options[0]["text"].as_str().unwrap().len(), 100);
+    }
+
+    #[test]
+    fn poll_question_length_is_validated_locally() {
+        assert!(validated_poll_question(&json!({})).is_err());
+        assert!(validated_poll_question(&json!({"question": ""})).is_err());
+        // Telegram's Bot API caps the question at 300 UTF-16 code units; 301 must be rejected.
+        assert!(validated_poll_question(&json!({"question": "a".repeat(301)})).is_err());
+
+        assert_eq!(
+            validated_poll_question(&json!({"question": "a".repeat(300)})).expect("valid at max"),
+            "a".repeat(300)
+        );
+        assert_eq!(
+            validated_poll_question(&json!({"question": "q"})).expect("valid at min"),
+            "q"
+        );
+    }
+
+    #[test]
+    fn poll_explanation_length_is_validated_locally() {
+        assert!(validated_poll_explanation(&json!({})).unwrap().is_none());
+        // Telegram's Bot API caps the explanation at 200 UTF-16 code units; 201 must be rejected.
+        assert!(validated_poll_explanation(&json!({"explanation": "a".repeat(201)})).is_err());
+        assert_eq!(
+            validated_poll_explanation(&json!({"explanation": "a".repeat(200)}))
+                .expect("valid at max"),
+            Some("a".repeat(200).as_str())
+        );
     }
 
     #[test]
