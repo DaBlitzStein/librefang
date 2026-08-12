@@ -86,6 +86,13 @@ def main():
     assert_in('"error": format!("stream error: {}", e)', rs, "rust-stream-transport-error")
     assert_not_in("while let Some(Ok(chunk))", rs, "rust-no-silent-stream-error")
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
+    assert_in("if !buffer.is_empty()", rs, "rust-flush-trailing-sse-line")
+    assert_in('if let Some(data) = line.trim().strip_prefix("data: ")', rs, "rust-parse-trailing-sse-line")
+    assert_in(
+        'invalid utf-8 in SSE line at byte {}", e.valid_up_to())',
+        rs,
+        "rust-trailing-sse-flush-reports-invalid-utf8",
+    )
     assert_in('"error": fmt.Sprintf("new request: %v", err)', go, "go-stream-request-error")
     assert_not_in("req, _ := http.NewRequest", go, "go-no-discarded-stream-request-error")
     assert_in('buffer = b""', py, "python-byte-buffer")
@@ -97,6 +104,13 @@ def main():
     assert_in("from urllib.error import HTTPError, URLError", py, "python-urlerror-import")
     assert py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures"
     assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")
+    assert_in("if buffer:", py, "python-flush-trailing-sse-line")
+    assert_in("line = buffer.decode().strip()", py, "python-parse-trailing-sse-line")
+    assert py.count("line = line.decode().strip()") + py.count(
+        "line = buffer.decode().strip()"
+    ) == 2, "trailing SSE flush must decode strictly, matching the per-line decode above it"
+    assert_in("const trailing = buffer.trim();", js, "js-flush-trailing-sse-line")
+    assert_in('if (trailing.startsWith("data: ")) {', js, "js-parse-trailing-sse-line")
 
     # SSE line-size cap
     assert_in("MAX_SSE_LINE", rs, "rust-max-sse")
