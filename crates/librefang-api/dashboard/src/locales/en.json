@@ -1693,7 +1693,11 @@
     "starting": "Starting…",
     "variables": "Variables",
     "step_output": "Output",
-    "step_pending": "Pending…"
+    "step_pending": "Pending…",
+    "save_from_chat": "Save as Workflow",
+    "saved_to_canvas": "Workflow saved — opening canvas",
+    "invalid_json": "Could not parse workflow JSON from message",
+    "no_json_found": "No workflow JSON found in message"
   },
   "scheduler": {
     "title": "Scheduler",

@@ -221,7 +221,7 @@ pub struct WorkflowInputParam {
     /// reference (#4982 — gap 3) that the runtime resolves to the
     /// artifact-store handle string before the workflow engine
     /// substitutes it into the step prompt.
-    #[serde(default = "default_input_param_type")]
+    #[serde(default = "default_input_param_type", alias = "type")]
     pub param_type: String,
     /// Whether the caller must supply this parameter.
     #[serde(default = "default_required")]
@@ -293,6 +293,10 @@ pub struct WorkflowStep {
 
 fn default_timeout() -> u64 {
     120
+}
+
+fn default_max_retries() -> u32 {
+    3
 }
 
 /// Upper bound (seconds) for any user-supplied step / total timeout.
@@ -1020,6 +1024,7 @@ pub enum ErrorMode {
     /// jitter. Both fields default to `None` so old persisted workflows
     /// (`{"retry": {"max_retries": 3}}`) deserialize cleanly.
     Retry {
+        #[serde(default = "default_max_retries")]
         max_retries: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         backoff_ms: Option<u64>,
