@@ -545,9 +545,14 @@ def _rebuild_safe_tag(tag_name: str, attrs_raw: str, self_closing: bool):
         v = next((v for k, v in attrs if k == "emoji-id"), None)
         if v is not None:
             buf += ' emoji-id="' + _escape_html_text(v) + '"'
-    if self_closing:
-        buf += "/"
     buf += ">"
+    if self_closing:
+        # Telegram's HTML subset has no self-closing-tag syntax: emitting
+        # a literal `<tag/>` would either be rejected by the Bot API's
+        # "Unclosed start tag" check or (if tolerated) leave the tag open
+        # for the rest of the message, matching telegram.rs's fix — close
+        # it immediately instead of leaking the marker into the output.
+        buf += "</" + tag_name + ">"
     return buf
 
 
@@ -583,16 +588,28 @@ def sanitize_telegram_html(text: str) -> str:
                                 pos = k
                                 break
                         if pos is not None:
-                            open_tags.pop(pos)
-                            result.append(text[i:tag_end + 1])
+                            # Close every tag above (and including) the
+                            # match, innermost first, mirroring
+                            # telegram.rs — sanitiser priority is
+                            # "produce valid HTML" not "preserve nesting
+                            # depth" when tags cross.
+                            for unclosed in reversed(open_tags[pos:]):
+                                result.append("</" + unclosed + ">")
+                            del open_tags[pos:]
                         else:
                             result.append("&lt;")
                             result.append(_escape_html_text(tag_content))
                             result.append("&gt;")
                     else:
-                        self_closing = tag_content.endswith("/")
+                        # rstrip before checking for the marker so a
+                        # self-closing tag with trailing whitespace before
+                        # `>` (e.g. `<tag/ >`, valid HTML) is still detected
+                        # — matches sanitize.rs's `attrs.trim_end().ends_with('/')`.
+                        self_closing = tag_content.rstrip().endswith("/")
                         attrs_raw = tag_content[len(name_raw):]
-                        attrs_raw = attrs_raw.rstrip("/").strip()
+                        if self_closing:
+                            attrs_raw = attrs_raw.rstrip()[:-1]
+                        attrs_raw = attrs_raw.strip()
                         rebuilt = _rebuild_safe_tag(
                             name_raw, attrs_raw, self_closing
                         )
