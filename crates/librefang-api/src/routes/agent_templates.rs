@@ -473,18 +473,35 @@ pub async fn create_agent_type(
 
     let dir = agent_types_dir();
     let path = dir.join(format!("{name}.toml"));
-    if path.exists() {
-        return ApiErrorResponse::conflict(format!("Agent type '{name}' already exists"))
-            .into_json_tuple();
-    }
 
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("Failed to create templates dir: {e}");
         return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
     }
-    if let Err(e) = std::fs::write(&path, &toml_content) {
-        tracing::warn!("Failed to write agent-type '{name}': {e}");
-        return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+    // Atomic create: create_new(true) fails with AlreadyExists instead
+    // of the check-then-write race where two concurrent POSTs both
+    // pass the exists() check and the last writer silently wins.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            if let Err(e) = f.write_all(toml_content.as_bytes()) {
+                tracing::warn!("Failed to write agent-type '{name}': {e}");
+                let _ = std::fs::remove_file(&path);
+                return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return ApiErrorResponse::conflict(format!("Agent type '{name}' already exists"))
+                .into_json_tuple();
+        }
+        Err(e) => {
+            tracing::warn!("Failed to create agent-type '{name}': {e}");
+            return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+        }
     }
 
     let manifest: AgentManifest = toml::from_str(&toml_content).unwrap_or_default();
