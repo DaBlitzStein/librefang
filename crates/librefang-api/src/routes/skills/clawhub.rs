@@ -128,9 +128,16 @@ pub async fn clawhub_search(
 
     match client.search(&query, limit).await {
         Ok(results) => {
+            // The ClawHub index contains duplicate entries for the same
+            // slug under different display casings (e.g. "Prd" and
+            // "prd"). Dedupe by lowercase slug so the UI never shows
+            // the same skill twice and one Install press never spans
+            // several look-alike rows.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             let items: Vec<serde_json::Value> = results
                 .results
                 .iter()
+                .filter(|e| seen.insert(e.slug.to_lowercase()))
                 .map(|e| {
                     serde_json::json!({
                         "slug": e.slug,
@@ -216,9 +223,14 @@ pub async fn clawhub_browse(
 
     match client.browse(sort, limit, cursor).await {
         Ok(results) => {
+            // Same slug-dedupe as search — the index repeats slugs
+            // under different casings and the UI renders each as a
+            // separate card.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             let items: Vec<serde_json::Value> = results
                 .items
                 .iter()
+                .filter(|e| seen.insert(e.slug.to_lowercase()))
                 .map(clawhub_browse_entry_to_json)
                 .collect();
             let resp = serde_json::json!({
@@ -544,9 +556,16 @@ pub async fn clawhub_cn_search(
 
     match client.search(&query, limit).await {
         Ok(results) => {
+            // The ClawHub index contains duplicate entries for the same
+            // slug under different display casings (e.g. "Prd" and
+            // "prd"). Dedupe by lowercase slug so the UI never shows
+            // the same skill twice and one Install press never spans
+            // several look-alike rows.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             let items: Vec<serde_json::Value> = results
                 .results
                 .iter()
+                .filter(|e| seen.insert(e.slug.to_lowercase()))
                 .map(|e| {
                     serde_json::json!({
                         "slug": e.slug,
@@ -612,9 +631,14 @@ pub async fn clawhub_cn_browse(
 
     match client.browse(sort, limit, cursor).await {
         Ok(results) => {
+            // Same slug-dedupe as search — the index repeats slugs
+            // under different casings and the UI renders each as a
+            // separate card.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             let items: Vec<serde_json::Value> = results
                 .items
                 .iter()
+                .filter(|e| seen.insert(e.slug.to_lowercase()))
                 .map(clawhub_browse_entry_to_json)
                 .collect();
             let resp = serde_json::json!({
