@@ -621,6 +621,10 @@ where
 pub struct KernelBridgeAdapter {
     kernel: Arc<dyn KernelApi>,
     started_at: Instant,
+    /// Per-sender extended-thinking preference, keyed by platform user id.
+    /// `/think` toggles it; the chat send path applies it as the
+    /// per-turn thinking override.
+    thinking_prefs: std::sync::Mutex<std::collections::HashMap<String, bool>>,
 }
 
 /// Compose the message returned to a channel user when `/approve <id>`
@@ -896,9 +900,22 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         } else {
             text
         };
+        // Apply the per-agent /think preference as the per-turn override.
+        let thinking = self
+            .thinking_prefs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&agent_id.0.to_string())
+            .copied();
         let result = self
             .kernel
-            .send_message_with_blocks_and_sender(agent_id, &text, blocks, sender.clone())
+            .send_message_with_blocks_and_sender_thinking(
+                agent_id,
+                &text,
+                blocks,
+                sender.clone(),
+                thinking,
+            )
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
@@ -1336,7 +1353,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .parse()
             .map_err(|e| format!("Invalid goal id: {e}"))?;
 
-        self.kernel.start_goal_run(
+        let started = self.kernel.start_goal_run(
             goal_id_parsed,
             agent_id,
             None, // max_iterations — use default
@@ -1345,9 +1362,16 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             None, // verify_max_retries
             None, // evaluator_model — use agent default
         );
-        Ok(format!(
-            "Goal created and started: {description} (ID: {goal_id})"
-        ))
+        if started {
+            Ok(format!(
+                "Goal created and started: {description} (ID: {goal_id})"
+            ))
+        } else {
+            Ok(format!(
+                "Goal created (ID: {goal_id}) but the run could not start — \
+                 kernel self-handle unset. Restart the daemon and resume the goal."
+            ))
+        }
     }
 
     async fn list_triggers_text(&self) -> String {
@@ -1971,12 +1995,18 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(msg)
     }
 
-    async fn set_thinking(&self, _agent_id: AgentId, on: bool) -> Result<String, String> {
-        // Future-ready: stores preference but doesn't affect model behavior yet
+    async fn set_thinking(&self, agent_id: AgentId, on: bool) -> Result<String, String> {
+        // Store the per-agent preference and apply it as the per-turn
+        // thinking override on the next chat message. Keyed by agent id
+        // (the command resolves the agent before calling here), so a
+        // group chat switching agents keeps each agent's own preference.
+        let key = agent_id.0.to_string();
+        {
+            let mut prefs = self.thinking_prefs.lock().map_err(|e| e.to_string())?;
+            prefs.insert(key, on);
+        }
         let state = if on { "enabled" } else { "disabled" };
-        Ok(format!(
-            "Extended thinking {state}. (This will take effect when supported by the model.)"
-        ))
+        Ok(format!("Extended thinking {state} for this chat."))
     }
 
     async fn classify_reply_intent(
@@ -2754,6 +2784,7 @@ pub async fn start_channel_bridge_with_config(
     let handle = KernelBridgeAdapter {
         kernel: kernel.clone(),
         started_at: Instant::now(),
+        thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
 
     // (adapter, default_agent_name, account_id) — `account_id` is the
@@ -2907,6 +2938,7 @@ pub async fn start_channel_bridge_with_config(
     let bridge_handle: Arc<dyn ChannelBridgeHandle> = Arc::new(KernelBridgeAdapter {
         kernel: kernel.clone(),
         started_at: Instant::now(),
+        thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let router = Arc::new(router);
     // Create message journal for crash recovery

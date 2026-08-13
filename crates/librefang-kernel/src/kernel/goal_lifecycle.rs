@@ -33,7 +33,7 @@ impl LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) {
+    ) -> bool {
         let max = max_iterations.unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS).max(1);
         let substrate = self.substrate_ref().clone();
 
@@ -44,7 +44,7 @@ impl LibreFangKernel {
             Some(k) => k,
             None => {
                 tracing::warn!(%goal_id, "Cannot start goal run: kernel self-handle unset");
-                return;
+                return false;
             }
         };
 
@@ -242,6 +242,7 @@ impl LibreFangKernel {
             verify_max_retries,
             evaluator_model,
         );
+        true
     }
 
     /// Stop an active goal run. Returns whether a run was stopped.

@@ -118,6 +118,8 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// Start a long-horizon autonomous run driving `agent_id` toward
     /// `goal_id`. `max_iterations` bounds the run (default
     /// [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`]).
+    /// Returns whether the run actually started (false when the kernel
+    /// self-handle is unset and the run cannot be scheduled).
     fn start_goal_run(
         &self,
         goal_id: librefang_types::goal::GoalId,
@@ -127,7 +129,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    );
+    ) -> bool;
     /// Stop an active goal run. Returns whether a run was stopped.
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
     /// Snapshot the observable state of a goal's run, if one is active.
@@ -719,6 +721,19 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: librefang_channels::types::SenderContext,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    /// Like [`Self::send_message_with_blocks_and_sender`] with a per-turn
+    /// extended-thinking override. Default implementation ignores the
+    /// override and delegates to the base method.
+    async fn send_message_with_blocks_and_sender_thinking(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: librefang_channels::types::SenderContext,
+        _thinking_override: Option<bool>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_blocks_and_sender(self, agent_id, message, blocks, sender).await
+    }
     async fn send_message_streaming_with_sender_context_and_routing(
         self: Arc<Self>,
         agent_id: AgentId,
@@ -890,7 +905,7 @@ impl KernelApi for LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) {
+    ) -> bool {
         self.goal_run_start(
             goal_id,
             agent_id,
@@ -899,7 +914,7 @@ impl KernelApi for LibreFangKernel {
             verify_agent_id,
             verify_max_retries,
             evaluator_model,
-        );
+        )
     }
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
         self.goal_run_stop(goal_id)
@@ -1665,6 +1680,24 @@ impl KernelApi for LibreFangKernel {
         sender: librefang_channels::types::SenderContext,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
         Self::send_message_with_blocks_and_sender(self, agent_id, message, blocks, &sender).await
+    }
+    async fn send_message_with_blocks_and_sender_thinking(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_blocks_and_sender_thinking(
+            self,
+            agent_id,
+            message,
+            blocks,
+            &sender,
+            thinking_override,
+        )
+        .await
     }
     async fn send_message_streaming_with_sender_context_and_routing(
         self: Arc<Self>,

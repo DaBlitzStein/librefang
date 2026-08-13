@@ -345,7 +345,7 @@ pub async fn start_goal_run(
         );
     }
 
-    state.kernel.start_goal_run(
+    let started = state.kernel.start_goal_run(
         goal_id,
         agent_id,
         max_iterations,
@@ -357,7 +357,7 @@ pub async fn start_goal_run(
     let run = state.kernel.goal_run_state(goal_id);
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "ok": true, "run": run })),
+        Json(serde_json::json!({ "ok": started, "run": run })),
     )
 }
 
