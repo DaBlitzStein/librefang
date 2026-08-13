@@ -28,6 +28,13 @@ export {
   listPromptsOverview,
   listExperiments,
   getExperimentMetrics,
+  // agent types
+  listAgentTypes,
+  getAgentType,
+  createAgentType,
+  updateAgentType,
+  deleteAgentType,
+  spawnEphemeral,
   // analytics / usage / budget
   getUsageSummary,
   listUsageByAgent,
@@ -178,6 +185,12 @@ export type {
   OperatorPause,
   OperatorActionVerb,
   OperatorActionDescriptor,
+  // agent types (#6699)
+  AgentType,
+  AgentTypeSummary,
+  AgentTypeInput,
+  EphemeralResult,
+  EphemeralSpawnRequest,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
