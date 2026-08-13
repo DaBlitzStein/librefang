@@ -16,34 +16,57 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
 use librefang_testing::{MockKernelBuilder, TestAppState};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tower::ServiceExt;
 
 struct Harness {
     app: Router,
     _state: Arc<AppState>,
     _test: TestAppState,
-    _tmp: tempfile::TempDir,
+}
+
+/// One tempdir for the whole test binary, set once via OnceLock — the
+/// same pattern as `profiles_templates_routes_integration.rs`. Setting
+/// `LIBREFANG_HOME` per-test races with every other concurrent test
+/// that calls `librefang_home()` (#6931 review).
+fn agent_types_home() -> &'static tempfile::TempDir {
+    static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let tmp = tempfile::tempdir().expect("tempdir for agent-types test");
+        // Safety: set once, before any concurrent reader — the standard
+        // workspace pattern for env-var-driven tests (Rust 2024 edition
+        // requires the unsafe block for env mutation).
+        std::env::set_var("LIBREFANG_HOME", tmp.path());
+        tmp
+    })
+}
+
+/// Serialise CRUD tests so concurrent creates don't observe each other's
+/// fixtures when listing (list walks the whole templates dir).
+fn crud_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
 }
 
 async fn boot() -> Harness {
-    // Isolate from the real home directory so tests don't touch
-    // ~/.librefang/templates (#6931 review).
-    let tmp = tempfile::tempdir().expect("tempdir for agent-types test");
-    std::env::set_var("LIBREFANG_HOME", tmp.path());
-    let (state, test) = MockKernelBuilder::default()
-        .build_app_state()
-        .await
-        .expect("boot kernel for agent-types test");
-    let app = routes::agent_templates::router()
-        .with_state(Arc::new(state.clone()))
-        .into_make_service();
-    let app = axum::Router::new().merge(axum::Router::from(app));
+    let _home = agent_types_home();
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
+        cfg.default_model = librefang_types::config::DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::BTreeMap::new(),
+            cli_profile_dirs: Vec::new(),
+        };
+    }));
+    let state = test.app_state();
+    let app = routes::agent_templates::router().with_state(state.clone());
     Harness {
         app,
-        _state: state.into(),
+        _state: state,
         _test: test,
-        _tmp: tmp,
     }
 }
 
@@ -63,7 +86,7 @@ fn agent_type_json(name: &str, desc: &str) -> serde_json::Value {
 // List
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_types_list_returns_200() {
     let h = boot().await;
     let req = Request::builder()
@@ -71,7 +94,7 @@ async fn agent_types_list_returns_200() {
         .uri("/templates")
         .body(Body::empty())
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
@@ -79,8 +102,9 @@ async fn agent_types_list_returns_200() {
 // Create → read → update → delete lifecycle
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_types_crud_lifecycle() {
+    let _guard = crud_lock().lock().expect("crud lock");
     let h = boot().await;
     let body = agent_type_json("test-agent-crud", "A test agent for CRUD.");
     let body_bytes = serde_json::to_vec(&body).unwrap();
@@ -92,7 +116,7 @@ async fn agent_types_crud_lifecycle() {
         .header("content-type", "application/json")
         .body(Body::from(body_bytes.clone()))
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Read the one we just created
@@ -101,7 +125,7 @@ async fn agent_types_crud_lifecycle() {
         .uri("/templates/test-agent-crud")
         .body(Body::empty())
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
@@ -137,7 +161,7 @@ async fn agent_types_crud_lifecycle() {
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&updated).unwrap()))
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
@@ -163,7 +187,7 @@ async fn agent_types_crud_lifecycle() {
         .uri("/templates/test-agent-crud")
         .body(Body::empty())
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Confirm deleted — should 404
@@ -172,7 +196,7 @@ async fn agent_types_crud_lifecycle() {
         .uri("/templates/test-agent-crud")
         .body(Body::empty())
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -180,7 +204,7 @@ async fn agent_types_crud_lifecycle() {
 // Validation
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_types_create_rejects_missing_name() {
     let h = boot().await;
     let body = serde_json::json!({"description": "no name"});
@@ -190,11 +214,11 @@ async fn agent_types_create_rejects_missing_name() {
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_types_rejects_path_traversal() {
     let h = boot().await;
     let req = Request::builder()
@@ -202,11 +226,11 @@ async fn agent_types_rejects_path_traversal() {
         .uri("/templates/../../../etc/passwd")
         .body(Body::empty())
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_types_create_rejects_invalid_name_chars() {
     let h = boot().await;
     let body = agent_type_json("bad name", "has spaces");
@@ -216,12 +240,13 @@ async fn agent_types_create_rejects_invalid_name_chars() {
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_types_create_rejects_duplicate() {
+    let _guard = crud_lock().lock().expect("crud lock");
     let h = boot().await;
     let body = agent_type_json("duplicate-test", "first create");
     let req = Request::builder()
@@ -230,7 +255,7 @@ async fn agent_types_create_rejects_duplicate() {
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Same name again → 409
@@ -240,7 +265,7 @@ async fn agent_types_create_rejects_duplicate() {
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 
     // Cleanup
@@ -249,10 +274,10 @@ async fn agent_types_create_rejects_duplicate() {
         .uri("/templates/duplicate-test")
         .body(Body::empty())
         .unwrap();
-    let _ = h.app.oneshot(req).await;
+    let _ = h.app.clone().oneshot(req).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_types_get_nonexistent_returns_404() {
     let h = boot().await;
     let req = Request::builder()
@@ -260,12 +285,13 @@ async fn agent_types_get_nonexistent_returns_404() {
         .uri("/templates/nonexistent-type")
         .body(Body::empty())
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_types_list_includes_created_items() {
+    let _guard = crud_lock().lock().expect("crud lock");
     let h = boot().await;
     let body = agent_type_json("list-include-test", "for list test");
     // Create it
@@ -275,7 +301,7 @@ async fn agent_types_list_includes_created_items() {
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
-    let _ = h.app.oneshot(req).await.unwrap();
+    let _ = h.app.clone().oneshot(req).await.unwrap();
 
     // List — should include it
     let req = Request::builder()
@@ -283,7 +309,7 @@ async fn agent_types_list_includes_created_items() {
         .uri("/templates")
         .body(Body::empty())
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
@@ -301,15 +327,16 @@ async fn agent_types_list_includes_created_items() {
         .uri("/templates/list-include-test")
         .body(Body::empty())
         .unwrap();
-    let _ = h.app.oneshot(req).await;
+    let _ = h.app.clone().oneshot(req).await;
 }
 
 // ---------------------------------------------------------------------------
 // TOML injection — ensure special characters are escaped
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_types_escapes_toml_special_chars() {
+    let _guard = crud_lock().lock().expect("crud lock");
     let h = boot().await;
     let body = serde_json::json!({
         "name": "toml-inject-test",
@@ -326,7 +353,7 @@ async fn agent_types_escapes_toml_special_chars() {
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     // Must not 500 — the TOML serializer should escape everything
     assert_eq!(resp.status(), StatusCode::CREATED);
 
@@ -336,7 +363,7 @@ async fn agent_types_escapes_toml_special_chars() {
         .uri("/templates/toml-inject-test")
         .body(Body::empty())
         .unwrap();
-    let resp = h.app.oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
@@ -353,5 +380,5 @@ async fn agent_types_escapes_toml_special_chars() {
         .uri("/templates/toml-inject-test")
         .body(Body::empty())
         .unwrap();
-    let _ = h.app.oneshot(req).await;
+    let _ = h.app.clone().oneshot(req).await;
 }
