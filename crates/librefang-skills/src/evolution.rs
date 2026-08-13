@@ -270,9 +270,7 @@ static ATOMIC_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 /// a nanosecond timestamp so collisions are extremely unlikely even
 /// under concurrent callers targeting the same final path.
 fn atomic_write(path: &Path, content: &str) -> Result<(), SkillError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| SkillError::Io(std::io::Error::other("no parent directory")))?;
+    let parent = crate::resolve_parent_or_cwd(path);
     std::fs::create_dir_all(parent)?;
 
     // Keep the thread-id string to ASCII-safe chars — `ThreadId`'s
