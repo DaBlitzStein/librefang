@@ -349,7 +349,20 @@ pub(super) async fn tool_agent_spawn(
                         ..Default::default()
                     })
                 } else {
-                    serde_json::from_value(v.clone()).ok()
+                    // Object form: accept ONLY provider/model. Do not
+                    // pass base_url / api_key_env through — a
+                    // prompt-injected agent could point the worker at an
+                    // attacker-controlled endpoint with a real env key
+                    // (#6930 review — credential-exfiltration
+                    // primitive).
+                    let obj = v.as_object()?;
+                    let provider = obj.get("provider")?.as_str()?.to_string();
+                    let model = obj.get("model")?.as_str()?.to_string();
+                    Some(librefang_types::agent::ModelConfig {
+                        provider,
+                        model,
+                        ..Default::default()
+                    })
                 }
             }),
             tools,

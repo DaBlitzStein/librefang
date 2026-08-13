@@ -514,7 +514,6 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
     ) -> Result<String, kernel_handle::KernelOpError> {
         use crate::workflow::Workflow;
         use kernel_handle::KernelOpError;
-        use std::io::Write;
 
         // Parse and validate
         let wf: Workflow = serde_json::from_str(workflow_json)
@@ -548,56 +547,37 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             )));
         }
 
-        // Check for name collision
-        let workflows_dir = self.home_dir_boot.join("workflows");
-        let file_path = workflows_dir.join(format!("{}.workflow.toml", &wf.name));
-        if file_path.exists() {
+        // Name-collision check against the live registry. The engine is
+        // the single persistence surface (`register` writes
+        // `<id>.workflow.json`); writing an extra `.workflow.toml` here
+        // would orphan a second file that survives `DELETE
+        // /api/workflows/{id}` and resurrects the workflow at boot
+        // (#6943 review).
+        let name_lower = wf.name.to_lowercase();
+        let exists = self
+            .workflows
+            .engine
+            .list_workflows()
+            .await
+            .iter()
+            .any(|w| w.name.to_lowercase() == name_lower);
+        if exists {
             return Err(KernelOpError::Internal(format!(
                 "Workflow '{}' already exists",
                 &wf.name
             )));
         }
 
-        // Ensure dir exists
-        std::fs::create_dir_all(&workflows_dir)
-            .map_err(|e| KernelOpError::Internal(format!("Failed to create workflows dir: {e}")))?;
-
-        // Serialize to TOML
-        let toml_str = toml::to_string_pretty(&wf)
-            .map_err(|e| KernelOpError::Internal(format!("TOML serialization failed: {e}")))?;
-
-        // Atomic write: tmp file + rename
-        let tmp_path = workflows_dir.join(format!(".{}.tmp", &wf.name));
-        {
-            let mut f = std::fs::File::create(&tmp_path)
-                .map_err(|e| KernelOpError::Internal(format!("Failed to write workflow: {e}")))?;
-            f.write_all(toml_str.as_bytes())
-                .map_err(|e| KernelOpError::Internal(format!("Failed to write workflow: {e}")))?;
-            f.flush()
-                .map_err(|e| KernelOpError::Internal(format!("Failed to flush workflow: {e}")))?;
-        }
-        std::fs::rename(&tmp_path, &file_path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            KernelOpError::Internal(format!("Failed to persist workflow: {e}"))
-        })?;
-
-        // Register in engine (hot-reload). `register` persists its own
-        // JSON copy and returns the canonical id; a failed register
-        // would leave the engine stale against the TOML we just wrote,
-        // so log the outcome for traceability.
-        let workflow_name = file_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        // Register in engine (hot-reload). `register` persists the
+        // canonical JSON copy and returns the canonical id.
         let registered_id = self.workflows.engine.register(wf).await;
         tracing::info!(
-            workflow = %workflow_name,
+            workflow = %name_lower,
             registered_id = %registered_id.0,
             "Workflow created via tool"
         );
 
-        Ok(workflow_name)
+        Ok(name_lower)
     }
 }
 
