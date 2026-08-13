@@ -2984,15 +2984,37 @@ export function ChatPage() {
   );
 
   const handleSaveWorkflow = useCallback((content: string) => {
-    // Extract the first JSON code block or object from the message
-    const jsonMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) ??
-      content.match(/(\{[\s\S]*"steps"[\s\S]*\})/);
-    if (jsonMatch) {
+    // Iterate all fenced blocks and try parsing each as JSON with a
+    // "steps" key — the first valid one wins. Falls back to the raw
+    // message itself (agents sometimes emit bare JSON).
+    const candidates: string[] = [];
+    const fenceRe = /```(?:json|js|ts)?\s*\n?([\s\S]*?)\n?```/g;
+    let m: RegExpExecArray | null;
+    while ((m = fenceRe.exec(content)) !== null) {
+      candidates.push(m[1]);
+    }
+    candidates.push(content);
+
+    let parsed: { steps?: unknown[]; name?: string; description?: string } | null = null;
+    for (const candidate of candidates) {
       try {
-        const parsed = JSON.parse(jsonMatch[1]);
+        const attempt = JSON.parse(candidate);
+        if (attempt && Array.isArray(attempt.steps)) {
+          parsed = attempt;
+          break;
+        }
+      } catch {
+        // not JSON — try next candidate
+      }
+    }
+
+    if (parsed) {
+      try {
         // Convert workflow JSON to canvas template shape so CanvasPage
         // can load it: each step becomes a node.
-        const nodes = (parsed.steps ?? []).map((s: Record<string, unknown>, i: number) => ({
+        const nodes = (parsed.steps ?? []).map((rawStep, i: number) => {
+          const s = rawStep as Record<string, unknown>;
+          return {
           id: `step-${i + 1}`,
           type: "agent",
           position: { x: 100, y: i * 150 },
@@ -3005,7 +3027,8 @@ export function ChatPage() {
             errorMode: (s.error_mode as string) ?? "fail",
             timeoutSecs: (s.timeout_secs as number) ?? 120,
           },
-        }));
+          };
+        });
         sessionStorage.setItem("workflowTemplate", JSON.stringify({
           nodes,
           name: (parsed.name as string) ?? "Agent workflow",

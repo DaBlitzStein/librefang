@@ -581,14 +581,21 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             KernelOpError::Internal(format!("Failed to persist workflow: {e}"))
         })?;
 
-        // Register in engine (hot-reload)
-        let _ = self.workflows.engine.register(wf).await;
-
+        // Register in engine (hot-reload). `register` persists its own
+        // JSON copy and returns the canonical id; a failed register
+        // would leave the engine stale against the TOML we just wrote,
+        // so log the outcome for traceability.
         let workflow_name = file_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
+        let registered_id = self.workflows.engine.register(wf).await;
+        tracing::info!(
+            workflow = %workflow_name,
+            registered_id = %registered_id.0,
+            "Workflow created via tool"
+        );
 
         Ok(workflow_name)
     }
