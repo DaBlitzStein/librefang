@@ -880,7 +880,7 @@ pub async fn clawhub_cn_install(
 /// repeats the same slug under different display casings ("Prd" vs
 /// "prd"); without this the UI renders duplicate cards and one
 /// Install press appears to install several skills.
-fn dedupe_by_slug<'a, F>(entries: &'a [F], slug_of: impl Fn(&F) -> &str) -> Vec<&'a F> {
+fn dedupe_by_slug<F>(entries: &[F], slug_of: impl Fn(&F) -> &str) -> Vec<&F> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     entries
         .iter()
