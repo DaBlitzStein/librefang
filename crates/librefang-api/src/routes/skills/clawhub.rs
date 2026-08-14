@@ -133,11 +133,8 @@ pub async fn clawhub_search(
             // "prd"). Dedupe by lowercase slug so the UI never shows
             // the same skill twice and one Install press never spans
             // several look-alike rows.
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let items: Vec<serde_json::Value> = results
-                .results
-                .iter()
-                .filter(|e| seen.insert(e.slug.to_lowercase()))
+            let items: Vec<serde_json::Value> = dedupe_by_slug(&results.results, |e| &e.slug)
+                .into_iter()
                 .map(|e| {
                     serde_json::json!({
                         "slug": e.slug,
@@ -226,11 +223,8 @@ pub async fn clawhub_browse(
             // Same slug-dedupe as search — the index repeats slugs
             // under different casings and the UI renders each as a
             // separate card.
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let items: Vec<serde_json::Value> = results
-                .items
-                .iter()
-                .filter(|e| seen.insert(e.slug.to_lowercase()))
+            let items: Vec<serde_json::Value> = dedupe_by_slug(&results.items, |e| &e.slug)
+                .into_iter()
                 .map(clawhub_browse_entry_to_json)
                 .collect();
             let resp = serde_json::json!({
@@ -561,11 +555,8 @@ pub async fn clawhub_cn_search(
             // "prd"). Dedupe by lowercase slug so the UI never shows
             // the same skill twice and one Install press never spans
             // several look-alike rows.
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let items: Vec<serde_json::Value> = results
-                .results
-                .iter()
-                .filter(|e| seen.insert(e.slug.to_lowercase()))
+            let items: Vec<serde_json::Value> = dedupe_by_slug(&results.results, |e| &e.slug)
+                .into_iter()
                 .map(|e| {
                     serde_json::json!({
                         "slug": e.slug,
@@ -634,11 +625,8 @@ pub async fn clawhub_cn_browse(
             // Same slug-dedupe as search — the index repeats slugs
             // under different casings and the UI renders each as a
             // separate card.
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let items: Vec<serde_json::Value> = results
-                .items
-                .iter()
-                .filter(|e| seen.insert(e.slug.to_lowercase()))
+            let items: Vec<serde_json::Value> = dedupe_by_slug(&results.items, |e| &e.slug)
+                .into_iter()
                 .map(clawhub_browse_entry_to_json)
                 .collect();
             let resp = serde_json::json!({
@@ -885,5 +873,44 @@ pub async fn clawhub_cn_install(
             };
             (status, Json(serde_json::json!({"error": body})))
         }
+    }
+}
+
+/// Dedupe marketplace entries by lowercase slug. The ClawHub index
+/// repeats the same slug under different display casings ("Prd" vs
+/// "prd"); without this the UI renders duplicate cards and one
+/// Install press appears to install several skills.
+fn dedupe_by_slug<'a, F>(entries: &'a [F], slug_of: impl Fn(&F) -> &str) -> Vec<&'a F> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    entries
+        .iter()
+        .filter(|e| seen.insert(slug_of(e).to_lowercase()))
+        .collect()
+}
+
+#[cfg(test)]
+mod dedupe_tests {
+    use super::dedupe_by_slug;
+
+    #[test]
+    fn dedupes_case_variants_of_the_same_slug() {
+        let entries = vec![
+            ("prd", "Prd"),
+            ("prd", "prd"),
+            ("prd", "PRD"),
+            ("other", "other"),
+        ];
+        let kept = dedupe_by_slug(&entries, |e| e.0);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].1, "Prd");
+        assert_eq!(kept[1].1, "other");
+    }
+
+    #[test]
+    fn keeps_first_of_identical_slugs() {
+        let entries = vec![("a", "A"), ("A", "A"), ("a", "a")];
+        let kept = dedupe_by_slug(&entries, |e| e.0);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].1, "A");
     }
 }

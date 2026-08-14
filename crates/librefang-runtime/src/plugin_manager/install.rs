@@ -635,6 +635,17 @@ pub fn remove_plugin(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `name` resolves on the daemon's PATH. Minimal images (Orange
+/// Pi) often ship `python3` without a `python` alias.
+fn python_exists(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
 /// Install Python requirements for a plugin.
 pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
     validate_plugin_name(plugin_name)?;
@@ -650,29 +661,44 @@ pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
     let mut args = vec!["-m", "pip", "install"];
     if !in_venv {
         args.push("--user");
+        // PEP 668 "externally managed" environments (Ubuntu 23.04+,
+        // including the Orange Pi images) reject pip installs without
+        // this override. In a venv the flag is unnecessary and pip
+        // warns, so it is only added outside one.
+        args.push("--break-system-packages");
     }
     args.push("-r");
+
+    // Resolve the interpreter: many minimal images (Orange Pi) ship
+    // `python3` only — `python` does not exist, which surfaced as
+    // "Failed to run python -m pip: No such file or directory".
+    let interpreter = if python_exists("python3") {
+        "python3"
+    } else {
+        "python"
+    };
 
     warn!(
         plugin = plugin_name,
         requirements = %requirements.display(),
         venv = in_venv,
+        interpreter = interpreter,
         "Installing Python requirements"
     );
 
-    let output = tokio::process::Command::new("python")
+    let output = tokio::process::Command::new(interpreter)
         .args(&args)
         .arg(&requirements)
         .output()
         .await
-        .map_err(|e| format!("Failed to run python -m pip: {e}"))?;
+        .map_err(|e| format!("Failed to run {interpreter} -m pip: {e}"))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout.to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("python -m pip install failed: {stderr}"))
+        Err(format!("{interpreter} -m pip install failed: {stderr}"))
     }
 }
 
