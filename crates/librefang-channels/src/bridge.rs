@@ -315,6 +315,23 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// Persist an explicit per-conversation `/agent` override for a `(channel instance, conversation)` pair (#5671 Model A, upper binding level).
+    ///
+    /// Written by the `/agent` command so the next inbound message resolves the new agent through [`resolve_conversation_override`](Self::resolve_conversation_override) — the router user-default alone cannot stick, because the sticky holder, per-peer binding, and instance default all outrank the router store in the dispatch chain.
+    /// `conversation_id` is `message.sender.platform_id` at the call site (chat id for groups, peer id for DMs); `agent` is the agent *name* (the store resolves names to live `AgentId`s at dispatch, same as the config-seeded path).
+    /// `bound_by` records who set it for the audit trail.
+    ///
+    /// Default is a no-op so test doubles keep working unchanged; the kernel adapter overrides it with the DB-backed write, guarded by an injection-site test.
+    async fn set_conversation_binding(
+        &self,
+        _instance: &str,
+        _conversation_id: &str,
+        _agent: &str,
+        _bound_by: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Resolve the instance default agent for a channel instance (#5671 Model A) — seeded from `[[sidecar_channels]] agent`, the lower of the two binding levels.
     /// Returns `None` when the instance has no default configured, in which case the bridge falls through to its legacy resolver chain.
     ///
@@ -6992,9 +7009,39 @@ async fn handle_command(
                 ),
                 None => router.set_user_default(sender.platform_id.clone(), agent_id),
             };
+            // #5671 Model A upper level: also persist the selection as the
+            // per-conversation binding. `resolve_for_command` /
+            // `resolve_or_fallback` consult the conversation override BEFORE
+            // the sticky holder, per-peer binding, and instance default — so
+            // an `/agent` that only wrote the router user-default never
+            // stuck (the ack claimed the new agent while dispatch kept the
+            // old one). Keyed by (account, platform_id), the same pair the
+            // override lookup reads, so the binding never leaks across bots
+            // (#5672). Skipped for single-bot channels (no account): those
+            // keep the legacy router-only path, matching `resolve_for_command`.
+            let persist_conversation_binding = async {
+                if let Some(instance) = account_id.filter(|s| !s.is_empty()) {
+                    let conversation_id = sender.platform_id.as_str();
+                    if !conversation_id.is_empty() {
+                        if let Err(e) = handle
+                            .set_conversation_binding(instance, conversation_id, agent_name, "user")
+                            .await
+                        {
+                            warn!(
+                                %instance,
+                                %conversation_id,
+                                agent = %agent_name,
+                                error = %e,
+                                "failed to persist /agent conversation binding"
+                            );
+                        }
+                    }
+                }
+            };
             match handle.find_agent_by_name(agent_name).await {
                 Ok(Some(agent_id)) => {
                     store_user_default(agent_id);
+                    persist_conversation_binding.await;
                     format!("Now talking to agent: {agent_name}")
                 }
                 Ok(None) => {
@@ -7002,6 +7049,7 @@ async fn handle_command(
                     match handle.spawn_agent_by_name(agent_name).await {
                         Ok(agent_id) => {
                             store_user_default(agent_id);
+                            persist_conversation_binding.await;
                             format!("Spawned and connected to agent: {agent_name}")
                         }
                         Err(e) => {
@@ -8194,10 +8242,25 @@ mod tests {
 
     /// MockHandle that records which `agent_id` `/model` was dispatched to,
     /// so we can assert command-routing isolation between multi-bot
-    /// deployments (#5672).
+    /// deployments (#5672). Also records `/agent` conversation bindings and
+    /// `/think` toggles so command side-effects are assertable, not just the
+    /// ack text.
     struct RecordingHandle {
         agents: Mutex<Vec<(AgentId, String)>>,
         set_model_calls: Mutex<Vec<AgentId>>,
+        bindings: Mutex<Vec<(String, String, String, String)>>,
+        set_thinking_calls: Mutex<Vec<(AgentId, bool)>>,
+    }
+
+    impl RecordingHandle {
+        fn new(agents: Vec<(AgentId, String)>) -> Self {
+            Self {
+                agents: Mutex::new(agents),
+                set_model_calls: Mutex::new(Vec::new()),
+                bindings: Mutex::new(Vec::new()),
+                set_thinking_calls: Mutex::new(Vec::new()),
+            }
+        }
     }
 
     #[async_trait]
@@ -8219,6 +8282,44 @@ mod tests {
             self.set_model_calls.lock().unwrap().push(agent_id);
             Ok("ok".to_string())
         }
+        async fn set_conversation_binding(
+            &self,
+            instance: &str,
+            conversation_id: &str,
+            agent: &str,
+            bound_by: &str,
+        ) -> Result<(), String> {
+            self.bindings.lock().unwrap().push((
+                instance.to_string(),
+                conversation_id.to_string(),
+                agent.to_string(),
+                bound_by.to_string(),
+            ));
+            Ok(())
+        }
+        async fn resolve_conversation_override(
+            &self,
+            instance: &str,
+            conversation_id: &str,
+        ) -> Option<AgentId> {
+            let name = {
+                let bindings = self.bindings.lock().unwrap();
+                bindings
+                    .iter()
+                    .find(|(i, c, _, _)| i == instance && c == conversation_id)
+                    .map(|(_, _, a, _)| a.clone())
+            }?;
+            self.agents
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, n)| n == &name)
+                .map(|(id, _)| *id)
+        }
+        async fn set_thinking(&self, agent_id: AgentId, on: bool) -> Result<String, String> {
+            self.set_thinking_calls.lock().unwrap().push((agent_id, on));
+            Ok("Extended thinking enabled for this chat.".to_string())
+        }
         fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
     }
 
@@ -8232,14 +8333,11 @@ mod tests {
         let agent_b = AgentId::new();
         let agent_c = AgentId::new();
 
-        let recording = Arc::new(RecordingHandle {
-            agents: Mutex::new(vec![
-                (agent_a, "agent-A".to_string()),
-                (agent_b, "agent-B".to_string()),
-                (agent_c, "agent-C".to_string()),
-            ]),
-            set_model_calls: Mutex::new(Vec::new()),
-        });
+        let recording = Arc::new(RecordingHandle::new(vec![
+            (agent_a, "agent-A".to_string()),
+            (agent_b, "agent-B".to_string()),
+            (agent_c, "agent-C".to_string()),
+        ]));
         let handle: Arc<dyn ChannelBridgeHandle> = recording.clone();
         let router = Arc::new(AgentRouter::new());
 
@@ -8290,6 +8388,119 @@ mod tests {
             vec![agent_b, agent_c],
             "/model must route per-account; got {:?}",
             calls,
+        );
+    }
+
+    /// Regression test for the `/agent` stickiness fix (H7): the command must
+    /// persist the selection as the per-conversation binding — the upper
+    /// #5671 dispatch level — so the next inbound message resolves the new
+    /// agent through `resolve_conversation_override`. The router user-default
+    /// alone cannot stick because the sticky holder, per-peer binding, and
+    /// instance default all outrank the router store.
+    #[tokio::test]
+    async fn agent_command_persists_conversation_binding() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        let recording = Arc::new(RecordingHandle::new(vec![
+            (agent_a, "agent-A".to_string()),
+            (agent_b, "agent-B".to_string()),
+        ]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recording.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-a".to_string(), agent_a);
+
+        let sender = ChannelUser {
+            platform_id: "shared-user".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        // User runs `/agent agent-B` in bot-a.
+        let result = handle_command(
+            "agent",
+            &["agent-B".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("bot-a"),
+            None,
+            &thread_ownership,
+        )
+        .await;
+        assert!(result.contains("Now talking to agent: agent-B"));
+
+        // The side effect, not just the ack: the binding is recorded for the
+        // (account, conversation) pair the dispatch chain reads.
+        let bindings = recording.bindings.lock().unwrap().clone();
+        assert_eq!(
+            bindings,
+            vec![(
+                "bot-a".to_string(),
+                "shared-user".to_string(),
+                "agent-B".to_string(),
+                "user".to_string(),
+            )],
+            "/agent must persist the conversation binding",
+        );
+
+        // And the override layer resolves it back to the live AgentId.
+        let resolved = handle
+            .resolve_conversation_override("bot-a", "shared-user")
+            .await;
+        assert_eq!(resolved, Some(agent_b));
+    }
+
+    /// Regression test for the `/think` fix on the streaming path: the toggle
+    /// must dispatch to the agent resolved for this (account, conversation) —
+    /// not a global default — and record through the handle so the streaming
+    /// send can apply it per turn.
+    #[tokio::test]
+    async fn think_command_records_set_thinking_on_resolved_agent() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        let recording = Arc::new(RecordingHandle::new(vec![
+            (agent_a, "agent-A".to_string()),
+            (agent_b, "agent-B".to_string()),
+        ]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recording.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-b".to_string(), agent_b);
+
+        let sender = ChannelUser {
+            platform_id: "shared-user".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        // `/think on` issued in bot-b must hit agent-B (the account-scoped
+        // default), not agent-A.
+        let result = handle_command(
+            "think",
+            &["on".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("bot-b"),
+            None,
+            &thread_ownership,
+        )
+        .await;
+        assert!(
+            result.contains("Extended thinking enabled"),
+            "unexpected ack: {result}",
+        );
+
+        let calls = recording.set_thinking_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![(agent_b, true)],
+            "/think must dispatch to the account-scoped agent",
         );
     }
 
