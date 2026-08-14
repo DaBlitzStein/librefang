@@ -24,6 +24,7 @@ impl LibreFangKernel {
     /// complete, the iteration cap (`max_iterations`, default
     /// [`DEFAULT_GOAL_MAX_ITERATIONS`]) is reached, an operator stops it, or the
     /// kernel shuts down.
+    #[allow(clippy::too_many_arguments)] // 8-context-arg public API; grouping churns trait+callers
     pub fn goal_run_start(
         &self,
         goal_id: GoalId,

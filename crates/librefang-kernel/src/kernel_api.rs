@@ -120,6 +120,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`]).
     /// Returns whether the run actually started (false when the kernel
     /// self-handle is unset and the run cannot be scheduled).
+    #[allow(clippy::too_many_arguments)] // 8-context-arg trait API; grouping churns impl+callers
     fn start_goal_run(
         &self,
         goal_id: librefang_types::goal::GoalId,

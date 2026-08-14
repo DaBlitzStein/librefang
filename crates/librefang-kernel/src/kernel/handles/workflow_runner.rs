@@ -564,7 +564,7 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         if exists {
             return Err(KernelOpError::Internal(format!(
                 "Workflow '{}' already exists",
-                &wf.name
+                wf.name
             )));
         }
 

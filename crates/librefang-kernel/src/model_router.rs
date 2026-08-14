@@ -165,7 +165,7 @@ pub fn match_profile<'a>(
         })
         .collect();
 
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|x| std::cmp::Reverse(x.1));
 
     if let Some((best, _)) = scored.first() {
         return Some(best);
