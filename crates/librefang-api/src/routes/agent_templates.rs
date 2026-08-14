@@ -286,7 +286,7 @@ pub async fn get_agent_template(
                 StatusCode::OK,
                 Json({
                     let mut v = manifest_to_agent_type(&name, &manifest);
-                    v.as_object_mut().map(|o| {
+                    if let Some(o) = v.as_object_mut() {
                         o.insert(
                             "source".to_string(),
                             serde_json::Value::String(source.to_string()),
@@ -295,7 +295,7 @@ pub async fn get_agent_template(
                             "manifest_toml".to_string(),
                             serde_json::Value::String(content),
                         );
-                    });
+                    }
                     v
                 }),
             ),
