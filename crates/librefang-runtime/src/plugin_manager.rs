@@ -1483,8 +1483,16 @@ pub async fn install_plugin_deps(name: &str) -> Result<Vec<String>, String> {
         "python" | "py" => {
             if plugin_dir.join("requirements.txt").exists() {
                 Some((
-                    "pip",
-                    vec!["install", "-r", "requirements.txt"],
+                    "python3",
+                    vec![
+                        "-m",
+                        "pip",
+                        "install",
+                        "--user",
+                        "--break-system-packages",
+                        "-r",
+                        "requirements.txt",
+                    ],
                     "requirements.txt",
                 ))
             } else {
