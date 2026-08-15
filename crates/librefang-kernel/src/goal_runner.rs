@@ -1425,6 +1425,13 @@ mod tests {
             |_agent_id, _message| async move {
                 std::future::pending::<Result<String, String>>().await
             },
+            |_name| async move { None::<AgentId> },
+            |_learnings| {},
+            |_goal, _output| async move { Ok(true) },
+            false,
+            None,
+            None,
+            None,
         );
 
         let row = store.get_run(&goal_id.to_string()).unwrap().unwrap();

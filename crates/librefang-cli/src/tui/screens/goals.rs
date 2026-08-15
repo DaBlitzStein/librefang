@@ -340,7 +340,7 @@ impl GoalsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut GoalsState) {
-    let inner = widgets::render_screen_block(f, area, &format!("\u{2316} Goals"));
+    let inner = widgets::render_screen_block(f, area, "\u{2316} Goals");
 
     if state.create_open {
         draw_create(f, inner, state);

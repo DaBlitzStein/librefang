@@ -2427,6 +2427,7 @@ pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 }
 
 /// Create a goal.
+#[allow(clippy::too_many_arguments)] // goal-run context args; grouping churns all callers
 pub fn spawn_create_goal(
     backend: BackendRef,
     title: String,

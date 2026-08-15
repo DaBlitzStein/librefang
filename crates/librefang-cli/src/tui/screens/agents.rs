@@ -547,12 +547,10 @@ impl AgentSelectState {
                     return AgentAction::FetchAgentMcpServers(id);
                 }
             }
-            KeyCode::Char('r') => {
+            KeyCode::Char('r') if self.detail.is_some() => {
                 // Edit model routing for this agent
-                if self.detail.is_some() {
-                    self.sub = AgentSubScreen::EditModelRouting;
-                    return AgentAction::LoadRouterProfiles;
-                }
+                self.sub = AgentSubScreen::EditModelRouting;
+                return AgentAction::LoadRouterProfiles;
             }
             _ => {}
         }
@@ -1938,7 +1936,7 @@ fn draw_prompt_picker(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             .collect();
 
         let list = widgets::themed_list(items);
-        let mut list_state = state.prompt_list_state.clone();
+        let mut list_state = state.prompt_list_state;
         f.render_stateful_widget(list, chunks[1], &mut list_state);
     }
 

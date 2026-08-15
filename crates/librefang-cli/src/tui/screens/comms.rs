@@ -271,7 +271,7 @@ impl CommsState {
                 self.channels.push(info);
                 self.channel_list_state
                     .select(Some(self.channels.len() - 1));
-                self.status_msg = format!("Channel added. Reload config to apply.");
+                self.status_msg = "Channel added. Reload config to apply.".to_string();
                 self.focus = CommsFocus::Channels;
                 return CommsAction::Refresh;
             }
@@ -936,7 +936,7 @@ fn draw_channel_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
                     ),
                     Span::styled(format!("{token} "), Style::default().fg(theme::GREEN)),
                     Span::styled(
-                        format!("{enabled}"),
+                        enabled.to_string(),
                         Style::default().fg(theme::TEXT_TERTIARY),
                     ),
                 ]))
@@ -946,7 +946,7 @@ fn draw_channel_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
     let list = List::new(items)
         .block(Block::default().borders(Borders::NONE))
         .highlight_style(Style::default().fg(theme::ACCENT));
-    let mut list_state = state.channel_list_state.clone();
+    let mut list_state = state.channel_list_state;
     f.render_stateful_widget(list, area, &mut list_state);
     state.channel_list_state = list_state;
 }
