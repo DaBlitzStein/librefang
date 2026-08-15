@@ -11,6 +11,12 @@
 //! networking, no LLM credentials) and drive the agent-types router via
 //! `tower::ServiceExt::oneshot`.
 
+// The process-wide `crud_lock` is intentionally held across the whole test
+// body (including awaits): it serializes CRUD tests against each other so
+// they do not interleave kernel state. A test-only std mutex, held for the
+// test's duration, is exactly its purpose.
+#![allow(clippy::await_holding_lock)]
+
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;

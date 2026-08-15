@@ -11818,7 +11818,6 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
             message_timeout_secs: 300,
             extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
-            ..Default::default()
         },
         ..KernelConfig::default()
     };
