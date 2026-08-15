@@ -1844,6 +1844,92 @@ mod tests {
         kernel.shutdown();
     }
 
+    // ── workflow_create injection (profile-scoped agents) ──────────────────
+
+    fn kernel_with_agent_manifest(
+        manifest_toml: &str,
+    ) -> (LibreFangKernel, AgentId, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let cfg = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+        let manifest: librefang_types::agent::AgentManifest =
+            toml::from_str(manifest_toml).expect("manifest should parse");
+        let id = kernel.spawn_agent(manifest).expect("agent should spawn");
+        (kernel, id, dir)
+    }
+
+    /// A profile-scoped agent whose profile never lists `workflow_*` tools
+    /// must still receive `workflow_create` (the injection gate). This test
+    /// fails on a tree without the injection.
+    #[test]
+    fn workflow_create_injected_for_profile_scoped_agent() {
+        let (kernel, id, _dir) = kernel_with_agent_manifest(
+            r#"
+name = "researcher"
+description = "test"
+module = "builtin:chat"
+profile = "research"
+"#,
+        );
+        let tools = kernel.available_tools(id);
+        assert!(
+            tools.iter().any(|t| t.name == "workflow_create"),
+            "profile-scoped agents must receive workflow_create via injection"
+        );
+        kernel.shutdown();
+    }
+
+    /// A per-agent `tool_blocklist` entry must still win over the injection.
+    #[test]
+    fn tool_blocklist_wins_over_workflow_create_injection() {
+        let (kernel, id, _dir) = kernel_with_agent_manifest(
+            r#"
+name = "researcher"
+description = "test"
+module = "builtin:chat"
+profile = "research"
+tool_blocklist = ["workflow_create"]
+"#,
+        );
+        let tools = kernel.available_tools(id);
+        assert!(
+            !tools.iter().any(|t| t.name == "workflow_create"),
+            "tool_blocklist must override the workflow_create injection"
+        );
+        kernel.shutdown();
+    }
+
+    /// A non-empty `tool_allowlist` that does not name `workflow_create`
+    /// must still win over the injection.
+    #[test]
+    fn tool_allowlist_wins_over_workflow_create_injection() {
+        let (kernel, id, _dir) = kernel_with_agent_manifest(
+            r#"
+name = "researcher"
+description = "test"
+module = "builtin:chat"
+profile = "research"
+tool_allowlist = ["web_fetch"]
+"#,
+        );
+        let tools = kernel.available_tools(id);
+        assert!(
+            !tools.iter().any(|t| t.name == "workflow_create"),
+            "non-empty tool_allowlist without workflow_create must override the injection"
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "web_fetch"),
+            "allowlisted tools must survive"
+        );
+        kernel.shutdown();
+    }
+
     // ── build_reviewer_candidate ────────────────────────────────────────────
 
     /// Verify that `build_reviewer_candidate` populates all fields correctly
