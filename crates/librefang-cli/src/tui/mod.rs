@@ -416,20 +416,20 @@ impl App {
                 self.goals.loading = false;
             }
             AppEvent::GoalCreated(id) => {
-                self.goals.status_msg = format!("Goal created: {id}");
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-created", &[("id", &id)]);
                 self.refresh_goals();
             }
             AppEvent::GoalDeleted(id) => {
                 self.goals.goals.retain(|g| g.id != id);
                 self.goals.refilter();
-                self.goals.status_msg = format!("Goal deleted: {id}");
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-deleted", &[("id", &id)]);
             }
             AppEvent::GoalRunStarted(id) => {
-                self.goals.status_msg = format!("Run started for goal: {id}");
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-started", &[("id", &id)]);
                 self.refresh_goals();
             }
             AppEvent::GoalRunStopped(id) => {
-                self.goals.status_msg = format!("Run stopped for goal: {id}");
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-stopped", &[("id", &id)]);
                 self.refresh_goals();
             }
             AppEvent::MemoryAgentsLoaded(agents) => {

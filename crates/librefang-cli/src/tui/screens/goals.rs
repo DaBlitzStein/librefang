@@ -340,7 +340,7 @@ impl GoalsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut GoalsState) {
-    let inner = widgets::render_screen_block(f, area, "\u{2316} Goals");
+    let inner = widgets::render_screen_block(f, area, &crate::i18n::t("tui-goals-title"));
 
     if state.create_open {
         draw_create(f, inner, state);
@@ -373,7 +373,7 @@ fn draw_list_panel(f: &mut Frame, area: Rect, state: &mut GoalsState) {
         let search_hint = if state.search_buf.is_empty() {
             String::new()
         } else {
-            format!("  filter: {}", state.search_buf)
+            crate::i18n::t_args("tui-goals-filter", &[("query", &state.search_buf)])
         };
         f.render_widget(
             Paragraph::new(vec![Line::from(vec![
@@ -389,9 +389,11 @@ fn draw_list_panel(f: &mut Frame, area: Rect, state: &mut GoalsState) {
 
     // List
     if state.loading {
-        f.render_widget(widgets::spinner(state.tick, "Loading goals..."), chunks[1]);
+        let loading_text = crate::i18n::t("tui-goals-loading");
+        f.render_widget(widgets::spinner(state.tick, &loading_text), chunks[1]);
     } else if state.filtered.is_empty() {
-        f.render_widget(widgets::empty_state("No goals found."), chunks[1]);
+        let empty_text = crate::i18n::t("tui-goals-empty");
+        f.render_widget(widgets::empty_state(&empty_text), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .filtered
@@ -423,10 +425,7 @@ fn draw_list_panel(f: &mut Frame, area: Rect, state: &mut GoalsState) {
 
     // Hints
     f.render_widget(
-        widgets::status_or_hint(
-            &state.status_msg,
-            "  / search | n new | d delete | s start/stop | Enter detail | r refresh",
-        ),
+        widgets::status_or_hint(&state.status_msg, &crate::i18n::t("tui-goals-hints")),
         chunks[2],
     );
 }
@@ -439,7 +438,10 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
     let idx = match state.selected_goal {
         Some(i) if i < state.goals.len() => i,
         _ => {
-            f.render_widget(widgets::empty_state("No goal selected."), area);
+            f.render_widget(
+                widgets::empty_state(&crate::i18n::t("tui-goals-none-selected")),
+                area,
+            );
             return;
         }
     };
@@ -512,7 +514,7 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
     ]));
     if let Some(ref em) = g.evaluator_model {
         lines.push(Line::from(vec![
-            Span::styled("  Goal Judge: ", theme::dim_style()),
+            Span::styled(crate::i18n::t("tui-goals-judge-label"), theme::dim_style()),
             Span::styled(em.as_str(), Style::default().fg(theme::CYAN)),
         ]));
     }
@@ -532,7 +534,7 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
         };
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  Run Phase: ", theme::dim_style()),
+            Span::styled(crate::i18n::t("tui-goals-phase-label"), theme::dim_style()),
             Span::styled(phase, phase_style),
         ]));
         if !max_iter.is_empty() {
@@ -570,11 +572,11 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
     );
 
     let run_hint = if g.run_phase.as_deref() == Some("running") {
-        "s stop run"
+        crate::i18n::t("tui-goals-hint-stop")
     } else {
-        "s start run"
+        crate::i18n::t("tui-goals-hint-start")
     };
-    let hint = format!("  q/Esc close | {run_hint} | r refresh");
+    let hint = crate::i18n::t_args("tui-goals-detail-hints", &[("run_hint", &run_hint)]);
     f.render_widget(widgets::hint_bar(&hint), chunks[3]);
 }
 
@@ -596,7 +598,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
         Paragraph::new(Line::from(vec![
             Span::styled("  \u{2316} ", Style::default().fg(theme::ACCENT)),
             Span::styled(
-                "New Goal",
+                crate::i18n::t("tui-goals-new-title"),
                 Style::default()
                     .fg(theme::TEXT_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -622,39 +624,43 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     let mut step_line = vec![Span::raw("  ")];
     step_line.extend(progress);
     step_line.push(Span::styled(
-        format!("  step {}/6", state.create_step + 1),
+        crate::i18n::t_args(
+            "tui-goals-step",
+            &[("n", &(state.create_step + 1).to_string())],
+        ),
         Style::default().fg(theme::TEXT_SECONDARY),
     ));
     f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
 
-    let (label, value, hint): (&str, &str, &str) = match state.create_step {
-        0 => ("Title:", &state.create_title, "e.g. \"Fix login timeout\""),
+    let judge_label = crate::i18n::t("tui-goals-judge");
+    let (label, value, hint): (&str, &str, String) = match state.create_step {
+        0 => (
+            "Title:",
+            &state.create_title,
+            crate::i18n::t("tui-goals-example"),
+        ),
         1 => (
             "Description:",
             &state.create_desc,
-            "What should the agent accomplish?",
+            crate::i18n::t("tui-goals-prompt"),
         ),
         2 => (
             "Agent:",
             &state.create_agent_id,
-            "UUID or empty to auto-spawn one",
+            crate::i18n::t("tui-goals-agent-hint"),
         ),
-        3 => (
-            "Auto-review:",
-            "",
-            "Toggle Space/Tab — verifier checks quality each iteration",
-        ),
+        3 => ("Auto-review:", "", crate::i18n::t("tui-goals-verify-hint")),
         4 => (
             "Reviewer:",
             &state.create_verify_agent_id,
-            "UUID or empty to auto-spawn a reviewer",
+            crate::i18n::t("tui-goals-reviewer-hint"),
         ),
         5 => (
-            "Goal Judge:",
+            &judge_label,
             &state.create_evaluator_model,
-            "Model for done-check, e.g. \"claude-haiku\" (optional)",
+            crate::i18n::t("tui-goals-model-hint"),
         ),
-        _ => ("", &state.create_title, ""),
+        _ => ("", &state.create_title, String::new()),
     };
 
     f.render_widget(
@@ -679,9 +685,9 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     } else {
         // Step 3 is the toggle — show Auto-review status
         let toggle_text = if state.create_loop_engineering {
-            "\u{25a3} Auto-review enabled (reviewer will check each iteration)"
+            crate::i18n::t("tui-goals-review-on")
         } else {
-            "\u{25a1} Auto-review disabled"
+            crate::i18n::t("tui-goals-review-off")
         };
         f.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
@@ -705,38 +711,47 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     }
 
     let hint_text = if state.create_step >= 4 {
-        "Esc back | Enter submit"
+        crate::i18n::t("tui-goals-nav-submit")
     } else if state.create_step == 3 {
-        "Esc back | Space/Tab toggle | Enter next"
+        crate::i18n::t("tui-goals-nav-toggle")
     } else {
-        "Esc back | Enter next"
+        crate::i18n::t("tui-goals-nav-next")
     };
-    f.render_widget(widgets::hint_bar(hint_text), chunks[8]);
+    f.render_widget(widgets::hint_bar(&hint_text), chunks[8]);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Map a goal status string to a (badge_text, style) pair.
-fn goal_status_badge(status: &str) -> (&'static str, Style) {
+fn goal_status_badge(status: &str) -> (String, Style) {
     let lower = status.to_lowercase();
     if lower.contains("in_progress") || lower.contains("running") || lower.contains("active") {
         (
-            "\u{25cf} ACTV",
+            crate::i18n::t("tui-goals-phase-actv"),
             Style::default()
                 .fg(theme::GREEN)
                 .add_modifier(Modifier::BOLD),
         )
     } else if lower.contains("completed") || lower.contains("done") {
-        ("\u{25cb} DONE", Style::default().fg(theme::ACCENT_DIM))
+        (
+            crate::i18n::t("tui-goals-phase-done"),
+            Style::default().fg(theme::ACCENT_DIM),
+        )
     } else if lower.contains("cancelled") || lower.contains("cancel") {
-        ("\u{25cb} CANC", Style::default().fg(theme::TEXT_TERTIARY))
+        (
+            crate::i18n::t("tui-goals-phase-canc"),
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )
     } else if lower.contains("failed") || lower.contains("error") {
         (
-            "\u{25cf} FAIL",
+            crate::i18n::t("tui-goals-phase-fail"),
             Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
         )
     } else {
         // pending / default
-        ("\u{25cb} PEND", Style::default().fg(theme::YELLOW))
+        (
+            crate::i18n::t("tui-goals-phase-pend"),
+            Style::default().fg(theme::YELLOW),
+        )
     }
 }

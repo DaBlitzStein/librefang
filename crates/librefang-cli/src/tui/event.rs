@@ -2475,7 +2475,7 @@ pub fn spawn_create_goal(
                     let err_body: serde_json::Value = resp.json().unwrap_or_default();
                     let msg = err_body["error"]
                         .as_str()
-                        .unwrap_or("Failed to create goal")
+                        .unwrap_or(&crate::i18n::t("tui-goal-create-failed"))
                         .to_string();
                     let _ = tx.send(AppEvent::FetchError(msg));
                 }
@@ -2485,9 +2485,9 @@ pub fn spawn_create_goal(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Goal management not available in-process".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
         }
     });
 }
@@ -2505,14 +2505,16 @@ pub fn spawn_delete_goal(backend: BackendRef, goal_id: String, tx: mpsc::Sender<
                     let _ = tx.send(AppEvent::GoalDeleted(goal_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError("Failed to delete goal".to_string()));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-delete-failed",
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Goal management not available in-process".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
         }
     });
 }
@@ -2533,19 +2535,22 @@ pub fn spawn_start_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Send
                     let err_body: serde_json::Value = resp.json().unwrap_or_default();
                     let msg = err_body["error"]
                         .as_str()
-                        .unwrap_or("Failed to start goal run")
+                        .unwrap_or(&crate::i18n::t("tui-goal-start-failed"))
                         .to_string();
                     let _ = tx.send(AppEvent::FetchError(msg));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Start goal run: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-goal-start-error",
+                        &[("error", &e.to_string())],
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Goal management not available in-process".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
         }
     });
 }
@@ -2563,14 +2568,14 @@ pub fn spawn_stop_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sende
                     let _ = tx.send(AppEvent::GoalRunStopped(goal_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError("Failed to stop goal run".to_string()));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-goal-stop-failed")));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Goal management not available in-process".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
         }
     });
 }

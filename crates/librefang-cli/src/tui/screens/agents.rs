@@ -1817,6 +1817,7 @@ fn draw_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     let prompt = Paragraph::new(crate::i18n::t("tui-agents-prompt-routing"));
     f.render_widget(prompt, chunks[0]);
 
+    let space_toggle = crate::i18n::t("tui-agents-space-toggle");
     let mut lines = vec![Line::from(vec![
         Span::raw("  Mode: "),
         if state.model_mode == "flexible" {
@@ -1829,34 +1830,35 @@ fn draw_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) {
         } else {
             Span::styled("Fixed", Style::default().fg(theme::YELLOW))
         },
-        Span::styled("  (Space to toggle)", theme::dim_style()),
+        Span::styled(&space_toggle, theme::dim_style()),
     ])];
 
     if state.model_mode == "flexible" {
         // Cost budget
         lines.push(Line::from(""));
         let current_budget = COST_BUDGET_OPTIONS[state.cost_budget_idx];
+        let hl_change = crate::i18n::t("tui-agents-hl-change");
         lines.push(Line::from(vec![
-            Span::styled("  Cost Budget: ", Style::default()),
+            Span::styled(crate::i18n::t("tui-agents-cost-budget"), Style::default()),
             Span::styled(
                 format!("< {} >", current_budget),
                 Style::default()
                     .fg(theme::CYAN)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  (h/l to change)", theme::dim_style()),
+            Span::styled(hl_change, theme::dim_style()),
         ]));
 
         // Allowed profiles
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Allowed Profiles (Tab to toggle):",
+            crate::i18n::t("tui-agents-allowed-profiles"),
             Style::default().fg(theme::TEXT_PRIMARY),
         )]));
 
         if state.router_profiles.is_empty() {
             lines.push(Line::from(vec![Span::styled(
-                "    (no profiles available)",
+                crate::i18n::t("tui-agents-no-profiles"),
                 theme::dim_style(),
             )]));
         } else {

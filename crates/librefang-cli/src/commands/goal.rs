@@ -38,12 +38,18 @@ pub(crate) fn cmd_goal(
         Some(id) => id.to_string(),
         None => {
             let err_msg = create_body["error"].as_str().unwrap_or("Unknown error");
-            eprintln!("Error creating goal: {err_msg}");
+            eprintln!(
+                "{}",
+                crate::i18n::t_args("cmd-goal-create-error", &[("error", err_msg)])
+            );
             std::process::exit(1);
         }
     };
 
-    println!("Goal created: {goal_id}");
+    println!(
+        "{}",
+        crate::i18n::t_args("cmd-goal-created", &[("id", &goal_id)])
+    );
 
     // 2. Start the goal run via POST /api/goals/{id}/start
     let mut start_payload = serde_json::json!({});
@@ -60,7 +66,10 @@ pub(crate) fn cmd_goal(
 
     if start_body.get("error").is_some() {
         let err_msg = start_body["error"].as_str().unwrap_or("Unknown error");
-        eprintln!("Error starting goal run: {err_msg}");
+        eprintln!(
+            "{}",
+            crate::i18n::t_args("cmd-goal-start-error", &[("error", err_msg)])
+        );
         std::process::exit(1);
     }
 
@@ -71,7 +80,7 @@ pub(crate) fn cmd_goal(
     }
 
     // 3. With --watch: poll GET /api/goals/{id}/run every 2s and print progress.
-    eprintln!("Watching goal run (Ctrl+C to stop)...");
+    eprintln!("{}", crate::i18n::t("cmd-goal-watching"));
     loop {
         std::thread::sleep(Duration::from_secs(2));
 
@@ -84,21 +93,34 @@ pub(crate) fn cmd_goal(
         let progress = run_body["run"]["last_progress"].as_u64().unwrap_or(0);
 
         eprintln!(
-            "  [{}/{}] phase={} progress={}%",
-            iteration, max_it, phase, progress,
+            "{}",
+            crate::i18n::t_args(
+                "cmd-goal-progress",
+                &[
+                    ("current", &iteration.to_string()),
+                    ("total", &max_it.to_string()),
+                    ("phase", phase),
+                    ("progress", &progress.to_string()),
+                ],
+            ),
         );
 
         if !running {
             match phase {
-                "finished" => eprintln!("  Goal finished successfully!"),
-                "max_iterations_reached" => eprintln!("  Goal reached max iterations."),
-                "rate_limited" => eprintln!("  Goal run rate-limited."),
-                "stopped" => eprintln!("  Goal run stopped."),
+                "finished" => eprintln!("{}", crate::i18n::t("cmd-goal-finished")),
+                "max_iterations_reached" => {
+                    eprintln!("{}", crate::i18n::t("cmd-goal-max-iterations"))
+                }
+                "rate_limited" => eprintln!("{}", crate::i18n::t("cmd-goal-rate-limited")),
+                "stopped" => eprintln!("{}", crate::i18n::t("cmd-goal-stopped")),
                 _ => {}
             }
             if let Some(err) = run_body["run"]["last_error"].as_str() {
                 if !err.is_empty() {
-                    eprintln!("  error: {err}");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::t_args("cmd-goal-error", &[("error", err)])
+                    );
                 }
             }
             break;
