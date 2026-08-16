@@ -1688,16 +1688,21 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
                         .json::<serde_json::Value>()
                         .ok()
                         .and_then(|b| b.get("error").and_then(|v| v.as_str()).map(String::from))
-                        .unwrap_or_else(|| format!("HTTP {http_status}"));
-                    let _ = tx.send(AppEvent::FetchError(format!(
-                        "{}: {detail}",
-                        crate::i18n::t_args("tui-event-skill-install-failed", &[("slug", &slug)],)
+                        .unwrap_or_else(|| {
+                            crate::i18n::t_args(
+                                "tui-event-skill-install-http-fallback",
+                                &[("status", http_status.as_str())],
+                            )
+                        });
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-skill-install-failed-detail",
+                        &[("slug", &slug), ("detail", &detail)],
                     )));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!(
-                        "{}: {e}",
-                        crate::i18n::t_args("tui-event-skill-install-failed", &[("slug", &slug)],)
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-skill-install-failed-detail",
+                        &[("slug", &slug), ("detail", &e.to_string())],
                     )));
                 }
             }
