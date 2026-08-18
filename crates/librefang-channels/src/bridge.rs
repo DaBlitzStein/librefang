@@ -7847,7 +7847,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_command_agents() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
@@ -7890,7 +7890,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_command_agent_select() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
@@ -8306,7 +8306,7 @@ mod tests {
     /// not to the first-registered channel default for the channel type.
     #[tokio::test]
     async fn command_resolution_respects_account_id() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
         let agent_c = AgentId::new();
@@ -8377,7 +8377,7 @@ mod tests {
     /// instance default all outrank the router store.
     #[tokio::test]
     async fn agent_command_persists_conversation_binding() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
 
@@ -8405,7 +8405,7 @@ mod tests {
             &ChannelType::Telegram,
             Some("bot-a"),
             None,
-            &thread_ownership,
+            &sender.platform_id,
         )
         .await;
         assert!(result.contains("Now talking to agent: agent-B"));
@@ -8437,7 +8437,7 @@ mod tests {
     /// send can apply it per turn.
     #[tokio::test]
     async fn think_command_records_set_thinking_on_resolved_agent() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
 
@@ -8466,7 +8466,7 @@ mod tests {
             &ChannelType::Telegram,
             Some("bot-b"),
             None,
-            &thread_ownership,
+            &sender.platform_id,
         )
         .await;
         assert!(
@@ -8486,7 +8486,7 @@ mod tests {
     /// override which agent handles bot-b's traffic for the same user.
     #[tokio::test]
     async fn agent_command_does_not_leak_across_bots() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
         let agent_c = AgentId::new();
@@ -9454,7 +9454,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_command_btw_no_args() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![]),
         });
@@ -9482,7 +9482,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_command_btw_no_agent_selected() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
@@ -9512,7 +9512,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_help_includes_btw_command() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![]),
         });
