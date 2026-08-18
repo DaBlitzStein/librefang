@@ -2984,65 +2984,22 @@ export function ChatPage() {
   );
 
   const handleSaveWorkflow = useCallback((content: string) => {
-    // Iterate all fenced blocks and try parsing each as JSON with a
-    // "steps" key — the first valid one wins. Falls back to the raw
-    // message itself (agents sometimes emit bare JSON).
-    const candidates: string[] = [];
-    const fenceRe = /```(?:json|js|ts)?\s*\n?([\s\S]*?)\n?```/g;
-    let m: RegExpExecArray | null;
-    while ((m = fenceRe.exec(content)) !== null) {
-      candidates.push(m[1]);
-    }
-    candidates.push(content);
-
-    let parsed: { steps?: unknown[]; name?: string; description?: string } | null = null;
-    for (const candidate of candidates) {
+    // Extract the first JSON code block or object from the message
+    const jsonMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) ??
+      content.match(/(\{[\s\S]*"steps"[\s\S]*\})/);
+    if (jsonMatch) {
       try {
-        const attempt = JSON.parse(candidate);
-        if (attempt && Array.isArray(attempt.steps)) {
-          parsed = attempt;
-          break;
-        }
+        const parsed = JSON.parse(jsonMatch[1]);
+        sessionStorage.setItem("canvas-draft", JSON.stringify(parsed));
+        addToast(t("workflows.saved_to_canvas"), "success");
+        navigate({ to: "/canvas" });
       } catch {
-        // not JSON — try next candidate
-      }
-    }
-
-    if (parsed) {
-      try {
-        // Convert workflow JSON to canvas template shape so CanvasPage
-        // can load it: each step becomes a node.
-        const nodes = (parsed.steps ?? []).map((rawStep, i: number) => {
-          const s = rawStep as Record<string, unknown>;
-          return {
-          id: `step-${i + 1}`,
-          type: "agent",
-          position: { x: 100, y: i * 150 },
-          data: {
-            label: (s.name as string) ?? `Step ${i + 1}`,
-            agentName: (s.agent as string) ?? "",
-            prompt: (s.prompt_template as string) ?? "",
-            outputVar: (s.output_var as string) ?? "",
-            dependsOn: (s.depends_on as string[]) ?? [],
-            errorMode: (s.error_mode as string) ?? "fail",
-            timeoutSecs: (s.timeout_secs as number) ?? 120,
-          },
-          };
-        });
-        sessionStorage.setItem("workflowTemplate", JSON.stringify({
-          nodes,
-          name: (parsed.name as string) ?? "Agent workflow",
-          description: (parsed.description as string) ?? "",
-        }));
-        addToast("Workflow saved — opening canvas", "success");
-        navigate({ to: "/canvas", search: {} } as never);
-      } catch {
-        addToast("Could not parse workflow JSON from message", "error");
+        addToast(t("workflows.invalid_json"), "error");
       }
     } else {
-      addToast("No workflow JSON found in message", "error");
+      addToast(t("workflows.no_json_found"), "error");
     }
-  }, [navigate]);
+  }, [navigate, t]);
 
   const handleCopy = useCallback(async (messageId: string, content: string) => {
     if (await copyToClipboard(content)) {
