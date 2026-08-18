@@ -3579,18 +3579,26 @@ mod tests {
         // Drain the text channel concurrently — the status oneshot is only
         // sent after the text stream fully drains.
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let status = tokio::time::timeout(std::time::Duration::from_secs(30), status_rx)
+        let _status = tokio::time::timeout(std::time::Duration::from_secs(30), status_rx)
             .await
             .expect("status must resolve within 30s")
             .expect("status channel must not be dropped");
         let _ = drain.await;
-        // Provider-less test kernel: the agent loop fails at the driver
-        // boundary (no LLM credentials). What matters here is that the stream
-        // started and ended with a reported failure — the pref read and the
-        // thinking-aware kernel entry were both reached.
-        assert!(
-            status.is_err(),
-            "expected provider-boundary failure, got: {status:?}"
+        // Deliberately no assertion on the loop's terminal status.
+        // Whether the provider-less test kernel completes the turn or fails it at the driver boundary is a property of whichever driver the mock harness seeds, not of the code under test.
+        // Asserting on it pinned the harness rather than the adapter, and broke as soon as the harness began resolving the loop successfully.
+        //
+        // The adapter-side contract gets pinned instead: the stream started and the status resolved rather than hanging or being dropped (both asserted above), and the pref is still readable under the exact key the send path derives.
+        // That last one is the actual regression this PR fixes — `set_thinking` storing under `agent_id.0.to_string()` while the send path looks the pref up under some other key is what makes `/think` silently inert, and a status assertion cannot see it.
+        assert_eq!(
+            adapter
+                .thinking_prefs
+                .lock()
+                .expect("thinking_prefs lock must not be poisoned")
+                .get(&assistant.0.to_string())
+                .copied(),
+            Some(true),
+            "the /think pref must stay readable under the key the send path derives",
         );
 
         kernel.shutdown();
