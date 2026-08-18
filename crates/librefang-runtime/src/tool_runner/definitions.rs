@@ -139,7 +139,6 @@ pub const ALWAYS_NATIVE_TOOLS: &[&str] = &[
     tool_name::FILE_LIST,
     tool_name::CODE_SEARCH,
     tool_name::AGENT_SEND,
-    tool_name::AGENT_SPAWN,
     tool_name::WORKFLOW_CREATE,
     tool_name::AGENT_LIST,
     tool_name::CHANNEL_SEND,
@@ -1285,9 +1284,9 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                                     "prompt_template": { "type": "string", "description": "The prompt sent to the agent. Use {{input}} for the previous step's output, {{var_name}} for named variables, and {{param}} for workflow input parameters." },
                                     "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps this step depends on. When set, steps execute in DAG order instead of sequentially." },
                                     "output_var": { "type": "string", "description": "When set, this step's output is stored as a named variable accessible in later steps via {{name}}." },
-                                    "mode": { "type": "string", "enum": ["sequential", "fan_out", "collect", "conditional", "loop", "wait", "approval"], "description": "Execution mode. Default: sequential." },
+                                    "mode": { "type": "string", "enum": ["sequential", "fan_out", "collect"], "description": "Execution mode. Default: sequential. (conditional / loop / wait / approval require workflow-toml authoring until the object-form schema lands.)" },
                                     "timeout_secs": { "type": "integer", "description": "Max seconds for this step. Default: 120." },
-                                    "error_mode": { "type": "string", "enum": ["fail", "skip", "retry"], "description": "What to do on failure. Default: fail." }
+                                    "error_mode": { "type": "string", "enum": ["fail", "skip"], "description": "What to do on failure. Default: fail. (retry requires workflow-toml authoring until the object-form schema lands.)" }
                                 },
                                 "required": ["name", "agent", "prompt_template"]
                             }
