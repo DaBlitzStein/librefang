@@ -1712,10 +1712,10 @@
       "pending_review_other": "{{count}} workflow runs awaiting operator review",
       "empty_artifact": "(empty artifact)"
     },
-    "save_from_chat": "Save as Workflow",
-    "saved_to_canvas": "Workflow saved — opening canvas",
-    "invalid_json": "Could not parse workflow JSON from message",
-    "no_json_found": "No workflow JSON found in message"
+    "save_from_chat": "Save as workflow",
+    "saved_to_canvas": "Workflow opened in Canvas",
+    "invalid_json": "That JSON block isn't valid workflow JSON",
+    "no_json_found": "No JSON block in this message to save"
   },
   "scheduler": {
     "title": "Scheduler",
