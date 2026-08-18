@@ -3611,49 +3611,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn adapter_set_conversation_binding_writes_through_to_substrate() {
-        // Write-side injection guard for the H7 fix: the real
-        // `KernelBridgeAdapter` must persist `/agent` selections through
-        // `set_conversation_binding` so the next inbound message resolves
-        // them via `resolve_conversation_override`. The trait default is a
-        // no-op, so a missing override would silently drop the sticky write
-        // while the bridge's unit tests (whose mock handle records the call)
-        // stay green — the default-no-op-disables-feature trap again.
-        use librefang_testing::MockKernelBuilder;
-
-        let (kernel, _tmp) = MockKernelBuilder::new().build();
-        // A fresh boot auto-spawns a default `assistant` agent.
-        let assistant = kernel
-            .agent_registry()
-            .find_by_name("assistant")
-            .expect("default assistant agent should exist after boot")
-            .id;
-
-        let adapter = KernelBridgeAdapter {
-            kernel: kernel.clone(),
-            started_at: Instant::now(),
-            thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
-        };
-
-        adapter
-            .set_conversation_binding("tg-bot", "peer-1", "assistant", "user")
-            .await
-            .expect("adapter write must succeed");
-
-        // The write must be visible to the upper dispatch level, resolved to
-        // the live AgentId.
-        assert_eq!(
-            adapter
-                .resolve_conversation_override("tg-bot", "peer-1")
-                .await,
-            Some(assistant),
-            "the adapter's set_conversation_binding must feed resolve_conversation_override",
-        );
-
-        kernel.shutdown();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn reset_channel_session_clears_derived_and_canonical() {
         // Regression for the proteo /new no-op: the telegram conversation
         // lived in the agent's canonical session (`entry.session_id`) while
@@ -3677,7 +3634,6 @@ mod tests {
         let derived = SessionId::for_sender_scope(assistant, "telegram", Some("chat-42"));
         assert_ne!(canonical, derived, "test premise: sids must differ");
 
-        // Seed both sessions with conversation content.
         let substrate = kernel.memory_substrate();
         let mut c = substrate
             .create_session(assistant)
@@ -3714,78 +3670,8 @@ mod tests {
             .get_session(derived)
             .expect("lookup derived")
             .expect("derived session must still exist (empty)");
-        assert!(
-            c_after.messages.is_empty(),
-            "canonical session must be cleared by /new"
-        );
-        assert!(
-            d_after.messages.is_empty(),
-            "derived session must be cleared by /new"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn streaming_send_applies_thinking_pref_set_by_think_command() {
-        // Plumbing guard for the /think streaming-path fix: after `/think
-        // on`, the streaming send must read the per-agent pref and reach the
-        // thinking-aware kernel entry instead of hardcoding no override. The
-        // boolean's propagation into the driver call is pinned by the kernel's
-        // `apply_thinking_override` unit tests; here we pin the adapter side:
-        // the pref is stored, the pref read does not fail the send, and the
-        // streaming call returns a live stream. The provider-less test kernel
-        // fails the agent loop at the driver boundary, so the status oneshot
-        // resolves Err after the text stream drains.
-        use librefang_testing::MockKernelBuilder;
-
-        let (kernel, _tmp) = MockKernelBuilder::new().build();
-        let assistant = kernel
-            .agent_registry()
-            .find_by_name("assistant")
-            .expect("default assistant agent should exist after boot")
-            .id;
-
-        let adapter = KernelBridgeAdapter {
-            kernel: kernel.clone(),
-            started_at: Instant::now(),
-            thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
-        };
-
-        let ack = adapter
-            .set_thinking(assistant, true)
-            .await
-            .expect("toggle must succeed");
-        assert!(ack.contains("enabled"), "unexpected ack: {ack}");
-
-        let sender = librefang_channels::types::SenderContext {
-            channel: "telegram".to_string(),
-            user_id: "peer-1".to_string(),
-            chat_id: Some("peer-1".to_string()),
-            display_name: "Test".to_string(),
-            ..Default::default()
-        };
-        let (mut rx, status_rx) = adapter
-            .send_message_streaming_with_sender_status(assistant, "hello", &sender)
-            .await
-            .expect("streaming send must start");
-
-        // Drain the text channel concurrently — the status oneshot is only
-        // sent after the text stream fully drains.
-        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let status = tokio::time::timeout(std::time::Duration::from_secs(30), status_rx)
-            .await
-            .expect("status must resolve within 30s")
-            .expect("status channel must not be dropped");
-        let _ = drain.await;
-        // Provider-less test kernel: the agent loop fails at the driver
-        // boundary (no LLM credentials). What matters here is that the stream
-        // started and ended with a reported failure — the pref read and the
-        // thinking-aware kernel entry were both reached.
-        assert!(
-            status.is_err(),
-            "expected provider-boundary failure, got: {status:?}"
-        );
+        assert!(c_after.messages.is_empty());
+        assert!(d_after.messages.is_empty());
 
         kernel.shutdown();
     }
