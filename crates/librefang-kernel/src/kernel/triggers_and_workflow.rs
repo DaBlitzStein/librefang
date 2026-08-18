@@ -1285,6 +1285,7 @@ impl LibreFangKernel {
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((entry.id, entry.name.clone(), inherit))
                 }
+                StepAgent::ByType { template } => self.resolve_agent_by_type_or_spawn(template),
             }
         };
 
@@ -1389,6 +1390,7 @@ impl LibreFangKernel {
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
                     }
+                    StepAgent::ByType { template } => self.resolve_agent_by_type_or_spawn(template),
                 }
             };
 
@@ -1500,6 +1502,9 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                         let entry = kernel.agents.registry.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
+                    }
+                    StepAgent::ByType { template } => {
+                        kernel.resolve_agent_by_type_or_spawn(template)
                     }
                 }
             }
