@@ -591,6 +591,67 @@ mod tests {
     /// the PR explicitly locks in. If you need to change the format,
     /// announce it in the changelog under a breaking-change bullet and
     /// update this assertion.
+    fn valid_workflow_json(name: &str) -> String {
+        serde_json::json!({
+            "name": name,
+            "description": "review-driven test workflow",
+            "steps": [{
+                "name": "only-step",
+                "agent": "assistant",
+                "prompt_template": "{{input}}"
+            }]
+        })
+        .to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_workflow_success_and_rejections() {
+        let dir = tempfile::tempdir().expect("tempdir for create_workflow test");
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..librefang_types::config::KernelConfig::default()
+        };
+        let kernel = crate::LibreFangKernel::boot_with_config(config)
+            .expect("kernel must boot for create_workflow test");
+        std::mem::forget(dir);
+        let kernel = std::sync::Arc::new(kernel);
+        let runner: &dyn kernel_handle::WorkflowRunner = kernel.as_ref();
+
+        // Success: a valid payload registers the workflow.
+        let ok = runner
+            .create_workflow(&valid_workflow_json("qa-probe"), None)
+            .await
+            .expect("valid workflow must be created");
+        assert_eq!(
+            ok, "qa-probe",
+            "create_workflow returns the normalized workflow name"
+        );
+
+        // Rejection: invalid name charset.
+        let err = runner
+            .create_workflow(&valid_workflow_json("bad name!"), None)
+            .await
+            .expect_err("name with spaces must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("1-64") || msg.contains("A-Za-z0-9"),
+            "the rejection must name the charset/length rule: {msg}"
+        );
+
+        // Rejection: name collision with the just-created workflow.
+        let err = runner
+            .create_workflow(&valid_workflow_json("qa-probe"), None)
+            .await
+            .expect_err("duplicate name must be rejected");
+        assert!(
+            err.to_string().contains("exists"),
+            "the collision must surface as an exists error: {err}"
+        );
+    }
+
     #[test]
     fn workflow_timeout_text_format_is_stable() {
         assert_eq!(
