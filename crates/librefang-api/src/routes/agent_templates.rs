@@ -506,6 +506,20 @@ pub async fn create_agent_type(
             .into_json_tuple();
     }
 
+    // Cross-source collision (#6931 review): a workspace agent with the same
+    // name is also resolvable as a template (dual-source listing), so
+    // creating a template that shadows a live agent's name is a 409 too.
+    let workspace_agent_path = super::system::librefang_home()
+        .join("workspaces")
+        .join("agents")
+        .join(&name);
+    if workspace_agent_path.exists() {
+        return ApiErrorResponse::conflict(format!(
+            "A workspace agent named '{name}' already exists — creating a template with the same name would shadow it"
+        ))
+        .into_json_tuple();
+    }
+
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("Failed to create templates dir: {e}");
         return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
