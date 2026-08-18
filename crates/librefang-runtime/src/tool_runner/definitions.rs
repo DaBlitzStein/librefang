@@ -1281,7 +1281,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                                 "type": "object",
                                 "properties": {
                                     "name": { "type": "string", "description": "Step name for display and variable referencing." },
-                                    "agent": { "type": "string", "description": "Agent name or UUID that executes this step. Use agent_find to discover available agents." },
+                                    "agent": { "type": ["string", "object"], "description": "Agent name, UUID, or { \"type\": \"<template>\" } to auto-spawn from an agent type when no instance exists." },
                                     "prompt_template": { "type": "string", "description": "The prompt sent to the agent. Use {{input}} for the previous step's output, {{var_name}} for named variables, and {{param}} for workflow input parameters." },
                                     "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps this step depends on. When set, steps execute in DAG order instead of sequentially." },
                                     "output_var": { "type": "string", "description": "When set, this step's output is stored as a named variable accessible in later steps via {{name}}." },
