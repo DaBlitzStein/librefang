@@ -624,7 +624,7 @@ impl LibreFangKernel {
 /// Returns None when no template exists; a read/parse failure is logged and
 /// treated as missing so the workflow step surfaces the ByType "not found"
 /// error instead of a raw filesystem error.
-fn load_agent_manifest_from_template_dirs(
+pub(crate) fn load_agent_manifest_from_template_dirs(
     home_dir_boot: &std::path::Path,
     template: &str,
 ) -> Option<AgentManifest> {

@@ -6713,6 +6713,33 @@ async fn workflow_send_message_closure_honours_per_agent_semaphore() {
     Arc::try_unwrap(kernel_arc).ok().unwrap().shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_dry_run_by_type_does_not_spawn() {
+    let kernel = boot_kernel_for_display_tests();
+    write_agent_template(&kernel, "researcher");
+    let before = kernel.agents.registry.count();
+
+    let engine = &kernel.workflows.engine;
+    let wf_id = engine.register(by_type_probe_workflow("researcher")).await;
+    let steps = kernel
+        .dry_run_workflow(wf_id, "input".to_string())
+        .await
+        .expect("dry run must succeed");
+
+    let step = steps.first().expect("one step");
+    assert!(step.agent_found, "the template must resolve on dry run");
+    assert_eq!(step.agent_name.as_deref(), Some("researcher"));
+    assert_eq!(
+        kernel.agents.registry.count(),
+        before,
+        "a dry run must not spawn the step agent"
+    );
+    assert!(
+        kernel.agents.registry.find_by_name("researcher").is_none(),
+        "no instance may exist after a dry run"
+    );
+}
+
 /// Source-shape sentinel for the fix above: the production workflow
 /// `send_message` closure (and its operator-resume twin) in
 /// `triggers_and_workflow.rs` must acquire the per-agent semaphore
