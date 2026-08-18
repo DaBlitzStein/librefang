@@ -287,14 +287,10 @@
     "provider": "제공자",
     "model": "모델",
     "tools": "도구",
-    "skills": "스킬",
     "message": "메시지",
     "result": "결과",
     "noTypes": "아직 정의된 에이전트 유형이 없습니다",
     "confirmDelete": "이 에이전트 유형을 삭제하시겠습니까?",
-    "runSuccess": "작업 완료",
-    "createSuccess": "에이전트 유형이 생성되었습니다",
-    "ephemeral": "임시",
     "iterations": "반복 횟수",
     "latency": "지연 시간",
     "cost": "비용"
@@ -1200,7 +1196,8 @@
     "pending_title": "기술 워크샵 진행 중",
     "pending_load_failed": "대기 중인 후보를 로드하지 못했습니다.",
     "pending_unknown_error": "알 수 없는 오류",
-    "pending_desc": "검토를 기다리는 에이전트 대화에서 캡처된 초안(#3328)"
+    "pending_desc": "검토를 기다리는 에이전트 대화에서 캡처된 초안(#3328)",
+    "viewOnMarketplace": "{{marketplace}}에서 보기"
   },
   "hands": {
     "title": "손",

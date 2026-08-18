@@ -291,6 +291,34 @@ pub async fn get_agent_template(
                             "source".to_string(),
                             serde_json::Value::String(source.to_string()),
                         );
+                        // The flat fields above are the list-row shape the
+                        // dashboard's AgentTypes page reads, and `name` there is
+                        // the *template id* (the `.toml` filename). They collapse
+                        // that id together with the agent name the manifest
+                        // itself declares, and drop `module` / `version` /
+                        // `author` entirely — so a detail response built only
+                        // from them cannot answer "what does this template
+                        // actually declare?".
+                        //
+                        // Expose the parsed manifest under its own key
+                        // alongside them: `name` stays the template id,
+                        // `manifest.name` is the declared agent name, and the
+                        // two are allowed to differ. Additive on purpose — the
+                        // flat fields keep working unchanged.
+                        match serde_json::to_value(&manifest) {
+                            Ok(m) => {
+                                o.insert("manifest".to_string(), m);
+                            }
+                            Err(e) => {
+                                // Serializing a manifest that already parsed
+                                // from TOML should not fail; surface it in the
+                                // log rather than silently shipping a response
+                                // with the key missing.
+                                tracing::warn!(
+                                    "Failed to serialize manifest for template '{name}': {e}"
+                                );
+                            }
+                        }
                         o.insert(
                             "manifest_toml".to_string(),
                             serde_json::Value::String(content),
@@ -473,35 +501,18 @@ pub async fn create_agent_type(
 
     let dir = agent_types_dir();
     let path = dir.join(format!("{name}.toml"));
+    if path.exists() {
+        return ApiErrorResponse::conflict(format!("Agent type '{name}' already exists"))
+            .into_json_tuple();
+    }
 
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("Failed to create templates dir: {e}");
         return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
     }
-    // Atomic create: create_new(true) fails with AlreadyExists instead
-    // of the check-then-write race where two concurrent POSTs both
-    // pass the exists() check and the last writer silently wins.
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut f) => {
-            use std::io::Write;
-            if let Err(e) = f.write_all(toml_content.as_bytes()) {
-                tracing::warn!("Failed to write agent-type '{name}': {e}");
-                let _ = std::fs::remove_file(&path);
-                return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return ApiErrorResponse::conflict(format!("Agent type '{name}' already exists"))
-                .into_json_tuple();
-        }
-        Err(e) => {
-            tracing::warn!("Failed to create agent-type '{name}': {e}");
-            return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
-        }
+    if let Err(e) = std::fs::write(&path, &toml_content) {
+        tracing::warn!("Failed to write agent-type '{name}': {e}");
+        return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
     }
 
     let manifest: AgentManifest = toml::from_str(&toml_content).unwrap_or_default();

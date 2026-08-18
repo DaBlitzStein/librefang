@@ -287,14 +287,10 @@
     "provider": "Provider",
     "model": "Model",
     "tools": "Tools",
-    "skills": "Skills",
     "message": "Message",
     "result": "Result",
     "noTypes": "No agent types defined yet",
     "confirmDelete": "Delete this agent type?",
-    "runSuccess": "Task completed",
-    "createSuccess": "Agent type created",
-    "ephemeral": "Ephemeral",
     "iterations": "Iterations",
     "latency": "Latency",
     "cost": "Cost"
@@ -1200,7 +1196,8 @@
     "pending_title": "Skill workshop pending",
     "pending_load_failed": "Failed to load pending candidates:",
     "pending_unknown_error": "unknown error",
-    "pending_desc": "Drafts captured from agent conversations awaiting your review (#3328)."
+    "pending_desc": "Drafts captured from agent conversations awaiting your review (#3328).",
+    "viewOnMarketplace": "View on {{marketplace}}"
   },
   "hands": {
     "title": "Hands",

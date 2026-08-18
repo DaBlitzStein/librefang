@@ -287,14 +287,10 @@
     "provider": "Провайдер",
     "model": "Модель",
     "tools": "Інструменти",
-    "skills": "Навички",
     "message": "Повідомлення",
     "result": "Результат",
     "noTypes": "Типи агентів ще не визначені",
     "confirmDelete": "Видалити цей тип агента?",
-    "runSuccess": "Завдання виконано",
-    "createSuccess": "Тип агента створено",
-    "ephemeral": "Тимчасовий",
     "iterations": "Ітерації",
     "latency": "Затримка",
     "cost": "Вартість"
@@ -1200,7 +1196,8 @@
     "pending_title": "Очікує Skill workshop",
     "pending_load_failed": "Не вдалося завантажити кандидатів:",
     "pending_unknown_error": "невідома помилка",
-    "pending_desc": "Чернетки, захоплені з розмов агентів, очікують вашого перегляду (#3328)."
+    "pending_desc": "Чернетки, захоплені з розмов агентів, очікують вашого перегляду (#3328).",
+    "viewOnMarketplace": "Переглянути на {{marketplace}}"
   },
   "hands": {
     "title": "Hands",

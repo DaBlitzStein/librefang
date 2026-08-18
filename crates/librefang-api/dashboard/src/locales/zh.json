@@ -287,14 +287,10 @@
     "provider": "提供商",
     "model": "模型",
     "tools": "工具",
-    "skills": "技能",
     "message": "消息",
     "result": "结果",
     "noTypes": "尚未定义智能体类型",
     "confirmDelete": "删除此智能体类型？",
-    "runSuccess": "任务完成",
-    "createSuccess": "智能体类型已创建",
-    "ephemeral": "临时",
     "iterations": "迭代次数",
     "latency": "延迟",
     "cost": "成本"
@@ -1200,7 +1196,8 @@
     "pending_title": "Skill workshop 待处理",
     "pending_load_failed": "加载待处理候选失败:",
     "pending_unknown_error": "未知错误",
-    "pending_desc": "从智能体对话捕获的草稿正在等待你审查（#3328）。"
+    "pending_desc": "从智能体对话捕获的草稿正在等待你审查（#3328）。",
+    "viewOnMarketplace": "在 {{marketplace}} 上查看"
   },
   "hands": {
     "title": "Hands",
