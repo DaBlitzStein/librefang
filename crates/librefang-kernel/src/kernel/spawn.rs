@@ -62,15 +62,38 @@ impl LibreFangKernel {
     pub fn resolve_agent_by_type_or_spawn(
         &self,
         template: &str,
+        owner: Option<AgentId>,
+        fresh: bool,
     ) -> Option<(AgentId, String, bool)> {
-        if let Some(entry) = self.agents.registry.find_by_name(template) {
-            let inherit = entry.manifest.inherit_parent_context;
-            return Some((entry.id, entry.name.clone(), inherit));
+        if !fresh {
+            if let Some(entry) = self.agents.registry.find_by_name(template) {
+                let inherit = entry.manifest.inherit_parent_context;
+                return Some((entry.id, entry.name.clone(), inherit));
+            }
         }
-        let manifest = load_agent_manifest_from_template_dirs(&self.home_dir_boot, template)?;
+        let mut manifest = load_agent_manifest_from_template_dirs(&self.home_dir_boot, template)?;
         let inherit = manifest.inherit_parent_context;
         let name = manifest.name.clone();
-        let id = match self.spawn_agent(manifest) {
+        // Deterministic canonical id for reuse across runs (race-safe via
+        // agent_identities, #4614) — computed explicitly because
+        // spawn_agent_inner derives a RANDOM id once a parent is set,
+        // which would break the find-or-spawn contract. fresh=true
+        // deliberately requests a new random instance per run; the
+        // registry is name-unique (AgentAlreadyExists), so a fresh
+        // instance also gets a unique name tag — it must never shadow
+        // the canonical name in find_by_name anyway.
+        let predetermined = if fresh {
+            let tag: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+            manifest.name = format!("{name}-{tag}");
+            AgentId::new()
+        } else {
+            let derived = AgentId::from_name(&name);
+            self.agents
+                .agent_identities
+                .register_if_absent(&name, derived)
+        };
+        let spawned_name = manifest.name.clone();
+        let id = match self.spawn_agent_inner(manifest, owner, None, Some(predetermined)) {
             Ok(id) => id,
             Err(e) => {
                 warn!(agent_type = %template, error = %e,
@@ -78,7 +101,7 @@ impl LibreFangKernel {
                 return None;
             }
         };
-        Some((id, name, inherit))
+        Some((id, spawned_name, inherit))
     }
 
     /// Pure, side-effect-free spawn pre-checks shared by `spawn_agent_inner` and destructive callers that must validate before mutating state.
