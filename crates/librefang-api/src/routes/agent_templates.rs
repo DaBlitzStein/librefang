@@ -291,6 +291,34 @@ pub async fn get_agent_template(
                             "source".to_string(),
                             serde_json::Value::String(source.to_string()),
                         );
+                        // The flat fields above are the list-row shape the
+                        // dashboard's AgentTypes page reads, and `name` there is
+                        // the *template id* (the `.toml` filename). They collapse
+                        // that id together with the agent name the manifest
+                        // itself declares, and drop `module` / `version` /
+                        // `author` entirely — so a detail response built only
+                        // from them cannot answer "what does this template
+                        // actually declare?".
+                        //
+                        // Expose the parsed manifest under its own key
+                        // alongside them: `name` stays the template id,
+                        // `manifest.name` is the declared agent name, and the
+                        // two are allowed to differ. Additive on purpose — the
+                        // flat fields keep working unchanged.
+                        match serde_json::to_value(&manifest) {
+                            Ok(m) => {
+                                o.insert("manifest".to_string(), m);
+                            }
+                            Err(e) => {
+                                // Serializing a manifest that already parsed
+                                // from TOML should not fail; surface it in the
+                                // log rather than silently shipping a response
+                                // with the key missing.
+                                tracing::warn!(
+                                    "Failed to serialize manifest for template '{name}': {e}"
+                                );
+                            }
+                        }
                         o.insert(
                             "manifest_toml".to_string(),
                             serde_json::Value::String(content),
