@@ -73,6 +73,15 @@ impl LibreFangKernel {
         let id = match self.spawn_agent(manifest) {
             Ok(id) => id,
             Err(e) => {
+                // Concurrent find-or-spawn race: another task may have
+                // registered the canonical instance between our
+                // find_by_name probe and the spawn above. Reuse the
+                // winner instead of failing the step.
+                if let Some(entry) = self.agents.registry.find_by_name(&name) {
+                    warn!(agent_type = %template, error = %e,
+                        "workflow step: lost the spawn race — reusing the winning instance");
+                    return Some((entry.id, entry.name.clone(), inherit));
+                }
                 warn!(agent_type = %template, error = %e,
                     "workflow step: template found but agent spawn failed");
                 return None;
