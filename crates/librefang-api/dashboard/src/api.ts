@@ -1556,6 +1556,8 @@ export interface AgentSkillsResponse {
   available: string[];
   mode: "all" | "allowlist" | "none";
   disabled: boolean;
+  /** Declared in the manifest but not installed yet (allowlist mode only). */
+  pending?: string[];
 }
 
 export async function getAgentSkills(agentId: string): Promise<AgentSkillsResponse> {
