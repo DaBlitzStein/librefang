@@ -6917,7 +6917,7 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
 
     // Depth 0 — accepted.
     // It still fails (the step's agent is not registered), but with `Internal("Workflow failed: ...")`, not the depth refusal.
-    let accepted = kernel.run_workflow(wf_id, "hello".to_string()).await;
+    let accepted = kernel.run_workflow(wf_id, "hello".to_string(), None).await;
     if let Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(msg))) = accepted {
         panic!("a top-level workflow run must not be refused by the depth quota, got: {msg}");
     }
@@ -6931,9 +6931,11 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
     // Depth 2 == `max_agent_call_depth` — refused.
     // Two nested `with_agent_call_depth` frames stand in for two stacked agent turns, which is exactly what the workflow step dispatch establishes in production.
     let refused = librefang_runtime::tool_runner::with_agent_call_depth(
-        librefang_runtime::tool_runner::with_agent_call_depth(
-            kernel.run_workflow(wf_id, "hello".to_string()),
-        ),
+        librefang_runtime::tool_runner::with_agent_call_depth(kernel.run_workflow(
+            wf_id,
+            "hello".to_string(),
+            None,
+        )),
     )
     .await;
     match refused {
@@ -6969,7 +6971,7 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
         let wf_id_str = wf_id.to_string();
         let via_trait = librefang_runtime::tool_runner::with_agent_call_depth(
             librefang_runtime::tool_runner::with_agent_call_depth(WorkflowRunner::run_workflow(
-                &kernel, &wf_id_str, "hello",
+                &kernel, &wf_id_str, "hello", None,
             )),
         )
         .await;
@@ -7001,6 +7003,7 @@ fn by_type_probe_workflow(template: &str) -> crate::workflow::Workflow {
             name: "only-step".to_string(),
             agent: StepAgent::ByType {
                 template: template.to_string(),
+                fresh: false,
             },
             prompt_template: "{{input}}".to_string(),
             mode: StepMode::Sequential,
@@ -7046,8 +7049,8 @@ async fn workflow_step_by_type_spawns_agent_from_template() {
     let sent_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
         match agent_ref {
-            crate::workflow::StepAgent::ByType { template } => {
-                kernel.resolve_agent_by_type_or_spawn(template)
+            crate::workflow::StepAgent::ByType { template, fresh } => {
+                kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
             }
             _ => None,
         }
@@ -7096,8 +7099,8 @@ async fn workflow_step_by_type_reuses_existing_agent() {
         let kernel = std::sync::Arc::clone(kernel);
         let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
             match agent_ref {
-                crate::workflow::StepAgent::ByType { template } => {
-                    kernel.resolve_agent_by_type_or_spawn(template)
+                crate::workflow::StepAgent::ByType { template, fresh } => {
+                    kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
                 }
                 _ => None,
             }
@@ -7142,8 +7145,8 @@ async fn workflow_step_by_type_missing_template_fails_run() {
 
     let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
         match agent_ref {
-            crate::workflow::StepAgent::ByType { template } => {
-                kernel.resolve_agent_by_type_or_spawn(template)
+            crate::workflow::StepAgent::ByType { template, fresh } => {
+                kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
             }
             _ => None,
         }
@@ -7167,11 +7170,112 @@ async fn workflow_step_by_type_missing_template_fails_run() {
     );
 }
 
-/// Source-shape sentinel for the other half of the fix, in the style of `workflow_send_message_closure_contains_per_agent_semaphore_acquire` above.
-///
-/// The behavioral test proves the quota *check* rejects a deep run.
-/// It cannot prove the step dispatch actually enters the depth scope, because observing the depth inside `send_message_full` needs a real LLM turn and this crate's tests have no driver-injection seam.
-/// Without that wrap every nesting level would read depth 0 and the check would never fire, so pin the wiring: the `run_workflow` step dispatch must call `send_message_full` through `with_agent_call_depth`.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_step_by_type_spawns_with_parent_owner() {
+    let kernel = boot_kernel_for_display_tests();
+    write_agent_template(&kernel, "researcher");
+    let owner = kernel
+        .agents
+        .registry
+        .find_by_name("assistant")
+        .expect("default assistant")
+        .id;
+
+    let engine = &kernel.workflows.engine;
+    let wf_id = engine.register(by_type_probe_workflow("researcher")).await;
+    let run_id = engine
+        .create_run_with_owner(wf_id, "input".to_string(), Some(owner))
+        .await
+        .unwrap();
+
+    let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
+        match agent_ref {
+            crate::workflow::StepAgent::ByType { template, fresh } => {
+                kernel.resolve_agent_by_type_or_spawn(template, Some(owner), *fresh)
+            }
+            _ => None,
+        }
+    };
+    let sender = |_id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
+        Ok((msg, 0u64, 0u64))
+    };
+    engine.execute_run(run_id, resolver, sender).await.unwrap();
+
+    let spawned = kernel
+        .agents
+        .registry
+        .find_by_name("researcher")
+        .expect("agent spawned from template");
+    assert_eq!(
+        spawned.parent,
+        Some(owner),
+        "the spawned step agent must record the run owner as its parent"
+    );
+
+    // And a run created without an owner keeps parent None.
+    let wf_id2 = engine.register(by_type_probe_workflow("researcher2")).await;
+    write_agent_template(&kernel, "researcher2");
+    let run_id2 = engine
+        .create_run(wf_id2, "input".to_string())
+        .await
+        .unwrap();
+    let resolver2 = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
+        match agent_ref {
+            crate::workflow::StepAgent::ByType { template, fresh } => {
+                kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+            }
+            _ => None,
+        }
+    };
+    engine
+        .execute_run(run_id2, resolver2, sender)
+        .await
+        .unwrap();
+    let spawned2 = kernel
+        .agents
+        .registry
+        .find_by_name("researcher2")
+        .expect("agent spawned from template");
+    assert_eq!(
+        spawned2.parent, None,
+        "ownerless runs must spawn with parent None"
+    );
+}
+
+#[test]
+fn workflow_step_by_type_fresh_spawns_new_instance_each_run() {
+    let kernel = boot_kernel_for_display_tests();
+    write_agent_template(&kernel, "researcher");
+
+    // Direct helper semantics: fresh=false resolves the same instance every
+    // time (find-or-spawn), fresh=true requests a brand-new instance per run.
+    let reuse_first = kernel
+        .resolve_agent_by_type_or_spawn("researcher", None, false)
+        .expect("helper must find-or-spawn the template");
+    let reuse_second = kernel
+        .resolve_agent_by_type_or_spawn("researcher", None, false)
+        .expect("helper must keep resolving the template");
+    assert_eq!(
+        reuse_first.0, reuse_second.0,
+        "fresh=false must reuse the same instance"
+    );
+
+    let fresh_first = kernel
+        .resolve_agent_by_type_or_spawn("researcher", None, true)
+        .expect("fresh spawn must succeed");
+    let fresh_second = kernel
+        .resolve_agent_by_type_or_spawn("researcher", None, true)
+        .expect("a second fresh spawn must succeed");
+    assert_ne!(
+        fresh_first.0, fresh_second.0,
+        "fresh=true must spawn a new instance per run"
+    );
+    assert_ne!(
+        fresh_first.0, reuse_first.0,
+        "fresh spawns must not reuse the canonical instance"
+    );
+}
+
 #[test]
 fn workflow_step_dispatch_enters_agent_call_depth_scope() {
     let src = include_str!("triggers_and_workflow.rs");

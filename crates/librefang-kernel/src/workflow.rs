@@ -343,7 +343,7 @@ pub enum StepAgent {
     /// Reference an agent type: the resolver reuses the registered agent
     /// with the template's name, or spawns one from the template manifest
     /// on first use.
-    ByType { template: String },
+    ByType { template: String, fresh: bool },
 }
 
 impl<'de> Deserialize<'de> for StepAgent {
@@ -364,6 +364,7 @@ impl<'de> Deserialize<'de> for StepAgent {
                 let id = map.get("id").and_then(|x| x.as_str());
                 let name = map.get("name").and_then(|x| x.as_str());
                 let template = map.get("type").and_then(|x| x.as_str());
+                let fresh = map.get("fresh").and_then(|x| x.as_bool());
                 // Exactly one of `id` / `name` / `type` must be set; the
                 // optional `fresh` key (paired with `type` by the step-flag
                 // feature) is not counted here.
@@ -372,6 +373,16 @@ impl<'de> Deserialize<'de> for StepAgent {
                     return Err(D::Error::custom(
                         "StepAgent: object form must set exactly one of `id`, `name`, or `type`",
                     ));
+                }
+                if map.contains_key("fresh") {
+                    if fresh.is_none() {
+                        return Err(D::Error::custom("StepAgent: `fresh` must be a boolean"));
+                    }
+                    if template.is_none() {
+                        return Err(D::Error::custom(
+                            "StepAgent: `fresh` is only valid together with `type`",
+                        ));
+                    }
                 }
                 if let Some(id) = id {
                     Ok(StepAgent::ById { id: id.to_string() })
@@ -382,6 +393,7 @@ impl<'de> Deserialize<'de> for StepAgent {
                 } else {
                     Ok(StepAgent::ByType {
                         template: template.unwrap().to_string(),
+                        fresh: fresh.unwrap_or(false),
                     })
                 }
             }
@@ -1102,6 +1114,11 @@ pub struct WorkflowRun {
     pub workflow_id: WorkflowId,
     /// Workflow name (copied for quick access).
     pub workflow_name: String,
+    /// The agent (or channel user's agent) that owns this run, when the
+    /// run was started by an agent-facing surface. Spawned step agents
+    /// are billed to this owner. `None` for API/daemon-initiated runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<AgentId>,
     /// Initial input to the workflow.
     pub input: String,
     /// Current state.
@@ -1329,7 +1346,7 @@ fn format_missing_agent_error(step_name: &str, agent: &StepAgent) -> String {
             "Registry agent with id '{id}' not found for workflow step '{step_name}' \
              (referenced by id; check the agent exists and the id is well-formed)"
         ),
-        StepAgent::ByType { template } => format!(
+        StepAgent::ByType { template, .. } => format!(
             "Agent type '{template}' not found for workflow step '{step_name}' \
              (no template file and no registered agent with that name)"
         ),
@@ -2115,6 +2132,18 @@ impl WorkflowEngine {
         workflow_id: WorkflowId,
         input: String,
     ) -> Option<WorkflowRunId> {
+        self.create_run_with_owner(workflow_id, input, None).await
+    }
+
+    /// [`Self::create_run`] with an explicit owner: the agent that
+    /// initiated the run (from `workflow_run` / `workflow_start` tools
+    /// or a channel command). Spawned step agents are billed to it.
+    pub async fn create_run_with_owner(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        owner_agent_id: Option<AgentId>,
+    ) -> Option<WorkflowRunId> {
         let workflow = self.workflows.read().await.get(&workflow_id)?.clone();
         let run_id = WorkflowRunId::new();
 
@@ -2122,6 +2151,7 @@ impl WorkflowEngine {
             id: run_id,
             workflow_id,
             workflow_name: workflow.name,
+            owner_agent_id,
             input,
             state: WorkflowRunState::Pending,
             step_results: Vec::new(),
@@ -2359,6 +2389,13 @@ impl WorkflowEngine {
     }
 
     /// List all workflow runs (optionally filtered by state).
+    /// The billing owner of a run, if it was started by an agent-facing
+    /// surface. Used by resume / operator-action resolvers so spawned step
+    /// agents keep billing to the original owner.
+    pub fn run_owner(&self, run_id: WorkflowRunId) -> Option<AgentId> {
+        self.runs.get(&run_id).and_then(|r| r.owner_agent_id)
+    }
+
     pub async fn list_runs(&self, state_filter: Option<&str>) -> Vec<WorkflowRun> {
         self.runs
             .iter()
@@ -6153,7 +6190,7 @@ impl Workflow {
                 let agent = match &step.agent {
                     StepAgent::ByName { name } => Some(name.clone()),
                     StepAgent::ById { id } => Some(id.clone()),
-                    StepAgent::ByType { template } => Some(template.clone()),
+                    StepAgent::ByType { template, .. } => Some(template.clone()),
                 };
 
                 WorkflowTemplateStep {
@@ -6654,6 +6691,8 @@ fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
     let step_results_json =
         serde_json::to_string(&run.step_results).unwrap_or_else(|_| "[]".to_string());
 
+    let owner_agent_id = run.owner_agent_id.map(|a| a.0.to_string());
+
     let paused_variables_json = if run.paused_variables.is_empty() {
         None
     } else {
@@ -6664,6 +6703,7 @@ fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
         id: run.id.to_string(),
         workflow_id: run.workflow_id.to_string(),
         workflow_name: run.workflow_name.clone(),
+        owner_agent_id,
         state: state_str,
         input: run.input.clone(),
         output: run.output.clone(),
@@ -6690,6 +6730,15 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         Uuid::parse_str(&row.workflow_id)
             .map_err(|e| format!("invalid workflow_id '{}': {e}", row.workflow_id))?,
     );
+
+    let owner_agent_id = match row.owner_agent_id.as_deref() {
+        Some(oid) => {
+            Some(AgentId(Uuid::parse_str(oid).map_err(|e| {
+                format!("invalid owner_agent_id '{oid}': {e}")
+            })?))
+        }
+        None => None,
+    };
 
     let state = match row.state.as_str() {
         "pending" => WorkflowRunState::Pending,
@@ -6787,6 +6836,7 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         id,
         workflow_id,
         workflow_name: row.workflow_name.clone(),
+        owner_agent_id,
         input: row.input.clone(),
         state,
         step_results,
@@ -9538,6 +9588,7 @@ prompt_template = "do {{x}}"
             id: WorkflowRunId::new(),
             workflow_id: WorkflowId::new(),
             workflow_name: "persist-test".to_string(),
+            owner_agent_id: None,
             input: "hello".to_string(),
             state,
             step_results: vec![StepResult {
@@ -9617,6 +9668,7 @@ prompt_template = "do {{x}}"
             id: WorkflowRunId::new(),
             workflow_id: WorkflowId::new(),
             workflow_name: "in-progress".to_string(),
+            owner_agent_id: None,
             input: "data".to_string(),
             state: WorkflowRunState::Running,
             step_results: vec![],
@@ -11288,7 +11340,7 @@ prompt_template = "do {{x}}"
         let v: StepAgent =
             serde_json::from_str(r#"{"type":"researcher"}"#).expect("object form by type");
         match v {
-            StepAgent::ByType { template } => assert_eq!(template, "researcher"),
+            StepAgent::ByType { template, .. } => assert_eq!(template, "researcher"),
             other => panic!("expected ByType, got {other:?}"),
         }
     }
@@ -11317,7 +11369,7 @@ prompt_template = "do {{x}}"
         let parsed: Wrap =
             toml::from_str("agent = { type = \"researcher\" }").expect("toml by type");
         match parsed.agent {
-            StepAgent::ByType { template } => assert_eq!(template, "researcher"),
+            StepAgent::ByType { template, .. } => assert_eq!(template, "researcher"),
             other => panic!("expected ByType, got {other:?}"),
         }
     }
