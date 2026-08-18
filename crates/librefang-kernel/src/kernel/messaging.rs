@@ -943,7 +943,20 @@ impl LibreFangKernel {
         };
 
         let cfg = self.config.load();
-        let max_iter = request.max_iterations.or(cfg.agent_max_iterations);
+        // #6930 review: an untrusted caller (HTTP body, LLM tool input) can
+        // request max_iterations = u32::MAX. Clamp any explicit request to
+        // the configured global cap, or to the goal-run default when no
+        // global cap is set. Request = None keeps the historical unbounded
+        // behaviour (config-driven).
+        let max_iter = request
+            .max_iterations
+            .map(|m| {
+                m.min(
+                    cfg.agent_max_iterations
+                        .unwrap_or(librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS),
+                )
+            })
+            .or(cfg.agent_max_iterations);
         let start_time = std::time::Instant::now();
 
         // Recursion depth guard (same check as agent_send + run_workflow).
@@ -961,6 +974,12 @@ impl LibreFangKernel {
             )));
         }
 
+        if request.skills.as_ref().is_some_and(|s| !s.is_empty()) {
+            tracing::warn!(
+                requested = ?request.skills,
+                "Ephemeral spawn: `skills` is accepted but not applied yet — the selection is dropped (skill registry is not built for ephemerals)"
+            );
+        }
         let result = librefang_runtime::tool_runner::with_agent_call_depth(run_agent_loop(
             &manifest,
             &request.message,
