@@ -4216,7 +4216,7 @@ async fn dispatch_message(
                 &message.channel,
                 message.metadata.get("account_id").and_then(|v| v.as_str()),
                 overrides.as_ref(),
-                sender_user_id(message),
+                thread_ownership,
             )
             .await;
             if !suppress_button_command_ack(&message.content, name) {
@@ -4634,7 +4634,7 @@ async fn dispatch_message(
                     &message.channel,
                     message.metadata.get("account_id").and_then(|v| v.as_str()),
                     overrides.as_ref(),
-                    sender_user_id(message),
+                    thread_ownership,
                 )
                 .await;
                 if !suppress_button_command_ack(&message.content, cmd) {
@@ -6886,17 +6886,16 @@ async fn handle_command(
     channel_type: &crate::types::ChannelType,
     account_id: Option<&str>,
     overrides: Option<&ChannelOverrides>,
-    sender_user_id: &str,
+    thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 ) -> String {
-    // Helper closure: build a `BindingContext` for the command and resolve
-    // the target agent. This mirrors the regular message dispatch path
-    // (`resolve_or_fallback`) layer for layer — the #5672 regression was
-    // that command arms called the context-less `resolve()` and lost the
-    // `account_id` along the way, and the follow-up (#7140) found the
-    // command path still skipped the conversation override, sticky holder,
-    // per-peer binding, and instance default that the chat path consults —
-    // so `/new` could reset a different agent than the one holding the
-    // conversation.
+    // Helper closure: resolve the target agent mirroring the regular
+    // message dispatch path (`resolve_or_fallback`) layer for layer — the
+    // #5672 regression was that command arms called the context-less
+    // `resolve()` and lost the `account_id`, and the follow-up (#7140)
+    // found the command path still skipped the conversation override,
+    // sticky holder, per-peer binding, and instance default that the chat
+    // path consults — so `/new` could reset a different agent than the
+    // one holding the conversation.
     let resolve_for_command = || async {
         // Explicit per-conversation `/agent` override (#5671 upper level).
         if let Some(instance) = account_id.filter(|s| !s.is_empty()) {
@@ -6910,10 +6909,10 @@ async fn handle_command(
                 }
             }
         }
-        // Sticky continuation (#5323): the live conversation-ownership claim
-        // for this (thread, peer) slice wins over the standing default.
-        // Commands carry no thread_id of their own; key by the chat id the
-        // same way `build_thread_key` falls back for non-topic messages.
+        // Sticky continuation (#5323): the live conversation-ownership
+        // claim wins over the standing default. Commands carry no
+        // thread_id; key by the chat id the way `build_thread_key`
+        // falls back for non-topic messages.
         let thread_key = crate::thread_ownership::ThreadKey::new(
             crate::router::channel_type_to_str(channel_type),
             sender.platform_id.as_str(),
@@ -7115,9 +7114,12 @@ async fn handle_command(
             }
         }
         "new" => {
-            // Resolve the user's current agent and the channel-derived sid so /new only resets THIS chat (#4868).
-            // The (channel, chat_id) pair must match `build_sender_context` exactly so the sid we delete here equals the sid the next inbound message will resolve via `SessionId::for_channel` — hence the shared `session_scope` rather than a re-inlined derivation (#7701).
-            let agent_id = resolve_for_command();
+            // Resolve the user's current agent and the channel-derived sid
+            // so /new only resets THIS chat (#4868). The (channel, chat_id)
+            // pair must match `build_sender_context` exactly so the sid we
+            // delete here equals the sid the next inbound message will
+            // resolve via `SessionId::for_channel`.
+            let agent_id = resolve_for_command().await;
             match agent_id {
                 Some(aid) => {
                     let (ch, chat) =
@@ -7971,7 +7973,7 @@ mod tests {
             &ChannelType::CLI,
             None,
             None,
-            &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("coder"));
@@ -7985,7 +7987,7 @@ mod tests {
             &ChannelType::CLI,
             None,
             None,
-            &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("/agents"));
@@ -8015,7 +8017,7 @@ mod tests {
             &ChannelType::CLI,
             None,
             None,
-            &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("Now talking to agent: coder"));
@@ -8446,7 +8448,7 @@ mod tests {
             &ChannelType::Telegram,
             Some("bot-b"),
             None,
-            &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         // `/model` issued in bot-c must dispatch to agent-C.
@@ -8459,7 +8461,7 @@ mod tests {
             &ChannelType::Telegram,
             Some("bot-c"),
             None,
-            &sender.platform_id,
+            &thread_ownership,
         )
         .await;
 
@@ -8621,7 +8623,7 @@ mod tests {
             &ChannelType::Telegram,
             Some("bot-a"),
             None,
-            &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("Now talking to agent: agent-C"));
@@ -9577,7 +9579,7 @@ mod tests {
             &ChannelType::CLI,
             None,
             None,
-            &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("Usage:"));
@@ -9607,7 +9609,7 @@ mod tests {
             &ChannelType::CLI,
             None,
             None,
-            &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("No agent selected"));
@@ -9635,7 +9637,7 @@ mod tests {
             &ChannelType::CLI,
             None,
             None,
-            &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("/btw"));

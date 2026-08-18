@@ -148,9 +148,9 @@ impl LibreFangKernel {
     }
 
     /// Same as [`Self::send_message_with_blocks_and_sender`] but applies a
-    /// per-turn extended-thinking override (`Some(true)` / `Some(false)`).
-    /// `None` keeps the agent's configured default. Used by the channel
-    /// bridge to honour the `/think` command preference.
+    /// per-turn extended-thinking override. `None` keeps the agent's
+    /// configured default. Used by the channel bridge to honour the
+    /// `/think` command preference.
     pub async fn send_message_with_blocks_and_sender_thinking(
         &self,
         agent_id: AgentId,
