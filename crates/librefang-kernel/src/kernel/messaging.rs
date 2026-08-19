@@ -899,6 +899,37 @@ impl LibreFangKernel {
         let mut manifest = self.resolve_ephemeral_manifest(&request)?;
 
         let agent_id = AgentId::new();
+
+        // #7723: agent-type-based ephemeral missions get a uid display name
+        // and a transient workspace dir that is created now and removed when
+        // the run ends (success and failure alike).
+        let mission_dir = if request.agent_type.is_some() {
+            let tag: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+            let base = manifest.name.clone();
+            manifest.name = format!("{base}-{tag}");
+            let dir = self.home_dir_boot.join("transient").join(&manifest.name);
+            if let Err(e) = ensure_workspace(&dir) {
+                warn!(dir = %dir.display(), error = %e,
+                    "failed to create ephemeral mission dir");
+            }
+            manifest.workspace = Some(dir.clone());
+            Some(dir)
+        } else {
+            None
+        };
+        struct _MissionCleanup(Option<std::path::PathBuf>);
+        impl Drop for _MissionCleanup {
+            fn drop(&mut self) {
+                if let Some(dir) = &self.0 {
+                    if let Err(e) = std::fs::remove_dir_all(dir) {
+                        tracing::warn!(dir = %dir.display(), error = %e,
+                            "failed to clean up ephemeral mission dir");
+                    }
+                }
+            }
+        }
+        let _cleanup = _MissionCleanup(mission_dir);
+
         let agent_name = manifest.name.clone();
         tracing::info!(
             agent_id = %agent_id,
@@ -1009,7 +1040,7 @@ impl LibreFangKernel {
             None, // no web
             None, // no browser
             None, // no embeddings
-            None, // no workspace root
+            manifest.workspace.as_deref(),
             None, // no phase callback
             None, // no media engine
             None, // no media drivers
@@ -3922,6 +3953,53 @@ impl LibreFangKernel {
 mod tests {
     use super::sidecar_default_conversation;
     use librefang_types::config::SidecarChannelConfig;
+
+    /// #7723 — an agent-type-based ephemeral mission gets a uid name and a
+    /// transient workspace that is removed after the run ends (here: the
+    /// run fails immediately without LLM drivers, which still exercises the
+    /// cleanup path).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ephemeral_mission_folder_created_and_cleaned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        std::fs::create_dir_all(home.join("templates")).unwrap();
+        std::fs::write(
+            home.join("templates").join("qa-mission.toml"),
+            "name = \"qa-mission\"\nmodule = \"builtin:chat\"\n",
+        )
+        .unwrap();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..librefang_types::config::KernelConfig::default()
+        };
+        let kernel = super::LibreFangKernel::boot_with_config(config).expect("boot");
+        std::mem::forget(dir);
+
+        let req = librefang_types::agent::EphemeralSpawnRequest {
+            system_prompt: None,
+            message: "probe".to_string(),
+            agent_type: Some("qa-mission".to_string()),
+            model: None,
+            tools: None,
+            skills: None,
+            max_iterations: Some(1),
+        };
+        let result = kernel.spawn_ephemeral_worker(req, None).await;
+        // No LLM driver is configured: the run must fail, and the cleanup
+        // must still have removed the mission dir.
+        assert!(result.is_err(), "worker must fail without a driver");
+        let transient = home.join("transient");
+        let leftovers: Vec<_> = std::fs::read_dir(&transient)
+            .map(|rd| rd.filter_map(|e| e.ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "transient dir must be empty after the run: {} entries left",
+            leftovers.len()
+        );
+    }
 
     fn sc(json: serde_json::Value) -> SidecarChannelConfig {
         serde_json::from_value(json).expect("valid SidecarChannelConfig")
