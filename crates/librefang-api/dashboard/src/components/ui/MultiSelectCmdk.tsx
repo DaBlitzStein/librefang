@@ -120,27 +120,29 @@ export function MultiSelectCmdk({
       if (e.key === "Backspace" && search === "" && value.length > 0) {
         remove(value[value.length - 1]);
       }
-      // Free-text commit: only kick in when the catalog has no
-      // candidates for the current query AND the caller opted in.
-      // When candidates exist, cmdk's own Enter handler selects the
-      // highlighted item — don't fight it.
-      if (
-        allowFreeText &&
-        e.key === "Enter" &&
-        search.trim() &&
-        filteredOptions.length === 0
-      ) {
-        e.preventDefault();
+      // Free-text commit (allowFreeText): on Enter with a query, commit
+      // the typed text UNLESS it exactly matches a catalog option (in
+      // which case cmdk's own Enter handler selects the highlighted
+      // entry). This is what lets operators add tools/skills that exist
+      // on the backend but not in the in-memory catalog even while other
+      // options are visible.
+      if (allowFreeText && e.key === "Enter" && search.trim()) {
         const cleaned = search.trim();
         const normalized = cleaned.toLowerCase();
-        if (!value.some((item) => item.toLowerCase() === normalized)) {
-          select(cleaned);
-        } else {
-          setSearch("");
+        const exactCatalogMatch = options.some(
+          (o) => o.toLowerCase() === normalized,
+        );
+        if (!exactCatalogMatch) {
+          e.preventDefault();
+          if (!value.some((item) => item.toLowerCase() === normalized)) {
+            select(cleaned);
+          } else {
+            setSearch("");
+          }
         }
       }
     },
-    [search, value, remove, allowFreeText, filteredOptions.length, select],
+    [search, value, remove, allowFreeText, filteredOptions.length, options, select],
   );
 
   const handleInputFocus = useCallback(() => {
