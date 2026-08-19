@@ -90,7 +90,15 @@ mod tests {
             "name": "qa-type",
             "system_prompt": "you are a qa probe",
             "tools": ["chat"],
-            "skills": ["review"]
+            "skills": ["review"],
+            "channels": ["telegram"],
+            "routing": {
+                "simple_model": "cheap-1",
+                "medium_model": "mid-1",
+                "complex_model": "big-1",
+                "simple_threshold": 200,
+                "complex_threshold": 2000
+            }
         })
         .to_string();
         let created = tools.create_agent_type(&json).await.expect("must create");
@@ -101,6 +109,15 @@ mod tests {
         assert!(
             content.contains("name = \"qa-type\""),
             "TOML must carry the name: {content}"
+        );
+        // #7731: channels + preferred-model tiers round-trip into the TOML.
+        assert!(
+            content.contains("telegram"),
+            "channels allowlist must round-trip: {content}"
+        );
+        assert!(
+            content.contains("simple_model") && content.contains("cheap-1"),
+            "routing tiers must round-trip: {content}"
         );
 
         // Rejection: invalid name charset.
