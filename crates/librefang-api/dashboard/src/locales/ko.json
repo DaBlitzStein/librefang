@@ -293,7 +293,13 @@
     "confirmDelete": "이 에이전트 유형을 삭제하시겠습니까?",
     "iterations": "반복 횟수",
     "latency": "지연 시간",
-    "cost": "비용"
+    "cost": "비용",
+    "skills": "스킬",
+    "skillsPlaceholder": "설치된 스킬 검색…",
+    "toolsPlaceholder": "도구 검색…",
+    "managedViaAgents": "에이전트에서 관리",
+    "providerHint": "기본 제공자",
+    "modelHint": "기본 모델"
   },
   "agents": {
     "title": "에이전트",

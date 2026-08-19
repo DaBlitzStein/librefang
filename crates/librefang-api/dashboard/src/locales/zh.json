@@ -293,7 +293,13 @@
     "confirmDelete": "删除此智能体类型？",
     "iterations": "迭代次数",
     "latency": "延迟",
-    "cost": "成本"
+    "cost": "成本",
+    "skills": "技能",
+    "skillsPlaceholder": "搜索已安装的技能…",
+    "toolsPlaceholder": "搜索工具…",
+    "managedViaAgents": "通过智能体管理",
+    "providerHint": "生成智能体的默认提供商",
+    "modelHint": "生成智能体的默认模型"
   },
   "agents": {
     "title": "智能体",

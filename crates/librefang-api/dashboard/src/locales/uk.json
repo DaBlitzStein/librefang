@@ -293,7 +293,13 @@
     "confirmDelete": "Видалити цей тип агента?",
     "iterations": "Ітерації",
     "latency": "Затримка",
-    "cost": "Вартість"
+    "cost": "Вартість",
+    "skills": "Навички",
+    "skillsPlaceholder": "Пошук встановлених навичок…",
+    "toolsPlaceholder": "Пошук інструментів…",
+    "managedViaAgents": "Керується через Агенти",
+    "providerHint": "Провайдер за замовчуванням",
+    "modelHint": "Модель за замовчуванням"
   },
   "agents": {
     "title": "Агенти",

@@ -293,7 +293,13 @@
     "confirmDelete": "Usunąć ten typ agenta?",
     "iterations": "Iteracje",
     "latency": "Opóźnienie",
-    "cost": "Koszt"
+    "cost": "Koszt",
+    "skills": "Umiejętności",
+    "skillsPlaceholder": "Szukaj zainstalowanych umiejętności…",
+    "toolsPlaceholder": "Szukaj narzędzi…",
+    "managedViaAgents": "Zarządzane przez Agenty",
+    "providerHint": "Domyślny dostawca",
+    "modelHint": "Domyślny model"
   },
   "agents": {
     "title": "Agenci",

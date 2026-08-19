@@ -17,6 +17,10 @@ pub struct TemplateInfo {
     pub category: String,
     pub provider: String,
     pub model: String,
+    /// True for operator-created agent types loaded from
+    /// ~/.librefang/templates/*.toml (spawn from the real file, not the
+    /// builtin inline manifest).
+    pub custom: bool,
 }
 
 #[derive(Clone)]
@@ -134,7 +138,7 @@ pub enum TemplatesAction {
 
 impl TemplatesState {
     pub fn new() -> Self {
-        let templates: Vec<TemplateInfo> = BUILTIN_TEMPLATES
+        let mut templates: Vec<TemplateInfo> = BUILTIN_TEMPLATES
             .iter()
             .map(|(name, desc, cat, prov, model)| TemplateInfo {
                 name: name.to_string(),
@@ -142,8 +146,54 @@ impl TemplatesState {
                 category: cat.to_string(),
                 provider: prov.to_string(),
                 model: model.to_string(),
+                custom: false,
             })
             .collect();
+        // Operator-created agent types (agent_type_create / the API) —
+        // listed after the builtins so the TUI mirrors the API surface.
+        let custom_dir = crate::commands::common::cli_librefang_home().join("templates");
+        if let Ok(entries) = std::fs::read_dir(&custom_dir) {
+            let mut custom: Vec<TemplateInfo> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
+                .filter_map(|e| {
+                    let content = std::fs::read_to_string(e.path()).ok()?;
+                    let value: toml::Value = content.parse().ok()?;
+                    let name = value
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed")
+                        .to_string();
+                    let desc = value
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let provider = value
+                        .get("model")
+                        .and_then(|m| m.get("provider"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("default")
+                        .to_string();
+                    let model = value
+                        .get("model")
+                        .and_then(|m| m.get("model"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("default")
+                        .to_string();
+                    Some(TemplateInfo {
+                        name,
+                        description: desc,
+                        category: "Custom".to_string(),
+                        provider,
+                        model,
+                        custom: true,
+                    })
+                })
+                .collect();
+            custom.sort_by(|a, b| a.name.cmp(&b.name));
+            templates.extend(custom);
+        }
         let filtered: Vec<usize> = (0..templates.len()).collect();
         let mut state = Self {
             templates,

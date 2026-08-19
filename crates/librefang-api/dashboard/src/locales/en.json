@@ -293,7 +293,13 @@
     "confirmDelete": "Delete this agent type?",
     "iterations": "Iterations",
     "latency": "Latency",
-    "cost": "Cost"
+    "cost": "Cost",
+    "skills": "Skills",
+    "skillsPlaceholder": "Search installed skills…",
+    "toolsPlaceholder": "Search tools…",
+    "managedViaAgents": "Managed via Agents",
+    "providerHint": "Default provider for spawned agents",
+    "modelHint": "Default model for spawned agents"
   },
   "agents": {
     "title": "Agents",

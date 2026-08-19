@@ -1775,11 +1775,22 @@ impl App {
             templates::TemplatesAction::SpawnTemplate(name) => {
                 // Find template and generate TOML manifest
                 if let Some(t) = self.templates.templates.iter().find(|t| t.name == name) {
-                    let toml_content = format!(
-                        "name = \"{}\"\ndescription = \"{}\"\n\n[model]\nprovider = \"{}\"\nmodel = \"{}\"\n\n[capabilities]\ntools = [\"shell\", \"file_read\", \"file_write\", \"web_fetch\", \"web_search\"]\n",
-                        t.name, t.description, t.provider, t.model,
-                    );
-                    self.spawn_agent(toml_content);
+                    if t.custom {
+                        // Operator-created agent type: spawn from the real
+                        // template file so tools/skills/model carry over.
+                        let path = crate::commands::common::cli_librefang_home()
+                            .join("templates")
+                            .join(format!("{}.toml", t.name));
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            self.spawn_agent(content);
+                        }
+                    } else {
+                        let toml_content = format!(
+                            "name = \"{}\"\ndescription = \"{}\"\n\n[model]\nprovider = \"{}\"\nmodel = \"{}\"\n\n[capabilities]\ntools = [\"shell\", \"file_read\", \"file_write\", \"web_fetch\", \"web_search\"]\n",
+                            t.name, t.description, t.provider, t.model,
+                        );
+                        self.spawn_agent(toml_content);
+                    }
                 }
             }
         }

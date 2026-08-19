@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Boxes, Plus, Pencil, Trash2, Zap, Loader2 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -12,6 +12,9 @@ import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { toastErr } from "../lib/errors";
+import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
+import { useSkills } from "../lib/queries/skills";
+import { useTools } from "../lib/queries/agents";
 import type {
   AgentType,
   AgentTypeInput,
@@ -28,6 +31,8 @@ import {
 
 const TEXTAREA_CLASS =
   "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-mono leading-relaxed resize-y disabled:opacity-50 focus:outline-none focus:border-brand";
+const INPUT_CLASS =
+  "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm disabled:opacity-50 focus:outline-none focus:border-brand";
 
 interface FormState {
   name: string;
@@ -35,7 +40,8 @@ interface FormState {
   system_prompt: string;
   provider: string;
   model: string;
-  tools: string;
+  tools: string[];
+  skills: string[];
 }
 
 const EMPTY_FORM: FormState = {
@@ -44,7 +50,8 @@ const EMPTY_FORM: FormState = {
   system_prompt: "",
   provider: "",
   model: "",
-  tools: "",
+  tools: [],
+  skills: [],
 };
 
 function toForm(type: AgentType): FormState {
@@ -54,15 +61,9 @@ function toForm(type: AgentType): FormState {
     system_prompt: type.system_prompt ?? "",
     provider: type.provider ?? "",
     model: type.model ?? "",
-    tools: (type.tools ?? []).join(", "),
+    tools: type.tools ?? [],
+    skills: type.skills ?? [],
   };
-}
-
-function splitList(raw: string): string[] {
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
 }
 
 function toInput(form: FormState): AgentTypeInput {
@@ -72,13 +73,24 @@ function toInput(form: FormState): AgentTypeInput {
     system_prompt: form.system_prompt.trim() || undefined,
     provider: form.provider.trim() || undefined,
     model: form.model.trim() || undefined,
-    tools: splitList(form.tools),
+    tools: form.tools,
+    skills: form.skills,
   };
 }
 
 export function AgentTypesPage() {
   const { t } = useTranslation();
   const { data: types, isLoading, isFetching, refetch } = useAgentTypes();
+  const skillsQuery = useSkills();
+  const toolsQuery = useTools();
+  const skillOptions = useMemo(
+    () => (skillsQuery.data ?? []).map((s: { name: string }) => s.name),
+    [skillsQuery.data],
+  );
+  const toolOptions = useMemo(
+    () => (toolsQuery.data ?? []).map((td: { name: string }) => td.name),
+    [toolsQuery.data],
+  );
 
   const createType = useCreateAgentType();
   const updateType = useUpdateAgentType();
@@ -218,22 +230,30 @@ export function AgentTypesPage() {
                   <Zap className="h-3.5 w-3.5" />
                   {t("agentTypes.quickRun")}
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={t("agentTypes.edit")}
-                  onClick={() => openEdit(type)}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={t("agentTypes.delete")}
-                  onClick={() => setDeleteTarget(type.name)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
+                {type.source === "agent" ? (
+                  <span className="text-[10px] uppercase tracking-wide text-text-dim">
+                    {t("agentTypes.managedViaAgents")}
+                  </span>
+                ) : (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={t("agentTypes.edit")}
+                      onClick={() => openEdit(type)}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={t("agentTypes.delete")}
+                      onClick={() => setDeleteTarget(type.name)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </>
+                )}
               </div>
             </Card>
           ))}
@@ -281,25 +301,63 @@ export function AgentTypesPage() {
               />
             </div>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Input
-                label={t("agentTypes.provider")}
-                value={form.provider}
-                onChange={(e) =>
-                  setForm({ ...form, provider: e.target.value })
-                }
-              />
-              <Input
-                label={t("agentTypes.model")}
-                value={form.model}
-                onChange={(e) => setForm({ ...form, model: e.target.value })}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                  {t("agentTypes.provider")}
+                </label>
+                <input
+                  value={form.provider}
+                  disabled={formPending}
+                  onChange={(e) => setForm({ ...form, provider: e.target.value })}
+                  placeholder={t("agentTypes.providerHint")}
+                  className={INPUT_CLASS}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                  {t("agentTypes.model")}
+                </label>
+                <input
+                  value={form.model}
+                  disabled={formPending}
+                  onChange={(e) => setForm({ ...form, model: e.target.value })}
+                  placeholder={t("agentTypes.modelHint")}
+                  className={INPUT_CLASS}
+                />
+              </div>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                {t("agentTypes.skills")}
+              </label>
+              <MultiSelectCmdk
+                options={skillOptions}
+                value={form.skills}
+                onChange={(next) => {
+                  const nextValue =
+                    typeof next === "function" ? next(form.skills) : next;
+                  setForm({ ...form, skills: nextValue });
+                }}
+                placeholder={t("agentTypes.skillsPlaceholder")}
+                allowFreeText
               />
             </div>
-            <Input
-              label={t("agentTypes.tools")}
-              value={form.tools}
-              placeholder="web_fetch, file_read"
-              onChange={(e) => setForm({ ...form, tools: e.target.value })}
-            />
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                {t("agentTypes.tools")}
+              </label>
+              <MultiSelectCmdk
+                options={toolOptions}
+                value={form.tools}
+                onChange={(next) => {
+                  const nextValue =
+                    typeof next === "function" ? next(form.tools) : next;
+                  setForm({ ...form, tools: nextValue });
+                }}
+                placeholder={t("agentTypes.toolsPlaceholder")}
+                allowFreeText
+              />
+            </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button
                 variant="ghost"

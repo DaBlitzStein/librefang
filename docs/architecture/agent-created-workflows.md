@@ -48,3 +48,26 @@ Installed as `prompt_context.md` so the content actually reaches the agent's con
 - `crates/librefang-runtime/src/tool_runner/workflow.rs` — tool implementations
 - `crates/librefang-kernel/src/kernel/handles/workflow_runner.rs` — kernel handle + persistence
 - `crates/librefang-kernel/src/workflow.rs` — engine, validation, run store
+
+## Step agent types, fresh instances, and required skills
+
+Steps can reference an **agent type** (a template) instead of a concrete agent:
+
+```json
+{ "type": "researcher" }
+```
+
+Resolution is find-or-spawn: reuse the registered agent with that name, otherwise load the template manifest (`templates/` first, then `workspaces/agents/`) and spawn it with the canonical name-derived UUID. Add `"fresh": true` to spawn a brand-new instance per run (uid name tag, never shadows the canonical one). A missing template fails the step with a ByType-specific error.
+
+Steps can also declare `required_skills`. The engine checks them right after agent resolution, before dispatch, and fails the step with a precise error distinguishing two cases:
+
+- "does not declare" — the skill is absent from the resolved agent's (or template's) skill allowlist;
+- "declares but are not installed" — the skill is in the allowlist but the registry hasn't loaded it (see the pending-declarations surface on the agents API).
+
+## Run ownership and billing
+
+A run records its `owner_agent_id` (migration v48): the caller of `workflow_run` / `workflow_start` / the channel `/workflow run` command. Template-spawned step agents are parented to the owner and their usage records bill to it. Resume and operator-action paths copy the original run's owner.
+
+## Agent types
+
+Agent types are templates: the canonical spelling is "agent type" everywhere (`/api/agent-types` aliases the `/api/templates` routes; the TUI templates screen is titled "Agent types"). Agents can author types with the `agent_type_create` tool (same validation as the API), and ephemeral workers spawned from a type get a uid display name plus a transient mission workspace under `~/.librefang/transient/<name>` that is deleted when the run ends.
