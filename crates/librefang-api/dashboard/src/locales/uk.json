@@ -1635,7 +1635,10 @@
     "workflow_load_error": "Не вдалося завантажити воркфлоу",
     "ctx_menu_label": "Контекстне меню",
     "output": "Вивід",
-    "prompt_sent": "Надісланий промпт"
+    "prompt_sent": "Надісланий промпт",
+    "agent_type_label": "Тип агента (темплейт)",
+    "no_agent_type": "Без типу агента",
+    "fresh_label": "Новий екземпляр на кожен запуск"
   },
   "workflows": {
     "title": "Воркфлоу",

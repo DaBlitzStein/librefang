@@ -32,8 +32,6 @@ export {
   listExperiments,
   getExperimentMetrics,
   // agent types
-  listAgentTypes,
-  getAgentType,
   createAgentType,
   updateAgentType,
   deleteAgentType,
@@ -204,10 +202,6 @@ export {
   // agents
   spawnAgent,
   // agent types + ephemeral spawning
-  createAgentType,
-  updateAgentType,
-  deleteAgentType,
-  spawnEphemeral,
   cloneAgent,
   stopAgent,
   suspendAgent,
@@ -383,11 +377,6 @@ export {
 export type {
   A2AAgentItem,
   A2ATaskStatus,
-  AgentTypeSummary,
-  AgentType,
-  AgentTypeInput,
-  EphemeralResult,
-  EphemeralSpawnRequest,
   AutoDreamAbortOutcome,
   AutoDreamAgentStatus,
   AutoDreamProgress,

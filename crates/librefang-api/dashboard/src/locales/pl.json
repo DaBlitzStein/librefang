@@ -1635,7 +1635,10 @@
     "workflow_load_error": "Nie udało się załadować przepływu pracy",
     "ctx_menu_label": "Menu kontekstowe",
     "output": "Wynik",
-    "prompt_sent": "Prompt wysłany"
+    "prompt_sent": "Prompt wysłany",
+    "agent_type_label": "Typ agenta (szablon)",
+    "no_agent_type": "Brak typu agenta",
+    "fresh_label": "Nowa instancja na każde uruchomienie"
   },
   "workflows": {
     "title": "Przepływy pracy",

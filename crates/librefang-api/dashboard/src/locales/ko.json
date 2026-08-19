@@ -1635,7 +1635,10 @@
     "workflow_load_error": "워크플로를 로드하지 못했습니다.",
     "ctx_menu_label": "상황에 맞는 메뉴",
     "output": "출력",
-    "prompt_sent": "메시지가 전송되었습니다."
+    "prompt_sent": "메시지가 전송되었습니다.",
+    "agent_type_label": "에이전트 유형 (템플릿)",
+    "no_agent_type": "에이전트 유형 없음",
+    "fresh_label": "실행마다 새 인스턴스"
   },
   "workflows": {
     "title": "워크플로",
