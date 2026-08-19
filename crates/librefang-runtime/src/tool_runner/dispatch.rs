@@ -1189,6 +1189,7 @@ pub async fn execute_tool_raw(
         }
         "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
         "workflow_create" => tool_workflow_create(input, kernel.as_deref(), *caller_agent_id).await,
+        "agent_type_create" => tool_agent_type_create(input, kernel.as_deref()).await,
 
         // Browser automation tools
         #[cfg(feature = "browser")]

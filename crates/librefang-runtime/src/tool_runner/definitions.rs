@@ -97,6 +97,7 @@ pub(crate) mod tool_name {
     pub const WORKFLOW_START: &str = "workflow_start";
     pub const WORKFLOW_CANCEL: &str = "workflow_cancel";
     pub const WORKFLOW_CREATE: &str = "workflow_create";
+    pub const AGENT_TYPE_CREATE: &str = "agent_type_create";
     pub const SYSTEM_TIME: &str = "system_time";
     pub const CANVAS_PRESENT: &str = "canvas_present";
     pub const READ_ARTIFACT: &str = "read_artifact";
@@ -1311,6 +1312,23 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         }
                     },
                     "required": ["name", "steps"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::AGENT_TYPE_CREATE.to_string(),
+                description: "Create a new agent type (template) that can be spawned later via agent_spawn's agent_type field or a workflow step's type field. Provide a unique name, a system prompt, an optional model/provider, and the tools/skills the type should carry.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Unique agent type name. Only [A-Za-z0-9_-] allowed, max 64 chars." },
+                        "description": { "type": "string", "description": "What this agent type is for." },
+                        "system_prompt": { "type": "string", "description": "The default system prompt for agents spawned from this type." },
+                        "provider": { "type": "string", "description": "Optional LLM provider (default: the daemon default)." },
+                        "model": { "type": "string", "description": "Optional model name (default: the daemon default)." },
+                        "tools": { "type": "array", "items": { "type": "string" }, "description": "Tool names this type's agents get." },
+                        "skills": { "type": "array", "items": { "type": "string" }, "description": "Skill names this type's agents get." }
+                    },
+                    "required": ["name"]
                 }),
             },
             ToolDefinition {

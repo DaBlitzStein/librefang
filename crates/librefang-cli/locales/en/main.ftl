@@ -1690,7 +1690,7 @@ tui-security-feat-prompt-name = Prompt Injection Scanner
 tui-security-feat-prompt-desc = Detects override attempts and data exfiltration
 
 # templates.rs
-tui-templates-title = Templates
+tui-templates-title = Agent types
 tui-templates-cat-all = All
 tui-templates-cat-general = General
 tui-templates-cat-development = Development

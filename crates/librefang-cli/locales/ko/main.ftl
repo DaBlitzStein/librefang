@@ -1690,7 +1690,7 @@ tui-security-feat-prompt-name = 프롬프트 인젝션 스캐너
 tui-security-feat-prompt-desc = 재정의 시도 및 데이터 유출을 탐지
 
 # templates.rs
-tui-templates-title = 템플릿
+tui-templates-title = 에이전트 유형
 tui-templates-cat-all = 전체
 tui-templates-cat-general = 일반
 tui-templates-cat-development = 개발

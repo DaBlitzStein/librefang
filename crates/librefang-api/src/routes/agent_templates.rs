@@ -35,6 +35,23 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/templates/{name}/toml",
             axum::routing::get(get_agent_template_toml),
         )
+        // Alias (#7722): agent templates ARE agent types. Both spellings
+        // resolve to the same handlers so no client has to migrate, while
+        // the canonical docs/TUI/dashboard wording is "agent type".
+        .route(
+            "/agent-types",
+            axum::routing::get(list_agent_templates).post(create_agent_type),
+        )
+        .route(
+            "/agent-types/{name}",
+            axum::routing::get(get_agent_template)
+                .put(update_agent_type)
+                .delete(delete_agent_type),
+        )
+        .route(
+            "/agent-types/{name}/toml",
+            axum::routing::get(get_agent_template_toml),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -426,58 +443,6 @@ fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
 /// Build a minimal `agent.toml` from the dashboard's JSON shape.
 /// Uses `toml::to_string_pretty` on a constructed `AgentManifest` so every
 /// caller-supplied string (name, description, system_prompt, provider, model)
-/// is properly escaped — no `format!` interpolation raw-dropping untrusted
-/// input into TOML string literals.
-fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
-    let name = v["name"].as_str().unwrap_or("unnamed");
-    let desc = v["description"].as_str().unwrap_or("");
-    let prompt = v["system_prompt"]
-        .as_str()
-        .unwrap_or("You are a helpful AI agent.");
-    let provider = v["provider"].as_str().unwrap_or("default");
-    let model_name = v["model"].as_str().unwrap_or("default");
-    let tools: Vec<String> = v["tools"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|t| t.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let skills: Vec<String> = v["skills"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let manifest = librefang_types::agent::AgentManifest {
-        name: name.to_string(),
-        description: desc.to_string(),
-        skills,
-        model: librefang_types::agent::ModelConfig {
-            provider: provider.to_string(),
-            model: model_name.to_string(),
-            system_prompt: prompt.to_string(),
-            ..Default::default()
-        },
-        capabilities: librefang_types::agent::ManifestCapabilities {
-            tools,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    toml::to_string_pretty(&manifest).unwrap_or_else(|_| {
-        // Fallback for round-trip safety — the TOML serializer should always
-        // succeed.
-        "[capabilities]\ntools = []\n\n[model]\nmodel = \"default\"\nprovider = \"default\"\nsystem_prompt = \"\"\n"
-            .to_string()
-    })
-}
 
 /// POST /api/templates — Create a new agent template from JSON.
 #[utoipa::path(post, path = "/api/templates", tag = "system", operation_id = "create_template", request_body = crate::types::JsonObject, responses((status = 201, description = "Template created", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 409, description = "Template already exists")))]
@@ -497,7 +462,7 @@ pub async fn create_agent_type(
         return ApiErrorResponse::bad_request("invalid agent type name").into_json_tuple();
     }
 
-    let toml_content = agent_type_json_to_toml(&body);
+    let toml_content = librefang_types::agent::agent_type_json_to_toml(&body);
 
     let dir = agent_types_dir();
     let path = dir.join(format!("{name}.toml"));
@@ -553,7 +518,7 @@ pub async fn update_agent_type(
     let mut body = body;
     body["name"] = serde_json::Value::String(name.clone());
 
-    let toml_content = agent_type_json_to_toml(&body);
+    let toml_content = librefang_types::agent::agent_type_json_to_toml(&body);
 
     let path = agent_types_dir().join(format!("{name}.toml"));
     if !path.exists() {

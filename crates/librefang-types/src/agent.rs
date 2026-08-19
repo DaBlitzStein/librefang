@@ -982,6 +982,60 @@ pub struct FallbackModel {
     pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// Convert the flat "agent type" JSON shape used by the API and the
+/// agent-facing `agent_type_create` tool into a template TOML document.
+///
+/// Single source of truth for both surfaces (#7722): the API route and the
+/// kernel-side tool writer share this so their accepted shapes can never
+/// drift apart.
+pub fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
+    let name = v["name"].as_str().unwrap_or("unnamed");
+    let desc = v["description"].as_str().unwrap_or("");
+    let prompt = v["system_prompt"]
+        .as_str()
+        .unwrap_or("You are a helpful AI agent.");
+    let provider = v["provider"].as_str().unwrap_or("default");
+    let model_name = v["model"].as_str().unwrap_or("default");
+    let tools: Vec<String> = v["tools"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let skills: Vec<String> = v["skills"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let manifest = AgentManifest {
+        name: name.to_string(),
+        description: desc.to_string(),
+        skills,
+        model: ModelConfig {
+            provider: provider.to_string(),
+            model: model_name.to_string(),
+            system_prompt: prompt.to_string(),
+            ..Default::default()
+        },
+        capabilities: ManifestCapabilities {
+            tools,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    toml::to_string_pretty(&manifest).unwrap_or_else(|_| {
+        "[capabilities]\ntools = []\n\n[model]\nmodel = \"default\"\nprovider = \"default\"\nsystem_prompt = \"\"\n"
+            .to_string()
+    })
+}
+
 /// Request to spawn an ephemeral (no-workspace, no-DB) agent worker.
 /// The caller controls everything; nothing is inherited from the parent.
 #[derive(Debug, Clone, Serialize, Deserialize)]

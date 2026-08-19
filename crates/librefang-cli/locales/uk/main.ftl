@@ -1709,7 +1709,7 @@ tui-security-feat-prompt-name = Сканер ін'єкцій у промптах
 tui-security-feat-prompt-desc = Виявляє спроби обходу інструкцій та витоку даних
 
 # templates.rs
-tui-templates-title = Темплейти
+tui-templates-title = Типи агентів
 tui-templates-cat-all = Всі
 tui-templates-cat-general = Загальні
 tui-templates-cat-development = Розробка

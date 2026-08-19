@@ -772,7 +772,7 @@ tui-security-feat-prompt-name = 提示词注入扫描器
 tui-security-feat-prompt-desc = 检测覆盖尝试和数据外泄
 
 # templates.rs
-tui-templates-title = 模板
+tui-templates-title = 智能体类型
 tui-templates-cat-all = 全部
 tui-templates-cat-general = 通用
 tui-templates-cat-development = 开发
