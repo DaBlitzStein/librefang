@@ -6740,6 +6740,59 @@ async fn workflow_dry_run_by_type_does_not_spawn() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_required_skills_gate_rejects_missing_and_pending() {
+    let kernel = boot_kernel_for_display_tests();
+    // Allowlist-mode template: declares "ghost-skill" only.
+    let agent_dir = kernel
+        .home_dir_boot
+        .join("workspaces")
+        .join("agents")
+        .join("skill-gate");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("agent.toml"),
+        "name = \"skill-gate\"\nmodule = \"builtin:chat\"\nskills = [\"ghost-skill\"]\n",
+    )
+    .unwrap();
+
+    let engine = &kernel.workflows.engine;
+    let mut wf = by_type_probe_workflow("skill-gate");
+    wf.steps[0].required_skills = vec!["ghost-skill".to_string()];
+    let wf_id = engine.register(wf).await;
+
+    let checker = |agent_id: AgentId, required: &[String]| {
+        kernel.check_step_required_skills(agent_id, required)
+    };
+
+    let run_once = |_skills: Vec<String>| async {
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+        let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
+            match agent_ref {
+                crate::workflow::StepAgent::ByType { template, fresh } => {
+                    kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+                }
+                _ => None,
+            }
+        };
+        let sender = |_id: AgentId,
+                      msg: String,
+                      _sm: Option<librefang_types::agent::SessionMode>| async move {
+            Ok((msg, 0u64, 0u64))
+        };
+        engine.execute_run(run_id, resolver, sender, checker).await
+    };
+
+    // Declared-but-unavailable: "ghost-skill" is in the allowlist but the
+    // skill itself is not installed on this instance.
+    let err = run_once(vec![])
+        .await
+        .expect_err("pending skill must fail the step");
+    assert!(
+        err.contains("declares but are not installed"),
+        "pending-skill error must be precise: {err}"
+    );
+}
 /// Source-shape sentinel for the fix above: the production workflow
 /// `send_message` closure (and its operator-resume twin) in
 /// `triggers_and_workflow.rs` must acquire the per-agent semaphore
@@ -6902,6 +6955,7 @@ fn depth_probe_workflow() -> crate::workflow::Workflow {
         name: "depth-probe".to_string(),
         description: "one step targeting an unregistered agent".to_string(),
         steps: vec![WorkflowStep {
+            required_skills: Vec::new(),
             name: "only-step".to_string(),
             agent: StepAgent::ByName {
                 name: "no-such-agent".to_string(),
@@ -7027,6 +7081,7 @@ fn by_type_probe_workflow(template: &str) -> crate::workflow::Workflow {
         name: "by-type-probe".to_string(),
         description: "one step referencing an agent type".to_string(),
         steps: vec![WorkflowStep {
+            required_skills: Vec::new(),
             name: "only-step".to_string(),
             agent: StepAgent::ByType {
                 template: template.to_string(),
@@ -7092,7 +7147,9 @@ async fn workflow_step_by_type_spawns_agent_from_template() {
             }
         }
     };
-    let result = engine.execute_run(run_id, resolver, sender).await;
+    let result = engine
+        .execute_run(run_id, resolver, sender, |_, _| Ok(()))
+        .await;
     assert!(result.is_ok(), "run must complete: {result:?}");
 
     let entry = kernel
@@ -7142,7 +7199,10 @@ async fn workflow_step_by_type_reuses_existing_agent() {
                 }
             }
         };
-        engine.execute_run(run_id, resolver, sender).await.unwrap();
+        engine
+            .execute_run(run_id, resolver, sender, |_, _| Ok(()))
+            .await
+            .unwrap();
         let x = sent_ids.lock().unwrap().clone();
         x
     }
@@ -7181,7 +7241,9 @@ async fn workflow_step_by_type_missing_template_fails_run() {
     let sender = |_id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
         Ok((msg, 0u64, 0u64))
     };
-    let result = engine.execute_run(run_id, resolver, sender).await;
+    let result = engine
+        .execute_run(run_id, resolver, sender, |_, _| Ok(()))
+        .await;
     assert!(result.is_err(), "a missing agent type must fail the run");
 
     let run = engine.get_run(run_id).await.unwrap();
@@ -7226,7 +7288,10 @@ async fn workflow_step_by_type_spawns_with_parent_owner() {
     let sender = |_id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
         Ok((msg, 0u64, 0u64))
     };
-    engine.execute_run(run_id, resolver, sender).await.unwrap();
+    engine
+        .execute_run(run_id, resolver, sender, |_, _| Ok(()))
+        .await
+        .unwrap();
 
     let spawned = kernel
         .agents
@@ -7255,7 +7320,7 @@ async fn workflow_step_by_type_spawns_with_parent_owner() {
         }
     };
     engine
-        .execute_run(run_id2, resolver2, sender)
+        .execute_run(run_id2, resolver2, sender, |_, _| Ok(()))
         .await
         .unwrap();
     let spawned2 = kernel

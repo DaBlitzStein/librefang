@@ -432,10 +432,12 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             // Don't swallow the result — without a log the agent that
             // called workflow_start has no way to learn the run failed
             // except by polling get_workflow_run for the Failed state.
-            let exec_fut = kernel_arc
-                .workflows
-                .engine
-                .execute_run(run_id, resolver, send_message);
+            let exec_fut = kernel_arc.workflows.engine.execute_run(
+                run_id,
+                resolver,
+                send_message,
+                |agent_id, required| kernel_arc.check_step_required_skills(agent_id, required),
+            );
             let exec_result: Result<Result<String, String>, ()> = match timeout {
                 Some(d) => match tokio::time::timeout(d, exec_fut).await {
                     Ok(inner) => Ok(inner),

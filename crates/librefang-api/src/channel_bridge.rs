@@ -1318,6 +1318,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         ))
                     }
                 },
+                |agent_id, required| kernel.check_step_required_skills(agent_id, required),
             )
             .await;
 

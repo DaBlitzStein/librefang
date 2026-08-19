@@ -453,6 +453,59 @@ impl LibreFangKernel {
     /// drop. Mode semantics mirror `available_tools` exactly: allowlist mode
     /// only (`["*"]` means "all", so nothing is pending there), and disabled
     /// modes yield nothing.
+    /// Check that a workflow step's required skills are satisfiable by the
+    /// resolved agent (#7721). The error names the step's needs precisely:
+    /// "not declared" (absent from the allowlist) vs "declared but not
+    /// installed" (pending declarations, #7713).
+    pub fn check_step_required_skills(
+        &self,
+        agent_id: AgentId,
+        required: &[String],
+    ) -> Result<(), String> {
+        if required.is_empty() {
+            return Ok(());
+        }
+        let Some(entry) = self.agents.registry.get(agent_id) else {
+            return Err(format!("step agent {agent_id} is not registered"));
+        };
+        let manifest = &entry.manifest;
+        if manifest.skills_disabled {
+            return Err(format!(
+                "step requires skills {:?} but agent '{}' has skills disabled",
+                required, entry.name
+            ));
+        }
+        // Allowlist semantics mirror available_tools: an empty list (or an
+        // explicit "*") means every skill is declared.
+        let has_all = manifest.skills.is_empty() || manifest.skills.iter().any(|s| s == "*");
+        if !has_all {
+            let missing: Vec<&String> = required
+                .iter()
+                .filter(|r| !manifest.skills.iter().any(|s| s == *r))
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "step requires skill(s) {:?} which agent '{}' does not declare (declared: {:?})",
+                    missing, entry.name, manifest.skills
+                ));
+            }
+        }
+        // Declared but not installed: surface the pending state so the
+        // operator can tell "add to manifest" apart from "install the skill".
+        let pending = self.pending_skill_and_mcp_declarations(agent_id);
+        let unavailable: Vec<&String> = required
+            .iter()
+            .filter(|r| pending.skills.iter().any(|p| p == *r))
+            .collect();
+        if !unavailable.is_empty() {
+            return Err(format!(
+                "step requires skill(s) {:?} which agent '{}' declares but are not installed on this instance — install them or reload skills",
+                unavailable, entry.name
+            ));
+        }
+        Ok(())
+    }
+
     pub fn pending_skill_and_mcp_declarations(
         &self,
         agent_id: AgentId,

@@ -64,6 +64,14 @@ pub async fn create_workflow(
 
         steps.push(WorkflowStep {
             name: step_name,
+            required_skills: s["required_skills"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
             agent,
             prompt_template: s["prompt"].as_str().unwrap_or("{{input}}").to_string(),
             mode,
@@ -362,6 +370,14 @@ pub async fn update_workflow(
 
             parsed_steps.push(WorkflowStep {
                 name: step_name,
+                required_skills: s["required_skills"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 agent,
                 prompt_template: s["prompt"].as_str().unwrap_or("{{input}}").to_string(),
                 mode,
@@ -564,6 +580,11 @@ fn spawn_background_run(
                             })
                             .map_err(|e| format!("{e}"))
                     }
+                },
+                |agent_id, required| {
+                    state
+                        .kernel
+                        .check_step_required_skills(agent_id, required)
                 },
             )
             .await;
@@ -1222,6 +1243,9 @@ pub async fn resume_workflow_run(
                             .map_err(|e| format!("{e}"))
                     }
                 },
+                |agent_id, required| {
+                    state.kernel.check_step_required_skills(agent_id, required)
+                },
             )
             .await;
         if let Err(e) = result {
@@ -1440,6 +1464,11 @@ pub async fn operator_action_workflow_run(
                             })
                             .map_err(|e| format!("{e}"))
                     }
+                },
+                |agent_id, required| {
+                    state_for_engine
+                        .kernel
+                        .check_step_required_skills(agent_id, required)
                 },
             )
             .await;

@@ -99,6 +99,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         owner: Option<AgentId>,
         fresh: bool,
     ) -> Option<(AgentId, String, bool)>;
+    /// Check that a workflow step's required skills are satisfiable by the
+    /// resolved agent (#7721) — see
+    /// `LibreFangKernel::check_step_required_skills`.
+    fn check_step_required_skills(
+        &self,
+        agent_id: AgentId,
+        required: &[String],
+    ) -> Result<(), String>;
     fn approvals(&self) -> &ApprovalManager;
     fn audit(&self) -> &Arc<AuditLog>;
     fn auth_manager(&self) -> &AuthManager;
@@ -849,6 +857,13 @@ impl KernelApi for LibreFangKernel {
         fresh: bool,
     ) -> Option<(AgentId, String, bool)> {
         LibreFangKernel::resolve_agent_by_type_or_spawn(self, template, owner, fresh)
+    }
+    fn check_step_required_skills(
+        &self,
+        agent_id: AgentId,
+        required: &[String],
+    ) -> Result<(), String> {
+        LibreFangKernel::check_step_required_skills(self, agent_id, required)
     }
     fn approvals(&self) -> &ApprovalManager {
         <Self as crate::GovernanceSubsystemApi>::approvals(self)

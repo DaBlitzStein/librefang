@@ -266,6 +266,12 @@ pub struct WorkflowStep {
     /// this step regardless of agent config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherit_context: Option<bool>,
+    /// Skills this step requires from the resolved agent (or from the
+    /// agent type's template when the step spawns one). Resolution checks
+    /// these and fails the step with a message naming the missing skill
+    /// (#7721).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_skills: Vec<String>,
     /// Names of steps this step depends on (for DAG execution).
     /// When non-empty, the workflow engine uses topological ordering
     /// instead of the default sequential/mode-based execution.
@@ -3058,16 +3064,18 @@ impl WorkflowEngine {
     ///
     /// Returns the eventual workflow output (or step error) just like the
     /// original `execute_run`.
-    pub async fn resume_run<F, Fut>(
+    pub async fn resume_run<F, Fut, C>(
         &self,
         run_id: WorkflowRunId,
         resume_token: Uuid,
         agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: F,
+        skill_check: C,
     ) -> Result<String, ResumeRunError>
     where
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+        C: Fn(AgentId, &[String]) -> Result<(), String> + Sync,
     {
         // Validate state + token, snapshot what we need, flip state back to
         // Running, then drop the lock before re-entering execution. The
@@ -3166,9 +3174,16 @@ impl WorkflowEngine {
         } else {
             // `input` here is unused on the resume path because the loop
             // pulls `paused_current_input` off the run when present.
-            self.execute_run_sequential(run_id, &workflow, "", &agent_resolver, &send_message)
-                .await
-                .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e })
+            self.execute_run_sequential(
+                run_id,
+                &workflow,
+                "",
+                &agent_resolver,
+                &send_message,
+                &skill_check,
+            )
+            .await
+            .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e })
         };
         self.cleanup_terminal_pause_state(run_id).await;
         // If persistence panicked, surface it instead of returning a fake Ok.
@@ -3547,17 +3562,19 @@ impl WorkflowEngine {
     /// same status codes the resume endpoint already uses. An action not
     /// present in the step's authorised `actions` is rejected as
     /// `ExecutionFailed` (the workflow author never allowed it).
-    pub async fn resolve_operator_step<F, Fut>(
+    pub async fn resolve_operator_step<F, Fut, C>(
         &self,
         run_id: WorkflowRunId,
         action: OperatorAction,
         payload: Option<String>,
         agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: F,
+        skill_check: C,
     ) -> Result<String, ResumeRunError>
     where
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+        C: Fn(AgentId, &[String]) -> Result<(), String> + Sync,
     {
         let pause = self
             .inspect_operator_pause(run_id)
@@ -3610,6 +3627,7 @@ impl WorkflowEngine {
             outcome,
             &agent_resolver,
             &send_message,
+            &skill_check,
         )
         .await
     }
@@ -3623,17 +3641,19 @@ impl WorkflowEngine {
     /// resolve uses, so an auto-resolve produces a byte-identical run state
     /// to an operator clicking the equivalent button. The kernel-side
     /// driver supplies the resolver/sender so downstream steps run.
-    pub async fn resolve_operator_timeout<F, Fut>(
+    pub async fn resolve_operator_timeout<F, Fut, C>(
         &self,
         run_id: WorkflowRunId,
         operator_step_index: usize,
         timeout_action: OperatorTimeoutAction,
         agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: F,
+        skill_check: C,
     ) -> Result<String, ResumeRunError>
     where
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+        C: Fn(AgentId, &[String]) -> Result<(), String> + Sync,
     {
         // The artifact is the operator step's pre-pause `current_input`,
         // already snapshotted as `paused_current_input`. Approve flows it
@@ -3664,6 +3684,7 @@ impl WorkflowEngine {
             outcome,
             &agent_resolver,
             &send_message,
+            &skill_check,
         )
         .await
     }
@@ -3679,17 +3700,19 @@ impl WorkflowEngine {
     /// is the security boundary for operator resolution, not a resume
     /// token. Shared by the HTTP path (#5133) and the timeout driver
     /// (#5134) so both produce byte-identical run states.
-    async fn apply_operator_outcome<F, Fut>(
+    async fn apply_operator_outcome<F, Fut, C>(
         &self,
         run_id: WorkflowRunId,
         operator_step_index: usize,
         outcome: OperatorOutcome,
         agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: &F,
+        skill_check: &C,
     ) -> Result<String, ResumeRunError>
     where
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+        C: Fn(AgentId, &[String]) -> Result<(), String> + Sync,
     {
         let resolved_output = match outcome {
             OperatorOutcome::Fail { reason } => {
@@ -3766,9 +3789,16 @@ impl WorkflowEngine {
         let result = if has_dag_deps {
             Err(ResumeRunError::DagUnsupported { run_id })
         } else {
-            self.execute_run_sequential(run_id, &workflow, "", agent_resolver, send_message)
-                .await
-                .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e })
+            self.execute_run_sequential(
+                run_id,
+                &workflow,
+                "",
+                agent_resolver,
+                send_message,
+                &skill_check,
+            )
+            .await
+            .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e })
         };
         self.cleanup_terminal_pause_state(run_id).await;
         if let Err(persist_err) = self.persist_runs_async().await {
@@ -3794,15 +3824,17 @@ impl WorkflowEngine {
     /// The `agent_resolver` returns `(AgentId, agent_name, inherit_parent_context)`.
     /// When `inherit_parent_context` is true and the step doesn't override it,
     /// previous step outputs are prepended to the prompt as context.
-    pub async fn execute_run<F, Fut>(
+    pub async fn execute_run<F, Fut, C>(
         &self,
         run_id: WorkflowRunId,
         agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: F,
+        skill_check: C,
     ) -> Result<String, String>
     where
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+        C: Fn(AgentId, &[String]) -> Result<(), String> + Sync,
     {
         // Get the run and workflow. Mutate the run's state synchronously
         // via DashMap's get_mut, then drop the shard guard before the
@@ -3839,8 +3871,15 @@ impl WorkflowEngine {
 
         let inner_fut = async {
             if has_dag_deps {
-                self.execute_run_dag(run_id, &workflow, &input, &agent_resolver, &send_message)
-                    .await
+                self.execute_run_dag(
+                    run_id,
+                    &workflow,
+                    &input,
+                    &agent_resolver,
+                    &send_message,
+                    &skill_check,
+                )
+                .await
             } else {
                 self.execute_run_sequential(
                     run_id,
@@ -3848,6 +3887,7 @@ impl WorkflowEngine {
                     &input,
                     &agent_resolver,
                     &send_message,
+                    &skill_check,
                 )
                 .await
             }
@@ -3910,17 +3950,19 @@ impl WorkflowEngine {
     }
 
     /// Sequential workflow execution (extracted for persistence wrapping).
-    async fn execute_run_sequential<F, Fut>(
+    async fn execute_run_sequential<F, Fut, C>(
         &self,
         run_id: WorkflowRunId,
         workflow: &Workflow,
         input: &str,
         agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: &F,
+        skill_check: &C,
     ) -> Result<String, String>
     where
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+        C: Fn(AgentId, &[String]) -> Result<(), String> + Sync,
     {
         // Resume snapshot: when the run was previously paused, the prior
         // execution stored `(step_index, variables, current_input)` on the
@@ -4062,6 +4104,21 @@ impl WorkflowEngine {
                             return Err(e);
                         }
                     };
+                    // Required-skills gate (#7721): fail the step before
+                    // dispatch when the resolved agent cannot provide a
+                    // skill the step declares as required.
+                    if !step.required_skills.is_empty() {
+                        if let Err(e) = skill_check(agent_id, &step.required_skills) {
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(e.clone());
+                                    r.current_step_index = None;
+                                }
+                            }
+                            return Err(e);
+                        }
+                    }
 
                     let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
@@ -5304,17 +5361,19 @@ impl WorkflowEngine {
     /// Steps within the same layer run concurrently; layers execute
     /// sequentially. Each step receives the workflow input plus any
     /// variables produced by its dependencies via `output_var`.
-    async fn execute_run_dag<F, Fut>(
+    async fn execute_run_dag<F, Fut, C>(
         &self,
         run_id: WorkflowRunId,
         workflow: &Workflow,
         input: &str,
         agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: &F,
+        skill_check: &C,
     ) -> Result<String, String>
     where
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+        C: Fn(AgentId, &[String]) -> Result<(), String> + Sync,
     {
         // Pause/resume support is sequential-path only in #3335. If a pause
         // request was lodged before the engine routed into the DAG branch,
@@ -5415,6 +5474,21 @@ impl WorkflowEngine {
                         return Err(e);
                     }
                 };
+                // Required-skills gate (#7721): fail the step before
+                // dispatch when the resolved agent cannot provide a
+                // skill the step declares as required.
+                if !step.required_skills.is_empty() {
+                    if let Err(e) = skill_check(agent_id, &step.required_skills) {
+                        if let Some(mut r) = self.runs.get_mut(&run_id) {
+                            if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                r.state = WorkflowRunState::Failed;
+                                r.error = Some(e.clone());
+                                r.current_step_index = None;
+                            }
+                        }
+                        return Err(e);
+                    }
+                }
 
                 let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
                 let prompt_sent = prompt.clone();
@@ -6632,6 +6706,7 @@ impl WorkflowTemplateRegistry {
                     prompt = prompt.replace(&format!("{{{{{}}}}}", k), v);
                 }
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: ts.name.clone(),
                     agent: match &ts.agent {
                         Some(a) => StepAgent::ByName { name: a.clone() },
@@ -6894,6 +6969,7 @@ mod tests {
             description: "A test pipeline".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "analyze".to_string(),
                     agent: StepAgent::ByName {
                         name: "analyst".to_string(),
@@ -6908,6 +6984,7 @@ mod tests {
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "summarize".to_string(),
                     agent: StepAgent::ByName {
                         name: "writer".to_string(),
@@ -6958,6 +7035,7 @@ mod tests {
             name: "cond-missing-agent".to_string(),
             description: String::new(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "cond".to_string(),
                 agent: StepAgent::ByName {
                     name: "deleted-agent".to_string(),
@@ -6986,7 +7064,9 @@ mod tests {
         let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((msg, 0u64, 0u64))
         };
-        let result = engine.execute_run(run_id, none_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, none_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_err(), "a missing agent must fail the run");
 
         let run = engine.get_run(run_id).await.unwrap();
@@ -7112,7 +7192,9 @@ mod tests {
             Ok((format!("Processed: {msg}"), 100u64, 50u64))
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -7136,6 +7218,7 @@ mod tests {
             name: "transform-fail".to_string(),
             description: String::new(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "bad-transform".to_string(),
                 agent: StepAgent::ByName {
                     name: "unused".to_string(),
@@ -7162,7 +7245,9 @@ mod tests {
         let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((msg, 0u64, 0u64))
         };
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(
             result.is_err(),
             "invalid transform template must fail the run"
@@ -7198,7 +7283,9 @@ mod tests {
         let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1u64, 1u64))
         };
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
         let run = engine.get_run(run_id).await.unwrap();
         assert!(matches!(run.state, WorkflowRunState::Completed));
@@ -7217,6 +7304,7 @@ mod tests {
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "first".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7231,6 +7319,7 @@ mod tests {
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "only-if-error".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7262,7 +7351,9 @@ mod tests {
             Ok((format!("OK: {msg}"), 10u64, 5u64))
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
 
         let run = engine.get_run(run_id).await.unwrap();
@@ -7279,6 +7370,7 @@ mod tests {
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "first".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7293,6 +7385,7 @@ mod tests {
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "only-if-error".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7322,7 +7415,9 @@ mod tests {
             Ok(("Found an ERROR in the data".to_string(), 10u64, 5u64))
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
 
         let run = engine.get_run(run_id).await.unwrap();
@@ -7338,6 +7433,7 @@ mod tests {
             name: "loop-test".to_string(),
             description: "".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "refine".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -7376,7 +7472,9 @@ mod tests {
             }
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("DONE"));
         assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 3);
@@ -7390,6 +7488,7 @@ mod tests {
             name: "loop-max-test".to_string(),
             description: "".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "refine".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -7418,7 +7517,9 @@ mod tests {
             Ok(("iteration output".to_string(), 10u64, 5u64))
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
 
         let run = engine.get_run(run_id).await.unwrap();
@@ -7434,6 +7535,7 @@ mod tests {
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "will-fail".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7448,6 +7550,7 @@ mod tests {
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "succeeds".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7484,7 +7587,9 @@ mod tests {
             }
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
 
         let run = engine.get_run(run_id).await.unwrap();
@@ -7501,6 +7606,7 @@ mod tests {
             name: "retry-test".to_string(),
             description: "".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "flaky".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -7540,7 +7646,9 @@ mod tests {
             }
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "finally worked");
         assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 3);
@@ -7555,6 +7663,7 @@ mod tests {
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "produce".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7569,6 +7678,7 @@ mod tests {
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "transform".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7583,6 +7693,7 @@ mod tests {
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "combine".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7620,7 +7731,9 @@ mod tests {
             }
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
         let output = result.unwrap();
         // The third step receives "First: alpha | Second: beta" as its prompt
@@ -7637,6 +7750,7 @@ mod tests {
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "task-a".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7651,6 +7765,7 @@ mod tests {
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "task-b".to_string(),
                     agent: StepAgent::ByName {
                         name: "b".to_string(),
@@ -7665,6 +7780,7 @@ mod tests {
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "collect".to_string(),
                     agent: StepAgent::ByName {
                         name: "c".to_string(),
@@ -7691,7 +7807,9 @@ mod tests {
             Ok((format!("Done: {msg}"), 10u64, 5u64))
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -7821,6 +7939,7 @@ mod tests {
             name: "rich-input".to_string(),
             description: "".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "render".to_string(),
                 agent: StepAgent::ByName {
                     name: "writer".to_string(),
@@ -7875,7 +7994,9 @@ mod tests {
             }
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok(), "run failed: {:?}", result);
 
         let prompts = captured.lock().unwrap();
@@ -7912,6 +8033,7 @@ mod tests {
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "first".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -7926,6 +8048,7 @@ mod tests {
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "second".to_string(),
                     agent: StepAgent::ByName {
                         name: "b".to_string(),
@@ -7965,7 +8088,9 @@ mod tests {
             }
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok(), "DAG run failed: {:?}", result);
 
         let prompts = captured.lock().unwrap();
@@ -8243,6 +8368,7 @@ mod tests {
     fn workflow_validate_surfaces_transform_syntax_errors() {
         let mut wf = test_workflow();
         wf.steps.push(WorkflowStep {
+            required_skills: Vec::new(),
             name: "bad-transform".to_string(),
             agent: StepAgent::ByName {
                 name: "_op".to_string(),
@@ -8272,6 +8398,7 @@ mod tests {
             name: name.to_string(),
             description: "validate test".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "op".to_string(),
                 agent: StepAgent::ByName {
                     name: "_op".to_string(),
@@ -8437,6 +8564,7 @@ mod tests {
             wf.steps.insert(
                 0,
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "producer".to_string(),
                     agent: StepAgent::ByName {
                         name: "_producer".to_string(),
@@ -8456,6 +8584,7 @@ mod tests {
             // target name resolves (validate doesn't dereference it
             // today but a future check might).
             wf.steps.push(WorkflowStep {
+                required_skills: Vec::new(),
                 name: "downstream".to_string(),
                 agent: StepAgent::ByName {
                     name: "_downstream".to_string(),
@@ -9000,7 +9129,9 @@ prompt_template = "do {{x}}"
             }
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
 
         let prompts = received_prompts.lock().unwrap();
@@ -9034,7 +9165,7 @@ prompt_template = "do {{x}}"
 
         // Use resolver that returns inherit_parent_context=false
         let result = engine
-            .execute_run(run_id, mock_resolver_no_inherit, sender)
+            .execute_run(run_id, mock_resolver_no_inherit, sender, |_, _| Ok(()))
             .await;
         assert!(result.is_ok());
 
@@ -9053,6 +9184,7 @@ prompt_template = "do {{x}}"
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "first".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -9067,6 +9199,7 @@ prompt_template = "do {{x}}"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "second".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -9102,7 +9235,9 @@ prompt_template = "do {{x}}"
             }
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
 
         let prompts = received_prompts.lock().unwrap();
@@ -9119,6 +9254,7 @@ prompt_template = "do {{x}}"
         // Linear chain: A -> B -> C
         let steps = vec![
             WorkflowStep {
+                required_skills: Vec::new(),
                 name: "A".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -9133,6 +9269,7 @@ prompt_template = "do {{x}}"
                 session_mode: None,
             },
             WorkflowStep {
+                required_skills: Vec::new(),
                 name: "B".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -9147,6 +9284,7 @@ prompt_template = "do {{x}}"
                 session_mode: None,
             },
             WorkflowStep {
+                required_skills: Vec::new(),
                 name: "C".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -9179,6 +9317,7 @@ prompt_template = "do {{x}}"
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "A".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -9193,6 +9332,7 @@ prompt_template = "do {{x}}"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "B".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -9207,6 +9347,7 @@ prompt_template = "do {{x}}"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "C".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -9241,7 +9382,9 @@ prompt_template = "do {{x}}"
         };
 
         // Agent says inherit=true, but step overrides to false
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_ok());
 
         let prompts = received_prompts.lock().unwrap();
@@ -9252,6 +9395,7 @@ prompt_template = "do {{x}}"
     #[test]
     fn test_build_context_prompt_no_results() {
         let step = WorkflowStep {
+            required_skills: Vec::new(),
             name: "s".to_string(),
             agent: StepAgent::ByName {
                 name: "a".to_string(),
@@ -9273,6 +9417,7 @@ prompt_template = "do {{x}}"
     #[test]
     fn test_build_context_prompt_with_results() {
         let step = WorkflowStep {
+            required_skills: Vec::new(),
             name: "s2".to_string(),
             agent: StepAgent::ByName {
                 name: "a".to_string(),
@@ -9315,6 +9460,7 @@ prompt_template = "do {{x}}"
     #[test]
     fn test_build_context_prompt_truncates_long_output() {
         let step = WorkflowStep {
+            required_skills: Vec::new(),
             name: "s2".to_string(),
             agent: StepAgent::ByName {
                 name: "a".to_string(),
@@ -9375,6 +9521,7 @@ prompt_template = "do {{x}}"
         // Verify topological order: A and B in first layer, C in second
         let layers = WorkflowEngine::topological_sort(&[
             WorkflowStep {
+                required_skills: Vec::new(),
                 name: "A".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -9389,6 +9536,7 @@ prompt_template = "do {{x}}"
                 session_mode: None,
             },
             WorkflowStep {
+                required_skills: Vec::new(),
                 name: "B".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -9403,6 +9551,7 @@ prompt_template = "do {{x}}"
                 session_mode: None,
             },
             WorkflowStep {
+                required_skills: Vec::new(),
                 name: "C".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -9428,6 +9577,7 @@ prompt_template = "do {{x}}"
         // A -> B -> A (cycle)
         let steps = vec![
             WorkflowStep {
+                required_skills: Vec::new(),
                 name: "A".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -9442,6 +9592,7 @@ prompt_template = "do {{x}}"
                 session_mode: None,
             },
             WorkflowStep {
+                required_skills: Vec::new(),
                 name: "B".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -9470,6 +9621,7 @@ prompt_template = "do {{x}}"
             description: "preserve dependencies".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "A".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -9484,6 +9636,7 @@ prompt_template = "do {{x}}"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "B".to_string(),
                     agent: StepAgent::ByName {
                         name: "b".to_string(),
@@ -9498,6 +9651,7 @@ prompt_template = "do {{x}}"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "C".to_string(),
                     agent: StepAgent::ByName {
                         name: "c".to_string(),
@@ -9538,6 +9692,7 @@ prompt_template = "do {{x}}"
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "A".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -9552,6 +9707,7 @@ prompt_template = "do {{x}}"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "B".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -9580,7 +9736,9 @@ prompt_template = "do {{x}}"
             Err::<(String, u64, u64), String>("simulated failure".to_string())
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("failed"));
 
@@ -10100,7 +10258,7 @@ prompt_template = "do {{x}}"
         // First execute_run: runs step 1, sender requests pause, loop
         // honors at the next step boundary (before step 2).
         engine
-            .execute_run(run_id, mock_resolver, sender)
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
             .await
             .expect("execute_run should pause cleanly without erroring");
 
@@ -10131,7 +10289,7 @@ prompt_template = "do {{x}}"
             Ok((format!("Processed: {msg}"), 100_u64, 50_u64))
         };
         let result = engine
-            .resume_run(run_id, token, mock_resolver, sender_resume)
+            .resume_run(run_id, token, mock_resolver, sender_resume, |_, _| Ok(()))
             .await
             .expect("resume_run should succeed");
         assert!(result.contains("Processed:"));
@@ -10167,7 +10325,7 @@ prompt_template = "do {{x}}"
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
-            .execute_run(run_id, mock_resolver, sender)
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
             .await
             .unwrap();
 
@@ -10180,7 +10338,7 @@ prompt_template = "do {{x}}"
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
-            .resume_run(run_id, bogus_token, mock_resolver, sender2)
+            .resume_run(run_id, bogus_token, mock_resolver, sender2, |_, _| Ok(()))
             .await
             .expect_err("resume_run with wrong token must error");
         assert!(
@@ -10203,7 +10361,7 @@ prompt_template = "do {{x}}"
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
-            .resume_run(run_id, Uuid::new_v4(), mock_resolver, sender)
+            .resume_run(run_id, Uuid::new_v4(), mock_resolver, sender, |_, _| Ok(()))
             .await
             .expect_err("resume_run on non-paused run must error");
         assert!(
@@ -10235,7 +10393,7 @@ prompt_template = "do {{x}}"
                 Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
             };
             engine
-                .execute_run(run_id, mock_resolver, sender)
+                .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
                 .await
                 .unwrap();
             // `execute_run` ends with `persist_runs_async().await`, which
@@ -10340,6 +10498,7 @@ prompt_template = "do {{x}}"
             description: "".into(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "a".into(),
                     agent: StepAgent::ByName { name: "x".into() },
                     prompt_template: "{{input}}".into(),
@@ -10352,6 +10511,7 @@ prompt_template = "do {{x}}"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "b".into(),
                     agent: StepAgent::ByName { name: "y".into() },
                     prompt_template: "{{input}}".into(),
@@ -10379,7 +10539,7 @@ prompt_template = "do {{x}}"
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
-            .execute_run(run_id, mock_resolver, sender)
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
             .await
             .expect_err("DAG executor with pause request must return an explicit error");
         assert!(
@@ -10452,14 +10612,14 @@ prompt_template = "do {{x}}"
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
-            .execute_run(run_id, mock_resolver, sender)
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
             .await
             .unwrap();
         let sender2 = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
-            .resume_run(run_id, token, mock_resolver, sender2)
+            .resume_run(run_id, token, mock_resolver, sender2, |_, _| Ok(()))
             .await
             .unwrap();
 
@@ -10471,7 +10631,7 @@ prompt_template = "do {{x}}"
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
-            .resume_run(run_id, token, mock_resolver, sender3)
+            .resume_run(run_id, token, mock_resolver, sender3, |_, _| Ok(()))
             .await
             .expect_err("double-resume on a completed run must error");
         assert!(
@@ -10498,7 +10658,7 @@ prompt_template = "do {{x}}"
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
-            .execute_run(run_id, mock_resolver, sender)
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
             .await
             .expect("pause-at-zero path must not error");
 
@@ -10544,7 +10704,7 @@ prompt_template = "do {{x}}"
             Ok((format!("R:{msg}"), 1_u64, 1_u64))
         };
         engine
-            .execute_run(run_id, mock_resolver, sender)
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
             .await
             .expect("pause must not error");
 
@@ -10776,6 +10936,7 @@ prompt_template = "do {{x}}"
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "step1".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -10790,6 +10951,7 @@ prompt_template = "do {{x}}"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "step2".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -10804,6 +10966,7 @@ prompt_template = "do {{x}}"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "step3".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -10855,6 +11018,7 @@ prompt_template = "do {{x}}"
                             }
                         }
                     },
+                    |_, _| Ok(()),
                 )
                 .await
         });
@@ -10916,6 +11080,7 @@ prompt_template = "do {{x}}"
             name: "timeout-test".to_string(),
             description: "".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "slow-step".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -10947,6 +11112,7 @@ prompt_template = "do {{x}}"
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 Ok(("done".to_string(), 0u64, 0u64))
             },
+            |_, _| Ok(()),
         );
 
         // Drive execute_run and advance time concurrently. With time paused
@@ -11069,6 +11235,7 @@ prompt_template = "do {{x}}"
             name: "retry-cancel-test".to_string(),
             description: "".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "always-fail".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -11106,6 +11273,7 @@ prompt_template = "do {{x}}"
                     |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async {
                         Err("forced failure".to_string())
                     },
+                    |_, _| Ok(()),
                 )
                 .await
         });
@@ -11160,6 +11328,7 @@ prompt_template = "do {{x}}"
             name: "evict-test".to_string(),
             description: "".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "s".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -11213,6 +11382,7 @@ prompt_template = "do {{x}}"
             name: "evict-notify-test".to_string(),
             description: "".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "s".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -11674,6 +11844,7 @@ name = "topic"
         wf.steps.insert(
             0,
             WorkflowStep {
+                required_skills: Vec::new(),
                 name: "producer".to_string(),
                 agent: StepAgent::ByName {
                     name: "_producer".to_string(),
@@ -11725,9 +11896,12 @@ name = "topic"
             .expect("create_run");
 
         let result = engine
-            .execute_run(run_id, mock_resolver, |_id, _prompt, _mode| async {
-                Ok(("ignored".to_string(), 0u64, 0u64))
-            })
+            .execute_run(
+                run_id,
+                mock_resolver,
+                |_id, _prompt, _mode| async { Ok(("ignored".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await;
         // The skeleton executor pauses cleanly — `execute_run` returns
         // Ok with the input value (pass-through) once Paused state is
@@ -11806,6 +11980,7 @@ name = "topic"
             description: "hitl test".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "produce".to_string(),
                     agent: StepAgent::ByName {
                         name: "producer".to_string(),
@@ -11820,6 +11995,7 @@ name = "topic"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "review".to_string(),
                     agent: StepAgent::ByName {
                         name: "_op".to_string(),
@@ -11839,6 +12015,7 @@ name = "topic"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "consume".to_string(),
                     agent: StepAgent::ByName {
                         name: "consumer".to_string(),
@@ -11884,9 +12061,12 @@ name = "topic"
             .expect("create_run");
 
         engine
-            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
-                Ok(("ignored".to_string(), 0u64, 0u64))
-            })
+            .execute_run(
+                run_id,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("ignored".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("operator pause returns Ok");
 
@@ -11934,9 +12114,12 @@ name = "topic"
             .expect("create_run");
 
         engine
-            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
-                Ok(("ignored".to_string(), 0u64, 0u64))
-            })
+            .execute_run(
+                run_id,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("ignored".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("operator pause returns Ok");
 
@@ -12001,9 +12184,12 @@ name = "topic"
             .expect("create_run");
 
         engine
-            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
-                Ok(("produced".to_string(), 1u64, 1u64))
-            })
+            .execute_run(
+                run_id,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("produced".to_string(), 1u64, 1u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("pauses at operator step");
         assert!(engine.get_run(run_id).await.unwrap().state.is_paused());
@@ -12016,6 +12202,7 @@ name = "topic"
                 None,
                 mock_resolver,
                 |_id, _p, _m| async { Ok(("consumed".to_string(), 1u64, 1u64)) },
+                |_, _| Ok(()),
             )
             .await
             .expect("approve resolves and resumes");
@@ -12079,7 +12266,7 @@ name = "topic"
             }
         };
         engine
-            .execute_run(run_id, mock_resolver_no_inherit, sender)
+            .execute_run(run_id, mock_resolver_no_inherit, sender, |_, _| Ok(()))
             .await
             .expect("pauses at operator step");
 
@@ -12090,6 +12277,7 @@ name = "topic"
                 None,
                 mock_resolver_no_inherit,
                 sender,
+                |_, _| Ok(()),
             )
             .await
             .expect("approve resolves");
@@ -12130,12 +12318,19 @@ name = "topic"
             }
         };
         engine
-            .execute_run(run_id, mock_resolver, sender.clone())
+            .execute_run(run_id, mock_resolver, sender.clone(), |_, _| Ok(()))
             .await
             .expect("pauses at operator step");
 
         let res = engine
-            .resolve_operator_step(run_id, OperatorAction::Reject, None, mock_resolver, sender)
+            .resolve_operator_step(
+                run_id,
+                OperatorAction::Reject,
+                None,
+                mock_resolver,
+                sender,
+                |_, _| Ok(()),
+            )
             .await;
         assert!(res.is_err(), "Reject must surface as an error (terminal)");
         assert!(matches!(
@@ -12171,7 +12366,7 @@ name = "topic"
             }
         };
         engine
-            .execute_run(run_id, mock_resolver_no_inherit, sender)
+            .execute_run(run_id, mock_resolver_no_inherit, sender, |_, _| Ok(()))
             .await
             .expect("pauses at operator step");
 
@@ -12182,6 +12377,7 @@ name = "topic"
                 Some("EDITED-BY-OPERATOR".to_string()),
                 mock_resolver_no_inherit,
                 sender,
+                |_, _| Ok(()),
             )
             .await
             .expect("edit resolves");
@@ -12204,9 +12400,12 @@ name = "topic"
             .await
             .expect("create_run");
         engine
-            .execute_run(run_id, mock_resolver, |_i, _p, _m| async {
-                Ok(("ARTIFACT".to_string(), 1u64, 1u64))
-            })
+            .execute_run(
+                run_id,
+                mock_resolver,
+                |_i, _p, _m| async { Ok(("ARTIFACT".to_string(), 1u64, 1u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("pauses");
 
@@ -12217,6 +12416,7 @@ name = "topic"
                 None,
                 mock_resolver,
                 |_i, _p, _m| async { Ok(("x".to_string(), 0, 0)) },
+                |_, _| Ok(()),
             )
             .await;
         assert!(res.is_err(), "unauthorised action must error");
@@ -12251,9 +12451,12 @@ name = "topic"
             .expect("create_run");
 
         engine
-            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
-                Ok(("ignored".to_string(), 0u64, 0u64))
-            })
+            .execute_run(
+                run_id,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("ignored".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("operator pause returns Ok");
         assert!(
@@ -12306,6 +12509,7 @@ name = "topic"
             name: "resume-cleanup".to_string(),
             description: "regression".to_string(),
             steps: vec![WorkflowStep {
+                required_skills: Vec::new(),
                 name: "only".to_string(),
                 agent: StepAgent::ByName {
                     name: "noop".to_string(),
@@ -12336,9 +12540,12 @@ name = "topic"
         // Drive the executor: it observes the pause_request at the
         // loop-top gate and parks the run in Paused state.
         engine
-            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
-                Ok(("done".to_string(), 0u64, 0u64))
-            })
+            .execute_run(
+                run_id,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("done".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("pause honoured");
         assert!(
@@ -12363,9 +12570,13 @@ name = "topic"
         // sits AFTER token validation (security boundary).
         let bogus = Uuid::new_v4();
         let err = engine
-            .resume_run(run_id, bogus, mock_resolver, |_id, _p, _m| async {
-                Ok(("x".to_string(), 0, 0))
-            })
+            .resume_run(
+                run_id,
+                bogus,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("x".to_string(), 0, 0)) },
+                |_, _| Ok(()),
+            )
             .await;
         assert!(err.is_err(), "bogus token must error");
         assert!(
@@ -12375,9 +12586,13 @@ name = "topic"
 
         // Correct token: cleanup must run.
         engine
-            .resume_run(run_id, token, mock_resolver, |_id, _p, _m| async {
-                Ok(("done".to_string(), 0u64, 0u64))
-            })
+            .resume_run(
+                run_id,
+                token,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("done".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("resume_run with correct token must succeed");
         assert!(
@@ -12463,9 +12678,12 @@ name = "topic"
             .await
             .expect("create_run A");
         engine
-            .execute_run(run_a, mock_resolver, |_id, _p, _m| async {
-                Ok(("ignored".to_string(), 0u64, 0u64))
-            })
+            .execute_run(
+                run_a,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("ignored".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("A pauses at operator");
 
@@ -12476,9 +12694,12 @@ name = "topic"
             .await
             .expect("create_run B");
         engine
-            .execute_run(run_b, mock_resolver, |_id, _p, _m| async {
-                Ok(("ignored".to_string(), 0u64, 0u64))
-            })
+            .execute_run(
+                run_b,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("ignored".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("B pauses at operator");
 
@@ -12555,9 +12776,12 @@ name = "topic"
             .await
             .expect("create_run A");
         engine
-            .execute_run(run_a, mock_resolver, |_id, _p, _m| async {
-                Ok(("ignored".to_string(), 0u64, 0u64))
-            })
+            .execute_run(
+                run_a,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("ignored".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("A pauses at operator");
 
@@ -12568,9 +12792,12 @@ name = "topic"
             .await
             .expect("create_run B");
         engine
-            .execute_run(run_b, mock_resolver, |_id, _p, _m| async {
-                Ok(("ignored".to_string(), 0u64, 0u64))
-            })
+            .execute_run(
+                run_b,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("ignored".to_string(), 0u64, 0u64)) },
+                |_, _| Ok(()),
+            )
             .await
             .expect("B pauses at operator");
 
@@ -12645,6 +12872,7 @@ name = "topic"
     #[tokio::test]
     async fn step_timeout_fail_message_is_actionable() {
         let step = WorkflowStep {
+            required_skills: Vec::new(),
             name: "evaluator".to_string(),
             agent: StepAgent::ByName {
                 name: "test-agent".to_string(),
@@ -12701,6 +12929,7 @@ name = "topic"
     #[tokio::test]
     async fn step_timeout_skip_mode_returns_none() {
         let step = WorkflowStep {
+            required_skills: Vec::new(),
             name: "skippable".to_string(),
             agent: StepAgent::ByName {
                 name: "test-agent".to_string(),
@@ -12755,6 +12984,7 @@ name = "topic"
             description: "".to_string(),
             steps: vec![
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "ideate".to_string(),
                     agent: StepAgent::ByName {
                         name: "a".to_string(),
@@ -12769,6 +12999,7 @@ name = "topic"
                     session_mode: None,
                 },
                 WorkflowStep {
+                    required_skills: Vec::new(),
                     name: "evaluator".to_string(),
                     agent: StepAgent::ByName {
                         name: "b".to_string(),
@@ -12803,7 +13034,9 @@ name = "topic"
             }
         };
 
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let result = engine
+            .execute_run(run_id, mock_resolver, sender, |_, _| Ok(()))
+            .await;
         let err = result.expect_err("the hanging evaluator step must time out");
         assert!(
             err.contains("evaluator"),

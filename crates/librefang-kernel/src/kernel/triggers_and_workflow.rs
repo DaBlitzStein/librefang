@@ -1354,9 +1354,12 @@ impl LibreFangKernel {
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(max_workflow_secs),
-            self.workflows
-                .engine
-                .execute_run(run_id, resolver, send_message),
+            self.workflows.engine.execute_run(
+                run_id,
+                resolver,
+                send_message,
+                |agent_id, required| self.check_step_required_skills(agent_id, required),
+            ),
         )
         .await
         .map_err(|_| {
@@ -1584,6 +1587,7 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                 timeout_action,
                 resolver,
                 send_message,
+                |agent_id, required| kernel.check_step_required_skills(agent_id, required),
             )
             .await
         {
