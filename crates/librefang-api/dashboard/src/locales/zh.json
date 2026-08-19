@@ -299,7 +299,15 @@
     "toolsPlaceholder": "搜索工具…",
     "managedViaAgents": "通过智能体管理",
     "providerHint": "生成智能体的默认提供商",
-    "modelHint": "生成智能体的默认模型"
+    "modelHint": "生成智能体的默认模型",
+    "channels": "渠道",
+    "channelsPlaceholder": "搜索已配置的渠道…",
+    "preferredModels": "首选模型（路由）",
+    "simpleModel": "简单级模型",
+    "mediumModel": "中等级模型",
+    "complexModel": "复杂级模型",
+    "simpleThreshold": "简单阈值",
+    "complexThreshold": "复杂阈值"
   },
   "agents": {
     "title": "智能体",

@@ -299,7 +299,15 @@
     "toolsPlaceholder": "Search tools…",
     "managedViaAgents": "Managed via Agents",
     "providerHint": "Default provider for spawned agents",
-    "modelHint": "Default model for spawned agents"
+    "modelHint": "Default model for spawned agents",
+    "channels": "Channels",
+    "channelsPlaceholder": "Search configured channels…",
+    "preferredModels": "Preferred models (routing)",
+    "simpleModel": "Simple-tier model",
+    "mediumModel": "Medium-tier model",
+    "complexModel": "Complex-tier model",
+    "simpleThreshold": "Simple threshold (chars)",
+    "complexThreshold": "Complex threshold (chars)"
   },
   "agents": {
     "title": "Agents",

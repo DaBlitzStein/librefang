@@ -299,7 +299,15 @@
     "toolsPlaceholder": "도구 검색…",
     "managedViaAgents": "에이전트에서 관리",
     "providerHint": "기본 제공자",
-    "modelHint": "기본 모델"
+    "modelHint": "기본 모델",
+    "channels": "채널",
+    "channelsPlaceholder": "구성된 채널 검색…",
+    "preferredModels": "선호 모델 (라우팅)",
+    "simpleModel": "단순 모델",
+    "mediumModel": "중간 모델",
+    "complexModel": "복잡 모델",
+    "simpleThreshold": "단순 임계값",
+    "complexThreshold": "복잡 임계값"
   },
   "agents": {
     "title": "에이전트",

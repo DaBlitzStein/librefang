@@ -299,7 +299,15 @@
     "toolsPlaceholder": "Пошук інструментів…",
     "managedViaAgents": "Керується через Агенти",
     "providerHint": "Провайдер за замовчуванням",
-    "modelHint": "Модель за замовчуванням"
+    "modelHint": "Модель за замовчуванням",
+    "channels": "Канали",
+    "channelsPlaceholder": "Пошук налаштованих каналів…",
+    "preferredModels": "Бажані моделі (маршрутизація)",
+    "simpleModel": "Модель простого рівня",
+    "mediumModel": "Модель середнього рівня",
+    "complexModel": "Модель складного рівня",
+    "simpleThreshold": "Поріг простого",
+    "complexThreshold": "Поріг складного"
   },
   "agents": {
     "title": "Агенти",

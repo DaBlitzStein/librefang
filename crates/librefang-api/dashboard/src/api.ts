@@ -3721,6 +3721,16 @@ export interface AgentType {
   model?: string;
   tools?: string[];
   skills?: string[];
+  /** Channel allowlist — empty means all configured channels. */
+  channels?: string[];
+  /** Preferred-model tiers ([default_routing] in the TOML). */
+  routing?: {
+    simple_model: string;
+    medium_model: string;
+    complex_model: string;
+    simple_threshold?: number;
+    complex_threshold?: number;
+  };
 }
 
 /** Body for create/update. Same flat shape as {@link AgentType}; `name` is

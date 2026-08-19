@@ -1012,11 +1012,42 @@ pub fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
                 .collect()
         })
         .unwrap_or_default();
+    let channels: Vec<String> = v["channels"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    // Preferred-model tiers: the optional [default_routing] block. Only set
+    // when at least one tier model is supplied so an empty block is never
+    // written.
+    let routing = v.get("routing").and_then(|r| {
+        let simple = r.get("simple_model").and_then(|x| x.as_str())?;
+        let medium = r.get("medium_model").and_then(|x| x.as_str())?;
+        let complex = r.get("complex_model").and_then(|x| x.as_str())?;
+        Some(ModelRoutingConfig {
+            simple_model: simple.to_string(),
+            medium_model: medium.to_string(),
+            complex_model: complex.to_string(),
+            simple_threshold: r
+                .get("simple_threshold")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32,
+            complex_threshold: r
+                .get("complex_threshold")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32,
+        })
+    });
 
     let manifest = AgentManifest {
         name: name.to_string(),
         description: desc.to_string(),
         skills,
+        channels,
+        routing,
         model: ModelConfig {
             provider: provider.to_string(),
             model: model_name.to_string(),

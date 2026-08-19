@@ -14,6 +14,7 @@ import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { toastErr } from "../lib/errors";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { useSkills } from "../lib/queries/skills";
+import { useChannels } from "../lib/queries/channels";
 import { useTools } from "../lib/queries/agents";
 import type {
   AgentType,
@@ -42,6 +43,12 @@ interface FormState {
   model: string;
   tools: string[];
   skills: string[];
+  channels: string[];
+  simple_model: string;
+  medium_model: string;
+  complex_model: string;
+  simple_threshold: string;
+  complex_threshold: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -52,6 +59,12 @@ const EMPTY_FORM: FormState = {
   model: "",
   tools: [],
   skills: [],
+  channels: [],
+  simple_model: "",
+  medium_model: "",
+  complex_model: "",
+  simple_threshold: "",
+  complex_threshold: "",
 };
 
 function toForm(type: AgentType): FormState {
@@ -63,10 +76,20 @@ function toForm(type: AgentType): FormState {
     model: type.model ?? "",
     tools: type.tools ?? [],
     skills: type.skills ?? [],
+    channels: type.channels ?? [],
+    simple_model: type.routing?.simple_model ?? "",
+    medium_model: type.routing?.medium_model ?? "",
+    complex_model: type.routing?.complex_model ?? "",
+    simple_threshold: type.routing?.simple_threshold != null ? String(type.routing.simple_threshold) : "",
+    complex_threshold: type.routing?.complex_threshold != null ? String(type.routing.complex_threshold) : "",
   };
 }
 
 function toInput(form: FormState): AgentTypeInput {
+  const hasRouting =
+    form.simple_model.trim() !== "" ||
+    form.medium_model.trim() !== "" ||
+    form.complex_model.trim() !== "";
   return {
     name: form.name.trim(),
     description: form.description.trim() || undefined,
@@ -75,6 +98,16 @@ function toInput(form: FormState): AgentTypeInput {
     model: form.model.trim() || undefined,
     tools: form.tools,
     skills: form.skills,
+    channels: form.channels,
+    routing: hasRouting
+      ? {
+          simple_model: form.simple_model.trim() || "default",
+          medium_model: form.medium_model.trim() || "default",
+          complex_model: form.complex_model.trim() || "default",
+          simple_threshold: Number(form.simple_threshold) || 0,
+          complex_threshold: Number(form.complex_threshold) || 0,
+        }
+      : undefined,
   };
 }
 
@@ -83,6 +116,11 @@ export function AgentTypesPage() {
   const { data: types, isLoading, isFetching, refetch } = useAgentTypes();
   const skillsQuery = useSkills();
   const toolsQuery = useTools();
+  const channelsQuery = useChannels();
+  const channelOptions = useMemo(
+    () => (channelsQuery.data ?? []).map((c: { name: string }) => c.name),
+    [channelsQuery.data],
+  );
   const skillOptions = useMemo(
     () => (skillsQuery.data ?? []).map((s: { name: string }) => s.name),
     [skillsQuery.data],
@@ -344,6 +382,22 @@ export function AgentTypesPage() {
             </div>
             <div className="flex flex-col gap-1.5">
               <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                {t("agentTypes.channels")}
+              </label>
+              <MultiSelectCmdk
+                options={channelOptions}
+                value={form.channels}
+                onChange={(next) => {
+                  const nextValue =
+                    typeof next === "function" ? next(form.channels) : next;
+                  setForm({ ...form, channels: nextValue });
+                }}
+                placeholder={t("agentTypes.channelsPlaceholder")}
+                allowFreeText
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
                 {t("agentTypes.tools")}
               </label>
               <MultiSelectCmdk
@@ -357,6 +411,52 @@ export function AgentTypesPage() {
                 placeholder={t("agentTypes.toolsPlaceholder")}
                 allowFreeText
               />
+            </div>
+            <div className="rounded-lg border border-border-subtle bg-surface/40 p-3 space-y-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                {t("agentTypes.preferredModels")}
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <input
+                  value={form.simple_model}
+                  disabled={formPending}
+                  onChange={(e) => setForm({ ...form, simple_model: e.target.value })}
+                  placeholder={t("agentTypes.simpleModel")}
+                  className={INPUT_CLASS}
+                />
+                <input
+                  value={form.medium_model}
+                  disabled={formPending}
+                  onChange={(e) => setForm({ ...form, medium_model: e.target.value })}
+                  placeholder={t("agentTypes.mediumModel")}
+                  className={INPUT_CLASS}
+                />
+                <input
+                  value={form.complex_model}
+                  disabled={formPending}
+                  onChange={(e) => setForm({ ...form, complex_model: e.target.value })}
+                  placeholder={t("agentTypes.complexModel")}
+                  className={INPUT_CLASS}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <input
+                  type="number"
+                  value={form.simple_threshold}
+                  disabled={formPending}
+                  onChange={(e) => setForm({ ...form, simple_threshold: e.target.value })}
+                  placeholder={t("agentTypes.simpleThreshold")}
+                  className={INPUT_CLASS}
+                />
+                <input
+                  type="number"
+                  value={form.complex_threshold}
+                  disabled={formPending}
+                  onChange={(e) => setForm({ ...form, complex_threshold: e.target.value })}
+                  placeholder={t("agentTypes.complexThreshold")}
+                  className={INPUT_CLASS}
+                />
+              </div>
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button

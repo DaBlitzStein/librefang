@@ -299,7 +299,15 @@
     "toolsPlaceholder": "Szukaj narzędzi…",
     "managedViaAgents": "Zarządzane przez Agenty",
     "providerHint": "Domyślny dostawca",
-    "modelHint": "Domyślny model"
+    "modelHint": "Domyślny model",
+    "channels": "Kanały",
+    "channelsPlaceholder": "Szukaj skonfigurowanych kanałów…",
+    "preferredModels": "Preferowane modele (routing)",
+    "simpleModel": "Model prosty",
+    "mediumModel": "Model średni",
+    "complexModel": "Model złożony",
+    "simpleThreshold": "Próg prosty",
+    "complexThreshold": "Próg złożony"
   },
   "agents": {
     "title": "Agenci",
