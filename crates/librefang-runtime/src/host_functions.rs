@@ -1605,6 +1605,7 @@ mod tests {
     }
 
     impl librefang_kernel_handle::WikiAccess for RecordingKernel {}
+    impl librefang_kernel_handle::AgentTypeTools for RecordingKernel {}
 
     #[async_trait::async_trait]
     impl librefang_kernel_handle::TaskQueue for RecordingKernel {

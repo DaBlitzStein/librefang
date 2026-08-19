@@ -467,6 +467,7 @@ impl MemoryAccess for NamedWsKernel {
 }
 
 impl WikiAccess for NamedWsKernel {}
+impl librefang_kernel_handle::AgentTypeTools for NamedWsKernel {}
 
 #[async_trait::async_trait]
 impl TaskQueue for NamedWsKernel {

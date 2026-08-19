@@ -619,7 +619,7 @@ async fn list_workflows_success_rate_excludes_cancelled() {
                 |_id: AgentId, _msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
                     Ok(("done".to_string(), 0u64, 0u64))
                 },
-            )
+            |_, _| Ok(()))
             .await
             .expect("execute_run must complete successfully");
     }
@@ -750,6 +750,7 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
         name: "transform-fail".to_string(),
         description: String::new(),
         steps: vec![WorkflowStep {
+            required_skills: Vec::new(),
             name: "bad-transform".to_string(),
             agent: StepAgent::ByName {
                 name: "unused".to_string(),
@@ -782,7 +783,9 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
         |_id: librefang_types::agent::AgentId,
          msg: String,
          _sm: Option<librefang_types::agent::SessionMode>| async move { Ok((msg, 0u64, 0u64)) };
-    let _ = engine.execute_run(run_id, resolver, sender).await;
+    let _ = engine
+        .execute_run(run_id, resolver, sender, |_, _| Ok(()))
+        .await;
 
     let (status, detail) = get(&h, &format!("/api/workflows/runs/{run_id}")).await;
     assert_eq!(status, StatusCode::OK, "{detail:?}");

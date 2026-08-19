@@ -9,6 +9,8 @@ use std::sync::Arc;
 ///   3. each role trait is individually object-safe.
 struct StubKernel;
 
+impl crate::AgentTypeTools for StubKernel {}
+
 #[async_trait]
 impl AgentControl for StubKernel {
     async fn spawn_agent(

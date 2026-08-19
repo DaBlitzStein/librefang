@@ -440,10 +440,6 @@ fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
     })
 }
 
-/// Build a minimal `agent.toml` from the dashboard's JSON shape.
-/// Uses `toml::to_string_pretty` on a constructed `AgentManifest` so every
-/// caller-supplied string (name, description, system_prompt, provider, model)
-
 /// POST /api/templates — Create a new agent template from JSON.
 #[utoipa::path(post, path = "/api/templates", tag = "system", operation_id = "create_template", request_body = crate::types::JsonObject, responses((status = 201, description = "Template created", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 409, description = "Template already exists")))]
 pub async fn create_agent_type(

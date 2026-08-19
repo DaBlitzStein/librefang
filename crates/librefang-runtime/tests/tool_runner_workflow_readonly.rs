@@ -177,6 +177,7 @@ impl HandsControl for WorkflowStubKernel {}
 impl A2ARegistry for WorkflowStubKernel {}
 impl ChannelSender for WorkflowStubKernel {}
 impl PromptStore for WorkflowStubKernel {}
+impl librefang_kernel_handle::AgentTypeTools for WorkflowStubKernel {}
 impl GoalControl for WorkflowStubKernel {}
 impl ToolPolicy for WorkflowStubKernel {}
 impl librefang_kernel_handle::CatalogQuery for WorkflowStubKernel {}
