@@ -857,7 +857,8 @@
       "tools_reset_to_all": "重置为使用所有工具",
       "events_tail": "事件 · 尾部",
       "no_logs": "此智能体还没有记录的轮次。",
-      "crashed_title": "{{name}} 处于错误状态"
+      "crashed_title": "{{name}} 处于错误状态",
+      "skill_pending": "Pending"
     },
     "tab": {
       "conversation": "对话",
@@ -1675,9 +1676,6 @@
     "delete_failed": "删除失败",
     "run_failed": "运行失败",
     "run_started": "运行已启动",
-    "rerun": "用相同参数重跑",
-    "rerun_started": "已用相同参数重新运行",
-    "rerun_failed": "重跑失败",
     "schedule_failed": "创建计划失败",
     "skip": "跳过",
     "agent_not_found": "未找到 Agent",
@@ -1721,7 +1719,18 @@
     "save_from_chat": "保存为工作流",
     "saved_to_canvas": "工作流已在画布中打开",
     "invalid_json": "该 JSON 代码块不是有效的工作流 JSON",
-    "no_json_found": "此消息中没有可保存的 JSON 代码块"
+    "no_json_found": "此消息中没有可保存的 JSON 代码块",
+    "console": "Console",
+    "rerun_hint": "Re-run with these parameters",
+    "starting": "Starting…",
+    "step_executing": "Step {{current}}/{{total}} executing…",
+    "step_output": "Output",
+    "step_pending": "Pending…",
+    "variables": "Variables",
+    "console_completed": "Run completed — {{duration}}, {{tokens}} tokens",
+    "console_failed": "Run FAILED: {{error}}",
+    "console_executing": "… executing ({{done}}/{{total}} steps done)",
+    "rerun_same": "Re-run with same parameters"
   },
   "scheduler": {
     "title": "调度器",
@@ -2779,7 +2788,10 @@
     "run_active": "执行中 · 第 {{iteration}}/{{max}} 轮",
     "help": "Goals 是战略规划面——一棵 agent（或你）正在追的目标树，含进度、状态和父子关系。模板播种常见目标形状；树视图展示层级和向上汇总的进度。\n\n使用步骤：\n\n1. 创建。\"Create goal\" 打开表单填标题、描述、父目标、状态。或 \"Pick template\" 一次性铺开预置目标树（如 \"ship a feature\"、\"research a topic\"）。\n\n2. 跟踪。每个节点显示 pending / in-progress / completed。父节点进度由子节点汇总。点节点可内联编辑状态或描述。\n\n3. 清理。\"Clear all\" 整棵清空（带二次确认）——开新阶段时常用。\n\n跟 Scheduler / Workflows 的区别：\n\n  · Goals —— 想做什么。长期意图，可被 agent 读取。\n  · Scheduler / Workflows —— 怎么做。具体的触发与步骤。\n\n典型场景：\n\n  · 给 agent 一个长期方向，规划时可以参考。\n  · 跟踪一个跨周项目，人和 agent 都看同一棵树。\n\n注意事项：\n\n  · 模板是起点，应用后随便改。\n  · 删父节点会带走子节点，\"Clear all\" 前请确认。",
     "progress": "进度",
-    "status": "状态"
+    "status": "状态",
+    "loop_engineering": "Loop engineering",
+    "no_agent_selected": "No agent selected",
+    "verifier_agent_id": "Verifier agent"
   },
   "sessions": {
     "title": "会话",
@@ -4036,5 +4048,6 @@
     "stack": "堆栈",
     "page_not_found": "页面未找到",
     "go_to_overview": "前往概览"
-  }
+  },
+  "agent_label": "Agent"
 }

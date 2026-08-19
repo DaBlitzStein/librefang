@@ -37,6 +37,7 @@ import {
 } from "../lib/queries/workflows";
 import {
   useRunWorkflow,
+  useRerunWorkflowRun,
   useDryRunWorkflow,
   useDeleteWorkflow,
   useInstantiateTemplate,
@@ -427,6 +428,7 @@ export function WorkflowsPage() {
   }, [runsQuery.data, selectedRunId]);
 
   const runMutation = useRunWorkflow();
+  const rerunMutation = useRerunWorkflowRun();
   const dryRunMutation = useDryRunWorkflow();
   const deleteMutation = useDeleteWorkflow();
   const instantiateMutation = useInstantiateTemplate();
@@ -633,7 +635,8 @@ export function WorkflowsPage() {
   };
 
   // Re-run a previous workflow run with its original params pre-filled.
-  const handleRerun = (runInputStr?: string) => {
+  const handleRerun = (run?: { id?: string; input?: string }) => {
+    const runInputStr = run?.input;
     if (!runInputStr) return;
     paramTouchedRef.current = false; // allow auto-populate to act
     try {
@@ -650,6 +653,19 @@ export function WorkflowsPage() {
       // Plain text input.
       setRunInput(runInputStr);
       setParamValues({});
+    }
+    // #6292: the per-row control re-runs the workflow with the stored
+    // parameters (pre-filled above so the operator can tweak before the
+    // next run, and the run itself restarts immediately).
+    if (run?.id) {
+      void rerunMutation
+        .mutateAsync({ runId: run.id, workflowId: selectedWorkflowId })
+        .catch((err) => {
+          addToast(
+            err instanceof Error ? err.message : String(err),
+            "error",
+          );
+        });
     }
     // Scroll to the Run button.
     document.getElementById("workflow-run-section")?.scrollIntoView({ behavior: "smooth" });
@@ -1300,7 +1316,7 @@ export function WorkflowsPage() {
                           if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
                             const entries = Object.entries(parsed).filter(([k]) => k !== "input");
                             if (entries.length === 0) return typeof parsed.input === "string" ? parsed.input.slice(0, 60) : null;
-                            return entries.map(([k, v]) => `${k}=${String(v).slice(0, 20)}`).join(", ").slice(0, 60);
+                            return entries.map(([k, v]) => `${k}: ${String(v).slice(0, 20)}`).join(", ").slice(0, 60);
                           }
                           return typeof run.input === "string" ? run.input.slice(0, 60) : null;
                         } catch {
@@ -1332,6 +1348,11 @@ export function WorkflowsPage() {
                                   {inputPreview}
                                 </p>
                               )}
+                              {state === "failed" && run.error && (
+                                <p className="text-[8px] text-error/70 truncate mt-0.5" title={run.error}>
+                                  {run.error}
+                                </p>
+                              )}
                             </div>
                             {/* "Selected from banner" pill — surfaces that
                                 this row was appended to the first-10 slice
@@ -1343,17 +1364,28 @@ export function WorkflowsPage() {
                                 {t("workflows.from_review_banner", { defaultValue: "from review banner" })}
                               </span>
                             )}
-                            {/* Re-run button */}
-                            <button
-                              className="p-1 rounded-lg hover:bg-surface text-text-dim/40 hover:text-brand transition-colors shrink-0"
+                            {/* Re-run control — a span, not a button: the row itself is a
+                                <button> and nesting buttons is invalid HTML (hydration error). */}
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              className="p-1 rounded-lg hover:bg-surface text-text-dim/40 hover:text-brand transition-colors shrink-0 cursor-pointer"
                               title={t("workflows.rerun_hint", { defaultValue: "Re-run with these parameters" })}
+                              aria-label={t("workflows.rerun_same", { defaultValue: "Re-run with same parameters" })}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleRerun(run.input);
+                                handleRerun(run);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  handleRerun(run);
+                                }
                               }}
                             >
                               <Play className="w-3 h-3" />
-                            </button>
+                            </span>
                             <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success/10 text-success" :
                               state === "failed" ? "bg-error/10 text-error" :
@@ -1449,11 +1481,11 @@ export function WorkflowsPage() {
                                 if (rd.state === "completed") {
                                   const totalMs = rd.completed_at && rd.started_at ? new Date(rd.completed_at).getTime() - new Date(rd.started_at).getTime() : 0;
                                   const totalTokens = allSteps.reduce((sum, s) => sum + (s.input_tokens||0) + (s.output_tokens||0), 0);
-                                  logs.push({ts: fmtTime(rd.completed_at), level: "info", msg: `Run completed — ${fmtDur(totalMs)}, ${totalTokens.toLocaleString()} tokens`});
+                                  logs.push({ts: fmtTime(rd.completed_at), level: "info", msg: t("workflows.console_completed", { duration: fmtDur(totalMs), tokens: totalTokens.toLocaleString() })});
                                 } else if (rd.state === "failed") {
-                                  logs.push({ts: fmtTime(rd.completed_at), level: "error", msg: rd.error ? `Run FAILED: ${rd.error}` : "Run FAILED"});
+                                  logs.push({ts: fmtTime(rd.completed_at), level: "error", msg: rd.error ? t("workflows.console_failed", { error: rd.error }) : t("workflows.console_failed", { error: "" })});
                                 } else if (rd.state === "running" || rd.state === "pending") {
-                                  logs.push({ts: "--:--:--", level: "info", msg: `… executing (${allSteps.length}/${totalSteps||"?"} steps done)`});
+                                  logs.push({ts: "--:--:--", level: "info", msg: t("workflows.console_executing", { done: String(allSteps.length), total: String(totalSteps || "?") })});
                                 }
                                 // use logConsoleRef from component level
                                 return (

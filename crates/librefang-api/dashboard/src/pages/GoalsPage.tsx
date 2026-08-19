@@ -477,19 +477,19 @@ export function GoalsPage() {
                 <textarea id="goal-create-description" value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
                 <label htmlFor="goal-create-agent" className="sr-only">{t("agent_label")}</label>
                 <select id="goal-create-agent" value={createDraft.agent_id} onChange={e => setCreateDraft({...createDraft, agent_id: e.target.value})} className={inputClass}>
-                  <option value="">Select agent (required to run)</option>
+                  <option value="">{t("goals.no_agent_selected")}</option>
                   {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                 </select>
                 <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
                   <input type="checkbox" checked={createDraft.loop_engineering}
                     onChange={e => setCreateDraft({...createDraft, loop_engineering: e.target.checked})}
                     className="rounded" />
-                  Loop Engineering
+                  {t("goals.loop_engineering")}
                 </label>
                 {createDraft.loop_engineering && (
                   <input value={createDraft.verify_agent_id}
                     onChange={e => setCreateDraft({...createDraft, verify_agent_id: e.target.value})}
-                    placeholder="Verifier agent ID (optional)" className={inputClass} />
+                    placeholder={t("goals.verifier_agent_id")} className={inputClass} />
                 )}
                 <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2">
                   {createMutation.isPending ? t("common.loading") : t("goals.create_goal")}
@@ -529,19 +529,19 @@ export function GoalsPage() {
                             <input id="goal-edit-progress" type="number" value={editDraft.progress} onChange={e => setEditDraft({...editDraft, progress: Number(e.target.value)})} className={inputClass} min={0} max={100} style={{ width: "80px" }} />
                             <label htmlFor="goal-edit-agent" className="sr-only">{t("agent_label")}</label>
                             <select id="goal-edit-agent" value={editDraft.agent_id} onChange={e => setEditDraft({...editDraft, agent_id: e.target.value})} className={inputClass}>
-                              <option value="">Select agent (required to run)</option>
+                              <option value="">{t("goals.no_agent_selected")}</option>
                               {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                             </select>
                             <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
                               <input type="checkbox" checked={editDraft.loop_engineering}
                                 onChange={e => setEditDraft({...editDraft, loop_engineering: e.target.checked})}
                                 className="rounded" />
-                              Loop Engineering
+                              {t("goals.loop_engineering")}
                             </label>
                             {editDraft.loop_engineering && (
                               <input value={editDraft.verify_agent_id}
                                 onChange={e => setEditDraft({...editDraft, verify_agent_id: e.target.value})}
-                                placeholder="Verifier agent ID (optional)" className={inputClass} />
+                                placeholder={t("goals.verifier_agent_id")} className={inputClass} />
                             )}
                             <Button variant="primary" size="sm" onClick={handleSaveEdit}>{t("common.save")}</Button>
                             <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>{t("common.cancel")}</Button>
@@ -578,7 +578,7 @@ export function GoalsPage() {
                                 {statusLabel(status)}
                               </Badge>
                               {r.goal.loop_engineering && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand/10 text-brand font-bold shrink-0">Loop</span>
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand/10 text-brand font-bold shrink-0">{t("goals.loop_engineering")}</span>
                               )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
