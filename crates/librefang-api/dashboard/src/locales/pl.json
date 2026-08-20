@@ -1196,8 +1196,7 @@
     "pending_title": "Oczekujący warsztat umiejętności",
     "pending_load_failed": "Nie udało się załadować oczekujących kandydatów:",
     "pending_unknown_error": "nieznany błąd",
-    "pending_desc": "Projekty przechwycone z rozmów z agentami oczekujące na Twoją recenzję (#3328).",
-    "viewOnMarketplace": "Zobacz w {{marketplace}}"
+    "pending_desc": "Projekty przechwycone z rozmów z agentami oczekujące na Twoją recenzję (#3328)."
   },
   "hands": {
     "title": "Ręce (Hands)",

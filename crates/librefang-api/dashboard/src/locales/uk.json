@@ -1196,8 +1196,7 @@
     "pending_title": "Очікує Skill workshop",
     "pending_load_failed": "Не вдалося завантажити кандидатів:",
     "pending_unknown_error": "невідома помилка",
-    "pending_desc": "Чернетки, захоплені з розмов агентів, очікують вашого перегляду (#3328).",
-    "viewOnMarketplace": "Переглянути на {{marketplace}}"
+    "pending_desc": "Чернетки, захоплені з розмов агентів, очікують вашого перегляду (#3328)."
   },
   "hands": {
     "title": "Hands",

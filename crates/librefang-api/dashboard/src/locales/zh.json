@@ -1196,8 +1196,7 @@
     "pending_title": "Skill workshop 待处理",
     "pending_load_failed": "加载待处理候选失败:",
     "pending_unknown_error": "未知错误",
-    "pending_desc": "从智能体对话捕获的草稿正在等待你审查（#3328）。",
-    "viewOnMarketplace": "在 {{marketplace}} 上查看"
+    "pending_desc": "从智能体对话捕获的草稿正在等待你审查（#3328）。"
   },
   "hands": {
     "title": "Hands",

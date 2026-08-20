@@ -1196,8 +1196,7 @@
     "pending_title": "Skill workshop pending",
     "pending_load_failed": "Failed to load pending candidates:",
     "pending_unknown_error": "unknown error",
-    "pending_desc": "Drafts captured from agent conversations awaiting your review (#3328).",
-    "viewOnMarketplace": "View on {{marketplace}}"
+    "pending_desc": "Drafts captured from agent conversations awaiting your review (#3328)."
   },
   "hands": {
     "title": "Hands",

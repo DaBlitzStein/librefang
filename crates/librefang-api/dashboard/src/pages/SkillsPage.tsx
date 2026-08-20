@@ -82,7 +82,6 @@ import {
   Tag,
   Edit as EditIcon,
   Upload,
-  ExternalLink,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -90,18 +89,6 @@ import {
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
 type ViewMode = "installed" | "browse" | "pending";
 type MarketplaceSource = "fanghub" | "clawhub" | "clawhub-cn" | "skillhub";
-
-/** Marketplace URL for a skill — lets users jump to the source to see
- *  comments, ratings, and full details. */
-function marketplaceUrl(source: MarketplaceSource, slug: string): string | null {
-  switch (source) {
-    case "clawhub":     return `https://clawhub.ai/skills/${slug}`;
-    case "clawhub-cn":  return `https://mirror-cn.clawhub.com/skills/${slug}`;
-    case "skillhub":    return `https://skillhub.com/skills/${slug}`;
-    case "fanghub":     return `https://fanghub.dev/skills/${slug}`;
-    default:            return null;
-  }
-}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -179,7 +166,6 @@ interface SkillCardProps {
   variant: SkillCardVariant;
   installPending?: boolean;
   source?: MarketplaceSource;
-  sourceSlug?: string;
   /** Optional hub origin badge rendered top-right (used by the unified
    *  "all hubs" view to make every card's source obvious). */
   hubBadge?: React.ReactNode;
@@ -203,7 +189,6 @@ const SkillCard = React.memo(function SkillCard({
   variant,
   installPending,
   source,
-  sourceSlug,
   hubBadge,
   onInstall,
   onUninstall,
@@ -273,28 +258,11 @@ const SkillCard = React.memo(function SkillCard({
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 flex-wrap">
-              {source && sourceSlug && marketplaceUrl(source, sourceSlug) ? (
-                <a
-                  href={marketplaceUrl(source, sourceSlug)!}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1"
-                  title={t("skills.viewOnMarketplace", { marketplace: source })}
-                >
-                  <h3
-                    className={`font-bold text-sm truncate transition-colors ${hoverTextClass} hover:underline`}
-                  >
-                    {name}
-                  </h3>
-                  <ExternalLink className="w-3 h-3 shrink-0 text-text-dim/60" />
-                </a>
-              ) : (
-                <h3
-                  className={`font-bold text-sm truncate transition-colors ${hoverTextClass}`}
-                >
-                  {name}
-                </h3>
-              )}
+              <h3
+                className={`font-bold text-sm truncate transition-colors ${hoverTextClass}`}
+              >
+                {name}
+              </h3>
               {variant === "installed" && (
                 <Badge variant="success">{t("skills.installed")}</Badge>
               )}
@@ -2098,8 +2066,6 @@ export function SkillsPage() {
                 author={s.author}
                 toolsCount={s.tools_count}
                 tags={s.tags}
-                source={s.source?.type as MarketplaceSource | undefined}
-                sourceSlug={s.source?.slug}
                 onUninstall={() => setUninstalling(s.name)}
                 onViewDetail={() => setDetailSkillName(s.name)}
                 t={t}
@@ -2164,7 +2130,6 @@ export function SkillsPage() {
                   isInstalled={entry.is_installed}
                   installPending={installingId === `fanghub:${entry.name}`}
                   source="fanghub"
-                  sourceSlug={entry.name}
                   hubBadge={<HubBadge hub="fanghub" />}
                   onInstall={() => handleInstall(entry.name, "fanghub")}
                   onViewDetail={() => setDetailsFangHub(entry as FangHubSkill)}
@@ -2183,7 +2148,6 @@ export function SkillsPage() {
                   isInstalled={entry.is_installed}
                   installPending={installingId === `${entry._hub}:${entry.slug}`}
                   source={entry._hub}
-                  sourceSlug={entry.slug}
                   hubBadge={<HubBadge hub={entry._hub} />}
                   onInstall={() => handleInstall(entry.slug, entry._hub)}
                   onViewDetail={() => {

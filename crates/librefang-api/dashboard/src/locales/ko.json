@@ -1196,8 +1196,7 @@
     "pending_title": "기술 워크샵 진행 중",
     "pending_load_failed": "대기 중인 후보를 로드하지 못했습니다.",
     "pending_unknown_error": "알 수 없는 오류",
-    "pending_desc": "검토를 기다리는 에이전트 대화에서 캡처된 초안(#3328)",
-    "viewOnMarketplace": "{{marketplace}}에서 보기"
+    "pending_desc": "검토를 기다리는 에이전트 대화에서 캡처된 초안(#3328)"
   },
   "hands": {
     "title": "손",
