@@ -1,4 +1,5 @@
 use librefang_types::agent::AgentManifest;
+use librefang_types::registry_paths::resolve_agent_types_dir;
 use regex_lite::Regex;
 use serde::Deserialize;
 use serde_json::Value;
@@ -264,12 +265,15 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
     // "requires agents registry directory" and emits a WARN on every
     // routing scan — and routing happens on every inbound message dispatch,
     // so the warning floods the log.
-    let agents_dir = home_dir.join("registry").join("agents");
-    let agents_dir_arg: Option<&Path> = if agents_dir.is_dir() {
-        Some(agents_dir.as_path())
-    } else {
-        None
-    };
+    //
+    // `resolve_agent_types_dir` prefers the registry's canonical
+    // `agent-types/` name, falls back to the legacy `agents/` name with a
+    // warning, and errors loudly when neither exists — a registry rename
+    // must not silently zero out `agents_dir_arg`, or every hand using
+    // `base = "<template>"` (e.g. `devteam`) drops out of routing with no
+    // signal beyond the downstream per-hand parse warning.
+    let agents_dir = resolve_agent_types_dir(&home_dir.join("registry"));
+    let agents_dir_arg: Option<&Path> = agents_dir.as_deref();
 
     for hands_dir in &dirs {
         let Ok(entries) = fs::read_dir(hands_dir) else {
