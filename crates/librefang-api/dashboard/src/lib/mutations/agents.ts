@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   spawnAgent,
   cloneAgent,
+  saveAgentAsAgentType,
   stopAgent,
   suspendAgent,
   resumeAgent,
@@ -30,10 +31,18 @@ import {
   setAgentChannels,
   getAgentTypeToml,
 } from "../http/client";
-import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
+import type {
+  AgentSchedulePatch,
+  CloneAgentPayload,
+  PromptExperiment,
+  PromptVersion,
+  SaveAgentAsAgentTypePayload,
+  SendAgentMessageOptions,
+} from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import {
   agentKeys,
+  agentTypeKeys,
   approvalKeys,
   budgetKeys,
   handKeys,
@@ -85,6 +94,27 @@ export function useCloneAgent() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+// Extracts a live agent's manifest into a reusable `templates/<name>.toml`
+// file — distinct from Clone above, which duplicates the running instance
+// itself. This never touches the agent list (no new/changed agent), only
+// the Agent Types domain, so it invalidates `agentTypeKeys` instead of
+// `agentKeys`.
+export function useSaveAgentAsAgentType() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      payload,
+    }: {
+      agentId: string;
+      payload: SaveAgentAsAgentTypePayload;
+    }) => saveAgentAsAgentType(agentId, payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.all });
     },
   });
 }

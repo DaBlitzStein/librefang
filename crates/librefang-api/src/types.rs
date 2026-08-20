@@ -372,8 +372,11 @@ pub struct SpawnRequest {
     /// Agent manifest as TOML string (optional if `template` is provided).
     #[serde(default)]
     pub manifest_toml: String,
-    /// Template name from `~/.librefang/workspaces/agents/{template}/agent.toml`.
-    /// When provided and `manifest_toml` is empty, the template is loaded automatically.
+    /// Template name, resolved against `~/.librefang/templates/{template}.toml`
+    /// first, falling back to `~/.librefang/workspaces/agents/{template}/agent.toml`
+    /// (kept for backward compatibility with callers that already resolve a
+    /// template by an existing agent's name). When provided and
+    /// `manifest_toml` is empty, the template is loaded automatically.
     #[serde(default)]
     pub template: Option<String>,
     /// Optional custom name for the agent. Overrides the name from the template

@@ -153,7 +153,7 @@ pub async fn get_profile(
 /// cannot escape the base directory through `..`, absolute paths, or platform
 /// separators (`/`, `\`). Rejects empty names and anything longer than 64
 /// chars to cap log noise.
-fn validate_agent_type_name(name: &str) -> Result<(), &'static str> {
+pub(crate) fn validate_agent_type_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() || name.len() > 64 {
         return Err("invalid template name");
     }
@@ -209,46 +209,30 @@ mod agent_type_name_validation_tests {
     }
 }
 
-/// GET /api/agent-types — List available agent types from both
-/// `~/.librefang/workspaces/agents/` (source = "agent") and
+/// GET /api/agent-types — List available agent types from
 /// `~/.librefang/templates/` (source = "template").
+///
+/// Used to also merge in `~/.librefang/workspaces/agents/` (source =
+/// "agent") — dropped in the fix for the "Agent Types page is uneditable"
+/// bug reported against an install with 42 agents and 0 templates. That
+/// merge meant every live agent showed up here with no way to edit or
+/// delete it (the dashboard's `AgentTypesPage` can only manage files under
+/// `templates/`), and the confusing "Managed via Agents" label was the
+/// symptom, not the cause. The underlying capability — spawning a worker
+/// from an existing agent's manifest by name — still exists at the
+/// resolution layer (`resolve_ephemeral_manifest`, `resolve_manifest`,
+/// `load_agent_manifest_from_template_dirs` all fall back to
+/// `workspaces/agents/<name>/agent.toml` when no template matches); only the
+/// *listing* stops conflating the two concepts. The bridge from "I have
+/// agents, not templates" to a populated, editable list is
+/// `POST /api/agents/{id}/save-as-agent-type`, which extracts a live agent's
+/// manifest into a real, editable `templates/<name>.toml` file.
 #[utoipa::path(get, path = "/api/agent-types", tag = "system", operation_id = "list_agent_types", responses((status = 200, description = "List agent types", body = Vec<serde_json::Value>)))]
 pub async fn list_agent_types() -> impl IntoResponse {
     let mut templates = Vec::new();
 
-    // Workspace agents (existing behaviour)
-    let agents_dir = super::system::librefang_home()
-        .join("workspaces")
-        .join("agents");
-    if let Ok(entries) = std::fs::read_dir(&agents_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let manifest_path = path.join("agent.toml");
-            if !manifest_path.exists() {
-                continue;
-            }
-            let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let description = std::fs::read_to_string(&manifest_path)
-                .ok()
-                .and_then(|content| toml::from_str::<AgentManifest>(&content).ok())
-                .map(|m| m.description)
-                .unwrap_or_default();
-            templates.push(serde_json::json!({
-                "name": name,
-                "description": description,
-                "source": "agent",
-            }));
-        }
-    }
-
-    // Template files (new — user-created via POST /api/templates)
+    // Template files (user-created via POST /api/agent-types, the
+    // agent_type_create tool, or POST /api/agents/{id}/save-as-agent-type)
     let templates_dir = agent_types_dir();
     if let Ok(entries) = std::fs::read_dir(&templates_dir) {
         for entry in entries.flatten() {
@@ -469,7 +453,7 @@ pub async fn get_agent_type_toml_deprecated(
 // unified `router()` above; the read endpoints serve both sources.
 
 /// Directory holding agent-type manifests (`~/.librefang/templates/`).
-fn agent_types_dir() -> std::path::PathBuf {
+pub(crate) fn agent_types_dir() -> std::path::PathBuf {
     super::system::librefang_home().join("templates")
 }
 
@@ -481,7 +465,7 @@ fn agent_types_dir() -> std::path::PathBuf {
 /// form reads `undefined`, renders empty, and the next save (which reuses
 /// this same flat shape) writes the empty value back out, erasing whatever
 /// was actually configured (#7740).
-fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
+pub(crate) fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
     serde_json::json!({
         "name": name,
         "description": m.description,

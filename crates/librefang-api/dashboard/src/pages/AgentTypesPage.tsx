@@ -294,35 +294,33 @@ export function AgentTypesPage() {
                 {type.source && <Badge variant="brand">{type.source}</Badge>}
               </div>
 
+              {/* Every row this page lists now comes exclusively from
+                  `~/.librefang/templates/` (`source: "template"`) — the
+                  dashboard's agent-type list no longer merges in live
+                  agents from `~/.librefang/workspaces/agents/`, so every
+                  card is a real, editable/deletable template with no
+                  special-cased "managed elsewhere" state to branch on. */}
               <div className="mt-auto flex items-center gap-2 pt-1">
                 <Button variant="primary" size="sm" onClick={() => openRun(type)}>
                   <Zap className="h-3.5 w-3.5" />
                   {t("agentTypes.quickRun")}
                 </Button>
-                {type.source === "agent" ? (
-                  <span className="text-[10px] uppercase tracking-wide text-text-dim">
-                    {t("agentTypes.managedViaAgents")}
-                  </span>
-                ) : (
-                  <>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-label={t("agentTypes.edit")}
-                      onClick={() => openEdit(type)}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-label={t("agentTypes.delete")}
-                      onClick={() => setDeleteTarget(type.name)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </>
-                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label={t("agentTypes.edit")}
+                  onClick={() => openEdit(type)}
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label={t("agentTypes.delete")}
+                  onClick={() => setDeleteTarget(type.name)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
               </div>
             </Card>
           ))}

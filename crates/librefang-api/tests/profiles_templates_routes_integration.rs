@@ -11,11 +11,19 @@
 //!
 //! ### Templates and `LIBREFANG_HOME`
 //!
-//! `list_agent_templates` / `get_agent_template` / `get_agent_template_toml`
-//! all read from `librefang_home()/workspaces/agents/`, where `librefang_home`
-//! honours the `LIBREFANG_HOME` env var. We pin a single tempdir for the
-//! whole test binary via `OnceLock` and serialise the template tests behind
-//! a `Mutex` so unique-name fixtures can coexist without env-var races.
+//! `list_agent_templates` lists ONLY `librefang_home()/templates/`
+//! (source = "template"); it used to also merge in
+//! `librefang_home()/workspaces/agents/` (source = "agent"), which made
+//! every live agent show up as an uneditable, undeletable "agent type" —
+//! fixed by dropping that merge (the fix's own changelog fragment has the
+//! full rationale). `get_agent_template` / `get_agent_template_toml`
+//! (the detail routes, not the list) still fall back to
+//! `workspaces/agents/<name>/agent.toml` when no template file matches, on
+//! purpose — kept for callers that already resolve a name that way.
+//! `librefang_home` honours the `LIBREFANG_HOME` env var. We pin a single
+//! tempdir for the whole test binary via `OnceLock` and serialise the
+//! template tests behind a `Mutex` so unique-name fixtures can coexist
+//! without env-var races.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -158,7 +166,7 @@ async fn profiles_get_unknown_profile_returns_404() {
 /// One tempdir for the whole test binary. We never unset `LIBREFANG_HOME`
 /// once it's set — flipping it mid-run would race with any other test that
 /// happens to call `librefang_home()`.
-fn templates_root() -> PathBuf {
+fn librefang_home_root() -> &'static std::path::Path {
     static HOME: OnceLock<TempDir> = OnceLock::new();
     let dir = HOME.get_or_init(|| {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -169,13 +177,26 @@ fn templates_root() -> PathBuf {
         std::env::set_var("LIBREFANG_HOME", tmp.path());
         tmp
     });
-    dir.path().join("workspaces").join("agents")
+    dir.path()
+}
+
+/// Workspace-agent fixtures (`source = "agent"`) — no longer picked up by
+/// the LIST endpoint, but still resolvable through the detail GET's
+/// fallback.
+fn templates_root() -> PathBuf {
+    librefang_home_root().join("workspaces").join("agents")
+}
+
+/// Real agent-type template fixtures (`source = "template"`) — the only
+/// thing the LIST endpoint reads.
+fn real_templates_root() -> PathBuf {
+    librefang_home_root().join("templates")
 }
 
 /// Serialise template-mutating tests so unique-name fixtures don't read each
 /// other's listings as "extra entries". `list_agent_templates` walks the
-/// whole `agents/` dir, so a parallel test seeding `bravo` while another is
-/// asserting "exactly one entry" would flake. Each test takes the lock,
+/// whole `templates/` dir, so a parallel test seeding `bravo` while another
+/// is asserting "exactly one entry" would flake. Each test takes the lock,
 /// writes its fixtures into a unique subdir, runs, then drops the lock.
 fn templates_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -192,6 +213,16 @@ fn write_template(name: &str, body: &str) {
 fn remove_template(name: &str) {
     let dir = templates_root().join(name);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+fn write_real_template(name: &str, body: &str) {
+    let root = real_templates_root();
+    std::fs::create_dir_all(&root).expect("create templates dir");
+    std::fs::write(root.join(format!("{name}.toml")), body).expect("write template toml");
+}
+
+fn remove_real_template(name: &str) {
+    let _ = std::fs::remove_file(real_templates_root().join(format!("{name}.toml")));
 }
 
 fn minimal_manifest_toml(name: &str, description: &str) -> String {
@@ -217,10 +248,10 @@ async fn templates_list_includes_seeded_template() {
     let _g = templates_lock().lock().await;
     // Force the home init before the harness boots so the kernel's own
     // setup doesn't hit `~/.librefang`.
-    let _ = templates_root();
+    let _ = librefang_home_root();
 
     let unique = "tmpl_list_alpha";
-    write_template(
+    write_real_template(
         unique,
         &minimal_manifest_toml("alpha", "Alpha test template"),
     );
@@ -240,6 +271,41 @@ async fn templates_list_includes_seeded_template() {
         .find(|r| r["name"] == unique)
         .unwrap_or_else(|| panic!("seeded template missing from list: {body}"));
     assert_eq!(row["description"], "Alpha test template", "{body}");
+    assert_eq!(row["source"], "template", "{body}");
+
+    remove_real_template(unique);
+}
+
+/// Regression test for the "Agent Types page is uneditable" bug: a
+/// workspace agent (source = "agent") must NOT appear in the list — every
+/// row the list returns has to be a real, editable/deletable template file
+/// — while the detail GET's dual-source fallback keeps resolving it by
+/// name, unchanged (point 4 of the fix: detail/toml routes are untouched).
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_list_excludes_workspace_agents() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let unique = "tmpl_list_excludes_workspace_agent";
+    write_template(
+        unique,
+        &minimal_manifest_toml("workspace-agent-alpha", "A live agent, not a template"),
+    );
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, "/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let templates = body["templates"].as_array().expect("templates array");
+    assert!(
+        !templates.iter().any(|r| r["name"] == unique),
+        "a workspace agent must not be listed as an agent type: {body}"
+    );
+
+    // The detail GET still resolves it — point 4 of the fix keeps this
+    // fallback for backward compatibility.
+    let (detail_status, detail_body) = get_json(&h, &format!("/api/templates/{unique}")).await;
+    assert_eq!(detail_status, StatusCode::OK, "{detail_body}");
+    assert_eq!(detail_body["source"], "agent", "{detail_body}");
 
     remove_template(unique);
 }

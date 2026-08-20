@@ -205,6 +205,7 @@ export {
   spawnAgent,
   // agent types + ephemeral spawning
   cloneAgent,
+  saveAgentAsAgentType,
   stopAgent,
   suspendAgent,
   resumeAgent,

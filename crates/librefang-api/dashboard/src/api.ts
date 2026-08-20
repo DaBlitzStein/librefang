@@ -1716,6 +1716,29 @@ export async function cloneAgent(
   return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/clone`, payload);
 }
 
+/** Body of `POST /api/agents/{id}/save-as-agent-type`.
+ *
+ *  Not to be confused with {@link CloneAgentPayload}: Clone duplicates a
+ *  *running instance* (new workspace, memory, sessions start empty).
+ *  Save-as-agent-type snapshots the agent's current configuration into a
+ *  reusable `templates/<template_name>.toml` file — it does not spawn
+ *  anything and never touches the source agent's workspace, memory, or
+ *  sessions.
+ */
+export interface SaveAgentAsAgentTypePayload {
+  template_name: string;
+}
+
+export async function saveAgentAsAgentType(
+  agentId: string,
+  payload: SaveAgentAsAgentTypePayload,
+): Promise<AgentType> {
+  return post<AgentType>(
+    `/api/agents/${encodeURIComponent(agentId)}/save-as-agent-type`,
+    payload,
+  );
+}
+
 export async function stopAgent(agentId: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/stop`, {});
 }

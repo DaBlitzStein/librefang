@@ -39,16 +39,33 @@ async fn resolve_manifest(
                     message: t.t("api-error-template-invalid-name"),
                 });
             }
-            let tmpl_path = state
-                .kernel
-                .config_ref()
-                .home_dir
+            // Real agent-type templates (`~/.librefang/templates/<name>.toml`)
+            // resolve first, falling back to a workspace agent's own
+            // manifest by name — same precedence as
+            // `resolve_ephemeral_manifest` (messaging.rs) and
+            // `load_agent_manifest_from_template_dirs` (spawn.rs). Before
+            // this fix, this was the ONLY one of the three template
+            // resolvers that skipped `templates/` entirely, so spawning a
+            // persistent agent "from template" via `POST /api/agents
+            // {"template": name}` 404'd for every real template and only
+            // worked when `name` happened to match an existing agent's own
+            // workspace — the opposite of what the endpoint promises. The
+            // workspace fallback is kept for backward compatibility with
+            // callers that already resolve `template` by an existing
+            // agent's name.
+            let home_dir = &state.kernel.config_ref().home_dir;
+            let tmpl_path = home_dir.join("templates").join(format!("{safe_name}.toml"));
+            let agent_path = home_dir
                 .join("workspaces")
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
-            // Use tokio::fs to avoid blocking in an async context
-            match tokio::fs::read_to_string(&tmpl_path).await {
+            // Use tokio::fs to avoid blocking in an async context.
+            let read_result = match tokio::fs::read_to_string(&tmpl_path).await {
+                Ok(content) => Ok(content),
+                Err(_) => tokio::fs::read_to_string(&agent_path).await,
+            };
+            match read_result {
                 Ok(content) => content,
                 Err(_) => {
                     let t = ErrorTranslator::new(lang);

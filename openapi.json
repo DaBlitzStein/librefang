@@ -354,7 +354,8 @@
         "tags": [
           "system"
         ],
-        "summary": "GET /api/agent-types — List available agent types from both\n`~/.librefang/workspaces/agents/` (source = \"agent\") and\n`~/.librefang/templates/` (source = \"template\").",
+        "summary": "GET /api/agent-types — List available agent types from\n`~/.librefang/templates/` (source = \"template\").",
+        "description": "Used to also merge in `~/.librefang/workspaces/agents/` (source =\n\"agent\") — dropped in the fix for the \"Agent Types page is uneditable\"\nbug reported against an install with 42 agents and 0 templates. That\nmerge meant every live agent showed up here with no way to edit or\ndelete it (the dashboard's `AgentTypesPage` can only manage files under\n`templates/`), and the confusing \"Managed via Agents\" label was the\nsymptom, not the cause. The underlying capability — spawning a worker\nfrom an existing agent's manifest by name — still exists at the\nresolution layer (`resolve_ephemeral_manifest`, `resolve_manifest`,\n`load_agent_manifest_from_template_dirs` all fall back to\n`workspaces/agents/<name>/agent.toml` when no template matches); only the\n*listing* stops conflating the two concepts. The bridge from \"I have\nagents, not templates\" to a populated, editable list is\n`POST /api/agents/{id}/save-as-agent-type`, which extracts a live agent's\nmanifest into a real, editable `templates/<name>.toml` file.",
         "operationId": "list_agent_types",
         "responses": {
           "200": {
@@ -2359,6 +2360,59 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/save-as-agent-type": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/save-as-agent-type — Extract a live agent's\ncurrent manifest into a reusable agent-type template.",
+        "description": "**Not the same as [`clone_agent`]**, and the two are easy to confuse\nbecause both start from an existing agent:\n- `POST /api/agents/{id}/clone` duplicates a *running instance* — new\n  workspace directory, optionally copied skills/tools files, a fresh\n  agent that starts running immediately under a new name. The source\n  agent's memory and sessions are never copied; the clone starts empty.\n- This endpoint does not spawn anything and does not touch the source\n  agent at all. It snapshots the agent's current configuration (model,\n  system prompt, tools, skills, channels, resources, …) into a\n  `templates/<template_name>.toml` file. That file shows up on the\n  Agent Types page, can be edited and deleted there like any other\n  template, and can be spawned from repeatedly later via\n  `POST /api/agents {\"template\": \"<template_name>\"}` or\n  `POST /api/agents/ephemeral {\"agent_type\": \"<template_name>\"}` —\n  without ever touching the original agent's session, memory, or\n  workspace.\n\nThis is the bridge for installs that have agents but no templates: it\nturns an existing agent's configuration into a reusable, editable\nstarting point for spawning more agents like it, instead of requiring a\ntemplate to be authored from scratch.",
+        "operationId": "save_agent_as_agent_type",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Name for the extracted agent-type template",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveAgentAsAgentTypeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent-type template created from the agent's live manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid template name"
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "409": {
+            "description": "Agent type already exists"
           }
         }
       }
@@ -15111,6 +15165,20 @@
           }
         }
       },
+      "SaveAgentAsAgentTypeRequest": {
+        "type": "object",
+        "description": "Request body for extracting a live agent's manifest into a reusable\nagent-type template.",
+        "required": [
+          "template_name"
+        ],
+        "properties": {
+          "template_name": {
+            "type": "string",
+            "description": "Filename (and manifest `name`) of the resulting\n`~/.librefang/templates/<template_name>.toml`. Independent of the\nsource agent's own name — the source agent is untouched and keeps\nrunning under its original name; only the extracted template file\ngets this name. Passing the source agent's own name is fine and is\nthe common case (turn \"researcher\" the agent into a \"researcher\"\ntemplate that mirrors its current config)."
+          }
+        },
+        "additionalProperties": false
+      },
       "SessionContextResponse": {
         "type": "object",
         "description": "Lightweight context-window usage indicator for an agent session.\n\nDistinct from `GET /api/agents/{id}/session`: that endpoint returns the full\nmessage history and exposes only the X numerator\n(`context_window_tokens`). This endpoint resolves the Y denominator (the\nmodel's context window, via the same precedence chain the agent loop uses)\nand the percentage, so the dashboard can render a cheap polled \"how full is\nthe window\" bar without pulling the heavy history payload.",
@@ -15357,7 +15425,7 @@
               "string",
               "null"
             ],
-            "description": "Template name from `~/.librefang/workspaces/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
+            "description": "Template name, resolved against `~/.librefang/templates/{template}.toml`\nfirst, falling back to `~/.librefang/workspaces/agents/{template}/agent.toml`\n(kept for backward compatibility with callers that already resolve a\ntemplate by an existing agent's name). When provided and\n`manifest_toml` is empty, the template is loaded automatically."
           }
         },
         "additionalProperties": false

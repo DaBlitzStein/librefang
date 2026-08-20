@@ -86,6 +86,7 @@ import {
   usePatchHandAgentRuntimeConfig,
   useResetAgentSession,
   useResumeAgent,
+  useSaveAgentAsAgentType,
   useSpawnAgent,
   useSuspendAgent,
   useUpdateAgentTools,
@@ -522,6 +523,15 @@ export function AgentsPage() {
   const [cloneNameDraft, setCloneNameDraft] = useState("");
   const [cloneIncludeSkills, setCloneIncludeSkills] = useState(true);
   const [cloneIncludeTools, setCloneIncludeTools] = useState(true);
+  // Save-as-agent-type dialog state. Distinct from Clone above: Clone
+  // duplicates the running instance (new workspace, memory, sessions);
+  // this snapshots the agent's current config into a reusable
+  // `templates/<name>.toml` file without touching the source agent at all.
+  const [saveAsTypeDialog, setSaveAsTypeDialog] = useState<{
+    agentId: string;
+    sourceName: string;
+  } | null>(null);
+  const [saveAsTypeNameDraft, setSaveAsTypeNameDraft] = useState("");
   const [showHandAgents, setShowHandAgents] = useState(false);
   const [showToolsEditor, setShowToolsEditor] = useState(false);
   const [toolsEditorAgentId, setToolsEditorAgentId] = useState<string | null>(null);
@@ -597,6 +607,7 @@ export function AgentsPage() {
   const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
   const patchAgentMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
+  const saveAsTypeMutation = useSaveAgentAsAgentType();
   const resetSessionMutation = useResetAgentSession();
   const updateToolsMutation = useUpdateAgentTools();
   const setAgentMcpServersMutation = useSetAgentMcpServers();
@@ -3301,6 +3312,18 @@ export function AgentsPage() {
                   variant="secondary"
                   size="sm"
                   className="flex-1 min-w-[88px]"
+                  onClick={() => {
+                    setSaveAsTypeNameDraft(detailAgent.name);
+                    setSaveAsTypeDialog({ agentId: detailAgent.id, sourceName: detailAgent.name });
+                  }}
+                >
+                  <Save className="w-3.5 h-3.5 mr-1.5" />
+                  {t("agents.save_as_agent_type")}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="flex-1 min-w-[88px]"
                   onClick={() =>
                     setConfirmDialog({
                       title: t("agents.reset_title", { defaultValue: "Reset session?" }),
@@ -3956,6 +3979,88 @@ export function AgentsPage() {
               {cloneMutation.isPending
                 ? t("common.saving", { defaultValue: "Saving..." })
                 : t("agents.clone")}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Save as Agent Type Modal — collects the template name. Distinct
+          from Clone above: this never spawns anything and never touches
+          the source agent's workspace, memory, or sessions, it only
+          extracts a snapshot of its current config into
+          `templates/<name>.toml`, which then shows up on the Agent Types
+          page. */}
+      <Modal
+        isOpen={saveAsTypeDialog !== null}
+        onClose={() => setSaveAsTypeDialog(null)}
+        title={t("agents.save_as_agent_type_title", { defaultValue: "Save as agent type" })}
+        size="sm"
+      >
+        <form
+          className="p-6 space-y-4"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!saveAsTypeDialog) return;
+            const templateName = saveAsTypeNameDraft.trim();
+            if (!templateName) return;
+            try {
+              await saveAsTypeMutation.mutateAsync({
+                agentId: saveAsTypeDialog.agentId,
+                payload: { template_name: templateName },
+              });
+              addToast(
+                t("agents.save_as_agent_type_succeeded", { defaultValue: "Saved as agent type" }),
+                "success",
+              );
+              setSaveAsTypeDialog(null);
+            } catch (err) {
+              addToast(
+                toastErr(
+                  err,
+                  t("agents.save_as_agent_type_failed", { defaultValue: "Failed to save agent type" }),
+                ),
+                "error",
+              );
+            }
+          }}
+        >
+          <p className="text-[11px] text-text-dim/70">
+            {t("agents.save_as_agent_type_desc", {
+              defaultValue:
+                "Extracts {{name}}'s current configuration into a reusable template on the Agent Types page. Unlike Clone, this does not create a new running agent or touch {{name}}'s workspace, memory, or sessions.",
+              name: saveAsTypeDialog?.sourceName ?? "",
+            })}
+          </p>
+          <div className="space-y-1.5">
+            <label
+              htmlFor="save-as-agent-type-name"
+              className="block text-[10px] font-black text-text-dim uppercase tracking-widest"
+            >
+              {t("agents.save_as_agent_type_name_label", { defaultValue: "Template name" })}
+            </label>
+            <Input
+              id="save-as-agent-type-name"
+              value={saveAsTypeNameDraft}
+              onChange={(e) => setSaveAsTypeNameDraft(e.target.value)}
+              placeholder={t("agents.save_as_agent_type_name_placeholder", {
+                defaultValue: "my-template",
+              })}
+              maxLength={64}
+              autoFocus
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="secondary" onClick={() => setSaveAsTypeDialog(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={!saveAsTypeNameDraft.trim() || saveAsTypeMutation.isPending}
+            >
+              {saveAsTypeMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("agents.save_as_agent_type")}
             </Button>
           </div>
         </form>
