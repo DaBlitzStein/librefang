@@ -1140,6 +1140,360 @@ pub fn apply_agent_type_json_to_manifest(
     existing
 }
 
+/// A single suspicious or privacy-sensitive value found by
+/// [`detect_private_manifest_fields`] in a live agent instance's manifest.
+///
+/// Meant to be shown directly to the operator before a "promote to
+/// registry" publish — the field path and reason explain *why* something
+/// was flagged, and `value_preview` (bounded, not the full raw value for
+/// long fields) lets them judge severity without re-opening the TOML.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateFieldFinding {
+    /// Dotted/indexed field path, e.g. `"model.api_key_env"`,
+    /// `"workspaces.library.mount"`, `"metadata.internal_ticket_id"`,
+    /// `"context_injection[0].content"`.
+    pub field: String,
+    /// Human-readable reason this was flagged. Shown directly in the UI.
+    pub reason: String,
+    /// A bounded preview of the offending value, when there is a scalar
+    /// value to show (absent for purely structural findings like `is_hand`
+    /// or the presence of `exec_policy`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_preview: Option<String>,
+}
+
+/// Strip operator-private / instance-specific data from a live agent's
+/// [`AgentManifest`] so the result is safe to publish as a public agent
+/// TYPE via the registry promotion flow.
+///
+/// A deployed instance's `agent.toml` carries operator identity the
+/// registry's own validator does not check for (it only requires `name`,
+/// `description`, and `module`) — so without this pass, promoting an
+/// instance manifest as-is would ship all of it to a public repository.
+///
+/// Removed or neutralised, at minimum:
+/// - `workspace` — absolute filesystem path into the operator's
+///   `~/.librefang/workspaces/`.
+/// - `api_key_env` and `base_url`, on `model` and on every entry of
+///   `fallback_models` — which environment variable this operator's
+///   credentials live in, and any private/self-hosted provider endpoint.
+/// - Absolute paths inside `workspaces` (`WorkspaceDecl::mount`, and a
+///   defensive check on `WorkspaceDecl::path` even though it is documented
+///   as relative) — the operator's own filesystem layout is not portable
+///   to a fresh install. An entry left with neither `path` nor `mount` is
+///   dropped entirely.
+/// - `exec_policy` — command/environment-variable allowlists are
+///   host-specific security policy, not portable agent-type config; the
+///   published type falls back to the new install's own global
+///   `exec_policy` instead.
+/// - `context_injection` — free-form literal text that can carry internal
+///   documentation, customer names, or other business data; cleared.
+/// - `is_hand` — instance state (was this spawned by a Hand?), not
+///   agent-type configuration.
+/// - `metadata` — an arbitrary operator key/value bag; occasionally holds
+///   identifiers or secrets (see [`detect_private_manifest_fields`]), so it
+///   is cleared rather than published unreviewed.
+///
+/// What survives unchanged: `name`, `description`, `model.system_prompt`,
+/// `model.provider` / `model.model`, `skills`, `capabilities.tools`,
+/// `channels`, `routing`, `tags`, and every other portable policy field
+/// (`resources`, `priority`, `mcp_servers`, `thinking`, `compaction`, …) —
+/// those describe *what kind of agent this is*, not *who is running it*.
+///
+/// Callers that want to warn the operator about what will be removed
+/// **before** publishing should call [`detect_private_manifest_fields`]
+/// first and show the findings — it also flags suspicious values in fields
+/// this function does NOT touch (e.g. a stray credential pasted into
+/// `system_prompt`), so a silent call to this function alone is not a
+/// complete privacy review.
+pub fn sanitize_agent_manifest_for_publication(manifest: &AgentManifest) -> AgentManifest {
+    let mut m = manifest.clone();
+
+    m.workspace = None;
+    m.model.api_key_env = None;
+    m.model.base_url = None;
+    if let Some(fallbacks) = m.fallback_models.as_mut() {
+        for fb in fallbacks.iter_mut() {
+            fb.api_key_env = None;
+            fb.base_url = None;
+        }
+    }
+    m.workspaces.retain(|_, decl| {
+        decl.mount = None;
+        if decl
+            .path
+            .as_ref()
+            .is_some_and(|p| looks_like_absolute_path(&p.display().to_string()))
+        {
+            decl.path = None;
+        }
+        decl.path.is_some()
+    });
+    m.exec_policy = None;
+    m.context_injection.clear();
+    m.is_hand = false;
+    m.metadata.clear();
+
+    m
+}
+
+/// Scan a live agent instance's [`AgentManifest`] for values that look
+/// operator-private, so a "promote to registry" UI can show the operator
+/// exactly what would be exposed **before** they publish — instead of
+/// [`sanitize_agent_manifest_for_publication`] silently removing it.
+///
+/// Two passes:
+/// 1. Every field [`sanitize_agent_manifest_for_publication`] would remove
+///    is reported unconditionally when present (so the operator can see the
+///    cleanup that is about to happen and can override /
+///    manually-inspect first).
+/// 2. A heuristic scan — absolute-path shape, credential-like strings,
+///    internal/private hostnames — over free-text fields the sanitizer
+///    deliberately preserves (`name`, `description`, `model.system_prompt`,
+///    `tags`, `capabilities.network`), since an operator can paste
+///    anything into a prompt or a tag and the sanitizer has no way to tell
+///    "portable config" from "an internal hostname that happens to sit in
+///    system_prompt" without this scan.
+pub fn detect_private_manifest_fields(manifest: &AgentManifest) -> Vec<PrivateFieldFinding> {
+    let mut findings = Vec::new();
+
+    if let Some(ws) = &manifest.workspace {
+        findings.push(PrivateFieldFinding {
+            field: "workspace".to_string(),
+            reason: "absolute operator workspace path".to_string(),
+            value_preview: Some(ws.display().to_string()),
+        });
+    }
+    if let Some(env) = &manifest.model.api_key_env {
+        findings.push(PrivateFieldFinding {
+            field: "model.api_key_env".to_string(),
+            reason: "names the operator's credential environment variable".to_string(),
+            value_preview: Some(env.clone()),
+        });
+    }
+    if let Some(url) = &manifest.model.base_url {
+        findings.push(PrivateFieldFinding {
+            field: "model.base_url".to_string(),
+            reason: "may point at a private or self-hosted provider endpoint".to_string(),
+            value_preview: Some(url.clone()),
+        });
+    }
+    for (i, fb) in manifest.fallback_models.iter().flatten().enumerate() {
+        if let Some(env) = &fb.api_key_env {
+            findings.push(PrivateFieldFinding {
+                field: format!("fallback_models[{i}].api_key_env"),
+                reason: "names the operator's credential environment variable".to_string(),
+                value_preview: Some(env.clone()),
+            });
+        }
+        if let Some(url) = &fb.base_url {
+            findings.push(PrivateFieldFinding {
+                field: format!("fallback_models[{i}].base_url"),
+                reason: "may point at a private or self-hosted provider endpoint".to_string(),
+                value_preview: Some(url.clone()),
+            });
+        }
+    }
+    for (name, decl) in &manifest.workspaces {
+        if let Some(mount) = &decl.mount {
+            findings.push(PrivateFieldFinding {
+                field: format!("workspaces.{name}.mount"),
+                reason: "absolute host filesystem path".to_string(),
+                value_preview: Some(mount.display().to_string()),
+            });
+        }
+        if let Some(path) = &decl.path {
+            let path_str = path.display().to_string();
+            if looks_like_absolute_path(&path_str) {
+                findings.push(PrivateFieldFinding {
+                    field: format!("workspaces.{name}.path"),
+                    reason: "absolute path where a relative one was expected".to_string(),
+                    value_preview: Some(path_str),
+                });
+            }
+        }
+    }
+    if manifest.exec_policy.is_some() {
+        findings.push(PrivateFieldFinding {
+            field: "exec_policy".to_string(),
+            reason: "host-specific command/environment-variable allowlist policy".to_string(),
+            value_preview: None,
+        });
+    }
+    for (i, inj) in manifest.context_injection.iter().enumerate() {
+        findings.push(PrivateFieldFinding {
+            field: format!("context_injection[{i}].content"),
+            reason: "literal injected text may carry business or internal data".to_string(),
+            value_preview: Some(truncate_preview(&inj.content)),
+        });
+    }
+    if manifest.is_hand {
+        findings.push(PrivateFieldFinding {
+            field: "is_hand".to_string(),
+            reason: "instance state, not agent-type configuration".to_string(),
+            value_preview: None,
+        });
+    }
+    for (key, value) in &manifest.metadata {
+        findings.push(PrivateFieldFinding {
+            field: format!("metadata.{key}"),
+            reason: "arbitrary operator metadata — may contain identifiers or secrets".to_string(),
+            value_preview: Some(truncate_preview(&value.to_string())),
+        });
+    }
+
+    scan_string_for_findings("name", &manifest.name, &mut findings);
+    scan_string_for_findings("description", &manifest.description, &mut findings);
+    scan_string_for_findings(
+        "model.system_prompt",
+        &manifest.model.system_prompt,
+        &mut findings,
+    );
+    for (i, tag) in manifest.tags.iter().enumerate() {
+        scan_string_for_findings(&format!("tags[{i}]"), tag, &mut findings);
+    }
+    for (i, host) in manifest.capabilities.network.iter().enumerate() {
+        scan_string_for_findings(&format!("capabilities.network[{i}]"), host, &mut findings);
+    }
+
+    findings
+}
+
+/// Bound a value preview so a large `context_injection` block or metadata
+/// blob doesn't blow up the findings payload. Truncates on a char boundary.
+fn truncate_preview(s: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    if s.chars().count() <= MAX_CHARS {
+        s.to_string()
+    } else {
+        let mut preview: String = s.chars().take(MAX_CHARS).collect();
+        preview.push('…');
+        preview
+    }
+}
+
+/// Whether `s` looks like an absolute filesystem path: Unix (`/foo/bar`),
+/// Windows drive-letter (`C:\foo`, `C:/foo`), or UNC (`\\host\share`).
+fn looks_like_absolute_path(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() > 1 && s.starts_with('/') {
+        return true;
+    }
+    if s.starts_with("\\\\") {
+        return true;
+    }
+    let bytes = s.as_bytes();
+    bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// Whether `s` looks like an API key / bearer token: either a known
+/// provider prefix, or a long run of base64/hex-alphabet characters with no
+/// whitespace (the shape of an opaque credential even without a recognised
+/// prefix).
+fn looks_like_credential(s: &str) -> bool {
+    let s = s.trim();
+    const PREFIXES: &[&str] = &[
+        "sk-",
+        "AKIA",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "xox",
+        "AIzaSy",
+        "glpat-",
+        "npm_",
+        "shpat_",
+    ];
+    if PREFIXES.iter().any(|p| s.starts_with(p)) && s.len() >= 12 {
+        return true;
+    }
+    let len = s.chars().count();
+    if !(24..=256).contains(&len) {
+        return false;
+    }
+    let charset_ok = s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+' | '/' | '='));
+    let has_digit = s.chars().any(|c| c.is_ascii_digit());
+    let has_alpha = s.chars().any(|c| c.is_ascii_alphabetic());
+    let no_whitespace = !s.chars().any(|c| c.is_whitespace());
+    charset_ok && has_digit && has_alpha && no_whitespace
+}
+
+/// Whether `s` looks like an internal/private hostname or IP: `localhost`,
+/// a `.local`/`.internal`/`.lan`/`.corp` suffix, or an RFC1918 private IP
+/// range. Tolerates a leading `scheme://` and a trailing `:port`/`/path`.
+fn looks_like_internal_host(s: &str) -> bool {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return false;
+    }
+    let after_scheme = match s.find("://") {
+        Some(idx) => &s[idx + 3..],
+        None => s.as_str(),
+    };
+    let host = after_scheme
+        .split(['/', ':'])
+        .next()
+        .unwrap_or(after_scheme);
+    if host.is_empty() {
+        return false;
+    }
+    if host == "localhost"
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".lan")
+        || host.ends_with(".corp")
+    {
+        return true;
+    }
+    if host == "127.0.0.1" || host.starts_with("127.") {
+        return true;
+    }
+    if host.starts_with("10.") || host.starts_with("192.168.") {
+        return true;
+    }
+    if let Some(rest) = host.strip_prefix("172.") {
+        if let Some(second_octet) = rest.split('.').next().and_then(|s| s.parse::<u8>().ok()) {
+            if (16..=31).contains(&second_octet) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Run the three heuristics over `value` and push a finding for each match.
+fn scan_string_for_findings(field: &str, value: &str, findings: &mut Vec<PrivateFieldFinding>) {
+    if value.is_empty() {
+        return;
+    }
+    if looks_like_credential(value) {
+        findings.push(PrivateFieldFinding {
+            field: field.to_string(),
+            reason: "value looks like a credential or API key".to_string(),
+            value_preview: Some(truncate_preview(value)),
+        });
+    }
+    if looks_like_absolute_path(value) {
+        findings.push(PrivateFieldFinding {
+            field: field.to_string(),
+            reason: "value looks like an absolute filesystem path".to_string(),
+            value_preview: Some(truncate_preview(value)),
+        });
+    }
+    if looks_like_internal_host(value) {
+        findings.push(PrivateFieldFinding {
+            field: field.to_string(),
+            reason: "value looks like an internal or private host".to_string(),
+            value_preview: Some(truncate_preview(value)),
+        });
+    }
+}
+
 /// Request to spawn an ephemeral (no-workspace, no-DB) agent worker.
 /// The caller controls everything; nothing is inherited from the parent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4187,5 +4541,255 @@ model = "claude-3-haiku-20240307"
             err.to_string().contains("unknown variant"),
             "explicit `session_mode = \"New\"` must error, not fall back to None / Persistent: {err}"
         );
+    }
+
+    // ---- registry promotion: sanitize + detect private fields ---------
+
+    /// Build a manifest that looks like a real deployed instance: absolute
+    /// workspace path, provider credentials, an external mount, exec
+    /// policy, literal context injection, `is_hand`, and metadata — every
+    /// field `sanitize_agent_manifest_for_publication` is supposed to
+    /// strip.
+    fn instance_manifest_with_private_data() -> AgentManifest {
+        let mut m = AgentManifest {
+            name: "candelito".to_string(),
+            description: "Handles customer support for Acme".to_string(),
+            is_hand: true,
+            ..Default::default()
+        };
+        m.workspace = Some(PathBuf::from(
+            "/home/proteo/.librefang/workspaces/agents/Candelito",
+        ));
+        m.model.provider = "anthropic".to_string();
+        m.model.model = "claude-opus".to_string();
+        m.model.system_prompt = "You are Candelito, a support agent.".to_string();
+        m.model.api_key_env = Some("CANDELITO_ANTHROPIC_KEY".to_string());
+        m.model.base_url = Some("https://internal-llm.corp:8443/v1".to_string());
+        m.fallback_models = Some(vec![FallbackModel {
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            api_key_env: Some("CANDELITO_OPENAI_KEY".to_string()),
+            base_url: Some("https://10.0.0.5:9000/v1".to_string()),
+            extra_params: Default::default(),
+        }]);
+        m.workspaces.insert(
+            "vault".to_string(),
+            WorkspaceDecl {
+                path: None,
+                mount: Some(PathBuf::from("/mnt/acme-nas/vault")),
+                mode: WorkspaceMode::ReadOnly,
+            },
+        );
+        m.workspaces.insert(
+            "shared-lib".to_string(),
+            WorkspaceDecl {
+                path: Some(PathBuf::from("shared/library")),
+                mount: None,
+                mode: WorkspaceMode::ReadWrite,
+            },
+        );
+        m.exec_policy = Some(crate::config::ExecPolicy::default());
+        m.context_injection = vec![crate::config::ContextInjection {
+            name: "acme-runbook".to_string(),
+            content: "Internal escalation path: page +1-555-0100, ticket queue ACME-OPS"
+                .to_string(),
+            position: Default::default(),
+            condition: None,
+        }];
+        m.metadata.insert(
+            "internal_ticket_id".to_string(),
+            serde_json::json!("ACME-4821"),
+        );
+        m.skills = vec!["triage".to_string()];
+        m.channels = vec!["telegram".to_string()];
+        m.tags = vec!["support".to_string()];
+        m.capabilities.tools = vec!["memory_recall".to_string()];
+        m.routing = Some(ModelRoutingConfig {
+            simple_model: "haiku".to_string(),
+            medium_model: "sonnet".to_string(),
+            complex_model: "opus".to_string(),
+            simple_threshold: 10,
+            complex_threshold: 80,
+        });
+        m
+    }
+
+    #[test]
+    fn sanitize_strips_operator_private_fields() {
+        let clean = sanitize_agent_manifest_for_publication(&instance_manifest_with_private_data());
+
+        assert!(clean.workspace.is_none());
+        assert!(clean.model.api_key_env.is_none());
+        assert!(clean.model.base_url.is_none());
+        for fb in clean.fallback_models.iter().flatten() {
+            assert!(fb.api_key_env.is_none());
+            assert!(fb.base_url.is_none());
+        }
+        assert!(
+            !clean.workspaces.contains_key("vault"),
+            "an absolute-mount-only workspace entry must be dropped entirely"
+        );
+        assert!(clean.exec_policy.is_none());
+        assert!(clean.context_injection.is_empty());
+        assert!(!clean.is_hand);
+        assert!(clean.metadata.is_empty());
+    }
+
+    #[test]
+    fn sanitize_preserves_portable_agent_type_fields() {
+        let clean = sanitize_agent_manifest_for_publication(&instance_manifest_with_private_data());
+
+        assert_eq!(clean.name, "candelito");
+        assert_eq!(clean.description, "Handles customer support for Acme");
+        assert_eq!(
+            clean.model.system_prompt,
+            "You are Candelito, a support agent."
+        );
+        assert_eq!(clean.model.provider, "anthropic");
+        assert_eq!(clean.model.model, "claude-opus");
+        assert_eq!(clean.skills, vec!["triage".to_string()]);
+        assert_eq!(clean.capabilities.tools, vec!["memory_recall".to_string()]);
+        assert_eq!(clean.channels, vec!["telegram".to_string()]);
+        assert_eq!(clean.tags, vec!["support".to_string()]);
+        assert!(clean.routing.is_some());
+        // A relative-path-only workspace entry is portable config, not
+        // operator-private data — it survives with its mount cleared (there
+        // was none) and its relative path intact.
+        let shared = clean
+            .workspaces
+            .get("shared-lib")
+            .expect("relative-path workspace entry must survive sanitization");
+        assert_eq!(shared.path, Some(PathBuf::from("shared/library")));
+        assert!(shared.mount.is_none());
+    }
+
+    #[test]
+    fn sanitize_a_manifest_with_nothing_private_is_a_no_op_on_type_fields() {
+        let bare = AgentManifest {
+            name: "hello-world".to_string(),
+            description: "friendly greeter".to_string(),
+            ..Default::default()
+        };
+        let clean = sanitize_agent_manifest_for_publication(&bare);
+        assert_eq!(clean.name, bare.name);
+        assert_eq!(clean.description, bare.description);
+    }
+
+    #[test]
+    fn detect_finds_every_field_the_sanitizer_removes() {
+        let findings = detect_private_manifest_fields(&instance_manifest_with_private_data());
+        let fields: std::collections::HashSet<&str> =
+            findings.iter().map(|f| f.field.as_str()).collect();
+
+        assert!(fields.contains("workspace"), "{findings:?}");
+        assert!(fields.contains("model.api_key_env"), "{findings:?}");
+        assert!(fields.contains("model.base_url"), "{findings:?}");
+        assert!(
+            fields.contains("fallback_models[0].api_key_env"),
+            "{findings:?}"
+        );
+        assert!(
+            fields.contains("fallback_models[0].base_url"),
+            "{findings:?}"
+        );
+        assert!(fields.contains("workspaces.vault.mount"), "{findings:?}");
+        assert!(fields.contains("exec_policy"), "{findings:?}");
+        assert!(
+            fields.contains("context_injection[0].content"),
+            "{findings:?}"
+        );
+        assert!(fields.contains("is_hand"), "{findings:?}");
+        assert!(
+            fields.contains("metadata.internal_ticket_id"),
+            "{findings:?}"
+        );
+    }
+
+    /// The detector also flags suspicious content the sanitizer leaves
+    /// alone — here, an internal hostname hiding inside `model.base_url`
+    /// AND a lookalike private IP inside a fallback's `base_url`, both of
+    /// which the "always reported" pass above already covers by field name,
+    /// but this test pins the heuristic reasons specifically (not just
+    /// presence) so a future refactor can't silently downgrade them to a
+    /// generic message.
+    #[test]
+    fn detect_reports_internal_host_reason_for_base_url() {
+        let findings = detect_private_manifest_fields(&instance_manifest_with_private_data());
+        let base_url_finding = findings
+            .iter()
+            .find(|f| f.field == "model.base_url")
+            .expect("model.base_url must be flagged");
+        assert!(base_url_finding
+            .value_preview
+            .as_deref()
+            .unwrap_or_default()
+            .contains("internal-llm.corp"));
+    }
+
+    /// A prompt with no absolute paths, credentials, or internal hosts must
+    /// produce zero findings from the heuristic scan — the detector should
+    /// not cry wolf on ordinary agent-type content.
+    #[test]
+    fn detect_heuristic_scan_is_quiet_on_clean_free_text() {
+        let mut m = AgentManifest {
+            name: "hello-world".to_string(),
+            description: "A friendly greeting agent.".to_string(),
+            ..Default::default()
+        };
+        m.model.system_prompt = "You are a helpful, friendly assistant.".to_string();
+        m.tags = vec!["general".to_string(), "greeting".to_string()];
+
+        let findings = detect_private_manifest_fields(&m);
+        assert!(
+            findings.is_empty(),
+            "clean agent-type content must not be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn looks_like_absolute_path_matches_unix_windows_and_unc() {
+        assert!(looks_like_absolute_path("/home/proteo/workspace"));
+        assert!(looks_like_absolute_path("C:\\Users\\proteo\\workspace"));
+        assert!(looks_like_absolute_path("C:/Users/proteo/workspace"));
+        assert!(looks_like_absolute_path("\\\\fileserver\\share"));
+        assert!(!looks_like_absolute_path("shared/library"));
+        assert!(!looks_like_absolute_path("relative/path"));
+        assert!(!looks_like_absolute_path(""));
+        assert!(!looks_like_absolute_path("/"));
+    }
+
+    #[test]
+    fn looks_like_credential_matches_known_prefixes_and_opaque_tokens() {
+        assert!(looks_like_credential("sk-ant-api03-abcdefghijklmnop"));
+        assert!(looks_like_credential(
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+        ));
+        // Opaque long alnum token with no recognised prefix.
+        assert!(looks_like_credential(
+            "aVeryLongOpaqueBearerToken1234567890ABCDEF"
+        ));
+        assert!(!looks_like_credential("hello-world"));
+        assert!(!looks_like_credential("short"));
+        assert!(!looks_like_credential(
+            "a sentence with spaces in it that is long"
+        ));
+    }
+
+    #[test]
+    fn looks_like_internal_host_matches_private_ranges_and_local_suffixes() {
+        assert!(looks_like_internal_host("localhost"));
+        assert!(looks_like_internal_host("http://localhost:8080"));
+        assert!(looks_like_internal_host("db.internal"));
+        assert!(looks_like_internal_host("printer.lan"));
+        assert!(looks_like_internal_host("10.0.0.5"));
+        assert!(looks_like_internal_host("192.168.1.161"));
+        assert!(looks_like_internal_host("172.16.0.1"));
+        assert!(looks_like_internal_host(
+            "https://internal-llm.corp:8443/v1"
+        ));
+        assert!(!looks_like_internal_host("172.15.0.1"));
+        assert!(!looks_like_internal_host("172.32.0.1"));
+        assert!(!looks_like_internal_host("api.anthropic.com"));
+        assert!(!looks_like_internal_host("example.com"));
     }
 }
