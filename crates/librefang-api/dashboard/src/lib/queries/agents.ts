@@ -2,10 +2,12 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   listAgents,
   getAgentDetail,
+  getAgentManifest,
+  getAgentChannels,
   getAgentStats,
   listAgentEvents,
   listAgentSessions,
-  listAgentTemplates,
+  listAgentTypeOptions,
   listPromptVersions,
   listExperiments,
   getExperimentMetrics,
@@ -62,10 +64,10 @@ export const agentQueries = {
       refetchInterval: 15_000,
       refetchIntervalInBackground: false, // #3393
     }),
-  templates: () =>
+  typeOptions: () =>
     queryOptions({
-      queryKey: agentKeys.templates(),
-      queryFn: listAgentTemplates,
+      queryKey: agentKeys.typeOptions(),
+      queryFn: listAgentTypeOptions,
     }),
   promptVersions: (agentId: string) =>
     queryOptions({
@@ -123,6 +125,23 @@ export const agentQueries = {
       queryFn: () => getAgentSkills(agentId),
       enabled: !!agentId,
     }),
+  // Full manifest as raw TOML (#7742). Disabled by default — callers gate
+  // this on the full manifest editor being open via QueryOverrides, since
+  // the payload is only needed while that drawer is mounted.
+  manifest: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.manifest(agentId),
+      queryFn: () => getAgentManifest(agentId),
+      enabled: false,
+    }),
+  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
+  // Channels section.
+  channels: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.channels(agentId),
+      queryFn: () => getAgentChannels(agentId),
+      enabled: !!agentId,
+    }),
   toolsList: () =>
     queryOptions({
       queryKey: toolKeys.list(),
@@ -157,8 +176,8 @@ export function useAgentEvents(
   return useQuery(withOverrides(agentQueries.events(agentId, limit), options));
 }
 
-export function useAgentTemplates(options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.templates(), options));
+export function useAgentTypeOptions(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.typeOptions(), options));
 }
 
 export function usePromptVersions(agentId: string, options: QueryOverrides = {}) {
@@ -183,4 +202,12 @@ export function useAgentTools(agentId: string, options: QueryOverrides = {}) {
 
 export function useAgentSkills(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.agentSkills(agentId), options));
+}
+
+export function useAgentManifest(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.manifest(agentId), options));
+}
+
+export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.channels(agentId), options));
 }

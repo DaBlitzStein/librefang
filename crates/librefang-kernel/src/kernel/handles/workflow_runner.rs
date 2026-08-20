@@ -522,7 +522,7 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
     async fn create_workflow(
         &self,
         workflow_json: &str,
-        _caller_agent_id: Option<&str>,
+        caller_agent_id: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
         use crate::workflow::Workflow;
         use kernel_handle::KernelOpError;
@@ -583,9 +583,20 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         // Register in engine (hot-reload). `register` persists the
         // canonical JSON copy and returns the canonical id.
         let registered_id = self.workflows.engine.register(wf).await;
+        // #6943 review: `workflow_create` sits in `ALWAYS_NATIVE_TOOLS`, so
+        // every agent has it unconditionally, and its sibling `workflow_run`
+        // (also always-native) can immediately execute whatever `steps[].agent`
+        // the new workflow names — including a more privileged agent than the
+        // caller, a confused-deputy path a prompt injection could ride. There
+        // is no ownership/quota model on `Workflow` today to gate that (that
+        // is a maintainer design decision, not this fix's job), but dropping
+        // `caller_agent_id` on the floor left this call with zero audit trail
+        // at all. Log the caller so a security investigation can at least
+        // trace which agent turn synthesized which workflow.
         tracing::info!(
             workflow = %name_lower,
             registered_id = %registered_id.0,
+            caller = ?caller_agent_id,
             "Workflow created via tool"
         );
 

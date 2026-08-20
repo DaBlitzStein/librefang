@@ -306,6 +306,27 @@ pub(super) async fn tool_agent_spawn(
                 "Taint violation (message): {violation}"
             )));
         }
+        // #6930 review: the ephemeral branch screened only `message`, while the
+        // permanent-spawn branch below screens `name` and `system_prompt` too.
+        // `resolve_ephemeral_manifest` assigns the requested `system_prompt`
+        // straight onto `manifest.model.system_prompt`, so tainted content (a
+        // tool result from an untrusted source) seeded the worker's system
+        // prompt without ever crossing the taint boundary. Screen the same
+        // fields here, with the same sink and error shape.
+        if let Some(system_prompt) = input["system_prompt"].as_str() {
+            if let Some(violation) = check_taint_outbound_text(system_prompt, &spawn_sink) {
+                return Err(ToolError::PermissionDenied(format!(
+                    "Taint violation (system_prompt): {violation}"
+                )));
+            }
+        }
+        if let Some(agent_type) = input["agent_type"].as_str() {
+            if let Some(violation) = check_taint_outbound_text(agent_type, &spawn_sink) {
+                return Err(ToolError::PermissionDenied(format!(
+                    "Taint violation (agent_type): {violation}"
+                )));
+            }
+        }
 
         // Enforce parent's tool allowlist on the ephemeral worker, same as the
         // permanent-agent path below. An unrestricted parent (None) passes

@@ -713,15 +713,15 @@ impl StandaloneChat {
             return;
         }
 
-        // Auto-spawn from template
-        let all_templates = crate::templates::load_all_templates();
-        let template = match agent_name {
-            Some(target_name) => all_templates.iter().find(|t| t.name == target_name),
-            None => preferred_template(&all_templates),
+        // Auto-spawn from an agent type
+        let all_agent_types = crate::templates::load_all_agent_types();
+        let agent_type = match agent_name {
+            Some(target_name) => all_agent_types.iter().find(|t| t.name == target_name),
+            None => preferred_agent_type(&all_agent_types),
         }
-        .or_else(|| all_templates.first());
+        .or_else(|| all_agent_types.first());
 
-        match template {
+        match agent_type {
             Some(t) => {
                 self.backend = Backend::Daemon {
                     base_url: base_url.to_string(),
@@ -762,17 +762,17 @@ impl StandaloneChat {
             return;
         }
 
-        // Spawn from template
-        let all_templates = crate::templates::load_all_templates();
-        let template = if self.agent_name.is_empty() {
-            preferred_template(&all_templates)
+        // Spawn from an agent type
+        let all_agent_types = crate::templates::load_all_agent_types();
+        let agent_type = if self.agent_name.is_empty() {
+            preferred_agent_type(&all_agent_types)
         } else {
-            all_templates.iter().find(|t| t.name == self.agent_name)
+            all_agent_types.iter().find(|t| t.name == self.agent_name)
         }
-        .or_else(|| all_templates.iter().find(|t| t.name == "assistant"))
-        .or_else(|| all_templates.first());
+        .or_else(|| all_agent_types.iter().find(|t| t.name == "assistant"))
+        .or_else(|| all_agent_types.first());
 
-        match template {
+        match agent_type {
             Some(t) => {
                 let manifest: librefang_types::agent::AgentManifest =
                     match toml::from_str(&t.content) {
@@ -957,18 +957,18 @@ fn preferred_inprocess_agent(agents: &[AgentEntry]) -> Option<&AgentEntry> {
     agents.first()
 }
 
-fn preferred_template(
-    templates: &[crate::templates::AgentTemplate],
-) -> Option<&crate::templates::AgentTemplate> {
+fn preferred_agent_type(
+    agent_types: &[crate::templates::AgentType],
+) -> Option<&crate::templates::AgentType> {
     for preferred in DEFAULT_ENTRY_AGENTS {
-        if let Some(template) = templates
+        if let Some(agent_type) = agent_types
             .iter()
-            .find(|template| template.name == *preferred)
+            .find(|agent_type| agent_type.name == *preferred)
         {
-            return Some(template);
+            return Some(agent_type);
         }
     }
-    templates.first()
+    agent_types.first()
 }
 
 #[cfg(test)]
@@ -986,20 +986,20 @@ mod tests {
     }
 
     #[test]
-    fn test_preferred_template_prefers_assistant() {
-        let templates = vec![
-            crate::templates::AgentTemplate {
+    fn test_preferred_agent_type_prefers_assistant() {
+        let agent_types = vec![
+            crate::templates::AgentType {
                 name: "coder".to_string(),
                 description: String::new(),
                 content: String::new(),
             },
-            crate::templates::AgentTemplate {
+            crate::templates::AgentType {
                 name: "assistant".to_string(),
                 description: String::new(),
                 content: String::new(),
             },
         ];
-        let preferred = preferred_template(&templates).unwrap();
+        let preferred = preferred_agent_type(&agent_types).unwrap();
         assert_eq!(preferred.name, "assistant");
     }
 }

@@ -472,6 +472,73 @@ fn sidecar_default_conversation(
         })
 }
 
+/// Tightest of two cost caps, honouring the `0.0 == unlimited` convention
+/// `librefang_memory::usage` uses (a zero limit is skipped entirely there).
+///
+/// So `min` is wrong: `min(5.0, 0.0)` would read as "$0 cap" to a human and
+/// as "unlimited" to the checker. Only two real limits compare numerically.
+fn tightest_cost_limit(a: f64, b: f64) -> f64 {
+    match (a > 0.0, b > 0.0) {
+        (true, true) => a.min(b),
+        (true, false) => a,
+        (false, true) => b,
+        (false, false) => 0.0,
+    }
+}
+
+/// Combine two quotas into the one that governs a run billed to the first
+/// agent but executed under the second's manifest (the ephemeral-spawn case,
+/// #6930). Only the three cost windows matter — they are the fields
+/// `MeteringEngine::check_all_and_record` reads off a `ResourceQuota`.
+fn tightest_cost_quota(
+    billed: &librefang_types::agent::ResourceQuota,
+    executed: &librefang_types::agent::ResourceQuota,
+) -> librefang_types::agent::ResourceQuota {
+    let mut merged = billed.clone();
+    merged.max_cost_per_hour_usd =
+        tightest_cost_limit(billed.max_cost_per_hour_usd, executed.max_cost_per_hour_usd);
+    merged.max_cost_per_day_usd =
+        tightest_cost_limit(billed.max_cost_per_day_usd, executed.max_cost_per_day_usd);
+    merged.max_cost_per_month_usd = tightest_cost_limit(
+        billed.max_cost_per_month_usd,
+        executed.max_cost_per_month_usd,
+    );
+    merged
+}
+
+/// `LoopOptions` for an ephemeral worker turn.
+///
+/// Factored out as a free function so the persistence contract is testable
+/// without an LLM driver: `incognito` MUST stay `true` here (#6930 review).
+/// The ephemeral worker's `agent_id` is a throwaway UUID with no registry
+/// entry, and the agent-loop persistence guards are
+/// `if !ctx.opts.is_fork && !ctx.opts.incognito`, so with `incognito: false`
+/// every run wrote a `sessions` row and an episodic-memory row under that
+/// orphan id — permanently, on a path advertised as leaving no trace and
+/// designed to be called cheaply in a loop.
+fn ephemeral_loop_options(
+    cfg: &librefang_types::config::KernelConfig,
+    max_iterations: Option<u32>,
+    aux_client: std::sync::Arc<librefang_runtime::aux_client::AuxClient>,
+) -> librefang_runtime::agent_loop::LoopOptions {
+    librefang_runtime::agent_loop::LoopOptions {
+        is_fork: false,
+        incognito: true,
+        allowed_tools: None,
+        interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
+        max_iterations,
+        max_history_messages: cfg.max_history_messages,
+        aux_client: Some(aux_client),
+        parent_session_id: None,
+        tool_results_config: None,
+        compaction_config: None,
+        gateway_compression: None,
+        parallel_tools_config: Some(cfg.parallel_tools.clone()),
+        canvas_config: Some(cfg.canvas.clone()),
+        system_call: false,
+    }
+}
+
 impl LibreFangKernel {
     /// Send an ephemeral "side question" to an agent (`/btw` command).
     ///
@@ -896,9 +963,40 @@ impl LibreFangKernel {
         request: librefang_types::agent::EphemeralSpawnRequest,
         parent: Option<AgentId>,
     ) -> KernelResult<AgentLoopResult> {
-        let mut manifest = self.resolve_ephemeral_manifest(&request)?;
+        let mut manifest = self.resolve_ephemeral_manifest(&request, parent)?;
 
         let agent_id = AgentId::new();
+
+        // #6930 review: cost is billed to the parent (see `billed_agent`
+        // below), so the parent's own `[resources]` caps are what must gate
+        // this run. Reading them here — and enforcing them BEFORE the LLM
+        // call, exactly like `execute_llm_agent` does via `check_quota` —
+        // closes the bypass where an agent with `max_cost_per_day_usd = 5.0`
+        // escaped its cap by calling `agent_spawn(ephemeral: true)` in a loop:
+        // the ephemeral manifest's quota (`AgentManifest::default()` for an
+        // inline spawn, i.e. all-zero = unlimited) was checked instead.
+        let parent_quota: Option<librefang_types::agent::ResourceQuota> = match parent {
+            Some(parent_id) => match self.agents.registry.get(parent_id) {
+                Some(entry) => Some(entry.manifest.resources.clone()),
+                None => {
+                    // A parent id that is not in the registry cannot be
+                    // billed against a manifest. Do not silently fall through
+                    // to the ephemeral (unlimited) quota without saying so.
+                    tracing::warn!(
+                        parent = %parent_id,
+                        "Ephemeral spawn parent is not in the registry — its per-agent cost quota cannot be enforced"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        if let (Some(parent_id), Some(quota)) = (parent, parent_quota.as_ref()) {
+            self.metering
+                .engine
+                .check_quota(parent_id, quota)
+                .map_err(KernelError::LibreFang)?;
+        }
 
         // #7723: agent-type-based ephemeral missions get a uid display name
         // and a transient workspace dir that is created now and removed when
@@ -938,14 +1036,25 @@ impl LibreFangKernel {
             "Spawning ephemeral worker"
         );
 
-        // Resolve tools by name from builtin definitions
+        // Resolve tools by name from builtin definitions.
+        // #6943 review: `request.tools` only covers the inline-spawn shape;
+        // when the caller instead picked `request.agent_type`, the tools
+        // configured on that saved agent-type's manifest
+        // (`manifest.capabilities.tools`) must be honoured too, otherwise
+        // the "Tools" field on the agent-type form has no effect on Quick
+        // Run and the ephemeral worker gets zero tools.
         let all_builtins = builtin_tool_definitions();
-        let tools: Vec<librefang_types::tool::ToolDefinition> = match &request.tools {
-            Some(names) if !names.is_empty() => all_builtins
+        let requested_tool_names: Option<&Vec<String>> = match &request.tools {
+            Some(names) if !names.is_empty() => Some(names),
+            _ if !manifest.capabilities.tools.is_empty() => Some(&manifest.capabilities.tools),
+            _ => None,
+        };
+        let tools: Vec<librefang_types::tool::ToolDefinition> = match requested_tool_names {
+            Some(names) => all_builtins
                 .into_iter()
                 .filter(|t| names.iter().any(|n| n == &t.name))
                 .collect(),
-            _ => vec![],
+            None => vec![],
         };
 
         // Budget gate
@@ -1055,22 +1164,7 @@ impl LibreFangKernel {
             None, // no proactive memory
             None, // no context engine
             None, // no pending messages
-            &librefang_runtime::agent_loop::LoopOptions {
-                is_fork: false,
-                incognito: false,
-                allowed_tools: None,
-                interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
-                max_iterations: max_iter,
-                max_history_messages: cfg.max_history_messages,
-                aux_client: Some(self.llm.aux_client.load_full()),
-                parent_session_id: None,
-                tool_results_config: None,
-                compaction_config: None,
-                gateway_compression: None,
-                parallel_tools_config: Some(cfg.parallel_tools.clone()),
-                canvas_config: Some(cfg.canvas.clone()),
-                system_call: false,
-            },
+            &ephemeral_loop_options(&cfg, max_iter, self.llm.aux_client.load_full()),
         ))
         .await
         .map_err(KernelError::LibreFang)?;
@@ -1109,9 +1203,22 @@ impl LibreFangKernel {
             channel: None,
             session_id: None,
         };
+        // The record is written under `billed_agent`, so the quota checked
+        // alongside it must be the one that governs that agent. Every other
+        // `check_all_and_record` call site passes the billed agent's own
+        // manifest resources (`messaging.rs` ephemeral side-question,
+        // streaming task, `agent_execution.rs`); this one passed the
+        // *ephemeral* manifest's, which for an inline spawn is
+        // `AgentManifest::default()` — all-zero, and `usage.rs` reads `0.0`
+        // as "unlimited". Take the tightest of the two per field so a
+        // template that declares a stricter cap still applies.
+        let effective_quota = match parent_quota.as_ref() {
+            Some(parent_q) => tightest_cost_quota(parent_q, &manifest.resources),
+            None => manifest.resources.clone(),
+        };
         if let Err(e) = self.metering.engine.check_all_and_record(
             &usage_record,
-            &manifest.resources,
+            &effective_quota,
             &self.current_budget(),
         ) {
             tracing::warn!(error = %e, "Ephemeral worker metering failed");
@@ -1134,11 +1241,126 @@ impl LibreFangKernel {
         Ok(result)
     }
 
+    /// Every `base_url` an operator has configured somewhere the kernel reads
+    /// it from: `[provider_urls]`, the runtime model catalog, and the
+    /// effective default model. Used to allowlist a caller-supplied override
+    /// (#6930) — see [`Self::validate_ephemeral_model_override`].
+    fn operator_configured_base_urls(&self) -> std::collections::BTreeSet<String> {
+        let cfg = self.config.load();
+        let mut urls: std::collections::BTreeSet<String> =
+            cfg.provider_urls.values().cloned().collect();
+        for p in self.llm.model_catalog.load().list_providers() {
+            if !p.base_url.is_empty() {
+                urls.insert(p.base_url.clone());
+            }
+        }
+        if let Some(url) = cfg.default_model.base_url.clone() {
+            urls.insert(url);
+        }
+        if let Some(default_override) = self
+            .llm
+            .default_model_override
+            .read()
+            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner())
+            .as_ref()
+            .and_then(|m| m.base_url.clone())
+        {
+            urls.insert(default_override);
+        }
+        urls
+    }
+
+    /// Every API-key env-var name an operator has configured: `[provider_api_keys]`,
+    /// `[auth_profiles]`, the runtime model catalog, and the default model.
+    fn operator_configured_api_key_envs(&self) -> std::collections::BTreeSet<String> {
+        let cfg = self.config.load();
+        let mut envs: std::collections::BTreeSet<String> =
+            cfg.provider_api_keys.values().cloned().collect();
+        for profiles in cfg.auth_profiles.values() {
+            for profile in profiles {
+                if !profile.api_key_env.is_empty() {
+                    envs.insert(profile.api_key_env.clone());
+                }
+            }
+        }
+        for p in self.llm.model_catalog.load().list_providers() {
+            if !p.api_key_env.is_empty() {
+                envs.insert(p.api_key_env.clone());
+            }
+        }
+        if !cfg.default_model.api_key_env.is_empty() {
+            envs.insert(cfg.default_model.api_key_env.clone());
+        }
+        envs
+    }
+
+    /// Allowlist a caller-supplied `base_url` / `api_key_env` override against
+    /// the operator's own provider configuration (#6930 review).
+    ///
+    /// `resolve_driver_for_owner` treats a manifest-pinned `api_key_env` as an
+    /// **operator-level** override: it reads that environment variable and
+    /// sends its value to the manifest's `base_url`. An ephemeral spawn takes
+    /// both straight off caller input (an LLM tool call or an HTTP body), so
+    /// unvalidated they compose into a credential-exfiltration primitive —
+    /// point `base_url` at an attacker host, name any env var the daemon can
+    /// see, and the key is posted there.
+    ///
+    /// The rule: an override may only name a value the operator has already
+    /// configured, or the exact value this provider would resolve to anyway
+    /// when the override is absent. Both cases grant the caller zero authority
+    /// it did not already have, so no legitimate spawn is blocked — a caller
+    /// that sends no override keeps the historical behaviour untouched.
+    fn validate_ephemeral_model_override(
+        &self,
+        model_cfg: &librefang_types::agent::ModelConfig,
+    ) -> KernelResult<()> {
+        if let Some(ref base_url) = model_cfg.base_url {
+            let implicit = self.lookup_provider_url(&model_cfg.provider);
+            let allowed = implicit.as_deref() == Some(base_url.as_str())
+                || self.operator_configured_base_urls().contains(base_url);
+            if !allowed {
+                return Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(
+                    format!(
+                        "Ephemeral spawn requested base_url '{base_url}', which is not configured \
+                         by the operator for provider '{}'. Only an operator-configured provider \
+                         endpoint may be used.",
+                        model_cfg.provider
+                    ),
+                )));
+            }
+        }
+        if let Some(ref api_key_env) = model_cfg.api_key_env {
+            let cfg = self.config.load();
+            let implicit = cfg.resolve_api_key_env(&model_cfg.provider);
+            let allowed = implicit == *api_key_env
+                || self
+                    .operator_configured_api_key_envs()
+                    .contains(api_key_env);
+            if !allowed {
+                return Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(
+                    format!(
+                        "Ephemeral spawn requested api_key_env '{api_key_env}', which is not \
+                         configured by the operator for provider '{}'. Only an \
+                         operator-configured credential may be used.",
+                        model_cfg.provider
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve an `AgentManifest` from an `EphemeralSpawnRequest`.
     /// Tries agent_type template first, then inline fields, then kernel defaults.
+    ///
+    /// `parent` is the calling agent, when the spawn came from an agent turn
+    /// (the `agent_spawn` tool). `None` means the spawn came from the
+    /// operator-authenticated HTTP route, which already has daemon-level
+    /// authority.
     fn resolve_ephemeral_manifest(
         &self,
         request: &librefang_types::agent::EphemeralSpawnRequest,
+        parent: Option<AgentId>,
     ) -> KernelResult<librefang_types::agent::AgentManifest> {
         let mut manifest = if let Some(ref type_name) = request.agent_type {
             // Path-traversal guard: only [A-Za-z0-9_-] for <name>.toml
@@ -1168,7 +1390,39 @@ impl LibreFangKernel {
                     )))
                 })?
             } else {
-                // Fallback: check workspaces/agents/<name>/agent.toml
+                // Fallback: check workspaces/agents/<name>/agent.toml.
+                //
+                // #6930 review: this reads the *live manifest of a real
+                // agent* — its `system_prompt`, `provider`, `model`,
+                // `base_url` and `api_key_env`. Unrestricted, any agent that
+                // can call `agent_spawn` could name any other agent as its
+                // `agent_type` and run a worker under that agent's identity
+                // and credentials. So when the spawn comes from an agent turn
+                // (`parent` is set — the prompt-injectable surface), the
+                // fallback is restricted to the caller's own manifest;
+                // borrowing another agent's identity is denied.
+                //
+                // `parent == None` is the operator-authenticated HTTP route
+                // (`POST /api/agents/ephemeral`), which the dashboard's
+                // dual-source Agent Types list depends on (workspace agents
+                // are listed as templates with `source: "agent"` — see
+                // `routes/agent_templates.rs::list_agent_templates`). That
+                // caller already has daemon-level authority and can set every
+                // one of those fields inline, so there is no privilege
+                // boundary to cross and the fallback stays available.
+                if let Some(parent_id) = parent {
+                    let caller_name = self.agents.registry.get(parent_id).map(|e| e.name);
+                    if caller_name.as_deref() != Some(type_name.as_str()) {
+                        return Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(
+                            format!(
+                                "agent_type '{type_name}' is not a template, and an agent may \
+                                 only fall back to its own workspace manifest — spawning under \
+                                 another agent's identity is denied. Create a template at \
+                                 templates/{type_name}.toml instead."
+                            ),
+                        )));
+                    }
+                }
                 let agent_path = self
                     .home_dir_boot
                     .join("workspaces")
@@ -1205,6 +1459,11 @@ impl LibreFangKernel {
             manifest.model.system_prompt = prompt.clone();
         }
         if let Some(ref model_cfg) = request.model {
+            // #6930: `base_url` / `api_key_env` arrive from caller input and
+            // are applied as an operator-level pin by `resolve_driver_for_owner`.
+            // Refuse anything outside the operator's own provider configuration
+            // before it can be written onto the manifest.
+            self.validate_ephemeral_model_override(model_cfg)?;
             manifest.model.provider = model_cfg.provider.clone();
             manifest.model.model = model_cfg.model.clone();
             if model_cfg.max_tokens > 0 {
@@ -3952,53 +4211,614 @@ impl LibreFangKernel {
 #[cfg(test)]
 mod tests {
     use super::sidecar_default_conversation;
+    use crate::error::KernelError;
+    use async_trait::async_trait;
+    use librefang_runtime::llm_driver::{
+        CompletionRequest, CompletionResponse, LlmDriver, LlmError,
+    };
     use librefang_types::config::SidecarChannelConfig;
+    use librefang_types::error::LibreFangError;
+    use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+    use std::sync::Arc;
 
-    /// #7723 — an agent-type-based ephemeral mission gets a uid name and a
-    /// transient workspace that is removed after the run ends (here: the
-    /// run fails immediately without LLM drivers, which still exercises the
-    /// cleanup path).
+    /// #7743 — the provider name `resolve_driver` sees when a test kernel is
+    /// booted through [`boot_kernel_with_stub_driver`]. It deliberately
+    /// matches no entry in the provider registry, so `driver_cache.get_or_create`
+    /// always fails for it and `resolve_driver_for_owner` falls through to the
+    /// injected `default_driver` stub — see the fallback branch in
+    /// `kernel::llm_drivers::resolve_driver_for_owner` (`agent_provider ==
+    /// default_provider && !has_custom_key && !has_custom_url`). This makes
+    /// driver resolution deterministic and independent of what the machine
+    /// running the test happens to have on `PATH` or in its environment
+    /// (API keys, the `claude` CLI, …).
+    const UNRESOLVABLE_TEST_PROVIDER: &str = "kernel-test-unresolvable-provider";
+
+    /// Always succeeds with a canned, empty-tool-call response — stands in
+    /// for a real provider in tests that must observe a completed turn.
+    struct StubOkDriver;
+
+    #[async_trait]
+    impl LlmDriver for StubOkDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "stub response".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    /// Always fails — stands in for a real provider in tests that must
+    /// observe a failed turn, without depending on whatever happens to be
+    /// unreachable/unconfigured on the host running the test.
+    struct StubErrDriver;
+
+    #[async_trait]
+    impl LlmDriver for StubErrDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Http(
+                "stub driver: intentionally fails in tests".to_string(),
+            ))
+        }
+    }
+
+    /// Captures the tool names present on the last `CompletionRequest` it
+    /// received, then answers like [`StubOkDriver`]. Used to prove that
+    /// [`super::LibreFangKernel::spawn_ephemeral_worker`] actually threads
+    /// an agent-type's `capabilities.tools` through to the completion call
+    /// (#6943 review: previously only `request.tools` — the inline-spawn
+    /// shape — was consulted, so a saved agent-type's "Tools" field had no
+    /// effect on Quick Run).
+    struct StubToolCapturingDriver {
+        captured: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl LlmDriver for StubToolCapturingDriver {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            let names: Vec<String> = req.tools.iter().map(|t| t.name.clone()).collect();
+            *self.captured.lock().expect("capture lock") = names;
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "stub response".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    /// #6943 review: an ephemeral worker spawned via `agent_type` (rather
+    /// than the inline-fields shape) must receive the tools declared in
+    /// that agent-type's `[capabilities] tools = [...]`, even though the
+    /// spawn request itself sets `tools: None`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn ephemeral_mission_folder_created_and_cleaned() {
+    async fn ephemeral_agent_type_capabilities_tools_reach_the_driver() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().to_path_buf();
-        std::fs::create_dir_all(home.join("data")).unwrap();
         std::fs::create_dir_all(home.join("templates")).unwrap();
         std::fs::write(
-            home.join("templates").join("qa-mission.toml"),
-            "name = \"qa-mission\"\nmodule = \"builtin:chat\"\n",
+            home.join("templates").join("tooled-mission.toml"),
+            "name = \"tooled-mission\"\nmodule = \"builtin:chat\"\n\n[capabilities]\ntools = [\"shell_exec\"]\n",
         )
         .unwrap();
-        let config = librefang_types::config::KernelConfig {
-            home_dir: home.clone(),
-            data_dir: home.join("data"),
-            ..librefang_types::config::KernelConfig::default()
-        };
-        let kernel = super::LibreFangKernel::boot_with_config(config).expect("boot");
+        let driver = Arc::new(StubToolCapturingDriver {
+            captured: std::sync::Mutex::new(Vec::new()),
+        });
+        let kernel = boot_kernel_with_stub_driver(&home, driver.clone());
         std::mem::forget(dir);
 
         let req = librefang_types::agent::EphemeralSpawnRequest {
             system_prompt: None,
             message: "probe".to_string(),
-            agent_type: Some("qa-mission".to_string()),
+            agent_type: Some("tooled-mission".to_string()),
             model: None,
             tools: None,
             skills: None,
             max_iterations: Some(1),
         };
         let result = kernel.spawn_ephemeral_worker(req, None).await;
-        // No LLM driver is configured: the run must fail, and the cleanup
-        // must still have removed the mission dir.
-        assert!(result.is_err(), "worker must fail without a driver");
-        let transient = home.join("transient");
-        let leftovers: Vec<_> = std::fs::read_dir(&transient)
-            .map(|rd| rd.filter_map(|e| e.ok()).collect::<Vec<_>>())
-            .unwrap_or_default();
         assert!(
-            leftovers.is_empty(),
-            "transient dir must be empty after the run: {} entries left",
-            leftovers.len()
+            result.is_ok(),
+            "expected ephemeral spawn to succeed: {result:?}"
         );
+        let captured = driver.captured.lock().expect("capture lock");
+        assert!(
+            captured.iter().any(|n| n == "shell_exec"),
+            "agent-type's capabilities.tools did not reach the completion request: {captured:?}"
+        );
+    }
+
+    /// Boot a throwaway kernel rooted at a leaked tempdir whose LLM
+    /// resolution can never reach a real provider — `default_model.provider`
+    /// is [`UNRESOLVABLE_TEST_PROVIDER`], so `resolve_driver` always falls
+    /// through to `driver`, which this function installs as
+    /// `kernel.llm.default_driver` after boot. See #7743: the prior tests in
+    /// this module assumed a bare `KernelConfig::default()` kernel could
+    /// never resolve a driver, which is false on any machine with real
+    /// provider credentials or the `claude` CLI on `PATH`.
+    fn boot_kernel_with_stub_driver(
+        home: &std::path::Path,
+        driver: Arc<dyn LlmDriver>,
+    ) -> super::LibreFangKernel {
+        // Anti-regression guard (#7743): if a future provider is ever
+        // registered under this exact name, `driver_cache.get_or_create`
+        // would stop failing for it and the fallback-to-`default_driver`
+        // branch this helper depends on would no longer trigger — silently
+        // reopening the live-provider leak this fix closes. Fail loudly at
+        // test setup instead of letting a real driver run unnoticed.
+        assert!(
+            !librefang_llm_drivers::drivers::known_providers()
+                .contains(&UNRESOLVABLE_TEST_PROVIDER),
+            "{UNRESOLVABLE_TEST_PROVIDER:?} is now a real registered provider — pick a \
+             different placeholder name in boot_kernel_with_stub_driver so test-kernel \
+             driver resolution stays deterministic"
+        );
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.to_path_buf(),
+            data_dir: home.join("data"),
+            default_model: librefang_types::config::DefaultModelConfig {
+                provider: UNRESOLVABLE_TEST_PROVIDER.to_string(),
+                ..librefang_types::config::DefaultModelConfig::default()
+            },
+            ..librefang_types::config::KernelConfig::default()
+        };
+        // `boot_with_config` takes `config` by value and, when the primary
+        // driver fails to construct (as it always will for our
+        // unresolvable placeholder provider), auto-detects a REAL provider
+        // from the environment (API keys, `claude` CLI on PATH, …) as a
+        // boot-resilience fallback — and that mutated copy becomes the
+        // kernel's live, hot-reloadable `KernelConfig`. Left unchecked, that
+        // auto-detected provider leaks into every later
+        // `resolve_driver_for_owner` call and defeats this stub entirely
+        // (exactly the #7743 leak, one layer deeper). Keep our own
+        // untouched copy and force the live config back to it after boot.
+        let intended_config = config.clone();
+        let mut kernel = super::LibreFangKernel::boot_with_config(config).expect("boot");
+        kernel.config.store(Arc::new(intended_config));
+        kernel.llm.default_driver = driver;
+        kernel
+    }
+
+    /// #7723 — an agent-type-based ephemeral mission gets a uid name and a
+    /// transient workspace that is removed after the run ends, whether the
+    /// underlying turn succeeds or fails. #7743: the driver is an explicit
+    /// in-test stub (see `boot_kernel_with_stub_driver`), so both outcomes
+    /// are exercised deterministically instead of assuming the run can only
+    /// ever fail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ephemeral_mission_folder_created_and_cleaned() {
+        for expect_ok in [true, false] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let home = dir.path().to_path_buf();
+            std::fs::create_dir_all(home.join("templates")).unwrap();
+            std::fs::write(
+                home.join("templates").join("qa-mission.toml"),
+                "name = \"qa-mission\"\nmodule = \"builtin:chat\"\n",
+            )
+            .unwrap();
+            let driver: Arc<dyn LlmDriver> = if expect_ok {
+                Arc::new(StubOkDriver)
+            } else {
+                Arc::new(StubErrDriver)
+            };
+            let kernel = boot_kernel_with_stub_driver(&home, driver);
+            std::mem::forget(dir);
+
+            let req = librefang_types::agent::EphemeralSpawnRequest {
+                system_prompt: None,
+                message: "probe".to_string(),
+                agent_type: Some("qa-mission".to_string()),
+                model: None,
+                tools: None,
+                skills: None,
+                max_iterations: Some(1),
+            };
+            let result = kernel.spawn_ephemeral_worker(req, None).await;
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "stub driver outcome did not propagate as expected: {result:?}"
+            );
+            // Anti-regression guard (#7743): a real provider (a network call
+            // or a `claude` CLI subprocess) would never coincidentally
+            // produce this exact canned string. If driver resolution ever
+            // stops routing to the injected stub — e.g. because
+            // `UNRESOLVABLE_TEST_PROVIDER` collides with a real registry
+            // entry, or the fallback-to-`default_driver` branch in
+            // `resolve_driver_for_owner` changes shape — this assertion
+            // fails loudly instead of the test silently making a live,
+            // billable LLM call.
+            if let Ok(loop_result) = &result {
+                assert_eq!(
+                    loop_result.response, "stub response",
+                    "response did not come from the injected stub driver — \
+                     a real LLM provider may have been resolved instead"
+                );
+            }
+            // The cleanup must run regardless of whether the turn above
+            // succeeded or failed.
+            let transient = home.join("transient");
+            let leftovers: Vec<_> = std::fs::read_dir(&transient)
+                .map(|rd| rd.filter_map(|e| e.ok()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            assert!(
+                leftovers.is_empty(),
+                "transient dir must be empty after the run (expect_ok={expect_ok}): {} entries left",
+                leftovers.len()
+            );
+        }
+    }
+
+    /// Boot a throwaway kernel rooted at a leaked tempdir, the same shape
+    /// `ephemeral_mission_folder_created_and_cleaned` uses. Only used by
+    /// tests below that never call `spawn_ephemeral_worker` (and therefore
+    /// never resolve an LLM driver) — see `boot_kernel_with_stub_driver`
+    /// above for the driver-resolving case.
+    fn boot_kernel_at(home: &std::path::Path) -> super::LibreFangKernel {
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.to_path_buf(),
+            data_dir: home.join("data"),
+            ..librefang_types::config::KernelConfig::default()
+        };
+        super::LibreFangKernel::boot_with_config(config).expect("boot")
+    }
+
+    fn register_agent(
+        kernel: &super::LibreFangKernel,
+        name: &str,
+        resources: librefang_types::agent::ResourceQuota,
+    ) -> librefang_types::agent::AgentId {
+        let id = librefang_types::agent::AgentId::new();
+        let entry = librefang_types::agent::AgentEntry {
+            id,
+            name: name.to_string(),
+            manifest: librefang_types::agent::AgentManifest {
+                name: name.to_string(),
+                resources,
+                ..Default::default()
+            },
+            state: librefang_types::agent::AgentState::Running,
+            ..Default::default()
+        };
+        kernel.agents.registry.register(entry).expect("register");
+        id
+    }
+
+    fn ephemeral_request() -> librefang_types::agent::EphemeralSpawnRequest {
+        librefang_types::agent::EphemeralSpawnRequest {
+            system_prompt: Some("be brief".to_string()),
+            message: "probe".to_string(),
+            agent_type: None,
+            model: None,
+            tools: None,
+            skills: None,
+            max_iterations: Some(1),
+        }
+    }
+
+    /// #6930 — the per-agent cost cap must survive `agent_spawn(ephemeral: true)`.
+    ///
+    /// Cost is billed to the parent, but the quota checked was the *ephemeral*
+    /// manifest's — `AgentManifest::default()` for an inline spawn, whose
+    /// all-zero cost fields `usage.rs` reads as "unlimited". A capped agent
+    /// therefore escaped its own cap by spawning ephemeral workers in a loop.
+    ///
+    /// #7743: the kernel is booted with an always-succeeding stub driver
+    /// (see `boot_kernel_with_stub_driver`) so the control case below proves
+    /// the actual quota *decision* — the uncapped parent's spawn succeeds —
+    /// rather than merely producing "some other error" that happened to be
+    /// distinguishable from `QuotaExceeded`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ephemeral_spawn_is_denied_when_parent_is_over_its_cost_quota() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().to_path_buf();
+        let kernel = boot_kernel_with_stub_driver(&home, Arc::new(StubOkDriver));
+        std::mem::forget(dir);
+
+        let parent = register_agent(
+            &kernel,
+            "capped-parent",
+            librefang_types::agent::ResourceQuota {
+                max_cost_per_day_usd: 5.0,
+                ..Default::default()
+            },
+        );
+
+        // Spend the parent's daily allowance before the spawn attempt.
+        kernel
+            .metering
+            .engine
+            .record(&librefang_memory::usage::UsageRecord {
+                agent_id: parent,
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                input_tokens: 1_000,
+                output_tokens: 1_000,
+                cost_usd: 6.0,
+                tool_calls: 0,
+                latency_ms: 1,
+                user_id: None,
+                channel: None,
+                session_id: None,
+            })
+            .expect("record prior spend");
+
+        let err = kernel
+            .spawn_ephemeral_worker(ephemeral_request(), Some(parent))
+            .await
+            .expect_err("an over-quota parent must not be able to spawn a worker");
+        assert!(
+            matches!(
+                err,
+                KernelError::LibreFang(LibreFangError::QuotaExceeded(_))
+            ),
+            "expected QuotaExceeded, got: {err:?}"
+        );
+
+        // Control: an uncapped parent with the same spend is not blocked by
+        // the quota gate. With the stub driver always succeeding, the spawn
+        // must actually complete — proving the gate specifically permits
+        // this case, not just that it fails with a different error variant.
+        let uncapped = register_agent(
+            &kernel,
+            "uncapped-parent",
+            librefang_types::agent::ResourceQuota::default(),
+        );
+        kernel
+            .metering
+            .engine
+            .record(&librefang_memory::usage::UsageRecord {
+                agent_id: uncapped,
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                input_tokens: 1_000,
+                output_tokens: 1_000,
+                cost_usd: 6.0,
+                tool_calls: 0,
+                latency_ms: 1,
+                user_id: None,
+                channel: None,
+                session_id: None,
+            })
+            .expect("record prior spend");
+        let result = kernel
+            .spawn_ephemeral_worker(ephemeral_request(), Some(uncapped))
+            .await;
+        assert!(
+            result.is_ok(),
+            "an uncapped parent must not be quota-blocked and must be able to spawn \
+             with the stub driver configured, got: {result:?}"
+        );
+        // Anti-regression guard (#7743): see the matching comment in
+        // `ephemeral_mission_folder_created_and_cleaned` — a real provider
+        // could never coincidentally produce this exact canned string.
+        assert_eq!(
+            result.expect("checked above").response,
+            "stub response",
+            "response did not come from the injected stub driver — \
+             a real LLM provider may have been resolved instead"
+        );
+    }
+
+    /// #6930 — per-field tightest-wins, with `0.0` meaning "unlimited".
+    #[test]
+    fn tightest_cost_quota_treats_zero_as_unlimited() {
+        let parent = librefang_types::agent::ResourceQuota {
+            max_cost_per_hour_usd: 0.0,
+            max_cost_per_day_usd: 5.0,
+            max_cost_per_month_usd: 50.0,
+            ..Default::default()
+        };
+        let ephemeral = librefang_types::agent::ResourceQuota {
+            max_cost_per_hour_usd: 1.0,
+            max_cost_per_day_usd: 0.0,
+            max_cost_per_month_usd: 20.0,
+            ..Default::default()
+        };
+        let merged = super::tightest_cost_quota(&parent, &ephemeral);
+        // Only the ephemeral side declares an hourly cap — it applies.
+        assert_eq!(merged.max_cost_per_hour_usd, 1.0);
+        // Only the parent declares a daily cap — it must NOT be erased by the
+        // ephemeral manifest's `0.0`. This is the bypass being fixed.
+        assert_eq!(merged.max_cost_per_day_usd, 5.0);
+        // Both declare a monthly cap — the stricter one wins.
+        assert_eq!(merged.max_cost_per_month_usd, 20.0);
+    }
+
+    /// #6930 — the ephemeral worker's turn must not persist anything.
+    ///
+    /// The agent-loop persistence guards are
+    /// `if !opts.is_fork && !opts.incognito`, so `incognito: false` made
+    /// `end_turn` write a `sessions` row and an episodic-memory row under the
+    /// worker's throwaway `agent_id`, which has no registry entry — orphan
+    /// rows, forever, on a path advertised as leaving no DB trace.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ephemeral_loop_options_suppress_persistence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().to_path_buf();
+        let kernel = boot_kernel_at(&home);
+        std::mem::forget(dir);
+
+        let cfg = kernel.config.load();
+        let opts = super::ephemeral_loop_options(&cfg, Some(1), kernel.llm.aux_client.load_full());
+        assert!(
+            opts.incognito,
+            "ephemeral turns must run incognito so end_turn skips save_session_async \
+             and remember_interaction_best_effort"
+        );
+        assert!(!opts.is_fork, "an ephemeral worker is not a fork");
+        assert_eq!(opts.max_iterations, Some(1));
+    }
+
+    /// #6930 — `agent_type` must not be usable to run under another agent's
+    /// identity, credentials and system prompt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ephemeral_agent_type_cannot_borrow_another_agents_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().to_path_buf();
+        let victim_dir = home.join("workspaces").join("agents").join("victim");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        std::fs::write(
+            victim_dir.join("agent.toml"),
+            "name = \"victim\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"openai\"\nmodel = \"gpt-4o\"\napi_key_env = \"VICTIM_SECRET_KEY\"\n",
+        )
+        .unwrap();
+        let kernel = boot_kernel_at(&home);
+        std::mem::forget(dir);
+
+        let caller = register_agent(
+            &kernel,
+            "caller",
+            librefang_types::agent::ResourceQuota::default(),
+        );
+        let mut req = ephemeral_request();
+        req.agent_type = Some("victim".to_string());
+
+        let err = kernel
+            .resolve_ephemeral_manifest(&req, Some(caller))
+            .expect_err("impersonating another agent must be denied");
+        assert!(
+            matches!(
+                err,
+                KernelError::LibreFang(LibreFangError::CapabilityDenied(_))
+            ),
+            "expected CapabilityDenied, got: {err:?}"
+        );
+
+        // An agent naming ITSELF still resolves — that borrows no identity it
+        // does not already have.
+        let victim = register_agent(
+            &kernel,
+            "victim",
+            librefang_types::agent::ResourceQuota::default(),
+        );
+        let manifest = kernel
+            .resolve_ephemeral_manifest(&req, Some(victim))
+            .expect("an agent may fall back to its own workspace manifest");
+        assert_eq!(
+            manifest.model.api_key_env.as_deref(),
+            Some("VICTIM_SECRET_KEY")
+        );
+
+        // The operator-authenticated HTTP route (no parent) keeps the
+        // dual-source template behaviour the dashboard lists.
+        assert!(kernel.resolve_ephemeral_manifest(&req, None).is_ok());
+
+        // A name that is neither a template nor a workspace agent is still a
+        // plain not-found, not an impersonation denial.
+        let mut missing = ephemeral_request();
+        missing.agent_type = Some("nobody".to_string());
+        let err = kernel
+            .resolve_ephemeral_manifest(&missing, None)
+            .expect_err("unknown agent type");
+        assert!(
+            matches!(
+                err,
+                KernelError::LibreFang(LibreFangError::AgentNotFound(_))
+            ),
+            "expected AgentNotFound, got: {err:?}"
+        );
+    }
+
+    /// #6930 — a caller-supplied `base_url` / `api_key_env` is an
+    /// operator-level pin once it lands on the manifest: `resolve_driver_for_owner`
+    /// reads the named env var and posts its value to the named URL. Only
+    /// operator-configured values may be used.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ephemeral_model_override_rejects_unconfigured_endpoint_and_credential() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let mut config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..librefang_types::config::KernelConfig::default()
+        };
+        config.provider_urls.insert(
+            "localllm".to_string(),
+            "http://127.0.0.1:11434/v1".to_string(),
+        );
+        config
+            .provider_api_keys
+            .insert("localllm".to_string(), "LOCALLLM_TOKEN".to_string());
+        let kernel = super::LibreFangKernel::boot_with_config(config).expect("boot");
+        std::mem::forget(dir);
+
+        // Exfiltration attempt: attacker endpoint + a credential env var the
+        // daemon can see.
+        let mut req = ephemeral_request();
+        req.model = Some(librefang_types::agent::ModelConfig {
+            provider: "localllm".to_string(),
+            model: "any".to_string(),
+            base_url: Some("https://attacker.example/v1".to_string()),
+            api_key_env: Some("LOCALLLM_TOKEN".to_string()),
+            ..Default::default()
+        });
+        let err = kernel
+            .resolve_ephemeral_manifest(&req, None)
+            .expect_err("unconfigured base_url must be refused");
+        assert!(
+            matches!(
+                err,
+                KernelError::LibreFang(LibreFangError::CapabilityDenied(_))
+            ),
+            "expected CapabilityDenied for base_url, got: {err:?}"
+        );
+
+        // Same, for the credential side: configured endpoint, but an env var
+        // the operator never mapped to this daemon's providers.
+        let mut req = ephemeral_request();
+        req.model = Some(librefang_types::agent::ModelConfig {
+            provider: "localllm".to_string(),
+            model: "any".to_string(),
+            base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+            api_key_env: Some("AWS_SECRET_ACCESS_KEY".to_string()),
+            ..Default::default()
+        });
+        let err = kernel
+            .resolve_ephemeral_manifest(&req, None)
+            .expect_err("unconfigured api_key_env must be refused");
+        assert!(
+            matches!(
+                err,
+                KernelError::LibreFang(LibreFangError::CapabilityDenied(_))
+            ),
+            "expected CapabilityDenied for api_key_env, got: {err:?}"
+        );
+
+        // Control: both values as the operator configured them are accepted,
+        // and a request with no override at all is untouched.
+        let mut req = ephemeral_request();
+        req.model = Some(librefang_types::agent::ModelConfig {
+            provider: "localllm".to_string(),
+            model: "any".to_string(),
+            base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+            api_key_env: Some("LOCALLLM_TOKEN".to_string()),
+            ..Default::default()
+        });
+        let manifest = kernel
+            .resolve_ephemeral_manifest(&req, None)
+            .expect("operator-configured override must be accepted");
+        assert_eq!(
+            manifest.model.base_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+        assert!(kernel
+            .resolve_ephemeral_manifest(&ephemeral_request(), None)
+            .is_ok());
     }
 
     fn sc(json: serde_json::Value) -> SidecarChannelConfig {

@@ -83,8 +83,8 @@ pub(crate) fn cmd_spawn_alias(
         return;
     }
 
-    let templates = templates::load_all_templates();
-    let template = templates
+    let agent_types = templates::load_all_agent_types();
+    let agent_type = agent_types
         .iter()
         .find(|t| t.name == target)
         .unwrap_or_else(|| {
@@ -98,10 +98,11 @@ pub(crate) fn cmd_spawn_alias(
             std::process::exit(1);
         });
     if dry_run {
-        let prepared = prepared_agent_manifest_from_template(template, name_override.as_deref());
+        let prepared =
+            prepared_agent_manifest_from_agent_type(agent_type, name_override.as_deref());
         preview_agent_manifest(&prepared);
     } else {
-        spawn_template_agent(config, template, name_override.as_deref());
+        spawn_agent_type_agent(config, agent_type, name_override.as_deref());
     }
 }
 
@@ -135,13 +136,13 @@ pub(crate) fn prepared_agent_manifest_from_path(
     )
 }
 
-pub(crate) fn prepared_agent_manifest_from_template(
-    template: &templates::AgentTemplate,
+pub(crate) fn prepared_agent_manifest_from_agent_type(
+    agent_type: &templates::AgentType,
     name_override: Option<&str>,
 ) -> PreparedAgentManifest {
     prepared_agent_manifest_from_contents(
-        &template.content,
-        format!("template:{}", template.name),
+        &agent_type.content,
+        format!("template:{}", agent_type.name),
         name_override,
     )
 }
@@ -683,9 +684,9 @@ pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
     }
 }
 
-pub(crate) fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<String>) {
-    let all_templates = templates::load_all_templates();
-    if all_templates.is_empty() {
+pub(crate) fn cmd_agent_new(config: Option<PathBuf>, agent_type_name: Option<String>) {
+    let all_agent_types = templates::load_all_agent_types();
+    if all_agent_types.is_empty() {
         ui::error_with_fix(
             &i18n::t("agent-new-no-templates"),
             &i18n::t("agent-new-no-templates-fix"),
@@ -693,9 +694,9 @@ pub(crate) fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<Strin
         std::process::exit(1);
     }
 
-    // Resolve template: by name or interactive picker
-    let chosen = match template_name {
-        Some(ref name) => match all_templates.iter().find(|t| t.name == *name) {
+    // Resolve agent type: by name or interactive picker
+    let chosen = match agent_type_name {
+        Some(ref name) => match all_agent_types.iter().find(|t| t.name == *name) {
             Some(t) => t,
             None => {
                 ui::error_with_fix(
@@ -708,7 +709,7 @@ pub(crate) fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<Strin
         None => {
             ui::section(&i18n::t("section-agent-templates"));
             ui::blank();
-            for (i, t) in all_templates.iter().enumerate() {
+            for (i, t) in all_agent_types.iter().enumerate() {
                 let desc = if t.description.is_empty() {
                     String::new()
                 } else {
@@ -730,23 +731,23 @@ pub(crate) fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<Strin
                     .parse::<usize>()
                     .unwrap_or(1)
                     .saturating_sub(1)
-                    .min(all_templates.len() - 1)
+                    .min(all_agent_types.len() - 1)
             };
-            &all_templates[idx]
+            &all_agent_types[idx]
         }
     };
 
     // Spawn the agent
-    spawn_template_agent(config, chosen, None);
+    spawn_agent_type_agent(config, chosen, None);
 }
 
-/// Spawn an agent from a template, via daemon or in-process.
-pub(crate) fn spawn_template_agent(
+/// Spawn an agent from an agent type, via daemon or in-process.
+pub(crate) fn spawn_agent_type_agent(
     config: Option<PathBuf>,
-    template: &templates::AgentTemplate,
+    agent_type: &templates::AgentType,
     name_override: Option<&str>,
 ) {
-    let prepared = prepared_agent_manifest_from_template(template, name_override);
+    let prepared = prepared_agent_manifest_from_agent_type(agent_type, name_override);
     let agent_name = prepared.manifest.name.clone();
 
     if let Some(base) = find_daemon() {

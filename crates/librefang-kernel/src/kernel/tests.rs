@@ -1265,6 +1265,74 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
     kernel.shutdown();
 }
 
+/// #7742 — `update_manifest` (the `PATCH /api/agents/{id}` `manifest_toml`
+/// path the dashboard's full manifest editor now uses) used to silently
+/// force `new_manifest.tags` back to whatever the agent already had,
+/// discarding any tag edit the caller submitted. The dashboard form has no
+/// way to know that, so a user editing tags would see the field revert on
+/// the next load with no error. Assert the caller's tags now win, and that
+/// `entry.tags` (index-backing) and the registry `tag_index` stay in sync
+/// with `manifest.tags` — the exact desync the original guard comment
+/// warned would happen without a dedicated tag-update API.
+#[test]
+fn update_manifest_applies_tags_and_keeps_registry_in_sync_7742() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-update-manifest-tags-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "tag-update-agent".to_string(),
+                tags: vec!["alpha".to_string(), "beta".to_string()],
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let mut new_manifest = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("entry")
+        .manifest
+        .clone();
+    new_manifest.tags = vec!["beta".to_string(), "gamma".to_string()];
+
+    kernel
+        .update_manifest(agent_id, new_manifest)
+        .expect("manifest update should succeed");
+
+    let refreshed = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("entry after update");
+    assert_eq!(
+        refreshed.manifest.tags,
+        vec!["beta".to_string(), "gamma".to_string()],
+        "manifest.tags should reflect the caller's edit, not be silently reverted"
+    );
+    assert_eq!(
+        refreshed.tags, refreshed.manifest.tags,
+        "entry.tags (index-backing) must mirror manifest.tags after update_manifest"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_hand_activation_does_not_seed_runtime_tool_filters() {
     let tmp = tempfile::tempdir().unwrap();

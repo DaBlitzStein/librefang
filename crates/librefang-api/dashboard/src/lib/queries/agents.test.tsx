@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { useAgentDetail, useAgentSessions, useAgentTemplates } from "./agents";
+import { useAgentDetail, useAgentSessions, useAgentTypeOptions } from "./agents";
 import * as httpClient from "../http/client";
 import { agentKeys } from "./keys";
 import { createQueryClientWrapper } from "../test/query-client";
@@ -8,7 +8,7 @@ import { createQueryClientWrapper } from "../test/query-client";
 vi.mock("../http/client", () => ({
   getAgentDetail: vi.fn(),
   listAgentSessions: vi.fn(),
-  listAgentTemplates: vi.fn(),
+  listAgentTypeOptions: vi.fn(),
 }));
 
 beforeEach(() => {
@@ -81,43 +81,43 @@ describe("useAgentSessions", () => {
   });
 });
 
-describe("useAgentTemplates", () => {
+describe("useAgentTypeOptions", () => {
   it("should fetch by default when enabled is not provided", async () => {
     const mockTemplates = [{ name: "Test Template", description: "Test description" }];
-    vi.mocked(httpClient.listAgentTemplates).mockResolvedValue(mockTemplates);
+    vi.mocked(httpClient.listAgentTypeOptions).mockResolvedValue(mockTemplates);
 
-    const { result } = renderHook(() => useAgentTemplates(), {
+    const { result } = renderHook(() => useAgentTypeOptions(), {
       wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     expect(result.current.data).toEqual(mockTemplates);
-    expect(httpClient.listAgentTemplates).toHaveBeenCalled();
+    expect(httpClient.listAgentTypeOptions).toHaveBeenCalled();
   });
 
   it("should not fetch when enabled is false", () => {
-    const { result } = renderHook(() => useAgentTemplates({ enabled: false }), {
+    const { result } = renderHook(() => useAgentTypeOptions({ enabled: false }), {
       wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
     expect(result.current.isLoading).toBe(false);
     expect(result.current.fetchStatus).toBe("idle");
-    expect(httpClient.listAgentTemplates).not.toHaveBeenCalled();
+    expect(httpClient.listAgentTypeOptions).not.toHaveBeenCalled();
   });
 
   it("should fetch when enabled is true", async () => {
     const mockTemplates = [{ name: "Test Template", description: "Test description" }];
-    vi.mocked(httpClient.listAgentTemplates).mockResolvedValue(mockTemplates);
+    vi.mocked(httpClient.listAgentTypeOptions).mockResolvedValue(mockTemplates);
 
-    const { result } = renderHook(() => useAgentTemplates({ enabled: true }), {
+    const { result } = renderHook(() => useAgentTypeOptions({ enabled: true }), {
       wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     expect(result.current.data).toEqual(mockTemplates);
-    expect(httpClient.listAgentTemplates).toHaveBeenCalled();
+    expect(httpClient.listAgentTypeOptions).toHaveBeenCalled();
   });
 });

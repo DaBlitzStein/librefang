@@ -1,10 +1,10 @@
-//! Discover and load agent templates from the agents directory.
+//! Discover and load agent types (agent templates) from the agents directory.
 
 use std::path::PathBuf;
 
-/// A discovered agent template.
-pub struct AgentTemplate {
-    /// Template name (directory name).
+/// A discovered agent type (agent template).
+pub struct AgentType {
+    /// Agent type name (directory name).
     pub name: String,
     /// Description from the manifest.
     pub description: String,
@@ -12,11 +12,11 @@ pub struct AgentTemplate {
     pub content: String,
 }
 
-/// Discover template directories. Checks:
+/// Discover agent-type directories. Checks:
 /// 1. The repo `agents/` dir (for dev builds)
-/// 2. `~/.librefang/workspaces/agents/` (installed templates)
+/// 2. `~/.librefang/workspaces/agents/` (installed agent types)
 /// 3. `LIBREFANG_AGENTS_DIR` env var
-pub fn discover_template_dirs() -> Vec<PathBuf> {
+pub fn discover_agent_type_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     // Installed templates (respects LIBREFANG_HOME)
@@ -46,12 +46,12 @@ pub fn discover_template_dirs() -> Vec<PathBuf> {
 }
 
 /// Load all templates from discovered directories, falling back to bundled templates.
-pub fn load_all_templates() -> Vec<AgentTemplate> {
-    let mut templates = Vec::new();
+pub fn load_all_agent_types() -> Vec<AgentType> {
+    let mut agent_types = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
     // First: load from filesystem (user-installed or dev repo)
-    for dir in discover_template_dirs() {
+    for dir in discover_agent_type_dirs() {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -68,7 +68,7 @@ pub fn load_all_templates() -> Vec<AgentTemplate> {
                 }
                 if let Ok(content) = std::fs::read_to_string(&manifest) {
                     let description = extract_description(&content);
-                    templates.push(AgentTemplate {
+                    agent_types.push(AgentType {
                         name,
                         description,
                         content,
@@ -78,8 +78,8 @@ pub fn load_all_templates() -> Vec<AgentTemplate> {
         }
     }
 
-    templates.sort_by(|a, b| a.name.cmp(&b.name));
-    templates
+    agent_types.sort_by(|a, b| a.name.cmp(&b.name));
+    agent_types
 }
 
 /// Extract the `description` field from raw TOML without full parsing.
@@ -96,8 +96,8 @@ fn extract_description(toml_str: &str) -> String {
     String::new()
 }
 
-/// Format a template description as a hint for cliclack select items.
-pub fn template_display_hint(t: &AgentTemplate) -> String {
+/// Format an agent-type description as a hint for cliclack select items.
+pub fn agent_type_display_hint(t: &AgentType) -> String {
     if t.description.is_empty() {
         String::new()
     } else if t.description.chars().count() > 60 {
@@ -169,11 +169,11 @@ description = "second"
     }
 
     // -----------------------------------------------------------------------
-    // template_display_hint — UI hint formatter with 60-char ellipsis.
+    // agent_type_display_hint — UI hint formatter with 60-char ellipsis.
     // -----------------------------------------------------------------------
 
-    fn make_template(description: &str) -> AgentTemplate {
-        AgentTemplate {
+    fn make_agent_type(description: &str) -> AgentType {
+        AgentType {
             name: "t".to_string(),
             description: description.to_string(),
             content: String::new(),
@@ -182,22 +182,22 @@ description = "second"
 
     #[test]
     fn display_hint_passes_short_description_through() {
-        let t = make_template("short and sweet");
-        assert_eq!(template_display_hint(&t), "short and sweet");
+        let t = make_agent_type("short and sweet");
+        assert_eq!(agent_type_display_hint(&t), "short and sweet");
     }
 
     #[test]
     fn display_hint_returns_empty_for_no_description() {
-        let t = make_template("");
-        assert_eq!(template_display_hint(&t), "");
+        let t = make_agent_type("");
+        assert_eq!(agent_type_display_hint(&t), "");
     }
 
     #[test]
     fn display_hint_truncates_with_ellipsis_above_60_chars() {
         // 70 'a's → must be truncated to 57 chars + "..." = 60 chars total.
         let long = "a".repeat(70);
-        let t = make_template(&long);
-        let hint = template_display_hint(&t);
+        let t = make_agent_type(&long);
+        let hint = agent_type_display_hint(&t);
         assert_eq!(hint.chars().count(), 60);
         assert!(hint.ends_with("..."));
         assert!(hint.starts_with(&"a".repeat(57)));
@@ -208,8 +208,8 @@ description = "second"
         // Boundary: cutoff is `> 60`, so exactly 60 chars must NOT be
         // truncated.
         let s = "a".repeat(60);
-        let t = make_template(&s);
-        assert_eq!(template_display_hint(&t), s);
+        let t = make_agent_type(&s);
+        assert_eq!(agent_type_display_hint(&t), s);
     }
 
     #[test]
@@ -218,14 +218,14 @@ description = "second"
         // (not by byte length) and must not panic on a non-char-boundary
         // byte slice.
         let s = "汉".repeat(70);
-        let t = make_template(&s);
-        let hint = template_display_hint(&t);
+        let t = make_agent_type(&s);
+        let hint = agent_type_display_hint(&t);
         assert_eq!(hint.chars().count(), 60);
         assert!(hint.ends_with("..."));
     }
 
     // -----------------------------------------------------------------------
-    // discover_template_dirs — env-var-driven path discovery.
+    // discover_agent_type_dirs — env-var-driven path discovery.
     //
     // These tests mutate process-global env vars; group them in a single
     // test (and serialize via a Mutex) so the cargo parallel harness can't
@@ -246,7 +246,7 @@ description = "second"
     }
 
     #[test]
-    fn discover_template_dirs_picks_up_env_override() {
+    fn discover_agent_type_dirs_picks_up_env_override() {
         let _guard = env_lock();
 
         let tmp = std::env::temp_dir().join("librefang-cli-templates-test-3582");
@@ -267,7 +267,7 @@ description = "second"
             std::env::set_var("LIBREFANG_AGENTS_DIR", &tmp);
         }
 
-        let dirs = discover_template_dirs();
+        let dirs = discover_agent_type_dirs();
         assert!(
             dirs.contains(&tmp),
             "AGENTS_DIR override not picked up: {dirs:?}"
@@ -291,7 +291,7 @@ description = "second"
     }
 
     #[test]
-    fn discover_template_dirs_skips_nonexistent_env_path() {
+    fn discover_agent_type_dirs_skips_nonexistent_env_path() {
         let _guard = env_lock();
 
         let bogus = std::env::temp_dir().join("librefang-cli-templates-test-3582-does-not-exist");
@@ -309,7 +309,7 @@ description = "second"
             std::env::set_var("LIBREFANG_AGENTS_DIR", &bogus);
         }
 
-        let dirs = discover_template_dirs();
+        let dirs = discover_agent_type_dirs();
         assert!(
             !dirs.contains(&bogus),
             "non-existent AGENTS_DIR must be filtered out: {dirs:?}"

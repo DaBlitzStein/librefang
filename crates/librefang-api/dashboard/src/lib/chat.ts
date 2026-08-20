@@ -207,6 +207,59 @@ export interface TerminalFrame {
  * `silent_complete` removes the owning bubble; `error` marks it with the failure.
  * Pure so the #6390 race is unit-testable without mounting the chat page.
  */
+/**
+ * Extract the JSON object embedded in an assistant chat message that
+ * represents a `workflow_create`-shaped payload (`{name, description,
+ * steps, ...}`), for the "Save as Workflow" chat action (#6943 review).
+ *
+ * Tries a fenced ` ```json ` code block first (the common case when the
+ * model follows its system prompt), then falls back to scanning the raw
+ * message for the first balanced `{...}` object containing a `"steps"`
+ * key. The regex this replaces (`/\{[\s\S]*"steps"[\s\S]*\}/`) was greedy
+ * on both sides: it matched from the FIRST `{` to the LAST `}` in the
+ * *entire* message, so any trailing prose containing a brace (e.g.
+ * "...steps} — let me know if you'd like changes {🙂}") captured past the
+ * real JSON and broke `JSON.parse` even when the message did contain
+ * valid JSON. Depth-tracked, quote/escape-aware scanning finds the actual
+ * matching close instead.
+ */
+export function extractWorkflowJson(content: string): string | null {
+  const fenced = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (fenced) return fenced[1];
+
+  const start = content.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < content.length; i++) {
+    const ch = content[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        const candidate = content.slice(start, i + 1);
+        return candidate.includes('"steps"') ? candidate : null;
+      }
+    }
+  }
+  return null;
+}
+
 export function applyForeignTerminalFrame<M extends TerminalRoutableMessage>(
   messages: M[],
   frame: TerminalFrame,

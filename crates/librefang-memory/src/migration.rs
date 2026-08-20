@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 48;
+const SCHEMA_VERSION: u32 = 49;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -226,6 +226,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // single-user agents.
     run_step!(47, migrate_v47);
     run_step!(48, migrate_v48);
+    // v49 (#6504 follow-up): persist workflow_runs.total_steps so a run
+    // recovered after a daemon restart reports real progress instead of
+    // "step X of 0".
+    run_step!(49, migrate_v49);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -902,6 +906,28 @@ fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (48, datetime('now'), 'Add owner_agent_id to workflow_runs (#workflow-owner)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 49: persist `workflow_runs.total_steps`.
+///
+/// The workflow_runs table (v37) never stored the run's step count, so
+/// `row_to_workflow_run` hardcoded `total_steps: 0` on reload — a run
+/// recovered after a daemon restart reported "step X of 0" in the API and
+/// dashboard (#6504). Store the actual value so progress survives a
+/// restart. `try_column_exists` keeps the ADD COLUMN idempotent.
+fn migrate_v49(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "workflow_runs", "total_steps")? {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (49, datetime('now'), 'Persist workflow_runs.total_steps so run progress survives restart')",
         [],
     )?;
     Ok(())
@@ -2464,6 +2490,19 @@ mod tests {
         // Idempotence: the registered step must tolerate a rerun (the column
         // guard makes the ALTER a no-op the second time).
         migrate_v48(&conn).unwrap();
+    }
+
+    #[test]
+    fn test_migrate_v49_adds_total_steps_column() {
+        // #6504: workflow_runs.total_steps must exist after migrating from
+        // an older schema, and a rerun of the step must be a no-op.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "workflow_runs", "total_steps"));
+        // Idempotence: the registered step must tolerate a rerun (the column
+        // guard makes the ALTER a no-op the second time).
+        migrate_v49(&conn).unwrap();
     }
 
     #[test]

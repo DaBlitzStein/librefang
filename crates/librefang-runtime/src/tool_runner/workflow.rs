@@ -370,6 +370,25 @@ pub(super) async fn tool_workflow_describe(
     }))?)
 }
 
+/// #6943 review: `workflow_create` sits in `ALWAYS_NATIVE_TOOLS`, so every
+/// agent has it regardless of configuration, and neither the tool's JSON
+/// schema (`definitions.rs`) nor the workflow engine enforced any ceiling
+/// on step count or timeout length before this fix. A schema `maxItems` /
+/// `maximum` is advisory only — the model driving the call can simply
+/// ignore it — so the real cap has to live here, in the handler that
+/// actually persists the workflow. Without it, a single `workflow_create`
+/// call could register an arbitrarily large step list or a
+/// `total_timeout_secs` up to the one-year panic-safety clamp in
+/// `crate::workflow::MAX_TIMEOUT_SECS`, tying up engine-tracked state and
+/// an async-task slot for as long as the caller likes — an unrate-limited
+/// resource-exhaustion vector.
+const MAX_WORKFLOW_STEPS: usize = 50;
+/// Per-step wall-clock ceiling enforced at creation time. One hour is
+/// generous for any legitimate step.
+const MAX_STEP_TIMEOUT_SECS: u64 = 60 * 60;
+/// Whole-workflow wall-clock ceiling enforced at creation time.
+const MAX_TOTAL_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+
 pub(super) async fn tool_workflow_create(
     input: &serde_json::Value,
     kernel: Option<&std::sync::Arc<dyn crate::kernel_handle::KernelHandle>>,
@@ -410,6 +429,37 @@ pub(super) async fn tool_workflow_create(
             name: "steps",
             reason: "Workflow must have at least one step".to_string(),
         });
+    }
+    if steps.len() > MAX_WORKFLOW_STEPS {
+        return Err(ToolError::InvalidParameter {
+            name: "steps",
+            reason: format!(
+                "Workflow may have at most {MAX_WORKFLOW_STEPS} steps (got {})",
+                steps.len()
+            ),
+        });
+    }
+    for step in steps {
+        if let Some(t) = step.get("timeout_secs").and_then(|v| v.as_u64()) {
+            if t > MAX_STEP_TIMEOUT_SECS {
+                return Err(ToolError::InvalidParameter {
+                    name: "steps",
+                    reason: format!(
+                        "step timeout_secs must be at most {MAX_STEP_TIMEOUT_SECS}s (got {t}s)"
+                    ),
+                });
+            }
+        }
+    }
+    if let Some(t) = input.get("total_timeout_secs").and_then(|v| v.as_u64()) {
+        if t > MAX_TOTAL_TIMEOUT_SECS {
+            return Err(ToolError::InvalidParameter {
+                name: "total_timeout_secs",
+                reason: format!(
+                    "total_timeout_secs must be at most {MAX_TOTAL_TIMEOUT_SECS}s (got {t}s)"
+                ),
+            });
+        }
     }
 
     // Serialize to workflow JSON the same shape the HTTP API expects

@@ -18,7 +18,9 @@ import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
-import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
+import { applyForeignTerminalFrame, extractWorkflowJson, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
+import { workflowStepsToCanvasState, type WorkflowCreateStepInput } from "../lib/canvas";
+import { CANVAS_DRAFT_KEY, type CanvasDraft } from "./CanvasPage";
 import {
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
@@ -2984,13 +2986,30 @@ export function ChatPage() {
   );
 
   const handleSaveWorkflow = useCallback((content: string) => {
-    // Extract the first JSON code block or object from the message
-    const jsonMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) ??
-      content.match(/(\{[\s\S]*"steps"[\s\S]*\})/);
-    if (jsonMatch) {
+    // Extract the JSON code block or object from the message — a
+    // `workflow_create`-shaped payload (`{name, description, steps, ...}`).
+    const jsonText = extractWorkflowJson(content);
+    if (jsonText) {
       try {
-        const parsed = JSON.parse(jsonMatch[1]);
-        sessionStorage.setItem("canvas-draft", JSON.stringify(parsed));
+        const parsed = JSON.parse(jsonText) as {
+          name?: string;
+          description?: string;
+          steps?: WorkflowCreateStepInput[];
+        };
+        // The canvas page reads `CanvasDraft` (`{nodes, edges,
+        // workflowName, workflowDescription}`), not the raw workflow_create
+        // shape — transform steps into nodes/edges before persisting so
+        // `readCanvasDraft()` on /canvas can actually interpret it (#6943
+        // review: previously the raw JSON was stored verbatim, so the
+        // canvas loaded empty and the steps were silently discarded).
+        const { nodes, edges } = workflowStepsToCanvasState(parsed.steps ?? []);
+        const draft: CanvasDraft = {
+          nodes,
+          edges,
+          workflowName: parsed.name ?? "",
+          workflowDescription: parsed.description ?? "",
+        };
+        sessionStorage.setItem(CANVAS_DRAFT_KEY, JSON.stringify(draft));
         addToast(t("workflows.saved_to_canvas"), "success");
         navigate({ to: "/canvas" });
       } catch {

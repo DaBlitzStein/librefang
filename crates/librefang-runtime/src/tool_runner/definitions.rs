@@ -1276,7 +1276,8 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         },
                         "steps": {
                             "type": "array",
-                            "description": "The workflow steps in execution order.",
+                            "description": "The workflow steps in execution order. Maximum 50 steps.",
+                            "maxItems": 50,
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -1287,7 +1288,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                                     "required_skills": { "type": "array", "items": { "type": "string" }, "description": "Skills the resolved agent (or spawned agent type) must provide; a missing skill fails the step with a clear error." },
                                     "output_var": { "type": "string", "description": "When set, this step's output is stored as a named variable accessible in later steps via {{name}}." },
                                     "mode": { "type": "string", "enum": ["sequential", "fan_out", "collect"], "description": "Execution mode. Default: sequential. (conditional / loop / wait / approval require workflow-toml authoring until the object-form schema lands.)" },
-                                    "timeout_secs": { "type": "integer", "description": "Max seconds for this step. Default: 120." },
+                                    "timeout_secs": { "type": "integer", "description": "Max seconds for this step. Default: 120. Maximum: 3600.", "maximum": 3600 },
                                     "error_mode": { "type": "string", "enum": ["fail", "skip"], "description": "What to do on failure. Default: fail. (retry requires workflow-toml authoring until the object-form schema lands.)" }
                                 },
                                 "required": ["name", "agent", "prompt_template"]
@@ -1309,7 +1310,8 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         },
                         "total_timeout_secs": {
                             "type": "integer",
-                            "description": "Max wall-clock seconds for the entire workflow run."
+                            "description": "Max wall-clock seconds for the entire workflow run. Maximum: 86400.",
+                            "maximum": 86400
                         }
                     },
                     "required": ["name", "steps"]

@@ -982,6 +982,32 @@ pub struct FallbackModel {
     pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// Parse the optional flat `"routing"` JSON object into a
+/// [`ModelRoutingConfig`]. Returns `None` when the field is absent or
+/// doesn't specify all three tier models, so an empty `[routing]` block is
+/// never written. Shared by [`agent_type_json_to_toml`] (create) and
+/// [`apply_agent_type_json_to_manifest`] (update) so the two accepted shapes
+/// can never drift apart.
+fn parse_routing_tier(v: &serde_json::Value) -> Option<ModelRoutingConfig> {
+    let r = v.get("routing")?;
+    let simple = r.get("simple_model").and_then(|x| x.as_str())?;
+    let medium = r.get("medium_model").and_then(|x| x.as_str())?;
+    let complex = r.get("complex_model").and_then(|x| x.as_str())?;
+    Some(ModelRoutingConfig {
+        simple_model: simple.to_string(),
+        medium_model: medium.to_string(),
+        complex_model: complex.to_string(),
+        simple_threshold: r
+            .get("simple_threshold")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as u32,
+        complex_threshold: r
+            .get("complex_threshold")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as u32,
+    })
+}
+
 /// Convert the flat "agent type" JSON shape used by the API and the
 /// agent-facing `agent_type_create` tool into a template TOML document.
 ///
@@ -1023,24 +1049,7 @@ pub fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
     // Preferred-model tiers: the optional [default_routing] block. Only set
     // when at least one tier model is supplied so an empty block is never
     // written.
-    let routing = v.get("routing").and_then(|r| {
-        let simple = r.get("simple_model").and_then(|x| x.as_str())?;
-        let medium = r.get("medium_model").and_then(|x| x.as_str())?;
-        let complex = r.get("complex_model").and_then(|x| x.as_str())?;
-        Some(ModelRoutingConfig {
-            simple_model: simple.to_string(),
-            medium_model: medium.to_string(),
-            complex_model: complex.to_string(),
-            simple_threshold: r
-                .get("simple_threshold")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0) as u32,
-            complex_threshold: r
-                .get("complex_threshold")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0) as u32,
-        })
-    });
+    let routing = parse_routing_tier(v);
 
     let manifest = AgentManifest {
         name: name.to_string(),
@@ -1065,6 +1074,70 @@ pub fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
         "[capabilities]\ntools = []\n\n[model]\nmodel = \"default\"\nprovider = \"default\"\nsystem_prompt = \"\"\n"
             .to_string()
     })
+}
+
+/// Apply the flat "agent type" JSON body onto an existing [`AgentManifest`],
+/// leaving every field the body does not mention untouched.
+///
+/// This is the update-path counterpart to [`agent_type_json_to_toml`]. That
+/// function always fills unset fields with hardcoded defaults, which is
+/// correct for create (there is nothing to preserve yet) but was silently
+/// destructive when reused for `PUT /api/templates/{name}`: rebuilding the
+/// whole manifest from this same 9-key flat JSON shape drops every field the
+/// shape doesn't cover — `[compaction]`, `max_history_messages`,
+/// `[[triggers]]`, `[resources]`, `[autonomous]`, `mcp_servers`,
+/// `tool_allowlist`, `session_mode`, `workspaces`, and more — on every save
+/// made from the WebUI editor (#7740). This function instead starts from the
+/// manifest already on disk and only overwrites the fields present in `v`.
+pub fn apply_agent_type_json_to_manifest(
+    mut existing: AgentManifest,
+    v: &serde_json::Value,
+) -> AgentManifest {
+    if let Some(name) = v["name"].as_str() {
+        existing.name = name.to_string();
+    }
+    if let Some(desc) = v["description"].as_str() {
+        existing.description = desc.to_string();
+    }
+    if let Some(prompt) = v["system_prompt"].as_str() {
+        existing.model.system_prompt = prompt.to_string();
+    }
+    if let Some(provider) = v["provider"].as_str() {
+        existing.model.provider = provider.to_string();
+    }
+    if let Some(model_name) = v["model"].as_str() {
+        existing.model.model = model_name.to_string();
+    }
+    if let Some(arr) = v["tools"].as_array() {
+        existing.capabilities.tools = arr
+            .iter()
+            .filter_map(|t| t.as_str().map(String::from))
+            .collect();
+    }
+    if let Some(arr) = v["skills"].as_array() {
+        existing.skills = arr
+            .iter()
+            .filter_map(|s| s.as_str().map(String::from))
+            .collect();
+    }
+    if let Some(arr) = v["channels"].as_array() {
+        existing.channels = arr
+            .iter()
+            .filter_map(|s| s.as_str().map(String::from))
+            .collect();
+    }
+    // "routing" is only touched when the key is present at all: absent =
+    // leave the existing tiers alone, `null` = explicitly clear them,
+    // an object = replace them wholesale (parse_routing_tier requires all
+    // three tier models, matching agent_type_json_to_toml's create path).
+    if let Some(r) = v.get("routing") {
+        existing.routing = if r.is_null() {
+            None
+        } else {
+            parse_routing_tier(v)
+        };
+    }
+    existing
 }
 
 /// Request to spawn an ephemeral (no-workspace, no-DB) agent worker.

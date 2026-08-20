@@ -1147,6 +1147,110 @@ async fn test_agent_spawn_subset_capabilities_allowed() {
     assert!(result.content.contains("spawned successfully"));
 }
 
+/// #6930 — the ephemeral branch of `agent_spawn` screened only `message`,
+/// so a tainted `system_prompt` (e.g. a tool result carrying a credential)
+/// seeded the ephemeral worker's system prompt without crossing the taint
+/// boundary the permanent-spawn branch enforces. Both branches must reject.
+#[tokio::test]
+async fn test_agent_spawn_ephemeral_rejects_tainted_system_prompt() {
+    let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+        should_fail_escalation: false,
+    });
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "ephemeral": true,
+            "message": "summarise the ticket",
+            "system_prompt": "You are a helper. Use api_key=sk-live-AbCdEf0123456789 when calling the API.",
+        }),
+        Some(&kernel),
+        None,
+        Some("parent-agent-id"),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+    assert!(
+        result.is_error,
+        "Tainted system_prompt must be rejected, got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Taint violation (system_prompt)"),
+        "Expected the same violation the permanent branch raises, got: {}",
+        result.content
+    );
+
+    // Control: the identical spawn with a clean system_prompt gets past the
+    // taint gate (it then fails on the mock kernel's unimplemented
+    // `spawn_ephemeral`, which is a different error).
+    let clean = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "ephemeral": true,
+            "message": "summarise the ticket",
+            "system_prompt": "You are a helper.",
+        }),
+        Some(&kernel),
+        None,
+        Some("parent-agent-id"),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+    assert!(
+        !clean.content.contains("Taint violation"),
+        "Clean system_prompt must not trip the taint gate, got: {}",
+        clean.content
+    );
+}
+
 #[test]
 fn test_tools_to_parent_capabilities_expands_resource_caps() {
     use librefang_types::capability::Capability;

@@ -1,8 +1,13 @@
-//! Tool profile + agent template endpoints — extracted from `system.rs` per #3749.
+//! Tool profile + agent-type (agent template) endpoints — extracted from
+//! `system.rs` per #3749.
 //!
-//! Mounts `/profiles`, `/profiles/{name}`, `/templates`, `/templates/{name}`,
-//! and `/templates/{name}/toml`. Public route paths are unchanged; this module
-//! is a sibling under `routes::` and is mounted via
+//! Mounts `/profiles`, `/profiles/{name}`, `/agent-types`,
+//! `/agent-types/{name}`, and `/agent-types/{name}/toml` as the canonical
+//! routes. `/templates`, `/templates/{name}`, and `/templates/{name}/toml`
+//! are kept mounted too, as a deprecated-but-functional alias (#7722,
+//! homogenized further here) — an agent type IS a template, so both
+//! spellings resolve to equivalent handlers and no client has to migrate.
+//! This module is a sibling under `routes::` and is mounted via
 //! `.merge(crate::routes::agent_templates::router())` from `system::router()`.
 
 use super::AppState;
@@ -16,41 +21,54 @@ use librefang_types::agent::AgentManifest;
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
 
-/// Build routes for the tool-profile + agent-template domain.
+/// Build routes for the tool-profile + agent-type (agent template) domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/profiles", axum::routing::get(list_profiles))
         .route("/profiles/{name}", axum::routing::get(get_profile))
-        .route(
-            "/templates",
-            axum::routing::get(list_agent_templates).post(create_agent_type),
-        )
-        .route(
-            "/templates/{name}",
-            axum::routing::get(get_agent_template)
-                .put(update_agent_type)
-                .delete(delete_agent_type),
-        )
-        .route(
-            "/templates/{name}/toml",
-            axum::routing::get(get_agent_template_toml),
-        )
-        // Alias (#7722): agent templates ARE agent types. Both spellings
-        // resolve to the same handlers so no client has to migrate, while
-        // the canonical docs/TUI/dashboard wording is "agent type".
+        // Canonical agent-type routes.
         .route(
             "/agent-types",
-            axum::routing::get(list_agent_templates).post(create_agent_type),
+            axum::routing::get(list_agent_types).post(create_agent_type),
         )
         .route(
             "/agent-types/{name}",
-            axum::routing::get(get_agent_template)
+            axum::routing::get(get_agent_type)
                 .put(update_agent_type)
                 .delete(delete_agent_type),
         )
         .route(
             "/agent-types/{name}/toml",
-            axum::routing::get(get_agent_template_toml),
+            axum::routing::get(get_agent_type_toml),
+        )
+        // Deprecated alias (#7722, canonicalized further here): agent
+        // templates ARE agent types, so `/templates` keeps working for
+        // existing clients — routed through thin `_deprecated` wrappers.
+        // These are their own separate `#[utoipa::path(...)]`-annotated
+        // handlers (rather than reusing the canonical ones' path items)
+        // purely so their `operation_id`s stay distinct in the generated
+        // OpenAPI spec; `utoipa::path`'s attribute-macro grammar in this
+        // crate's utoipa version (5.x) has no `deprecated = true` argument
+        // — marking an operation deprecated there means the item itself
+        // carries the standard Rust `#[deprecated]` attribute, which is not
+        // done here because axum's `.get(list_agent_types_deprecated)` etc.
+        // wiring below is itself a "use" of the item and would then trip
+        // `-D warnings`. The doc comments on each wrapper below carry the
+        // "deprecated alias of ..." note instead.
+        .route(
+            "/templates",
+            axum::routing::get(list_agent_types_deprecated)
+                .post(create_agent_type_deprecated),
+        )
+        .route(
+            "/templates/{name}",
+            axum::routing::get(get_agent_type_deprecated)
+                .put(update_agent_type_deprecated)
+                .delete(delete_agent_type_deprecated),
+        )
+        .route(
+            "/templates/{name}/toml",
+            axum::routing::get(get_agent_type_toml_deprecated),
         )
 }
 
@@ -135,7 +153,7 @@ pub async fn get_profile(
 /// cannot escape the base directory through `..`, absolute paths, or platform
 /// separators (`/`, `\`). Rejects empty names and anything longer than 64
 /// chars to cap log noise.
-fn validate_template_name(name: &str) -> Result<(), &'static str> {
+fn validate_agent_type_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() || name.len() > 64 {
         return Err("invalid template name");
     }
@@ -149,53 +167,53 @@ fn validate_template_name(name: &str) -> Result<(), &'static str> {
 }
 
 #[cfg(test)]
-mod template_name_validation_tests {
-    use super::validate_template_name;
+mod agent_type_name_validation_tests {
+    use super::validate_agent_type_name;
 
     #[test]
     fn accepts_simple_names() {
-        assert!(validate_template_name("assistant").is_ok());
-        assert!(validate_template_name("customer-support").is_ok());
-        assert!(validate_template_name("coder_v2").is_ok());
-        assert!(validate_template_name("a1").is_ok());
+        assert!(validate_agent_type_name("assistant").is_ok());
+        assert!(validate_agent_type_name("customer-support").is_ok());
+        assert!(validate_agent_type_name("coder_v2").is_ok());
+        assert!(validate_agent_type_name("a1").is_ok());
     }
 
     #[test]
     fn rejects_path_traversal() {
-        assert!(validate_template_name("..").is_err());
-        assert!(validate_template_name("../../etc").is_err());
-        assert!(validate_template_name("foo/../bar").is_err());
-        assert!(validate_template_name("..\\..\\tmp").is_err());
+        assert!(validate_agent_type_name("..").is_err());
+        assert!(validate_agent_type_name("../../etc").is_err());
+        assert!(validate_agent_type_name("foo/../bar").is_err());
+        assert!(validate_agent_type_name("..\\..\\tmp").is_err());
     }
 
     #[test]
     fn rejects_separators_and_absolute_paths() {
-        assert!(validate_template_name("foo/bar").is_err());
-        assert!(validate_template_name("foo\\bar").is_err());
-        assert!(validate_template_name("/etc/passwd").is_err());
-        assert!(validate_template_name("C:\\Windows").is_err());
+        assert!(validate_agent_type_name("foo/bar").is_err());
+        assert!(validate_agent_type_name("foo\\bar").is_err());
+        assert!(validate_agent_type_name("/etc/passwd").is_err());
+        assert!(validate_agent_type_name("C:\\Windows").is_err());
     }
 
     #[test]
     fn rejects_empty_and_oversized() {
-        assert!(validate_template_name("").is_err());
-        assert!(validate_template_name(&"a".repeat(65)).is_err());
+        assert!(validate_agent_type_name("").is_err());
+        assert!(validate_agent_type_name(&"a".repeat(65)).is_err());
     }
 
     #[test]
     fn rejects_null_and_special_chars() {
-        assert!(validate_template_name("foo\0bar").is_err());
-        assert!(validate_template_name("foo bar").is_err());
-        assert!(validate_template_name("foo.bar").is_err());
-        assert!(validate_template_name("foo%2fbar").is_err());
+        assert!(validate_agent_type_name("foo\0bar").is_err());
+        assert!(validate_agent_type_name("foo bar").is_err());
+        assert!(validate_agent_type_name("foo.bar").is_err());
+        assert!(validate_agent_type_name("foo%2fbar").is_err());
     }
 }
 
-/// GET /api/templates — List available agent templates from both
+/// GET /api/agent-types — List available agent types from both
 /// `~/.librefang/workspaces/agents/` (source = "agent") and
 /// `~/.librefang/templates/` (source = "template").
-#[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
-pub async fn list_agent_templates() -> impl IntoResponse {
+#[utoipa::path(get, path = "/api/agent-types", tag = "system", operation_id = "list_agent_types", responses((status = 200, description = "List agent types", body = Vec<serde_json::Value>)))]
+pub async fn list_agent_types() -> impl IntoResponse {
     let mut templates = Vec::new();
 
     // Workspace agents (existing behaviour)
@@ -271,14 +289,22 @@ pub async fn list_agent_templates() -> impl IntoResponse {
     }))
 }
 
-/// GET /api/templates/:name — Get template details.
-#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = crate::types::JsonObject)))]
-pub async fn get_agent_template(
+/// GET /api/templates — Deprecated alias of `GET /api/agent-types`. Kept
+/// working for existing clients; new integrations should use the canonical
+/// `/api/agent-types` path.
+#[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List agent types (deprecated alias of GET /api/agent-types)", body = Vec<serde_json::Value>)))]
+pub async fn list_agent_types_deprecated() -> impl IntoResponse {
+    list_agent_types().await
+}
+
+/// GET /api/agent-types/:name — Get agent type details.
+#[utoipa::path(get, path = "/api/agent-types/{name}", tag = "system", operation_id = "get_agent_type", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type details", body = crate::types::JsonObject)))]
+pub async fn get_agent_type(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if validate_template_name(&name).is_err() {
+    if validate_agent_type_name(&name).is_err() {
         return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
     }
 
@@ -357,14 +383,23 @@ pub async fn get_agent_template(
     }
 }
 
-/// GET /api/templates/:name/toml — Get the raw TOML content of a template.
-#[utoipa::path(get, path = "/api/templates/{name}/toml", tag = "system", operation_id = "get_agent_template_toml", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template TOML content as plain text", body = String)))]
-pub async fn get_agent_template_toml(
+/// GET /api/templates/:name — Deprecated alias of `GET /api/agent-types/:name`.
+#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type details (deprecated alias of GET /api/agent-types/:name)", body = crate::types::JsonObject)))]
+pub async fn get_agent_type_deprecated(
+    path: Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    get_agent_type(path, lang).await
+}
+
+/// GET /api/agent-types/:name/toml — Get the raw TOML content of an agent type.
+#[utoipa::path(get, path = "/api/agent-types/{name}/toml", tag = "system", operation_id = "get_agent_type_toml", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type TOML content as plain text", body = String)))]
+pub async fn get_agent_type_toml(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if validate_template_name(&name).is_err() {
+    if validate_agent_type_name(&name).is_err() {
         return (
             StatusCode::NOT_FOUND,
             [(axum::http::header::CONTENT_TYPE, "text/plain")],
@@ -413,21 +448,39 @@ pub async fn get_agent_template_toml(
     }
 }
 
+/// GET /api/templates/:name/toml — Deprecated alias of
+/// `GET /api/agent-types/:name/toml`.
+#[utoipa::path(get, path = "/api/templates/{name}/toml", tag = "system", operation_id = "get_agent_template_toml", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type TOML content as plain text (deprecated alias of GET /api/agent-types/:name/toml)", body = String)))]
+pub async fn get_agent_type_toml_deprecated(
+    path: Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    get_agent_type_toml(path, lang).await
+}
+
 // ---------------------------------------------------------------------------
-// Agent template CRUD endpoints
+// Agent-type CRUD endpoints
 // ---------------------------------------------------------------------------
 //
-// Templates are named manifests consumed by the ephemeral-worker spawn path
-// (`EphemeralSpawnRequest.agent_type`). They live as `<name>.toml` under
-// `~/.librefang/templates/`. Write operations are wired into `/api/templates`
-// in the unified `router()` above; the read endpoints serve both sources.
+// Agent types are named manifests consumed by the ephemeral-worker spawn
+// path (`EphemeralSpawnRequest.agent_type`). They live as `<name>.toml`
+// under `~/.librefang/templates/`. Write operations are wired into
+// `/api/agent-types` (and the deprecated `/api/templates` alias) in the
+// unified `router()` above; the read endpoints serve both sources.
 
-/// Directory holding agent-template manifests (`~/.librefang/templates/`).
+/// Directory holding agent-type manifests (`~/.librefang/templates/`).
 fn agent_types_dir() -> std::path::PathBuf {
     super::system::librefang_home().join("templates")
 }
 
 /// Flatten a manifest into the JSON shape the dashboard expects.
+///
+/// Must emit every field `interface AgentType` in the dashboard's `api.ts`
+/// declares, including `channels` and `routing` — omitting either one here
+/// silently defeats the WebUI's channel-allowlist and model-tier editor: the
+/// form reads `undefined`, renders empty, and the next save (which reuses
+/// this same flat shape) writes the empty value back out, erasing whatever
+/// was actually configured (#7740).
 fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
     serde_json::json!({
         "name": name,
@@ -437,11 +490,13 @@ fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
         "model": m.model.model,
         "tools": m.capabilities.tools,
         "skills": m.skills,
+        "channels": m.channels,
+        "routing": m.routing,
     })
 }
 
-/// POST /api/templates — Create a new agent template from JSON.
-#[utoipa::path(post, path = "/api/templates", tag = "system", operation_id = "create_template", request_body = crate::types::JsonObject, responses((status = 201, description = "Template created", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 409, description = "Template already exists")))]
+/// POST /api/agent-types — Create a new agent type from JSON.
+#[utoipa::path(post, path = "/api/agent-types", tag = "system", operation_id = "create_agent_type", request_body = crate::types::JsonObject, responses((status = 201, description = "Agent type created", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 409, description = "Agent type already exists")))]
 pub async fn create_agent_type(
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
@@ -454,11 +509,40 @@ pub async fn create_agent_type(
             return ApiErrorResponse::bad_request("name is required").into_json_tuple();
         }
     };
-    if validate_template_name(&name).is_err() {
+    if validate_agent_type_name(&name).is_err() {
         return ApiErrorResponse::bad_request("invalid agent type name").into_json_tuple();
     }
 
-    let toml_content = librefang_types::agent::agent_type_json_to_toml(&body);
+    // Full-manifest path (#7742): mirrors `PATCH /api/agents/{id}`'s
+    // `manifest_toml` handling. When the caller (the dashboard's
+    // `AgentManifestForm`-backed editor) supplies raw TOML, parse it
+    // directly instead of rebuilding a manifest from the flat 9-key JSON
+    // shape below — that shape only round-trips the fields it knows about,
+    // which is fine for the old quick-create form but would silently drop
+    // everything else (resources, autonomous, triggers, …) the visual
+    // editor now exposes. The name is still pinned to the validated path
+    // value so the template file id and the manifest's own `name` field
+    // can never disagree.
+    let toml_content =
+        if let Some(manifest_toml) = body.get("manifest_toml").and_then(|v| v.as_str()) {
+            let mut manifest: AgentManifest = match toml::from_str(manifest_toml) {
+                Ok(m) => m,
+                Err(e) => {
+                    return ApiErrorResponse::bad_request(format!("invalid manifest_toml: {e}"))
+                        .into_json_tuple();
+                }
+            };
+            manifest.name = name.clone();
+            match toml::to_string_pretty(&manifest) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to serialize manifest for agent-type '{name}': {e}");
+                    return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+                }
+            }
+        } else {
+            librefang_types::agent::agent_type_json_to_toml(&body)
+        };
 
     let dir = agent_types_dir();
     let path = dir.join(format!("{name}.toml"));
@@ -497,16 +581,63 @@ pub async fn create_agent_type(
     )
 }
 
+/// POST /api/templates — Deprecated alias of `POST /api/agent-types`.
+#[utoipa::path(post, path = "/api/templates", tag = "system", operation_id = "create_template", request_body = crate::types::JsonObject, responses((status = 201, description = "Agent type created (deprecated alias of POST /api/agent-types)", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 409, description = "Agent type already exists")))]
+pub async fn create_agent_type_deprecated(
+    lang: Option<axum::Extension<RequestLanguage>>,
+    body: Json<serde_json::Value>,
+) -> impl IntoResponse {
+    create_agent_type(lang, body).await
+}
+
 /// PUT /api/agent-types/:name — Update an existing agent type from JSON.
-#[utoipa::path(put, path = "/api/templates/{name}", tag = "system", operation_id = "update_template", params(("name" = String, Path, description = "Template name")), request_body = crate::types::JsonObject, responses((status = 200, description = "Template updated", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 404, description = "Template not found")))]
+#[utoipa::path(put, path = "/api/agent-types/{name}", tag = "system", operation_id = "update_agent_type", params(("name" = String, Path, description = "Agent type name")), request_body = crate::types::JsonObject, responses((status = 200, description = "Agent type updated", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 404, description = "Agent type not found")))]
 pub async fn update_agent_type(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if validate_template_name(&name).is_err() {
+    if validate_agent_type_name(&name).is_err() {
         return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
+
+    let path = agent_types_dir().join(format!("{name}.toml"));
+    if !path.exists() {
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
+
+    // Non-destructive update (#7740): start from the manifest already on
+    // disk and apply only the fields the request body actually supplies,
+    // instead of rebuilding the whole manifest from the flat 9-key JSON
+    // shape (which used to silently drop [compaction], max_history_messages,
+    // [[triggers]], [resources], [autonomous], mcp_servers, tool_allowlist,
+    // session_mode, workspaces, and every other field on each WebUI save).
+    let existing_content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to read agent-type '{name}' for update: {e}");
+            return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+        }
+    };
+    let existing_manifest: AgentManifest = match toml::from_str(&existing_content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("Invalid existing manifest for agent-type '{name}': {e}");
+            return ApiErrorResponse::internal(t.t("api-error-template-invalid-manifest"))
+                .into_json_tuple();
+        }
+    };
+
+    // #6931/#6943 review: `Json<serde_json::Value>` accepts any JSON value
+    // (array, string, number, bool), but `serde_json::Value`'s `IndexMut<&str>`
+    // only handles `Null` and `Object` — every other variant panics via
+    // `panic!("cannot access key ... in ...")`. A `PUT` with body `[]` or `42`
+    // against an existing agent-type reached that panic and took the process
+    // down, so reject non-object bodies up front.
+    if !body.is_object() {
+        return ApiErrorResponse::bad_request("request body must be a JSON object")
+            .into_json_tuple();
     }
 
     // Pin the manifest name to the URL path segment — the body's
@@ -514,33 +645,74 @@ pub async fn update_agent_type(
     let mut body = body;
     body["name"] = serde_json::Value::String(name.clone());
 
-    let toml_content = librefang_types::agent::agent_type_json_to_toml(&body);
+    // Full-manifest replacement path (#7742), symmetric with the create
+    // handler above and with `PATCH /api/agents/{id}`'s `manifest_toml`
+    // handling: when present, parse the whole document and use it as-is
+    // rather than routing through `apply_agent_type_json_to_manifest`'s
+    // flat 9-key merge. This is what lets the dashboard's
+    // `AgentManifestForm`-backed editor save every manifest field it
+    // exposes (resources, autonomous, thinking, routing, context
+    // injection, …) instead of only the fields the flat JSON shape
+    // understands — and it stays non-destructive for the same reason the
+    // flat-merge path is (#7740): `AgentManifestForm` is always seeded
+    // from this same template's current `manifest_toml`, and any field the
+    // form doesn't render is preserved verbatim in `extras` and re-emitted
+    // on save. `apply_agent_type_json_to_manifest` is left untouched and
+    // still serves the flat-JSON callers that never send `manifest_toml`
+    // (the `agent_type_create` tool has no update counterpart today, but
+    // older API clients built against the original 9-key PUT shape keep
+    // working unchanged).
+    let manifest = if let Some(manifest_toml) = body.get("manifest_toml").and_then(|v| v.as_str()) {
+        let mut manifest: AgentManifest = match toml::from_str(manifest_toml) {
+            Ok(m) => m,
+            Err(e) => {
+                return ApiErrorResponse::bad_request(format!("invalid manifest_toml: {e}"))
+                    .into_json_tuple();
+            }
+        };
+        manifest.name = name.clone();
+        manifest
+    } else {
+        librefang_types::agent::apply_agent_type_json_to_manifest(existing_manifest, &body)
+    };
 
-    let path = agent_types_dir().join(format!("{name}.toml"));
-    if !path.exists() {
-        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
-    }
+    let toml_content = match toml::to_string_pretty(&manifest) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to serialize updated manifest for '{name}': {e}");
+            return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+        }
+    };
 
     if let Err(e) = std::fs::write(&path, &toml_content) {
         tracing::warn!("Failed to write agent-type '{name}': {e}");
         return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
     }
 
-    let manifest: AgentManifest = toml::from_str(&toml_content).unwrap_or_default();
     (
         StatusCode::OK,
         Json(manifest_to_agent_type(&name, &manifest)),
     )
 }
 
+/// PUT /api/templates/:name — Deprecated alias of `PUT /api/agent-types/:name`.
+#[utoipa::path(put, path = "/api/templates/{name}", tag = "system", operation_id = "update_template", params(("name" = String, Path, description = "Agent type name")), request_body = crate::types::JsonObject, responses((status = 200, description = "Agent type updated (deprecated alias of PUT /api/agent-types/:name)", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 404, description = "Agent type not found")))]
+pub async fn update_agent_type_deprecated(
+    path: Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    body: Json<serde_json::Value>,
+) -> impl IntoResponse {
+    update_agent_type(path, lang, body).await
+}
+
 /// DELETE /api/agent-types/:name — Delete an agent type file.
-#[utoipa::path(delete, path = "/api/templates/{name}", tag = "system", operation_id = "delete_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template deleted", body = crate::types::JsonObject), (status = 404, description = "Template not found")))]
+#[utoipa::path(delete, path = "/api/agent-types/{name}", tag = "system", operation_id = "delete_agent_type", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type deleted", body = crate::types::JsonObject), (status = 404, description = "Agent type not found")))]
 pub async fn delete_agent_type(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if validate_template_name(&name).is_err() {
+    if validate_agent_type_name(&name).is_err() {
         return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
     }
 
@@ -558,4 +730,14 @@ pub async fn delete_agent_type(
         StatusCode::OK,
         Json(serde_json::json!({ "name": name, "deleted": true })),
     )
+}
+
+/// DELETE /api/templates/:name — Deprecated alias of
+/// `DELETE /api/agent-types/:name`.
+#[utoipa::path(delete, path = "/api/templates/{name}", tag = "system", operation_id = "delete_template", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type deleted (deprecated alias of DELETE /api/agent-types/:name)", body = crate::types::JsonObject), (status = 404, description = "Agent type not found")))]
+pub async fn delete_agent_type_deprecated(
+    path: Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    delete_agent_type(path, lang).await
 }

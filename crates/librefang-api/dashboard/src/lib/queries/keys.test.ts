@@ -38,6 +38,7 @@ import {
   userBudgetKeys,
   permissionPolicyKeys,
   promptsKeys,
+  agentTypeKeys,
 } from "./keys";
 
 describe("query key factories", () => {
@@ -53,7 +54,7 @@ describe("query key factories", () => {
       expect(agentKeys.list()).toEqual(["agents", "list", {}]);
       expect(agentKeys.details()).toEqual(["agents", "detail"]);
       expect(agentKeys.detail("abc")).toEqual(["agents", "detail", "abc"]);
-      expect(agentKeys.templates()).toEqual(["agents", "templates"]);
+      expect(agentKeys.typeOptions()).toEqual(["agents", "type-options"]);
       expect(agentKeys.sessions("abc")).toEqual([
         "agents",
         "sessions",
@@ -268,7 +269,7 @@ describe("query key factories", () => {
       const prefix = agentKeys.all;
       expect(agentKeys.lists().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.details().slice(0, prefix.length)).toEqual(prefix);
-      expect(agentKeys.templates().slice(0, prefix.length)).toEqual(prefix);
+      expect(agentKeys.typeOptions().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.sessions("x").slice(0, prefix.length)).toEqual(
         prefix,
       );
@@ -438,6 +439,7 @@ describe("query key factories", () => {
       userKeys,
       userBudgetKeys,
       permissionPolicyKeys,
+      agentTypeKeys,
     ];
 
     it("all factories have an 'all' key", () => {
@@ -530,6 +532,40 @@ describe("query key factories", () => {
 
     it("different event limits produce different keys", () => {
       expect(commsKeys.events(100)).not.toEqual(commsKeys.events(200));
+    });
+  });
+
+  describe("agentTypeKeys (#7742)", () => {
+    it("exposes the standard all / lists() / details() / detail hierarchy", () => {
+      expect(agentTypeKeys.all).toEqual(["agent-types"]);
+      expect(agentTypeKeys.lists()).toEqual(["agent-types", "list"]);
+      expect(agentTypeKeys.details()).toEqual(["agent-types", "detail"]);
+      expect(agentTypeKeys.detail("coder")).toEqual([
+        "agent-types",
+        "detail",
+        "coder",
+      ]);
+    });
+
+    it("all sub-keys are anchored on agentTypeKeys.all", () => {
+      const prefix = agentTypeKeys.all;
+      expect(agentTypeKeys.lists().slice(0, prefix.length)).toEqual(prefix);
+      expect(agentTypeKeys.details().slice(0, prefix.length)).toEqual(prefix);
+      expect(agentTypeKeys.detail("coder").slice(0, prefix.length)).toEqual(
+        prefix,
+      );
+    });
+
+    it("details() prefixes detail(name) and is disjoint from lists()", () => {
+      const ds = agentTypeKeys.details();
+      expect(agentTypeKeys.detail("coder").slice(0, ds.length)).toEqual(ds);
+      expect(agentTypeKeys.details()).not.toEqual(agentTypeKeys.lists());
+    });
+
+    it("different names produce different detail keys", () => {
+      expect(agentTypeKeys.detail("coder")).not.toEqual(
+        agentTypeKeys.detail("researcher"),
+      );
     });
   });
 

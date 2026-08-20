@@ -1610,6 +1610,113 @@ async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
     );
 }
 
+// ── workflow_create resource-cap tests (#6943 review) ──────────────────────
+//
+// `workflow_create` is always-native (`ALWAYS_NATIVE_TOOLS`), so every
+// agent has it without configuration. Neither the tool's JSON schema nor
+// the workflow engine capped step count or timeouts before this fix — a
+// schema `maxItems` is advisory only and a model can ignore it. These tests
+// drive `tool_workflow_create` directly and assert the handler itself
+// rejects an oversized request before ever reaching the kernel (the
+// `DispatchCapture` stub's default `create_workflow` always errors with
+// "unavailable", so reaching it would surface as `ToolError::Upstream`
+// instead of `InvalidParameter` — that distinction is what proves the cap
+// is enforced pre-dispatch, not merely documented in the schema).
+
+fn workflow_create_step(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "agent": "assistant",
+        "prompt_template": "{{input}}"
+    })
+}
+
+#[tokio::test]
+async fn workflow_create_rejects_too_many_steps() {
+    let kernel: Arc<dyn KernelHandle> = Arc::new(DispatchCapture::default());
+    let steps: Vec<serde_json::Value> = (0..51)
+        .map(|i| workflow_create_step(&format!("step-{i}")))
+        .collect();
+    let input = serde_json::json!({
+        "name": "too-many-steps",
+        "steps": steps,
+    });
+
+    let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
+        .await
+        .expect_err("51 steps must be rejected");
+    match &err {
+        ToolError::InvalidParameter { name, reason } => {
+            assert_eq!(*name, "steps");
+            assert!(
+                reason.contains("50"),
+                "reason should mention the cap: {reason}"
+            );
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn workflow_create_accepts_step_count_at_the_cap() {
+    let kernel: Arc<dyn KernelHandle> = Arc::new(DispatchCapture::default());
+    let steps: Vec<serde_json::Value> = (0..50)
+        .map(|i| workflow_create_step(&format!("step-{i}")))
+        .collect();
+    let input = serde_json::json!({
+        "name": "exactly-at-cap",
+        "steps": steps,
+    });
+
+    // The default `DispatchCapture::create_workflow` stub always errors
+    // with "unavailable" — reaching that (an `Upstream` error) rather than
+    // an `InvalidParameter` proves 50 steps cleared the cap check.
+    let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
+        .await
+        .expect_err("stub kernel has no workflow engine");
+    assert!(
+        matches!(err, ToolError::Upstream { .. }),
+        "50 steps must pass validation and reach the kernel, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn workflow_create_rejects_step_timeout_over_the_ceiling() {
+    let kernel: Arc<dyn KernelHandle> = Arc::new(DispatchCapture::default());
+    let mut step = workflow_create_step("only-step");
+    step["timeout_secs"] = serde_json::json!(60 * 60 + 1);
+    let input = serde_json::json!({
+        "name": "step-timeout-too-long",
+        "steps": [step],
+    });
+
+    let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
+        .await
+        .expect_err("a step timeout over 3600s must be rejected");
+    match &err {
+        ToolError::InvalidParameter { name, .. } => assert_eq!(*name, "steps"),
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn workflow_create_rejects_total_timeout_over_the_ceiling() {
+    let kernel: Arc<dyn KernelHandle> = Arc::new(DispatchCapture::default());
+    let input = serde_json::json!({
+        "name": "total-timeout-too-long",
+        "steps": [workflow_create_step("only-step")],
+        "total_timeout_secs": 24 * 60 * 60 + 1,
+    });
+
+    let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
+        .await
+        .expect_err("a total_timeout_secs over 86400s must be rejected");
+    match &err {
+        ToolError::InvalidParameter { name, .. } => assert_eq!(*name, "total_timeout_secs"),
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
 // ── channel_send mirror tests ────────────────────────────────────────────
 
 /// A minimal kernel for mirror tests.

@@ -111,14 +111,17 @@ type WorkflowStepBuild = {
   [key: string]: unknown;
 };
 
-type CanvasDraft = {
+export type CanvasDraft = {
   nodes: CanvasNode[];
   edges: Edge[];
   workflowName: string;
   workflowDescription: string;
 };
 
-const CANVAS_DRAFT_KEY = "canvasDraft";
+/** Exported so `ChatPage.tsx`'s "Save as Workflow" action writes the same
+ *  key this page reads (#6943 review — the two used to disagree, so the
+ *  hand-off silently no-op'd). */
+export const CANVAS_DRAFT_KEY = "canvasDraft";
 
 function readCanvasDraft(): CanvasDraft | null {
   if (typeof window === "undefined") return null;

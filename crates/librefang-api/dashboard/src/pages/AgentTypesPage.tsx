@@ -1,23 +1,36 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Boxes, Plus, Pencil, Trash2, Zap, Loader2 } from "lucide-react";
+import type { TomlTable } from "smol-toml";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
-import { Input } from "../components/ui/Input";
 import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { toastErr } from "../lib/errors";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
+import { AgentManifestForm } from "../components/AgentManifestForm";
 import { useSkills } from "../lib/queries/skills";
 import { useChannels } from "../lib/queries/channels";
 import { useTools } from "../lib/queries/agents";
+import { useProviders } from "../lib/queries/providers";
+import { useModels } from "../lib/queries/models";
+import { useMcpServers } from "../lib/queries/mcp";
+import { isProviderAvailable } from "../lib/status";
+import {
+  emptyManifestExtras,
+  emptyManifestForm,
+  parseManifestToml,
+  serializeManifestForm,
+  validateManifestForm,
+  type ManifestExtras,
+  type ManifestFormState,
+} from "../lib/agentManifest";
 import type {
-  AgentType,
   AgentTypeInput,
   AgentTypeSummary,
   EphemeralResult,
@@ -32,84 +45,27 @@ import {
 
 const TEXTAREA_CLASS =
   "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-mono leading-relaxed resize-y disabled:opacity-50 focus:outline-none focus:border-brand";
-const INPUT_CLASS =
-  "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm disabled:opacity-50 focus:outline-none focus:border-brand";
 
-interface FormState {
-  name: string;
-  description: string;
-  system_prompt: string;
-  provider: string;
-  model: string;
-  tools: string[];
-  skills: string[];
-  channels: string[];
-  simple_model: string;
-  medium_model: string;
-  complex_model: string;
-  simple_threshold: string;
-  complex_threshold: string;
-}
+// `channels` is a plain `AgentManifest` top-level field, but it is NOT part
+// of `ManifestFormState` — `AgentManifestForm` has no channels widget
+// because the live-agent editor (AgentsPage) manages channels through its
+// own dedicated `ChannelsSection`, which talks to the agent-only
+// `/agents/{id}/channels` endpoint (there is no running instance for a
+// agent type to reach). Agent types have nothing to reach either, so this page
+// tracks the allowlist as its own draft and folds it back into
+// `extras.topLevel` right before serializing — it round-trips through
+// `parseManifestToml`/`serializeManifestForm` exactly like every other
+// extras entry the form doesn't own.
+const asChannelsArray = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 
-const EMPTY_FORM: FormState = {
-  name: "",
-  description: "",
-  system_prompt: "",
-  provider: "",
-  model: "",
-  tools: [],
-  skills: [],
-  channels: [],
-  simple_model: "",
-  medium_model: "",
-  complex_model: "",
-  simple_threshold: "",
-  complex_threshold: "",
+const withChannelsExtra = (topLevel: TomlTable, channels: string[]): TomlTable => {
+  if (channels.length === 0) {
+    const { channels: _drop, ...rest } = topLevel;
+    return rest;
+  }
+  return { ...topLevel, channels };
 };
-
-function toForm(type: AgentType): FormState {
-  return {
-    name: type.name ?? "",
-    description: type.description ?? "",
-    system_prompt: type.system_prompt ?? "",
-    provider: type.provider ?? "",
-    model: type.model ?? "",
-    tools: type.tools ?? [],
-    skills: type.skills ?? [],
-    channels: type.channels ?? [],
-    simple_model: type.routing?.simple_model ?? "",
-    medium_model: type.routing?.medium_model ?? "",
-    complex_model: type.routing?.complex_model ?? "",
-    simple_threshold: type.routing?.simple_threshold != null ? String(type.routing.simple_threshold) : "",
-    complex_threshold: type.routing?.complex_threshold != null ? String(type.routing.complex_threshold) : "",
-  };
-}
-
-function toInput(form: FormState): AgentTypeInput {
-  const hasRouting =
-    form.simple_model.trim() !== "" ||
-    form.medium_model.trim() !== "" ||
-    form.complex_model.trim() !== "";
-  return {
-    name: form.name.trim(),
-    description: form.description.trim() || undefined,
-    system_prompt: form.system_prompt.trim() || undefined,
-    provider: form.provider.trim() || undefined,
-    model: form.model.trim() || undefined,
-    tools: form.tools,
-    skills: form.skills,
-    channels: form.channels,
-    routing: hasRouting
-      ? {
-          simple_model: form.simple_model.trim() || "default",
-          medium_model: form.medium_model.trim() || "default",
-          complex_model: form.complex_model.trim() || "default",
-          simple_threshold: Number(form.simple_threshold) || 0,
-          complex_threshold: Number(form.complex_threshold) || 0,
-        }
-      : undefined,
-  };
-}
 
 export function AgentTypesPage() {
   const { t } = useTranslation();
@@ -117,17 +73,35 @@ export function AgentTypesPage() {
   const skillsQuery = useSkills();
   const toolsQuery = useTools();
   const channelsQuery = useChannels();
+  const providersQuery = useProviders();
+
   const channelOptions = useMemo(
     () => (channelsQuery.data ?? []).map((c: { name: string }) => c.name),
     [channelsQuery.data],
   );
-  const skillOptions = useMemo(
-    () => (skillsQuery.data ?? []).map((s: { name: string }) => s.name),
+  const skillCatalog = useMemo(
+    () =>
+      (skillsQuery.data ?? []).map((s: { name: string; description?: string }) => ({
+        name: s.name,
+        description: s.description,
+      })),
     [skillsQuery.data],
   );
-  const toolOptions = useMemo(
-    () => (toolsQuery.data ?? []).map((td: { name: string }) => td.name),
+  const toolCatalog = useMemo(
+    () =>
+      (toolsQuery.data ?? []).map((td: { name: string; description?: string }) => ({
+        name: td.name,
+        description: td.description,
+      })),
     [toolsQuery.data],
+  );
+  const configuredProviders = useMemo(
+    () => (providersQuery.data ?? []).filter((p) => isProviderAvailable(p.auth_status)),
+    [providersQuery.data],
+  );
+  const providerOptions = useMemo(
+    () => configuredProviders.map((p) => ({ name: p.id })),
+    [configuredProviders],
   );
 
   const createType = useCreateAgentType();
@@ -137,21 +111,62 @@ export function AgentTypesPage() {
 
   // Create/edit dialog. `editing` is null while creating, or the type name
   // while editing (the name field is locked on edit so the PUT path stays
-  // stable). The edit form is populated from the detail fetch below.
+  // stable). The full-manifest form is seeded from the detail fetch's
+  // `manifest_toml` below (#7742 parity with the running-agent editor).
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
+  const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
+  const [formChannels, setFormChannels] = useState<string[]>([]);
+  const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
+  const [parseError, setParseError] = useState<string | null>(null);
 
   // Detail fetch that backs the edit form. Disabled until a name is selected.
   const detail = useAgentType(editing ?? "");
   // Track which type we've loaded so a re-render can't clobber in-progress edits.
   const loadedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (editing && detail.data && loadedFor.current !== editing) {
-      setForm(toForm(detail.data));
+    if (!editing || !detail.data || loadedFor.current === editing) return;
+    const toml = detail.data.manifest_toml;
+    if (!toml) {
+      // Nothing to seed from — leave the blank form in place rather than
+      // throwing, so an unexpected response shape doesn't crash the drawer.
       loadedFor.current = editing;
+      return;
     }
-  }, [editing, detail.data]);
+    const parsed = parseManifestToml(toml);
+    if (parsed.ok) {
+      setFormState(parsed.form);
+      setFormExtras(parsed.extras);
+      setFormChannels(asChannelsArray(parsed.extras.topLevel.channels));
+      setParseError(null);
+    } else {
+      setParseError(
+        parsed.message === "json_schema_unsafe_integer"
+          ? t("agents.form.json_schema_unsafe_integer")
+          : parsed.message,
+      );
+    }
+    loadedFor.current = editing;
+  }, [editing, detail.data, t]);
+
+  // Model catalog for the form's provider/model pickers — filtered by
+  // whichever provider is currently selected, gated to while the dialog
+  // is open so it isn't polled at page load.
+  const modelsQuery = useModels(
+    { provider: formState.model.provider },
+    { enabled: formOpen && !!formState.model.provider.trim() },
+  );
+  const modelOptions = useMemo(
+    () =>
+      (modelsQuery.data?.models ?? []).map((m) => ({ provider: m.provider, id: m.id })),
+    [modelsQuery.data?.models],
+  );
+  const mcpServersQuery = useMcpServers({ enabled: formOpen, refetchInterval: false });
+  const mcpCatalog = useMemo(
+    () => (mcpServersQuery.data?.configured ?? []).map((s) => ({ name: s.name })),
+    [mcpServersQuery.data],
+  );
 
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
@@ -163,19 +178,35 @@ export function AgentTypesPage() {
   function openCreate() {
     setEditing(null);
     loadedFor.current = null;
-    setForm(EMPTY_FORM);
+    setFormState(emptyManifestForm());
+    setFormExtras(emptyManifestExtras());
+    setFormChannels([]);
+    setFormErrors(new Set());
+    setParseError(null);
     setFormOpen(true);
   }
 
   function openEdit(type: AgentTypeSummary) {
     setEditing(type.name);
     loadedFor.current = null;
-    setForm(EMPTY_FORM);
+    setFormState(emptyManifestForm());
+    setFormExtras(emptyManifestExtras());
+    setFormChannels([]);
+    setFormErrors(new Set());
+    setParseError(null);
     setFormOpen(true);
   }
 
   function submitForm() {
-    const input = toInput(form);
+    const errors = validateManifestForm(formState);
+    setFormErrors(new Set(errors));
+    if (errors.length > 0) return;
+    const extrasToSend: ManifestExtras = {
+      ...formExtras,
+      topLevel: withChannelsExtra(formExtras.topLevel, formChannels),
+    };
+    const manifest_toml = serializeManifestForm(formState, extrasToSend);
+    const input: AgentTypeInput = { name: formState.name.trim(), manifest_toml };
     if (!input.name) return;
     if (editing) {
       updateType.mutate(
@@ -248,7 +279,7 @@ export function AgentTypesPage() {
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {types.map((type) => (
-            <Card key={type.name} padding="md" className="flex flex-col gap-3">
+            <Card key={`${type.source}:${type.name}`} padding="md" className="flex flex-col gap-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <h3 className="truncate text-sm font-bold text-text-main">
@@ -298,163 +329,56 @@ export function AgentTypesPage() {
         </div>
       )}
 
-      {/* Create / edit dialog — structured form */}
+      {/* Create / edit dialog — full manifest editor (#7742), reusing
+          AgentManifestForm the same way the running-agent editor
+          (AgentsPage) does. Seeded from the detail GET's `manifest_toml`
+          and saved as a full-manifest replacement via
+          `PUT /api/agent-types/{name}` (or the create-time equivalent on
+          `POST /api/agent-types`) so every manifest field this form covers —
+          not just the old 7-field flat shape — round-trips intact. */}
       <Modal
         isOpen={formOpen}
         onClose={() => setFormOpen(false)}
         title={editing ? t("agentTypes.edit") : t("agentTypes.create")}
-        size="lg"
+        size="2xl"
       >
         {editLoading ? (
           <div className="flex h-48 items-center justify-center">
             <Loader2 className="h-5 w-5 animate-spin text-text-dim" />
           </div>
+        ) : parseError ? (
+          <p className="text-xs text-error">
+            {t("agents.form.toml_parse_error", { msg: parseError })}
+          </p>
         ) : (
           <div className="space-y-4">
-            <Input
-              label={t("agentTypes.name")}
-              value={form.name}
-              disabled={!!editing}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-            />
-            <Input
-              label={t("agentTypes.description")}
-              value={form.description}
-              onChange={(e) =>
-                setForm({ ...form, description: e.target.value })
-              }
-            />
-            <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                {t("agentTypes.systemPrompt")}
-              </label>
-              <textarea
-                value={form.system_prompt}
-                rows={6}
-                disabled={formPending}
-                onChange={(e) =>
-                  setForm({ ...form, system_prompt: e.target.value })
-                }
-                className={TEXTAREA_CLASS}
+            <div className="max-h-[65vh] overflow-y-auto pr-1 space-y-4">
+              <AgentManifestForm
+                value={formState}
+                onChange={setFormState}
+                providers={providerOptions}
+                models={modelOptions}
+                invalidFields={formErrors}
+                extras={formExtras}
+                skillCatalog={skillCatalog}
+                toolCatalog={toolCatalog}
+                mcpCatalog={mcpCatalog}
+                nameLocked={!!editing}
               />
-            </div>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                  {t("agentTypes.provider")}
-                </label>
-                <input
-                  value={form.provider}
-                  disabled={formPending}
-                  onChange={(e) => setForm({ ...form, provider: e.target.value })}
-                  placeholder={t("agentTypes.providerHint")}
-                  className={INPUT_CLASS}
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                  {t("agentTypes.model")}
-                </label>
-                <input
-                  value={form.model}
-                  disabled={formPending}
-                  onChange={(e) => setForm({ ...form, model: e.target.value })}
-                  placeholder={t("agentTypes.modelHint")}
-                  className={INPUT_CLASS}
-                />
-              </div>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                {t("agentTypes.skills")}
-              </label>
-              <MultiSelectCmdk
-                options={skillOptions}
-                value={form.skills}
-                onChange={(next) => {
-                  const nextValue =
-                    typeof next === "function" ? next(form.skills) : next;
-                  setForm({ ...form, skills: nextValue });
-                }}
-                placeholder={t("agentTypes.skillsPlaceholder")}
-                allowFreeText
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                {t("agentTypes.channels")}
-              </label>
-              <MultiSelectCmdk
-                options={channelOptions}
-                value={form.channels}
-                onChange={(next) => {
-                  const nextValue =
-                    typeof next === "function" ? next(form.channels) : next;
-                  setForm({ ...form, channels: nextValue });
-                }}
-                placeholder={t("agentTypes.channelsPlaceholder")}
-                allowFreeText
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                {t("agentTypes.tools")}
-              </label>
-              <MultiSelectCmdk
-                options={toolOptions}
-                value={form.tools}
-                onChange={(next) => {
-                  const nextValue =
-                    typeof next === "function" ? next(form.tools) : next;
-                  setForm({ ...form, tools: nextValue });
-                }}
-                placeholder={t("agentTypes.toolsPlaceholder")}
-                allowFreeText
-              />
-            </div>
-            <div className="rounded-lg border border-border-subtle bg-surface/40 p-3 space-y-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                {t("agentTypes.preferredModels")}
-              </p>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <input
-                  value={form.simple_model}
-                  disabled={formPending}
-                  onChange={(e) => setForm({ ...form, simple_model: e.target.value })}
-                  placeholder={t("agentTypes.simpleModel")}
-                  className={INPUT_CLASS}
-                />
-                <input
-                  value={form.medium_model}
-                  disabled={formPending}
-                  onChange={(e) => setForm({ ...form, medium_model: e.target.value })}
-                  placeholder={t("agentTypes.mediumModel")}
-                  className={INPUT_CLASS}
-                />
-                <input
-                  value={form.complex_model}
-                  disabled={formPending}
-                  onChange={(e) => setForm({ ...form, complex_model: e.target.value })}
-                  placeholder={t("agentTypes.complexModel")}
-                  className={INPUT_CLASS}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <input
-                  type="number"
-                  value={form.simple_threshold}
-                  disabled={formPending}
-                  onChange={(e) => setForm({ ...form, simple_threshold: e.target.value })}
-                  placeholder={t("agentTypes.simpleThreshold")}
-                  className={INPUT_CLASS}
-                />
-                <input
-                  type="number"
-                  value={form.complex_threshold}
-                  disabled={formPending}
-                  onChange={(e) => setForm({ ...form, complex_threshold: e.target.value })}
-                  placeholder={t("agentTypes.complexThreshold")}
-                  className={INPUT_CLASS}
+              <div className="rounded-xl border border-border-subtle/60 bg-surface/40 p-3 space-y-2.5">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
+                  {t("agentTypes.channels")}
+                </p>
+                <MultiSelectCmdk
+                  options={channelOptions}
+                  value={formChannels}
+                  onChange={(next) => {
+                    const nextValue =
+                      typeof next === "function" ? next(formChannels) : next;
+                    setFormChannels(nextValue);
+                  }}
+                  placeholder={t("agentTypes.channelsPlaceholder")}
+                  allowFreeText
                 />
               </div>
             </div>
@@ -469,7 +393,7 @@ export function AgentTypesPage() {
               <Button
                 variant="primary"
                 size="sm"
-                disabled={!form.name.trim() || formPending}
+                disabled={!formState.name.trim() || formPending}
                 onClick={submitForm}
               >
                 {formPending && <Loader2 className="h-4 w-4 animate-spin" />}

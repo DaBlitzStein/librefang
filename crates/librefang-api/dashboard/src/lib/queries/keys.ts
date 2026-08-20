@@ -21,7 +21,9 @@ export const agentKeys = {
     [...agentKeys.lists(), opts] as const,
   details: () => [...agentKeys.all, "detail"] as const,
   detail: (id: string) => [...agentKeys.details(), id] as const,
-  templates: () => [...agentKeys.all, "templates"] as const,
+  // Lightweight name+description list for the quick-spawn picker. Distinct
+  // from `agentTypeKeys` below, which backs the full Agent Types CRUD page.
+  typeOptions: () => [...agentKeys.all, "type-options"] as const,
   sessions: (agentId: string) =>
     [...agentKeys.all, "sessions", agentId] as const,
   // History snapshot for a single (agent, session) pair — hydrates ChatPage
@@ -54,6 +56,24 @@ export const agentKeys = {
   // PUT only invalidates the skill read, not the tool read.
   skills: (agentId: string) =>
     [...agentKeys.all, "skills", agentId] as const,
+  // Per-agent MCP server grant (#6565 follow-up) — no dedicated GET hook
+  // reads this yet (the grant is read off `agentKeys.detail()`'s
+  // `mcp_servers` / `mcp_servers_mode` fields), but the mutation still
+  // invalidates this subtree for forward compatibility with a future
+  // `GET /agents/{id}/mcp_servers` hook.
+  mcpServers: (agentId: string) =>
+    [...agentKeys.all, "mcpServers", agentId] as const,
+  // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest
+  // editor, distinct from `detail(id)`'s curated JSON projection.
+  manifest: (agentId: string) =>
+    [...agentKeys.all, "manifest", agentId] as const,
+  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
+  // Channels section. Named distinctly from `channelKeys` (the
+  // instance-wide `/api/channels` integration domain) to avoid confusion
+  // between "channels this agent is reachable from" and "channels
+  // configured on this instance".
+  channels: (agentId: string) =>
+    [...agentKeys.all, "channels", agentId] as const,
 };
 
 export const agentTypeKeys = {

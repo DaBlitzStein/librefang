@@ -1,12 +1,12 @@
 # System & Configuration API
 
-Endpoints for system health, configuration, templates, sessions, task queue, backup/restore, migration, and UI bindings.
+Endpoints for system health, configuration, agent types, sessions, task queue, backup/restore, migration, and UI bindings.
 
-## Template Endpoints
+## Agent Type Endpoints
 
-### GET /api/templates
+### GET /api/agent-types
 
-List available agent templates from the agents directory.
+List available agent types from the agents directory. `GET /api/templates` is a deprecated alias of this endpoint — an agent type IS a template, so both spellings resolve to the same handler, but new integrations should use `/api/agent-types`.
 
 **Response** `200 OK`:
 
@@ -28,9 +28,9 @@ List available agent templates from the agents directory.
 }
 ```
 
-### GET /api/templates/&lbrace;name&rbrace;
+### GET /api/agent-types/&lbrace;name&rbrace;
 
-Get a specific template's manifest and raw TOML.
+Get a specific agent type's manifest and raw TOML. `GET /api/templates/{name}` remains available as a deprecated alias.
 
 **Response** `200 OK`:
 

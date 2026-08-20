@@ -13,8 +13,9 @@ use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
 use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::kernel_handle::SessionWriter;
-use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest, ResetScope};
+use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest, ModelMode, ResetScope};
 use librefang_types::i18n::ErrorTranslator;
+use librefang_types::model_profile::{AgentRouterOverride, CostTier};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
@@ -193,6 +194,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_channels).put(set_agent_channels),
         )
         .route(
+            "/agents/{id}/model_routing",
+            axum::routing::get(get_agent_model_routing).put(set_agent_model_routing),
+        )
+        .route(
             "/agents/{id}/identity",
             axum::routing::patch(update_agent_identity),
         )
@@ -212,6 +217,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route(
             "/agents/{id}/reload",
             axum::routing::post(reload_agent_manifest),
+        )
+        .route(
+            "/agents/{id}/manifest",
+            axum::routing::get(get_agent_manifest_toml),
         )
         .route(
             "/agents/{id}/files",

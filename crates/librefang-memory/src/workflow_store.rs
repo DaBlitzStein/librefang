@@ -35,6 +35,10 @@ pub struct WorkflowRunRow {
     pub paused_variables: Option<String>,
     pub paused_current_input: Option<String>,
     pub step_results: String,
+    /// Total number of steps in the workflow, copied at run creation so a
+    /// run reloaded after a daemon restart still reports real progress
+    /// instead of "step X of 0" (#6504).
+    pub total_steps: i64,
     pub started_at: String,
     pub completed_at: Option<String>,
     pub created_at: String,
@@ -83,12 +87,12 @@ impl WorkflowStore {
                 id, workflow_id, workflow_name, state, input, output, error,
                 resume_token, pause_reason, paused_at, paused_step_index,
                 paused_variables, paused_current_input,
-                step_results, started_at, completed_at, owner_agent_id
+                step_results, started_at, completed_at, owner_agent_id, total_steps
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
                 ?12, ?13,
-                ?14, ?15, ?16, ?17
+                ?14, ?15, ?16, ?17, ?18
             ) ON CONFLICT(id) DO UPDATE SET
                 state = excluded.state,
                 input = excluded.input,
@@ -102,7 +106,8 @@ impl WorkflowStore {
                 paused_current_input = excluded.paused_current_input,
                 step_results = excluded.step_results,
                 completed_at = excluded.completed_at,
-                owner_agent_id = excluded.owner_agent_id",
+                owner_agent_id = excluded.owner_agent_id,
+                total_steps = excluded.total_steps",
             rusqlite::params![
                 row.id,
                 row.workflow_id,
@@ -121,6 +126,7 @@ impl WorkflowStore {
                 row.started_at,
                 row.completed_at,
                 row.owner_agent_id,
+                row.total_steps,
             ],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("workflow upsert failed: {e}")))?;
@@ -135,7 +141,8 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at, owner_agent_id
+                        step_results, started_at, completed_at, created_at, owner_agent_id,
+                        total_steps
                  FROM workflow_runs WHERE id = ?1",
             )
             .map_err(|e| {
@@ -163,7 +170,8 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at, owner_agent_id
+                        step_results, started_at, completed_at, created_at, owner_agent_id,
+                        total_steps
                  FROM workflow_runs WHERE state = ?1 ORDER BY started_at DESC"
                     .to_string(),
                 vec![Box::new(state.to_string()) as Box<dyn rusqlite::types::ToSql>],
@@ -172,7 +180,8 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at, owner_agent_id
+                        step_results, started_at, completed_at, created_at, owner_agent_id,
+                        total_steps
                  FROM workflow_runs ORDER BY started_at DESC"
                     .to_string(),
                 vec![],
@@ -239,18 +248,19 @@ impl WorkflowStore {
                     id, workflow_id, workflow_name, state, input, output, error,
                     resume_token, pause_reason, paused_at, paused_step_index,
                     paused_variables, paused_current_input,
-                    step_results, started_at, completed_at, created_at
+                    step_results, started_at, completed_at, created_at, total_steps
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11,
                     ?12, ?13,
-                    ?14, ?15, ?16, ?17
+                    ?14, ?15, ?16, ?17, ?18
                 ) ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
                     output = excluded.output,
                     error = excluded.error,
                     step_results = excluded.step_results,
-                    completed_at = excluded.completed_at",
+                    completed_at = excluded.completed_at,
+                    total_steps = excluded.total_steps",
                 rusqlite::params![
                     row.id,
                     row.workflow_id,
@@ -269,6 +279,7 @@ impl WorkflowStore {
                     row.started_at,
                     row.completed_at,
                     row.created_at,
+                    row.total_steps,
                 ],
             )
             .map_err(|e| {
@@ -319,6 +330,7 @@ fn row_from_sqlite(row: &rusqlite::Row<'_>) -> Result<WorkflowRunRow, rusqlite::
         completed_at: row.get(15)?,
         created_at: row.get(16)?,
         owner_agent_id: row.get(17)?,
+        total_steps: row.get(18)?,
     })
 }
 
@@ -352,6 +364,7 @@ mod tests {
             paused_variables: None,
             paused_current_input: None,
             step_results: "[]".to_string(),
+            total_steps: 0,
             started_at: "2026-05-06T00:00:00Z".to_string(),
             completed_at: None,
             created_at: "2026-05-06T00:00:00Z".to_string(),
@@ -369,6 +382,25 @@ mod tests {
         assert_eq!(loaded.state, "running");
         assert_eq!(loaded.workflow_name, "test-workflow");
         assert_eq!(loaded.input, "hello world");
+    }
+
+    #[test]
+    fn total_steps_round_trips_through_persistence() {
+        // #6504: a run created with N steps must still report N steps
+        // after being written to and re-read from SQLite, not the
+        // hardcoded 0 that `row_to_workflow_run` used to fall back to
+        // when the column didn't exist.
+        let store = in_memory_store();
+        let mut row = sample_row("run-1", "running");
+        row.total_steps = 4;
+        store.upsert_run(&row).unwrap();
+
+        let loaded = store.get_run("run-1").unwrap().expect("row must exist");
+        assert_eq!(loaded.total_steps, 4);
+
+        let listed = store.list_runs(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].total_steps, 4);
     }
 
     #[test]

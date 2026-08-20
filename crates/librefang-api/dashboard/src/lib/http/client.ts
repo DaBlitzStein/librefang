@@ -23,10 +23,12 @@ export {
   listAgentTypes,
   getAgentType,
   getAgentDetail,
+  getAgentManifest,
+  getAgentChannels,
   getAgentStats,
   listAgentEvents,
   listAgentSessions,
-  listAgentTemplates,
+  listAgentTypeOptions,
   listPromptVersions,
   listPromptsOverview,
   listExperiments,
@@ -144,7 +146,7 @@ export {
   getAgentTools,
   // per-agent skill assignment — read (#4917)
   getAgentSkills,
-  getAgentTemplateToml,
+  getAgentTypeToml,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -216,6 +218,10 @@ export {
   updateAgentTools,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
+  // per-agent MCP server grant — write (#6565 follow-up)
+  setAgentMcpServers,
+  // per-agent channel allowlist — write (#7742)
+  setAgentChannels,
   createAgentSession,
   switchAgentSession,
   deleteSession,

@@ -1,7 +1,7 @@
 //! Agent selection + creation: list running agents, template picker, custom builder.
 //! Overhauled with search/filter, state badges, detail view, and new actions.
 
-use crate::templates::{self, AgentTemplate};
+use crate::templates::{self, AgentType};
 use crate::tui::theme;
 use crate::tui::widgets;
 use librefang_kernel::AgentSubsystemApi;
@@ -28,7 +28,7 @@ const TOOL_OPTIONS: &[(&str, &str)] = &[
 
 const DEFAULT_TOOLS: &[bool] = &[true, false, true, true, true, true, false, false, false];
 
-const COST_BUDGET_OPTIONS: &[&str] = &["default", "cheap", "medium", "expensive"];
+pub(crate) const COST_BUDGET_OPTIONS: &[&str] = &["default", "cheap", "medium", "expensive"];
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum AgentSubScreen {
@@ -39,7 +39,7 @@ pub enum AgentSubScreen {
     /// Pick creation method: template or custom
     CreateMethod,
     /// Pick a template
-    TemplatePicker,
+    AgentTypePicker,
     /// Custom builder: name
     CustomName,
     /// Custom builder: description
@@ -87,9 +87,9 @@ pub struct AgentSelectState {
     // Create method
     pub create_method_list: ListState,
 
-    // Template picker
-    pub templates: Vec<AgentTemplate>,
-    pub template_list: ListState,
+    // Agent type picker
+    pub agent_types: Vec<AgentType>,
+    pub agent_type_list: ListState,
 
     // Custom builder
     pub custom_name: String,
@@ -181,10 +181,24 @@ pub enum AgentAction {
     UpdateSkills { id: String, skills: Vec<String> },
     /// Update MCP servers for an agent.
     UpdateMcpServers { id: String, servers: Vec<String> },
+    /// Update model routing mode + router override for an agent.
+    UpdateModelRouting {
+        id: String,
+        /// "fixed" or "flexible".
+        mode: String,
+        /// Allowed profile names (only meaningful when `mode == "flexible"`).
+        allowed_profiles: Vec<String>,
+        /// Cost budget tier ("cheap"/"medium"/"expensive"), `None` = no cap.
+        cost_budget: Option<String>,
+    },
     /// Fetch skills/mcp data for an agent.
     FetchAgentSkills(String),
     /// Fetch MCP data for an agent.
     FetchAgentMcpServers(String),
+    /// Fetch the current model routing state for an agent (mode + router
+    /// override), so the editor starts from the agent's real config instead
+    /// of stale in-memory state left over from a previous screen.
+    FetchAgentModelRouting(String),
     /// Load prompts library from API.
     LoadPrompts,
     /// Load router profiles from the kernel/config.
@@ -203,8 +217,8 @@ impl AgentSelectState {
             filtered_indices: Vec::new(),
             detail: None,
             create_method_list: ListState::default(),
-            templates: Vec::new(),
-            template_list: ListState::default(),
+            agent_types: Vec::new(),
+            agent_type_list: ListState::default(),
             custom_name: String::new(),
             custom_desc: String::new(),
             custom_prompt: String::new(),
@@ -230,7 +244,7 @@ impl AgentSelectState {
         self.sub = AgentSubScreen::AgentList;
         self.list.select(Some(0));
         self.create_method_list.select(Some(0));
-        self.template_list.select(Some(0));
+        self.agent_type_list.select(Some(0));
         self.custom_name.clear();
         self.custom_desc.clear();
         self.custom_prompt.clear();
@@ -371,11 +385,11 @@ impl AgentSelectState {
         }
     }
 
-    fn load_templates(&mut self) {
-        if self.templates.is_empty() {
-            self.templates = templates::load_all_templates();
+    fn load_agent_types(&mut self) {
+        if self.agent_types.is_empty() {
+            self.agent_types = templates::load_all_agent_types();
         }
-        self.template_list.select(Some(0));
+        self.agent_type_list.select(Some(0));
     }
 
     /// Build detail from daemon agent.
@@ -413,7 +427,7 @@ impl AgentSelectState {
             AgentSubScreen::AgentList => self.handle_agent_list(key),
             AgentSubScreen::AgentDetail => self.handle_detail(key),
             AgentSubScreen::CreateMethod => self.handle_create_method(key),
-            AgentSubScreen::TemplatePicker => self.handle_template_picker(key),
+            AgentSubScreen::AgentTypePicker => self.handle_agent_type_picker(key),
             AgentSubScreen::CustomName => self.handle_custom_name(key),
             AgentSubScreen::CustomDesc => self.handle_custom_desc(key),
             AgentSubScreen::CustomPrompt => self.handle_custom_prompt(key),
@@ -547,10 +561,15 @@ impl AgentSelectState {
                     return AgentAction::FetchAgentMcpServers(id);
                 }
             }
-            KeyCode::Char('r') if self.detail.is_some() => {
-                // Edit model routing for this agent
-                self.sub = AgentSubScreen::EditModelRouting;
-                return AgentAction::LoadRouterProfiles;
+            KeyCode::Char('r') => {
+                // Edit model routing for this agent — fetch the agent's
+                // actual current mode/override so Enter doesn't later save
+                // stale state left over from a previous screen (#7741).
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.sub = AgentSubScreen::EditModelRouting;
+                    return AgentAction::FetchAgentModelRouting(id);
+                }
             }
             _ => {}
         }
@@ -575,13 +594,13 @@ impl AgentSelectState {
             KeyCode::Enter => {
                 match self.create_method_list.selected() {
                     Some(0) => {
-                        self.load_templates();
-                        if self.templates.is_empty() {
-                            // No templates, go straight to custom
+                        self.load_agent_types();
+                        if self.agent_types.is_empty() {
+                            // No agent types, go straight to custom
                             self.custom_name.clear();
                             self.sub = AgentSubScreen::CustomName;
                         } else {
-                            self.sub = AgentSubScreen::TemplatePicker;
+                            self.sub = AgentSubScreen::AgentTypePicker;
                         }
                     }
                     Some(1) => {
@@ -600,30 +619,30 @@ impl AgentSelectState {
         AgentAction::Continue
     }
 
-    fn handle_template_picker(&mut self, key: KeyEvent) -> AgentAction {
+    fn handle_agent_type_picker(&mut self, key: KeyEvent) -> AgentAction {
         match key.code {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::CreateMethod;
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                let i = self.template_list.selected().unwrap_or(0);
-                let total = self.templates.len();
+                let i = self.agent_type_list.selected().unwrap_or(0);
+                let total = self.agent_types.len();
                 let next = if i == 0 {
                     total.saturating_sub(1)
                 } else {
                     i - 1
                 };
-                self.template_list.select(Some(next));
+                self.agent_type_list.select(Some(next));
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let i = self.template_list.selected().unwrap_or(0);
-                let next = (i + 1) % self.templates.len().max(1);
-                self.template_list.select(Some(next));
+                let i = self.agent_type_list.selected().unwrap_or(0);
+                let next = (i + 1) % self.agent_types.len().max(1);
+                self.agent_type_list.select(Some(next));
             }
             KeyCode::Enter => {
-                if let Some(idx) = self.template_list.selected() {
-                    if idx < self.templates.len() {
-                        let toml = self.templates[idx].content.clone();
+                if let Some(idx) = self.agent_type_list.selected() {
+                    if idx < self.agent_types.len() {
+                        let toml = self.agent_types[idx].content.clone();
                         return AgentAction::CreatedManifest(toml);
                     }
                 }
@@ -778,8 +797,13 @@ impl AgentSelectState {
                 *checked = !*checked;
             }
             KeyCode::Enter => {
-                // Advance to model routing configuration
+                // Advance to model routing configuration. This screen was
+                // never wired to fetch the router profile catalog at all
+                // (pre-existing gap, `available_router_profiles` stayed
+                // empty), so load it now that we're about to show the
+                // flexible-mode profile picker.
                 self.sub = AgentSubScreen::CustomModelRouting;
+                return AgentAction::LoadRouterProfiles;
             }
             _ => {}
         }
@@ -939,7 +963,28 @@ impl AgentSelectState {
                 };
             }
             KeyCode::Enter => {
-                // Save model routing — return to detail (for now just go back)
+                // Save model routing to the backend (#7741 — this used to
+                // silently discard the edit and just navigate back).
+                if let Some(ref detail) = self.detail {
+                    let mode = self.model_mode.clone();
+                    let allowed_profiles: Vec<String> = self
+                        .router_profiles
+                        .iter()
+                        .filter(|(_, allowed)| *allowed)
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    let cost_budget = if self.cost_budget_idx == 0 {
+                        None
+                    } else {
+                        Some(COST_BUDGET_OPTIONS[self.cost_budget_idx].to_string())
+                    };
+                    return AgentAction::UpdateModelRouting {
+                        id: detail.id.clone(),
+                        mode,
+                        allowed_profiles,
+                        cost_budget,
+                    };
+                }
                 self.sub = AgentSubScreen::AgentDetail;
             }
             _ => {}
@@ -1046,7 +1091,13 @@ impl AgentSelectState {
             .collect();
         let mcp_str = selected_mcp.join(", ");
 
-        // Model routing section
+        // Model routing section. `mode = "flexible"` must be set explicitly
+        // here — omitting it left `ModelConfig::mode` at its `#[default]`
+        // Fixed value even when the wizard collected a router_override,
+        // so a "flexible" custom agent silently spawned as fixed-mode.
+        // `cost_budget` is only emitted for a real `CostTier` — `"default"`
+        // (index 0 / no cap) isn't a valid `CostTier` variant and would
+        // fail TOML deserialization of the whole manifest if written out.
         let routing_section = if self.model_mode == "flexible" {
             let allowed_profiles: Vec<String> = self
                 .router_profiles
@@ -1055,14 +1106,23 @@ impl AgentSelectState {
                 .map(|(name, _)| format!("\"{}\"", name))
                 .collect();
             let profiles_str = allowed_profiles.join(", ");
-            let cost_budget = COST_BUDGET_OPTIONS[self.cost_budget_idx];
+            let cost_budget_line = if self.cost_budget_idx == 0 {
+                String::new()
+            } else {
+                format!(
+                    r#"cost_budget = "{}"
+"#,
+                    COST_BUDGET_OPTIONS[self.cost_budget_idx]
+                )
+            };
             format!(
                 r#"
+mode = "flexible"
+
 [model.router_override]
 fixed = false
 allowed_profiles = [{profiles_str}]
-cost_budget = "{cost_budget}"
-"#
+{cost_budget_line}"#
             )
         } else {
             String::new()
@@ -1138,7 +1198,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::EditModelRouting
         | AgentSubScreen::PromptPicker => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
-        AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
+        AgentSubScreen::AgentTypePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
         AgentSubScreen::CustomDesc => crate::i18n::t("tui-agents-title-custom-desc"),
         AgentSubScreen::CustomPrompt => crate::i18n::t("tui-agents-title-custom-prompt"),
@@ -1177,7 +1237,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
 
     match state.sub {
         AgentSubScreen::CreateMethod => draw_create_method(f, inner, state),
-        AgentSubScreen::TemplatePicker => draw_template_picker(f, inner, state),
+        AgentSubScreen::AgentTypePicker => draw_agent_type_picker(f, inner, state),
         AgentSubScreen::CustomName => draw_text_input(
             f,
             inner,
@@ -1588,14 +1648,14 @@ fn draw_create_method(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
     );
 }
 
-fn draw_template_picker(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
+fn draw_agent_type_picker(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
     let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(area);
 
     let items: Vec<ListItem> = state
-        .templates
+        .agent_types
         .iter()
         .map(|t| {
-            let hint = templates::template_display_hint(t);
+            let hint = templates::agent_type_display_hint(t);
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("  {:<20}", t.name),
@@ -1608,7 +1668,7 @@ fn draw_template_picker(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
 
     let list = widgets::themed_list(items);
 
-    f.render_stateful_widget(list, chunks[0], &mut state.template_list);
+    f.render_stateful_widget(list, chunks[0], &mut state.agent_type_list);
 
     f.render_widget(
         widgets::hint_bar(&crate::i18n::t("tui-agents-hints-navigate")),
@@ -2014,5 +2074,118 @@ mod tests {
             !toml.contains("max_llm_tokens_per_hour = 200000"),
             "template must not re-introduce the 200000 hourly cap"
         );
+    }
+
+    /// #7741 — Enter on the model-routing editor used to just navigate back
+    /// to the detail screen without ever emitting an action, so the edit
+    /// was silently discarded. This asserts Enter now produces a save
+    /// action carrying exactly what the editor state holds.
+    #[test]
+    fn edit_model_routing_enter_emits_update_action_with_edited_values() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::EditModelRouting;
+        state.detail = Some(AgentDetail {
+            id: "agent-123".to_string(),
+            name: "test-agent".to_string(),
+            ..Default::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_profiles = vec![("coder".to_string(), true), ("writer".to_string(), false)];
+        state.cost_budget_idx = 2; // COST_BUDGET_OPTIONS[2] == "medium"
+
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match action {
+            AgentAction::UpdateModelRouting {
+                id,
+                mode,
+                allowed_profiles,
+                cost_budget,
+            } => {
+                assert_eq!(id, "agent-123");
+                assert_eq!(mode, "flexible");
+                assert_eq!(allowed_profiles, vec!["coder".to_string()]);
+                assert_eq!(cost_budget, Some("medium".to_string()));
+            }
+            AgentAction::Continue => panic!(
+                "Enter must persist the edited model routing instead of silently discarding it"
+            ),
+            _ => panic!("Enter on the model-routing editor produced an unexpected action"),
+        }
+        // The screen itself must not flip away before the save round-trips
+        // through the backend — that transition happens on
+        // AgentModelRoutingUpdated, not here.
+        assert!(matches!(state.sub, AgentSubScreen::EditModelRouting));
+    }
+
+    /// A fixed-mode edit must clear any previously-set router override
+    /// rather than resending stale flexible-mode profile/budget state.
+    #[test]
+    fn edit_model_routing_enter_fixed_mode_clears_override_fields() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::EditModelRouting;
+        state.detail = Some(AgentDetail {
+            id: "agent-456".to_string(),
+            ..Default::default()
+        });
+        state.model_mode = "fixed".to_string();
+        state.router_profiles = vec![("coder".to_string(), true)];
+        state.cost_budget_idx = 0; // "default" — no cap
+
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match action {
+            AgentAction::UpdateModelRouting {
+                mode, cost_budget, ..
+            } => {
+                assert_eq!(mode, "fixed");
+                assert_eq!(cost_budget, None);
+            }
+            _ => panic!("Enter on the model-routing editor produced an unexpected action"),
+        }
+    }
+
+    /// #7741 (adjacent bug found while fixing the editor no-op): the custom
+    /// creation wizard collected a router_override for "flexible" mode but
+    /// never wrote `mode = "flexible"` to the manifest, so the agent
+    /// silently spawned in fixed mode. It also unconditionally wrote
+    /// `cost_budget = "default"` for the default/no-cap selection, which is
+    /// not a valid `CostTier` and would fail manifest TOML parsing.
+    #[test]
+    fn custom_agent_flexible_routing_emits_mode_and_valid_toml() {
+        let mut state = AgentSelectState::new();
+        state.custom_name = "flex-agent".to_string();
+        state.custom_desc = "desc".to_string();
+        state.custom_prompt = "prompt".to_string();
+        state.model_mode = "flexible".to_string();
+        state.router_profiles = vec![("coder".to_string(), true)];
+        state.cost_budget_idx = 0; // "default" — must not become an invalid CostTier value
+
+        let toml_str = state.build_custom_toml();
+
+        assert!(
+            toml_str.contains("mode = \"flexible\""),
+            "flexible mode must be persisted on the manifest, not just router_override:\n{toml_str}"
+        );
+        assert!(
+            !toml_str.contains("cost_budget = \"default\""),
+            "\"default\" is not a valid CostTier and must not be written to the manifest:\n{toml_str}"
+        );
+        // Parse through the exact type production code parses into
+        // (`PATCH /api/agents/{id}` manifest_toml handling), so this also
+        // catches a schema mismatch like an invalid `CostTier` variant, not
+        // just a TOML syntax error.
+        let manifest: librefang_types::agent::AgentManifest = toml::from_str(&toml_str)
+            .unwrap_or_else(|e| panic!("generated manifest must deserialize: {e}\n{toml_str}"));
+        assert_eq!(
+            manifest.model.mode,
+            librefang_types::agent::ModelMode::Flexible
+        );
+        let router_override = manifest
+            .model
+            .router_override
+            .expect("flexible mode must carry a router_override");
+        assert_eq!(router_override.cost_budget, None);
+        assert_eq!(router_override.allowed_profiles, vec!["coder".to_string()]);
     }
 }

@@ -299,3 +299,85 @@ export function removeEdgeById<E extends Edge>(edges: E[], edgeId: string): E[] 
   const nextEdges = edges.filter((edge) => edge.id !== edgeId);
   return nextEdges.length === edges.length ? edges : nextEdges;
 }
+
+/**
+ * Minimal shape of a `workflow_create`-style step as embedded in an
+ * assistant chat message JSON payload — looser than the canonical
+ * `WorkflowStep` API type since it comes straight from `JSON.parse` on
+ * LLM output, not a validated API response.
+ */
+export type WorkflowCreateStepInput = {
+  name?: string;
+  prompt_template?: string;
+  agent?: string | { id?: string; name?: string; type?: string; fresh?: boolean };
+  depends_on?: string[];
+  [key: string]: unknown;
+};
+
+/**
+ * Turn `workflow_create`-shaped steps into canvas nodes/edges (#6943
+ * review — "Save as Workflow" chat action).
+ *
+ * Mirrors the linear-chain-with-DAG-override layout
+ * `CanvasPage.loadWorkflowIntoCanvas` uses for a workflow with no saved
+ * `layout`: steps lay out left-to-right at a fixed spacing; when any step
+ * declares `depends_on`, dashed "depends" edges replace the plain linear
+ * chain. Kept here as a pure, independently-testable function instead of
+ * duplicated inline in `ChatPage.tsx`, and used so the sessionStorage
+ * draft `ChatPage` hands off to `/canvas` is shaped like the
+ * `CanvasDraft` the canvas page actually reads (`{nodes, edges,
+ * workflowName, workflowDescription}`) rather than the raw
+ * `workflow_create` JSON (`{name, description, steps, ...}`), which
+ * `readCanvasDraft()` cannot interpret.
+ */
+export function workflowStepsToCanvasState(
+  steps: WorkflowCreateStepInput[],
+): { nodes: CanvasNode[]; edges: Edge[] } {
+  const nodes: CanvasNode[] = steps.map((s, idx) => {
+    const agent = typeof s.agent === "object" && s.agent !== null ? s.agent : undefined;
+    const agentName = typeof s.agent === "string" ? s.agent : agent?.name;
+    return {
+      id: `node-${idx}`,
+      type: "custom",
+      position: { x: 80 + idx * 260, y: 100 },
+      data: {
+        label: s.name || `Step ${idx + 1}`,
+        prompt: s.prompt_template || "",
+        nodeType: "agent",
+        agentId: agent?.id,
+        agentName,
+        agentType: agent?.type,
+        fresh: agent?.fresh,
+      },
+    };
+  });
+
+  const hasDag = steps.some((step) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
+  let edges: Edge[];
+  if (hasDag) {
+    const nameToId: Record<string, string> = {};
+    steps.forEach((step, idx) => {
+      if (step.name) nameToId[step.name] = `node-${idx}`;
+    });
+    edges = [];
+    steps.forEach((step, idx) => {
+      (step.depends_on || []).forEach((dep, depIdx) => {
+        const sourceId = nameToId[dep];
+        if (sourceId) {
+          edges.push({
+            id: `dep-${idx}-${depIdx}`,
+            source: sourceId,
+            target: `node-${idx}`,
+            style: { strokeDasharray: "6 3" },
+            label: "depends",
+            labelStyle: { fontSize: 9, fill: "#6b7280" },
+          });
+        }
+      });
+    });
+  } else {
+    edges = nodes.slice(0, -1).map((_, i) => ({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` }));
+  }
+
+  return { nodes, edges };
+}
