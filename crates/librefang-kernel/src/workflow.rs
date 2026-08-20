@@ -6800,6 +6800,7 @@ fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
         paused_variables: paused_variables_json,
         paused_current_input: run.paused_current_input.clone(),
         step_results: step_results_json,
+        total_steps: run.total_steps as i64,
         started_at: run.started_at.to_rfc3339(),
         completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
         created_at: run.started_at.to_rfc3339(),
@@ -6926,7 +6927,7 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         state,
         step_results,
         current_step_index: None,
-        total_steps: 0,
+        total_steps: row.total_steps.max(0) as usize,
         output: row.output.clone(),
         error: row.error.clone(),
         started_at,
@@ -9820,6 +9821,9 @@ prompt_template = "do {{x}}"
             assert_eq!(c.output.as_deref(), Some("final output"));
             assert_eq!(c.step_results.len(), 1);
             assert_eq!(c.step_results[0].step_name, "step-1");
+            // #6504: total_steps must survive a persist/reload round trip
+            // instead of coming back hardcoded to 0.
+            assert_eq!(c.total_steps, 1);
 
             let f = engine.runs.get(&failed_id).expect("failed run missing");
             assert!(matches!(f.state, WorkflowRunState::Failed));

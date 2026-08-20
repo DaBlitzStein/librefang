@@ -337,6 +337,214 @@ async fn agent_types_list_includes_created_items() {
 }
 
 // ---------------------------------------------------------------------------
+// #7740 — PUT must not destroy manifest fields outside the flat JSON shape
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_types_update_preserves_unmentioned_manifest_fields() {
+    let _guard = crud_lock().lock().expect("crud lock");
+    let home = agent_types_home();
+    let h = boot().await;
+
+    // Seed a template file directly on disk with fields the flat "agent
+    // type" JSON shape has never covered: [compaction] and
+    // max_history_messages. `#[serde(default)]` on `AgentManifest` means
+    // every other field can be left out of the fixture.
+    let templates_dir = home.path().join("templates");
+    std::fs::create_dir_all(&templates_dir).unwrap();
+    // `max_history_messages` must sit before the `[model]` table header —
+    // once a TOML table opens, every bare `key = value` line belongs to
+    // that table until the next header, so placing it after `[model]`
+    // would silently fold it into `ModelConfig`'s `#[serde(flatten)]
+    // extra_params` bag instead of the top-level `AgentManifest` field.
+    let seed_toml = r#"
+name = "compaction-preserve-test"
+description = "original description"
+max_history_messages = 42
+
+[model]
+provider = "test-provider"
+model = "test-model"
+system_prompt = "You are a test agent."
+
+[compaction]
+threshold_messages = 30
+keep_recent = 10
+"#;
+    std::fs::write(
+        templates_dir.join("compaction-preserve-test.toml"),
+        seed_toml,
+    )
+    .unwrap();
+
+    // PUT with the plain flat body the dashboard sends — it says nothing
+    // about compaction or max_history_messages at all.
+    let body = serde_json::json!({
+        "name": "compaction-preserve-test",
+        "description": "updated description",
+        "system_prompt": "You are an updated test agent.",
+        "provider": "test-provider",
+        "model": "test-model",
+        "tools": [],
+        "skills": []
+    });
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri("/templates/compaction-preserve-test")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Read the file back off disk — the edited field must have changed,
+    // and the fields the request never mentioned must still be there.
+    let content =
+        std::fs::read_to_string(templates_dir.join("compaction-preserve-test.toml")).unwrap();
+    let manifest: librefang_types::agent::AgentManifest = toml::from_str(&content).unwrap();
+    assert_eq!(manifest.description, "updated description");
+    assert_eq!(
+        manifest.max_history_messages,
+        Some(42),
+        "max_history_messages must survive an update that never mentions it: {content}"
+    );
+    let compaction = manifest
+        .compaction
+        .unwrap_or_else(|| panic!("[compaction] must survive the update: {content}"));
+    assert_eq!(compaction.threshold_messages, Some(30));
+    assert_eq!(compaction.keep_recent, Some(10));
+
+    // Cleanup
+    let req = Request::builder()
+        .method(Method::DELETE)
+        .uri("/templates/compaction-preserve-test")
+        .body(Body::empty())
+        .unwrap();
+    let _ = h.app.clone().oneshot(req).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_types_channels_and_routing_round_trip_through_update() {
+    let _guard = crud_lock().lock().expect("crud lock");
+    let h = boot().await;
+
+    // Create with a channel allowlist and preferred-model tiers.
+    let create_body = serde_json::json!({
+        "name": "channels-routing-roundtrip",
+        "description": "round trip test",
+        "system_prompt": "You are a test agent.",
+        "provider": "test-provider",
+        "model": "test-model",
+        "tools": ["file_read"],
+        "skills": ["test-skill"],
+        "channels": ["telegram", "discord"],
+        "routing": {
+            "simple_model": "cheap-1",
+            "medium_model": "mid-1",
+            "complex_model": "big-1",
+            "simple_threshold": 100,
+            "complex_threshold": 900
+        }
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/templates")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // GET — channels + routing must come back (defect 1: manifest_to_agent_type
+    // used to omit both entirely).
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/templates/channels-routing-roundtrip")
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let fetched: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        fetched["channels"]
+            .as_array()
+            .expect("channels must be present after create")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["telegram", "discord"]
+    );
+    assert_eq!(fetched["routing"]["simple_model"], "cheap-1");
+    assert_eq!(fetched["routing"]["medium_model"], "mid-1");
+    assert_eq!(fetched["routing"]["complex_model"], "big-1");
+    assert_eq!(fetched["routing"]["simple_threshold"], 100);
+    assert_eq!(fetched["routing"]["complex_threshold"], 900);
+
+    // PUT with exactly what the GET returned — mirrors the dashboard's edit
+    // flow (toForm() reads the detail GET, toInput() sends the flat shape
+    // straight back on save). Strip the extras the detail GET adds on top
+    // of the flat AgentType shape (source/manifest/manifest_toml) since the
+    // dashboard's AgentTypeInput never sends those back.
+    let mut put_body = fetched.clone();
+    put_body["description"] =
+        serde_json::Value::String("round trip test, saved again".to_string());
+    if let Some(o) = put_body.as_object_mut() {
+        o.remove("source");
+        o.remove("manifest");
+        o.remove("manifest_toml");
+    }
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri("/templates/channels-routing-roundtrip")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&put_body).unwrap()))
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // GET again — channels + routing must still be intact. Before the fix,
+    // the round-trip through the front's toForm()/toInput() pair would have
+    // wiped both back to []/None on this second save.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/templates/channels-routing-roundtrip")
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let refetched: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(refetched["description"], "round trip test, saved again");
+    assert_eq!(
+        refetched["channels"]
+            .as_array()
+            .expect("channels must survive the round trip")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["telegram", "discord"]
+    );
+    assert_eq!(refetched["routing"]["simple_model"], "cheap-1");
+    assert_eq!(refetched["routing"]["medium_model"], "mid-1");
+    assert_eq!(refetched["routing"]["complex_model"], "big-1");
+    assert_eq!(refetched["routing"]["simple_threshold"], 100);
+    assert_eq!(refetched["routing"]["complex_threshold"], 900);
+
+    // Cleanup
+    let req = Request::builder()
+        .method(Method::DELETE)
+        .uri("/templates/channels-routing-roundtrip")
+        .body(Body::empty())
+        .unwrap();
+    let _ = h.app.clone().oneshot(req).await;
+}
+
+// ---------------------------------------------------------------------------
 // TOML injection — ensure special characters are escaped
 // ---------------------------------------------------------------------------
 

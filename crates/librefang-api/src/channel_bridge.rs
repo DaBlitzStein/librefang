@@ -621,10 +621,25 @@ where
 pub struct KernelBridgeAdapter {
     kernel: Arc<dyn KernelApi>,
     started_at: Instant,
-    /// Per-agent extended-thinking preference, keyed by agent id.
-    /// `/think` toggles it; the chat send path applies it as the
-    /// per-turn thinking override.
+    /// Per-conversation extended-thinking preference, keyed by
+    /// [`thinking_pref_key`] (agent + channel + chat_id). `/think` toggles
+    /// it for the conversation it was issued from; the chat send path for
+    /// that same conversation applies it as the per-turn thinking override.
+    /// Process-local by design — see the comment on
+    /// `KernelBridgeAdapter::set_thinking` for why it isn't persisted.
     thinking_prefs: std::sync::Mutex<std::collections::HashMap<String, bool>>,
+}
+
+/// Derive the [`KernelBridgeAdapter::thinking_prefs`] lookup key for a
+/// conversation.
+///
+/// Uses the same `(agent_id, channel, chat_id)` scope as
+/// `SessionId::for_sender_scope` — the formula `/new`, `/reboot`, and
+/// `/compact` already key their per-conversation session resets by (#7701)
+/// — so `/think` in one chat can never bleed into another chat, group, or
+/// the agent's other channels (#7159).
+fn thinking_pref_key(agent_id: AgentId, channel: &str, chat_id: Option<&str>) -> String {
+    SessionId::for_sender_scope(agent_id, channel, chat_id).to_string()
 }
 
 /// Compose the message returned to a channel user when `/approve <id>`
@@ -843,13 +858,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .map(|e| e.manifest.show_progress)
             .unwrap_or(true);
         let language = self.kernel.config_snapshot().language.clone();
-        // Apply the per-agent /think preference as the per-turn override on
-        // the streaming path too — same as the non-streaming send above.
+        // Apply the per-conversation /think preference as the per-turn
+        // override on the streaming path too — same as the non-streaming
+        // send below. Keyed by this same conversation's (channel, chat_id),
+        // so it only ever reads back the pref /think set for this chat.
         let thinking = self
             .thinking_prefs
             .lock()
             .map_err(|e| e.to_string())?
-            .get(&agent_id.0.to_string())
+            .get(&thinking_pref_key(
+                agent_id,
+                &sender.channel,
+                sender.chat_id.as_deref(),
+            ))
             .copied();
         let (event_rx, kernel_handle) = self
             .kernel
@@ -910,12 +931,17 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         } else {
             text
         };
-        // Apply the per-agent /think preference as the per-turn override.
+        // Apply the per-conversation /think preference as the per-turn
+        // override — same conversation scope as the streaming path above.
         let thinking = self
             .thinking_prefs
             .lock()
             .map_err(|e| e.to_string())?
-            .get(&agent_id.0.to_string())
+            .get(&thinking_pref_key(
+                agent_id,
+                &sender.channel,
+                sender.chat_id.as_deref(),
+            ))
             .copied();
         let result = self
             .kernel
@@ -2005,10 +2031,27 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(msg)
     }
 
-    async fn set_thinking(&self, agent_id: AgentId, on: bool) -> Result<String, String> {
-        // Store the per-agent preference and apply it as the per-turn
-        // thinking override on the next chat message.
-        let key = agent_id.0.to_string();
+    async fn set_thinking(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+        on: bool,
+    ) -> Result<String, String> {
+        // Store the preference under the same (agent, channel, chat_id)
+        // scope the reset/reboot/compact commands use, so `/think` affects
+        // only the conversation it was issued from rather than every
+        // conversation this agent has (#7159). Apply it as the per-turn
+        // thinking override on the next message sent in that conversation.
+        //
+        // Kept process-local (not persisted to the memory substrate): this
+        // is a lightweight, per-conversation runtime toggle, not durable
+        // agent configuration — durable thinking config already lives in
+        // the agent's model settings. A daemon restart resetting it back
+        // to the manifest default is an acceptable trade-off against
+        // adding a persistence path for what one `/think on` fully repairs;
+        // the ack below only promises "for this chat", not "forever".
+        let key = thinking_pref_key(agent_id, channel, chat_id);
         {
             let mut prefs = self.thinking_prefs.lock().map_err(|e| e.to_string())?;
             prefs.insert(key, on);
@@ -3550,6 +3593,72 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn reset_channel_session_clears_derived_and_canonical() {
+        // Regression for the proteo /new no-op: the telegram conversation
+        // lived in the agent's canonical session (`entry.session_id`) while
+        // /new reset only the channel-derived sid — the ack was honest
+        // about a dead session. The adapter must clear BOTH when they
+        // differ and report the number of cleared messages.
+        use librefang_testing::MockKernelBuilder;
+        use librefang_types::message::Message;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+        let canonical = kernel
+            .agent_registry()
+            .get(assistant)
+            .expect("assistant entry")
+            .session_id;
+        let derived = SessionId::for_sender_scope(assistant, "telegram", Some("chat-42"));
+        assert_ne!(canonical, derived, "test premise: sids must differ");
+
+        let substrate = kernel.memory_substrate();
+        let mut c = substrate
+            .create_session(assistant)
+            .expect("create canonical seed");
+        c.id = canonical;
+        c.messages = vec![Message::user("canonical history")];
+        substrate.save_session(&c).expect("save canonical seed");
+        let mut d = substrate
+            .create_session(assistant)
+            .expect("create derived seed");
+        d.id = derived;
+        d.messages = vec![Message::user("derived history")];
+        substrate.save_session(&d).expect("save derived seed");
+
+        let adapter = KernelBridgeAdapter {
+            kernel: kernel.clone(),
+            started_at: Instant::now(),
+            thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let reply = adapter
+            .reset_channel_session(assistant, "telegram", Some("chat-42"))
+            .await
+            .expect("reset must succeed");
+        assert!(
+            reply.contains("2 messages cleared"),
+            "ack must report the cleared count, got: {reply}"
+        );
+
+        let c_after = substrate
+            .get_session(canonical)
+            .expect("lookup canonical")
+            .expect("canonical session must still exist (empty)");
+        let d_after = substrate
+            .get_session(derived)
+            .expect("lookup derived")
+            .expect("derived session must still exist (empty)");
+        assert!(c_after.messages.is_empty());
+        assert!(d_after.messages.is_empty());
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn adapter_set_conversation_binding_writes_through_to_substrate() {
         // Write-side injection guard for the H7 fix: the real
         // `KernelBridgeAdapter` must persist `/agent` selections through
@@ -3595,14 +3704,27 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn streaming_send_applies_thinking_pref_set_by_think_command() {
         // Plumbing guard for the /think streaming-path fix: after `/think
-        // on`, the streaming send must read the per-agent pref and reach the
-        // thinking-aware kernel entry instead of hardcoding no override. The
-        // boolean's propagation into the driver call is pinned by the kernel's
-        // `apply_thinking_override` unit tests; here we pin the adapter side:
-        // the pref is stored, the pref read does not fail the send, and the
-        // streaming call returns a live stream. The provider-less test kernel
-        // fails the agent loop at the driver boundary, so the status oneshot
-        // resolves Err after the text stream drains.
+        // on`, the streaming send must read the per-conversation pref and
+        // reach the thinking-aware kernel entry instead of hardcoding no
+        // override. The boolean's propagation into the driver call is
+        // pinned by the kernel's `apply_thinking_override` unit tests;
+        // here we pin the adapter side: the pref is stored under the
+        // conversation-scoped key, the pref read does not fail the send,
+        // and the streaming call is accepted.
+        //
+        // Deliberately does NOT wait for the agent loop's terminal status
+        // (the `status_rx` oneshot `start_stream_text_bridge_with_status`
+        // resolves once the loop finishes). An earlier version of this
+        // test hard-asserted `status.is_err()`, assuming the provider-less
+        // mock kernel always fails fast at the driver boundary; a houko
+        // review on #7159 found that assumption false — the mock harness's
+        // resolve-driver outcome (fast error, slow error, or even success)
+        // is a property of the harness and the sandbox's network
+        // reachability, not of the code under test, and asserting on it
+        // made the test flaky/wrong in either direction. What this test
+        // can honestly pin without depending on that boundary: the send
+        // call is accepted synchronously, and the pref is still readable
+        // under the exact key the send path just read it from.
         use librefang_testing::MockKernelBuilder;
 
         let (kernel, _tmp) = MockKernelBuilder::new().build();
@@ -3619,7 +3741,7 @@ mod tests {
         };
 
         let ack = adapter
-            .set_thinking(assistant, true)
+            .set_thinking(assistant, "telegram", Some("peer-1"), true)
             .await
             .expect("toggle must succeed");
         assert!(ack.contains("enabled"), "unexpected ack: {ack}");
@@ -3631,34 +3753,97 @@ mod tests {
             display_name: "Test".to_string(),
             ..Default::default()
         };
-        let (mut rx, status_rx) = adapter
+        let (rx, status_rx) = adapter
             .send_message_streaming_with_sender_status(assistant, "hello", &sender)
             .await
             .expect("streaming send must start");
+        // The rest of the turn (driver resolution, the agent loop, the
+        // eventual terminal status) runs on its own detached task and is
+        // not this test's concern — drop both ends rather than block on
+        // an outcome the code under test has no control over.
+        drop(rx);
+        drop(status_rx);
 
-        // Drain the text channel concurrently — the status oneshot is only
-        // sent after the text stream fully drains.
-        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let _status = tokio::time::timeout(std::time::Duration::from_secs(30), status_rx)
-            .await
-            .expect("status must resolve within 30s")
-            .expect("status channel must not be dropped");
-        let _ = drain.await;
-        // Deliberately no assertion on the loop's terminal status.
-        // Whether the provider-less test kernel completes the turn or fails it at the driver boundary is a property of whichever driver the mock harness seeds, not of the code under test.
-        // Asserting on it pinned the harness rather than the adapter, and broke as soon as the harness began resolving the loop successfully.
-        //
-        // The adapter-side contract gets pinned instead: the stream started and the status resolved rather than hanging or being dropped (both asserted above), and the pref is still readable under the exact key the send path derives.
-        // That last one is the actual regression this PR fixes — `set_thinking` storing under `agent_id.0.to_string()` while the send path looks the pref up under some other key is what makes `/think` silently inert, and a status assertion cannot see it.
+        // The actual regression this PR fixes (#7159): `set_thinking` used
+        // to key its storage by `agent_id` alone, so `/think` in one
+        // conversation leaked into every other conversation the agent has.
+        // Pinning the exact conversation-scoped key here is what would
+        // have caught it.
         assert_eq!(
             adapter
                 .thinking_prefs
                 .lock()
                 .expect("thinking_prefs lock must not be poisoned")
-                .get(&assistant.0.to_string())
+                .get(&thinking_pref_key(assistant, "telegram", Some("peer-1")))
                 .copied(),
             Some(true),
-            "the /think pref must stay readable under the key the send path derives",
+            "the /think pref must stay readable under the conversation-scoped key the send path derives",
+        );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn think_command_does_not_leak_across_conversations_of_the_same_agent() {
+        // Regression for the #7159 blocker: `set_thinking` used to key its
+        // storage by `agent_id` alone, so `/think on` in one chat silently
+        // changed the agent's behaviour in every other chat, group, and
+        // surface it talks on — even though the ack text promises "for this
+        // chat". This pins the fix: toggling in conversation A must leave
+        // conversation B (same agent, same channel type, different
+        // chat_id) untouched, and must leave a different channel entirely
+        // untouched too.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+
+        let adapter = KernelBridgeAdapter {
+            kernel: kernel.clone(),
+            started_at: Instant::now(),
+            thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+
+        // Toggle ON only in Telegram chat "chat-A".
+        adapter
+            .set_thinking(assistant, "telegram", Some("chat-A"), true)
+            .await
+            .expect("toggle must succeed");
+
+        let read_pref = |channel: &str, chat_id: Option<&str>| {
+            adapter
+                .thinking_prefs
+                .lock()
+                .expect("thinking_prefs lock must not be poisoned")
+                .get(&thinking_pref_key(assistant, channel, chat_id))
+                .copied()
+        };
+
+        assert_eq!(
+            read_pref("telegram", Some("chat-A")),
+            Some(true),
+            "the chat the /think command was issued in must see the pref",
+        );
+        assert_eq!(
+            read_pref("telegram", Some("chat-B")),
+            None,
+            "a DIFFERENT chat_id on the SAME channel and agent must not see chat-A's pref — \
+             this is exactly the isolation break houko blocked #7159 on",
+        );
+        assert_eq!(
+            read_pref("discord", Some("chat-A")),
+            None,
+            "a different channel entirely, even reusing the same chat_id string, must not \
+             see chat-A's pref",
+        );
+        assert_eq!(
+            read_pref("telegram", None),
+            None,
+            "the channel-level scope (no chat_id) must not see the per-chat pref either",
         );
 
         kernel.shutdown();

@@ -368,6 +368,30 @@ impl App {
                     crate::i18n::t_args("tui-mod-agent-mcp-updated", &[("id", &id)]);
                 self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
+            AppEvent::AgentModelRoutingLoaded {
+                mode,
+                allowed_profiles,
+                cost_budget,
+            } => {
+                // Seed the editor from the agent's real current config
+                // rather than leaving whatever the previous screen left in
+                // this shared state (#7741).
+                self.agents.model_mode = mode;
+                self.agents.router_profiles = allowed_profiles
+                    .iter()
+                    .map(|name| (name.clone(), true))
+                    .collect();
+                self.agents.router_profile_cursor = 0;
+                self.agents.cost_budget_idx = cost_budget
+                    .as_deref()
+                    .and_then(|b| agents::COST_BUDGET_OPTIONS.iter().position(|o| *o == b))
+                    .unwrap_or(0);
+            }
+            AppEvent::AgentModelRoutingUpdated(id) => {
+                self.agents.status_msg =
+                    crate::i18n::t_args("tui-mod-agent-model-routing-updated", &[("id", &id)]);
+                self.agents.sub = agents::AgentSubScreen::AgentDetail;
+            }
             AppEvent::PromptsLoaded(prompts) => {
                 self.agents.prompt_list = prompts;
                 self.agents.prompt_list_state.select(Some(0));
@@ -1476,6 +1500,28 @@ impl App {
             agents::AgentAction::FetchAgentMcpServers(id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_mcp_servers(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateModelRouting {
+                id,
+                mode,
+                allowed_profiles,
+                cost_budget,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_model_routing(
+                        backend,
+                        id,
+                        mode,
+                        allowed_profiles,
+                        cost_budget,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
+            agents::AgentAction::FetchAgentModelRouting(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_model_routing(backend, id, self.event_tx.clone());
                 }
             }
             agents::AgentAction::LoadPrompts => {

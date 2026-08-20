@@ -28,7 +28,7 @@ const TOOL_OPTIONS: &[(&str, &str)] = &[
 
 const DEFAULT_TOOLS: &[bool] = &[true, false, true, true, true, true, false, false, false];
 
-const COST_BUDGET_OPTIONS: &[&str] = &["default", "cheap", "medium", "expensive"];
+pub(crate) const COST_BUDGET_OPTIONS: &[&str] = &["default", "cheap", "medium", "expensive"];
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum AgentSubScreen {
@@ -181,10 +181,24 @@ pub enum AgentAction {
     UpdateSkills { id: String, skills: Vec<String> },
     /// Update MCP servers for an agent.
     UpdateMcpServers { id: String, servers: Vec<String> },
+    /// Update model routing mode + router override for an agent.
+    UpdateModelRouting {
+        id: String,
+        /// "fixed" or "flexible".
+        mode: String,
+        /// Allowed profile names (only meaningful when `mode == "flexible"`).
+        allowed_profiles: Vec<String>,
+        /// Cost budget tier ("cheap"/"medium"/"expensive"), `None` = no cap.
+        cost_budget: Option<String>,
+    },
     /// Fetch skills/mcp data for an agent.
     FetchAgentSkills(String),
     /// Fetch MCP data for an agent.
     FetchAgentMcpServers(String),
+    /// Fetch the current model routing state for an agent (mode + router
+    /// override), so the editor starts from the agent's real config instead
+    /// of stale in-memory state left over from a previous screen.
+    FetchAgentModelRouting(String),
     /// Load prompts library from API.
     LoadPrompts,
     /// Load router profiles from the kernel/config.
@@ -547,10 +561,15 @@ impl AgentSelectState {
                     return AgentAction::FetchAgentMcpServers(id);
                 }
             }
-            KeyCode::Char('r') if self.detail.is_some() => {
-                // Edit model routing for this agent
-                self.sub = AgentSubScreen::EditModelRouting;
-                return AgentAction::LoadRouterProfiles;
+            KeyCode::Char('r') => {
+                // Edit model routing for this agent — fetch the agent's
+                // actual current mode/override so Enter doesn't later save
+                // stale state left over from a previous screen (#7741).
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.sub = AgentSubScreen::EditModelRouting;
+                    return AgentAction::FetchAgentModelRouting(id);
+                }
             }
             _ => {}
         }
@@ -778,8 +797,13 @@ impl AgentSelectState {
                 *checked = !*checked;
             }
             KeyCode::Enter => {
-                // Advance to model routing configuration
+                // Advance to model routing configuration. This screen was
+                // never wired to fetch the router profile catalog at all
+                // (pre-existing gap, `available_router_profiles` stayed
+                // empty), so load it now that we're about to show the
+                // flexible-mode profile picker.
                 self.sub = AgentSubScreen::CustomModelRouting;
+                return AgentAction::LoadRouterProfiles;
             }
             _ => {}
         }
@@ -939,7 +963,28 @@ impl AgentSelectState {
                 };
             }
             KeyCode::Enter => {
-                // Save model routing — return to detail (for now just go back)
+                // Save model routing to the backend (#7741 — this used to
+                // silently discard the edit and just navigate back).
+                if let Some(ref detail) = self.detail {
+                    let mode = self.model_mode.clone();
+                    let allowed_profiles: Vec<String> = self
+                        .router_profiles
+                        .iter()
+                        .filter(|(_, allowed)| *allowed)
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    let cost_budget = if self.cost_budget_idx == 0 {
+                        None
+                    } else {
+                        Some(COST_BUDGET_OPTIONS[self.cost_budget_idx].to_string())
+                    };
+                    return AgentAction::UpdateModelRouting {
+                        id: detail.id.clone(),
+                        mode,
+                        allowed_profiles,
+                        cost_budget,
+                    };
+                }
                 self.sub = AgentSubScreen::AgentDetail;
             }
             _ => {}
@@ -1046,7 +1091,13 @@ impl AgentSelectState {
             .collect();
         let mcp_str = selected_mcp.join(", ");
 
-        // Model routing section
+        // Model routing section. `mode = "flexible"` must be set explicitly
+        // here — omitting it left `ModelConfig::mode` at its `#[default]`
+        // Fixed value even when the wizard collected a router_override,
+        // so a "flexible" custom agent silently spawned as fixed-mode.
+        // `cost_budget` is only emitted for a real `CostTier` — `"default"`
+        // (index 0 / no cap) isn't a valid `CostTier` variant and would
+        // fail TOML deserialization of the whole manifest if written out.
         let routing_section = if self.model_mode == "flexible" {
             let allowed_profiles: Vec<String> = self
                 .router_profiles
@@ -1055,14 +1106,23 @@ impl AgentSelectState {
                 .map(|(name, _)| format!("\"{}\"", name))
                 .collect();
             let profiles_str = allowed_profiles.join(", ");
-            let cost_budget = COST_BUDGET_OPTIONS[self.cost_budget_idx];
+            let cost_budget_line = if self.cost_budget_idx == 0 {
+                String::new()
+            } else {
+                format!(
+                    r#"cost_budget = "{}"
+"#,
+                    COST_BUDGET_OPTIONS[self.cost_budget_idx]
+                )
+            };
             format!(
                 r#"
+mode = "flexible"
+
 [model.router_override]
 fixed = false
 allowed_profiles = [{profiles_str}]
-cost_budget = "{cost_budget}"
-"#
+{cost_budget_line}"#
             )
         } else {
             String::new()
@@ -2014,5 +2074,118 @@ mod tests {
             !toml.contains("max_llm_tokens_per_hour = 200000"),
             "template must not re-introduce the 200000 hourly cap"
         );
+    }
+
+    /// #7741 — Enter on the model-routing editor used to just navigate back
+    /// to the detail screen without ever emitting an action, so the edit
+    /// was silently discarded. This asserts Enter now produces a save
+    /// action carrying exactly what the editor state holds.
+    #[test]
+    fn edit_model_routing_enter_emits_update_action_with_edited_values() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::EditModelRouting;
+        state.detail = Some(AgentDetail {
+            id: "agent-123".to_string(),
+            name: "test-agent".to_string(),
+            ..Default::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_profiles = vec![
+            ("coder".to_string(), true),
+            ("writer".to_string(), false),
+        ];
+        state.cost_budget_idx = 2; // COST_BUDGET_OPTIONS[2] == "medium"
+
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match action {
+            AgentAction::UpdateModelRouting {
+                id,
+                mode,
+                allowed_profiles,
+                cost_budget,
+            } => {
+                assert_eq!(id, "agent-123");
+                assert_eq!(mode, "flexible");
+                assert_eq!(allowed_profiles, vec!["coder".to_string()]);
+                assert_eq!(cost_budget, Some("medium".to_string()));
+            }
+            AgentAction::Continue => panic!(
+                "Enter must persist the edited model routing instead of silently discarding it"
+            ),
+            _ => panic!("Enter on the model-routing editor produced an unexpected action"),
+        }
+        // The screen itself must not flip away before the save round-trips
+        // through the backend — that transition happens on
+        // AgentModelRoutingUpdated, not here.
+        assert!(matches!(state.sub, AgentSubScreen::EditModelRouting));
+    }
+
+    /// A fixed-mode edit must clear any previously-set router override
+    /// rather than resending stale flexible-mode profile/budget state.
+    #[test]
+    fn edit_model_routing_enter_fixed_mode_clears_override_fields() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::EditModelRouting;
+        state.detail = Some(AgentDetail {
+            id: "agent-456".to_string(),
+            ..Default::default()
+        });
+        state.model_mode = "fixed".to_string();
+        state.router_profiles = vec![("coder".to_string(), true)];
+        state.cost_budget_idx = 0; // "default" — no cap
+
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match action {
+            AgentAction::UpdateModelRouting {
+                mode, cost_budget, ..
+            } => {
+                assert_eq!(mode, "fixed");
+                assert_eq!(cost_budget, None);
+            }
+            _ => panic!("Enter on the model-routing editor produced an unexpected action"),
+        }
+    }
+
+    /// #7741 (adjacent bug found while fixing the editor no-op): the custom
+    /// creation wizard collected a router_override for "flexible" mode but
+    /// never wrote `mode = "flexible"` to the manifest, so the agent
+    /// silently spawned in fixed mode. It also unconditionally wrote
+    /// `cost_budget = "default"` for the default/no-cap selection, which is
+    /// not a valid `CostTier` and would fail manifest TOML parsing.
+    #[test]
+    fn custom_agent_flexible_routing_emits_mode_and_valid_toml() {
+        let mut state = AgentSelectState::new();
+        state.custom_name = "flex-agent".to_string();
+        state.custom_desc = "desc".to_string();
+        state.custom_prompt = "prompt".to_string();
+        state.model_mode = "flexible".to_string();
+        state.router_profiles = vec![("coder".to_string(), true)];
+        state.cost_budget_idx = 0; // "default" — must not become an invalid CostTier value
+
+        let toml_str = state.build_custom_toml();
+
+        assert!(
+            toml_str.contains("mode = \"flexible\""),
+            "flexible mode must be persisted on the manifest, not just router_override:\n{toml_str}"
+        );
+        assert!(
+            !toml_str.contains("cost_budget = \"default\""),
+            "\"default\" is not a valid CostTier and must not be written to the manifest:\n{toml_str}"
+        );
+        // Parse through the exact type production code parses into
+        // (`PATCH /api/agents/{id}` manifest_toml handling), so this also
+        // catches a schema mismatch like an invalid `CostTier` variant, not
+        // just a TOML syntax error.
+        let manifest: librefang_types::agent::AgentManifest = toml::from_str(&toml_str)
+            .unwrap_or_else(|e| panic!("generated manifest must deserialize: {e}\n{toml_str}"));
+        assert_eq!(manifest.model.mode, librefang_types::agent::ModelMode::Flexible);
+        let router_override = manifest
+            .model
+            .router_override
+            .expect("flexible mode must carry a router_override");
+        assert_eq!(router_override.cost_budget, None);
+        assert_eq!(router_override.allowed_profiles, vec!["coder".to_string()]);
     }
 }

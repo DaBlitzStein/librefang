@@ -428,6 +428,13 @@ fn agent_types_dir() -> std::path::PathBuf {
 }
 
 /// Flatten a manifest into the JSON shape the dashboard expects.
+///
+/// Must emit every field `interface AgentType` in the dashboard's `api.ts`
+/// declares, including `channels` and `routing` — omitting either one here
+/// silently defeats the WebUI's channel-allowlist and model-tier editor: the
+/// form reads `undefined`, renders empty, and the next save (which reuses
+/// this same flat shape) writes the empty value back out, erasing whatever
+/// was actually configured (#7740).
 fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
     serde_json::json!({
         "name": name,
@@ -437,6 +444,8 @@ fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
         "model": m.model.model,
         "tools": m.capabilities.tools,
         "skills": m.skills,
+        "channels": m.channels,
+        "routing": m.routing,
     })
 }
 
@@ -509,24 +518,54 @@ pub async fn update_agent_type(
         return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
     }
 
+    let path = agent_types_dir().join(format!("{name}.toml"));
+    if !path.exists() {
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
+
+    // Non-destructive update (#7740): start from the manifest already on
+    // disk and apply only the fields the request body actually supplies,
+    // instead of rebuilding the whole manifest from the flat 9-key JSON
+    // shape (which used to silently drop [compaction], max_history_messages,
+    // [[triggers]], [resources], [autonomous], mcp_servers, tool_allowlist,
+    // session_mode, workspaces, and every other field on each WebUI save).
+    let existing_content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to read agent-type '{name}' for update: {e}");
+            return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+        }
+    };
+    let existing_manifest: AgentManifest = match toml::from_str(&existing_content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("Invalid existing manifest for agent-type '{name}': {e}");
+            return ApiErrorResponse::internal(t.t("api-error-template-invalid-manifest"))
+                .into_json_tuple();
+        }
+    };
+
     // Pin the manifest name to the URL path segment — the body's
     // "name" field is advisory; the path is authoritative (#6931 review).
     let mut body = body;
     body["name"] = serde_json::Value::String(name.clone());
 
-    let toml_content = librefang_types::agent::agent_type_json_to_toml(&body);
+    let manifest =
+        librefang_types::agent::apply_agent_type_json_to_manifest(existing_manifest, &body);
 
-    let path = agent_types_dir().join(format!("{name}.toml"));
-    if !path.exists() {
-        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
-    }
+    let toml_content = match toml::to_string_pretty(&manifest) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to serialize updated manifest for '{name}': {e}");
+            return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+        }
+    };
 
     if let Err(e) = std::fs::write(&path, &toml_content) {
         tracing::warn!("Failed to write agent-type '{name}': {e}");
         return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
     }
 
-    let manifest: AgentManifest = toml::from_str(&toml_content).unwrap_or_default();
     (
         StatusCode::OK,
         Json(manifest_to_agent_type(&name, &manifest)),

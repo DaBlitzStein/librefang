@@ -1,11 +1,7 @@
 //! Cluster pulled out of mod.rs in #4713 phase 3d.
 //!
-//! Hosts dashboard-driven manifest mutation flows:
-//! `persist_manifest_to_disk`, `set_agent_model`, `reload_agent_from_disk`,
-//! `update_manifest`, `set_agent_skills`, `set_agent_mcp_servers`,
-//! `set_agent_tool_filters`. Each public entry point applies the change
-//! to the in-memory `AgentRegistry` entry, invalidates relevant prompt
-//! caches, and persists the resulting manifest back to `agent.toml`.
+//! Hosts dashboard-driven manifest mutation flows: `persist_manifest_to_disk`, `set_agent_model`, `reload_agent_from_disk`, `update_manifest`, `set_agent_skills`, `set_agent_mcp_servers`, `set_agent_model_routing`, `set_agent_tool_filters`.
+//! Each public entry point applies the change to the in-memory `AgentRegistry` entry, invalidates relevant prompt caches, and persists the resulting manifest back to `agent.toml`.
 //!
 //! Sibling submodule of `kernel::mod`, so it retains access to
 //! `LibreFangKernel`'s private fields and inherent methods without any
@@ -415,7 +411,20 @@ impl LibreFangKernel {
             new_manifest.workspace = entry.manifest.workspace.clone();
         }
         new_manifest.name = entry.manifest.name.clone();
-        new_manifest.tags = entry.manifest.tags.clone();
+
+        // Tags: unlike name (which has no dedicated rename API), tags now
+        // have one — `AgentRegistry::update_tags` (#7742). Route a change
+        // through it BEFORE `replace_manifest` so `entry.tags` and the
+        // `tag_index` stay in sync with the incoming manifest; a plain
+        // `replace_manifest` only swaps `entry.manifest` and would silently
+        // desync `entry.tags` from `manifest.tags` (see that method's doc
+        // comment on why it deliberately leaves tags alone).
+        if new_manifest.tags != entry.tags {
+            self.agents
+                .registry
+                .update_tags(agent_id, new_manifest.tags.clone())
+                .map_err(KernelError::LibreFang)?;
+        }
 
         self.agents
             .registry
@@ -604,6 +613,53 @@ impl LibreFangKernel {
         self.persist_manifest_to_disk(agent_id);
 
         info!(agent_id = %agent_id, channels = ?channels, "Agent channel allowlist updated");
+        Ok(())
+    }
+
+    /// Update an agent's model routing mode and per-agent router override
+    /// (profile allowlist + cost budget). Empty `allowed_profiles` on the
+    /// override means "all profiles allowed" (see
+    /// `AgentRouterOverride::allowed_profiles`) — no cross-check against the
+    /// live profile catalog is done here because `ModelRouter::match_profile`
+    /// treats an unknown name as simply never matching, so an unresolved name
+    /// in the allowlist is harmless rather than a hard error. Mirrors
+    /// `set_agent_channels`: snapshot-then-rollback on DB persist failure,
+    /// then mirror to `agent.toml` on disk.
+    pub fn set_agent_model_routing(
+        &self,
+        agent_id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()> {
+        let prev_state = self.agents.registry.get(agent_id).map(|e| {
+            (
+                e.manifest.model.mode,
+                e.manifest.model.router_override.clone(),
+            )
+        });
+
+        self.agents
+            .registry
+            .update_model_routing(agent_id, mode, router_override.clone())
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
+                if let Some((p_mode, p_override)) = prev_state {
+                    let _ = self
+                        .agents
+                        .registry
+                        .update_model_routing(agent_id, p_mode, p_override);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
+        }
+
+        // Persist to agent.toml so the change survives a daemon restart —
+        // same reasoning as set_agent_skills/set_agent_mcp_servers/set_agent_channels.
+        self.persist_manifest_to_disk(agent_id);
+
+        info!(agent_id = %agent_id, mode = ?mode, "Agent model routing updated");
         Ok(())
     }
 
