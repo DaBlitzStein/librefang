@@ -349,6 +349,206 @@
         }
       }
     },
+    "/api/agent-types": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/agent-types — List available agent types from both\n`~/.librefang/workspaces/agents/` (source = \"agent\") and\n`~/.librefang/templates/` (source = \"template\").",
+        "operationId": "list_agent_types",
+        "responses": {
+          "200": {
+            "description": "List agent types",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/agent-types — Create a new agent type from JSON.",
+        "operationId": "create_agent_type",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent type created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "409": {
+            "description": "Agent type already exists"
+          }
+        }
+      }
+    },
+    "/api/agent-types/{name}": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/agent-types/:name — Get agent type details.",
+        "operationId": "get_agent_type",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "PUT /api/agent-types/:name — Update an existing agent type from JSON.",
+        "operationId": "update_agent_type",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Agent type updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "404": {
+            "description": "Agent type not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "system"
+        ],
+        "summary": "DELETE /api/agent-types/:name — Delete an agent type file.",
+        "operationId": "delete_agent_type",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent type not found"
+          }
+        }
+      }
+    },
+    "/api/agent-types/{name}/toml": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/agent-types/:name/toml — Get the raw TOML content of an agent type.",
+        "operationId": "get_agent_type_toml",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type TOML content as plain text",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents": {
       "get": {
         "tags": [
@@ -1554,6 +1754,38 @@
         }
       }
     },
+    "/api/agents/{id}/manifest": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.",
+        "description": "Powers the dashboard's full manifest editor (#7742): the Configure\ndrawer's quick-edit widgets only cover a handful of fields, so this\nendpoint hands back every field `AgentManifest` carries for\n`AgentManifestForm` to parse and pre-fill, with `PATCH /api/agents/{id}`\n(`manifest_toml`) as the matching write path. Renders the live\nin-memory manifest the same way `persist_manifest_to_disk` writes\n`agent.toml`, rather than re-reading the on-disk file, so the response\nalways reflects the latest state even if a prior partial PATCH hasn't\nflushed to disk yet.",
+        "operationId": "get_agent_manifest_toml",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest as raw TOML",
+            "content": {
+              "application/toml": {}
+            }
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [
@@ -1904,6 +2136,79 @@
         "responses": {
           "200": {
             "description": "Change an agent's LLM model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/model_routing": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/model_routing — Get an agent's model routing mode and router override.",
+        "operationId": "get_agent_model_routing",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get an agent's model routing mode and router override",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/{id}/model_routing — Update an agent's model routing mode and router override.",
+        "operationId": "set_agent_model_routing",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Model routing mode, allowed profiles, and cost budget",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Update an agent's model routing mode and router override",
             "content": {
               "application/json": {
                 "schema": {
@@ -11818,11 +12123,11 @@
         "tags": [
           "system"
         ],
-        "summary": "GET /api/templates — List available agent templates from both\n`~/.librefang/workspaces/agents/` (source = \"agent\") and\n`~/.librefang/templates/` (source = \"template\").",
+        "summary": "GET /api/templates — Deprecated alias of `GET /api/agent-types`. Kept\nworking for existing clients; new integrations should use the canonical\n`/api/agent-types` path.",
         "operationId": "list_agent_templates",
         "responses": {
           "200": {
-            "description": "List templates",
+            "description": "List agent types (deprecated alias of GET /api/agent-types)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11838,7 +12143,7 @@
         "tags": [
           "system"
         ],
-        "summary": "POST /api/templates — Create a new agent template from JSON.",
+        "summary": "POST /api/templates — Deprecated alias of `POST /api/agent-types`.",
         "operationId": "create_template",
         "requestBody": {
           "content": {
@@ -11852,7 +12157,7 @@
         },
         "responses": {
           "201": {
-            "description": "Template created",
+            "description": "Agent type created (deprecated alias of POST /api/agent-types)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11865,7 +12170,7 @@
             "description": "Invalid input"
           },
           "409": {
-            "description": "Template already exists"
+            "description": "Agent type already exists"
           }
         }
       }
@@ -11875,13 +12180,13 @@
         "tags": [
           "system"
         ],
-        "summary": "GET /api/templates/:name — Get template details.",
+        "summary": "GET /api/templates/:name — Deprecated alias of `GET /api/agent-types/:name`.",
         "operationId": "get_agent_template",
         "parameters": [
           {
             "name": "name",
             "in": "path",
-            "description": "Template name",
+            "description": "Agent type name",
             "required": true,
             "schema": {
               "type": "string"
@@ -11890,7 +12195,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Template details",
+            "description": "Agent type details (deprecated alias of GET /api/agent-types/:name)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11905,13 +12210,13 @@
         "tags": [
           "system"
         ],
-        "summary": "PUT /api/agent-types/:name — Update an existing agent type from JSON.",
+        "summary": "PUT /api/templates/:name — Deprecated alias of `PUT /api/agent-types/:name`.",
         "operationId": "update_template",
         "parameters": [
           {
             "name": "name",
             "in": "path",
-            "description": "Template name",
+            "description": "Agent type name",
             "required": true,
             "schema": {
               "type": "string"
@@ -11930,7 +12235,7 @@
         },
         "responses": {
           "200": {
-            "description": "Template updated",
+            "description": "Agent type updated (deprecated alias of PUT /api/agent-types/:name)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11943,7 +12248,7 @@
             "description": "Invalid input"
           },
           "404": {
-            "description": "Template not found"
+            "description": "Agent type not found"
           }
         }
       },
@@ -11951,13 +12256,13 @@
         "tags": [
           "system"
         ],
-        "summary": "DELETE /api/agent-types/:name — Delete an agent type file.",
+        "summary": "DELETE /api/templates/:name — Deprecated alias of\n`DELETE /api/agent-types/:name`.",
         "operationId": "delete_template",
         "parameters": [
           {
             "name": "name",
             "in": "path",
-            "description": "Template name",
+            "description": "Agent type name",
             "required": true,
             "schema": {
               "type": "string"
@@ -11966,7 +12271,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Template deleted",
+            "description": "Agent type deleted (deprecated alias of DELETE /api/agent-types/:name)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11976,7 +12281,7 @@
             }
           },
           "404": {
-            "description": "Template not found"
+            "description": "Agent type not found"
           }
         }
       }
@@ -11986,13 +12291,13 @@
         "tags": [
           "system"
         ],
-        "summary": "GET /api/templates/:name/toml — Get the raw TOML content of a template.",
+        "summary": "GET /api/templates/:name/toml — Deprecated alias of\n`GET /api/agent-types/:name/toml`.",
         "operationId": "get_agent_template_toml",
         "parameters": [
           {
             "name": "name",
             "in": "path",
-            "description": "Template name",
+            "description": "Agent type name",
             "required": true,
             "schema": {
               "type": "string"
@@ -12001,7 +12306,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Template TOML content as plain text",
+            "description": "Agent type TOML content as plain text (deprecated alias of GET /api/agent-types/:name/toml)",
             "content": {
               "text/plain": {
                 "schema": {
