@@ -1,0 +1,3 @@
+An agent type's `tools` field now actually reaches the ephemeral worker spawned from it.
+`spawn_ephemeral_worker` resolved the worker's tool list only from the spawn request's own `tools` field, never consulting `capabilities.tools` on the manifest `resolve_ephemeral_manifest` loaded for `request.agent_type` — so an agent type saved with `tools = ["shell_exec"]` handed Quick Run a worker with zero tools unless the caller repeated the tool list in the request body, silently making the "Tools" field on the Agent Types form a no-op for that flow.
+The worker now falls back to the resolved manifest's `capabilities.tools` when the request does not supply its own `tools` list (#6943) (@DaBlitzStein)
