@@ -158,7 +158,7 @@ pub async fn clone_agent(
 #[serde(deny_unknown_fields)]
 pub(crate) struct SaveAgentAsAgentTypeRequest {
     /// Filename (and manifest `name`) of the resulting
-    /// `~/.librefang/templates/<template_name>.toml`. Independent of the
+    /// `~/.librefang/agent-types/<template_name>.toml`. Independent of the
     /// source agent's own name — the source agent is untouched and keeps
     /// running under its original name; only the extracted template file
     /// gets this name. Passing the source agent's own name is fine and is
@@ -178,8 +178,8 @@ pub(crate) struct SaveAgentAsAgentTypeRequest {
 ///   agent's memory and sessions are never copied; the clone starts empty.
 /// - This endpoint does not spawn anything and does not touch the source
 ///   agent at all. It snapshots the agent's current configuration (model,
-///   system prompt, tools, skills, channels, resources, …) into a
-///   `templates/<template_name>.toml` file. That file shows up on the
+///   system prompt, tools, skills, channels, resources, …) into an
+///   `agent-types/<template_name>.toml` file. That file shows up on the
 ///   Agent Types page, can be edited and deleted there like any other
 ///   template, and can be spawned from repeatedly later via
 ///   `POST /api/agents {"template": "<template_name>"}` or
@@ -312,7 +312,7 @@ pub async fn save_agent_as_agent_type(
 
     let dir = crate::routes::agent_templates::agent_types_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("Failed to create templates dir: {e}");
+        tracing::warn!("Failed to create agent-types dir: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": t.t("api-error-internal")})),

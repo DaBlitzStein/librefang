@@ -1,4 +1,6 @@
-//! Resolve the agent-templates directory inside a `librefang-registry` checkout.
+//! Resolve the agent-types directories used on both sides of a registry
+//! sync: the *source* (inside a `librefang-registry` checkout) and the
+//! *destination* (this installation's own live agent-type store).
 //!
 //! [`librefang/librefang-registry`](https://github.com/librefang/librefang-registry)
 //! is renaming its `agents/` directory to `agent-types/` (upstream naming
@@ -16,6 +18,25 @@
 //! warning, and log loudly (not silently return "not found") when neither
 //! directory exists — that last case is exactly the failure mode that used
 //! to vanish without a trace.
+//!
+//! [`installed_agent_types_dir`] resolves the other side: where THIS
+//! installation keeps its own live agent-type manifests
+//! (`~/.librefang/agent-types/`) — populated by a registry sync, by
+//! `POST /api/agent-types`, by the `agent_type_create` tool, and by
+//! `save-as-agent-type`, and read back by every agent_type-spawn resolver
+//! and by `GET /api/agent-types`. It used to be `~/.librefang/templates/`,
+//! which was wrong on two counts: that directory is a *different* domain
+//! (starter/skeleton TOML scaffolding for agent/hand/skill/channel/workflow
+//! authoring, #7758) that agent-types writes were silently contaminating,
+//! and the registry's copy of it was landing agent-type *instances* inside
+//! `~/.librefang/workspaces/agents/` — the deployed-agents directory — so a
+//! fresh install's registry sync manufactured dozens of agents the operator
+//! never asked to run. [`warn_on_agent_type_like_files_in_templates_dir`]
+//! is the read-only, boot-time half of the fix for installs that already
+//! have agent-type-shaped files sitting in the old, wrong location: it
+//! warns and names the files, but never moves or deletes anything — moving
+//! files between two unrelated domains on the operator's behalf is exactly
+//! what this fix is trying to stop doing.
 
 use std::path::{Path, PathBuf};
 
@@ -74,6 +95,93 @@ pub fn resolve_agent_types_dir(registry_cache: &Path) -> Option<PathBuf> {
          registry: verify the sync actually ran and populated {registry_cache_display}"
     );
     None
+}
+
+/// Directory name for this installation's own agent-type manifest store.
+/// Deliberately the same string as [`AGENT_TYPES_DIR_NAME`] — it names the
+/// same *concept* (agent-type manifests) on the destination side of a sync,
+/// just rooted at `home_dir` (`~/.librefang/`) instead of a registry
+/// checkout.
+pub const INSTALLED_AGENT_TYPES_DIR_NAME: &str = AGENT_TYPES_DIR_NAME;
+
+/// Resolve this installation's canonical agent-type manifest directory
+/// (`~/.librefang/agent-types/`).
+///
+/// This is the single place every reader and writer of agent-type manifests
+/// should call instead of hand-rolling `home_dir.join("agent-types")` (or,
+/// worse, `home_dir.join("templates")` / `home_dir.join("workspaces").join("agents")`
+/// — both wrong locations this directory replaces). See the module doc
+/// comment for why those two were wrong.
+///
+/// Agent-type manifests are stored flat: `agent-types/<name>.toml` — one
+/// file per type, matching what `GET/POST/PUT/DELETE /api/agent-types`, the
+/// `agent_type_create` tool, and every ephemeral/persistent spawn resolver
+/// already expect. This is deliberately NOT the registry checkout's own
+/// directory-per-type layout (`agent-types/<name>/agent.toml`, see
+/// [`resolve_agent_types_dir`]) — a registry sync flattens on copy.
+pub fn installed_agent_types_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(INSTALLED_AGENT_TYPES_DIR_NAME)
+}
+
+/// Boot-time diagnostic (never a mutation): warn when
+/// `{home_dir}/templates/` — the unrelated starter/skeleton TOML directory
+/// for agent/hand/skill/channel/workflow authoring (#7758) — contains files
+/// that look like agent-type manifests rather than plain skeletons.
+///
+/// A now-fixed bug used to write operator- and tool-created agent-types
+/// into `templates/` instead of the canonical [`installed_agent_types_dir`].
+/// This function does not move, copy, or delete anything — `templates/` and
+/// `agent-types/` are different domains, and silently relocating files
+/// between them on the operator's behalf is exactly the mistake this fix is
+/// correcting. It only surfaces a `tracing::warn!` naming the suspect files
+/// and the canonical directory, so the operator can decide.
+///
+/// Heuristic: a legitimate `templates/` skeleton (e.g. a minimal
+/// `name = "…"` / `module = "…"` starter) does not declare a `[model]`
+/// table — every agent-type manifest written by `POST /api/agent-types`,
+/// the `agent_type_create` tool, or `save-as-agent-type` does, because all
+/// three serialize a full `AgentManifest`, which always carries a `model`
+/// field. A `[model]` table is therefore a reliable (if imperfect) signal
+/// that a `templates/*.toml` file belongs in `agent-types/` instead.
+pub fn warn_on_agent_type_like_files_in_templates_dir(home_dir: &Path) {
+    let templates_dir = home_dir.join("templates");
+    let Ok(entries) = std::fs::read_dir(&templates_dir) else {
+        return;
+    };
+
+    let mut suspects: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                return None;
+            }
+            let content = std::fs::read_to_string(&path).ok()?;
+            let value: toml::Value = toml::from_str(&content).ok()?;
+            value
+                .get("model")
+                .and_then(|m| m.as_table())
+                .map(|_| path.display().to_string())
+        })
+        .collect();
+
+    if suspects.is_empty() {
+        return;
+    }
+    suspects.sort();
+
+    let canonical = installed_agent_types_dir(home_dir);
+    tracing::warn!(
+        files = ?suspects,
+        canonical_dir = %canonical.display(),
+        templates_dir = %templates_dir.display(),
+        "found {} file(s) in the 'templates/' scaffold directory that look like agent-type \
+         manifests (each declares a [model] table) — 'templates/' holds starter TOML skeletons \
+         for agent/hand/skill/channel/workflow authoring, not agent-type storage; the canonical \
+         location for agent-types is 'agent-types/'. This is a diagnostic only: nothing was \
+         moved or deleted. If these files are meant to be agent-types, move them yourself.",
+        suspects.len()
+    );
 }
 
 #[cfg(test)]
@@ -199,6 +307,85 @@ mod tests {
         assert!(
             logs.contains("agent-types") && logs.contains("agents"),
             "error must name both directories that were tried, got: {logs}"
+        );
+    }
+
+    // ---- installed_agent_types_dir ----------------------------------
+
+    #[test]
+    fn installed_agent_types_dir_is_home_join_agent_types() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            installed_agent_types_dir(tmp.path()),
+            tmp.path().join("agent-types")
+        );
+    }
+
+    // ---- warn_on_agent_type_like_files_in_templates_dir --------------
+
+    #[test]
+    fn templates_dir_missing_is_a_silent_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = capture_logs(|| {
+            warn_on_agent_type_like_files_in_templates_dir(tmp.path());
+        });
+        assert!(
+            logs.is_empty(),
+            "no templates/ dir at all must not warn, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn plain_skeleton_without_model_table_does_not_warn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates_dir = tmp.path().join("templates");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        std::fs::write(
+            templates_dir.join("tooled-mission.toml"),
+            "name = \"tooled-mission\"\nmodule = \"builtin:chat\"\n",
+        )
+        .unwrap();
+
+        let logs = capture_logs(|| {
+            warn_on_agent_type_like_files_in_templates_dir(tmp.path());
+        });
+        assert!(
+            logs.is_empty(),
+            "a skeleton with no [model] table must not be flagged, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn file_with_model_table_warns_and_names_it_without_moving_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates_dir = tmp.path().join("templates");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        let misplaced = templates_dir.join("misplaced-agent-type.toml");
+        std::fs::write(
+            &misplaced,
+            "name = \"misplaced-agent-type\"\ndescription = \"oops\"\n\n[model]\nprovider = \"default\"\nmodel = \"default\"\n",
+        )
+        .unwrap();
+
+        let logs = capture_logs(|| {
+            warn_on_agent_type_like_files_in_templates_dir(tmp.path());
+        });
+
+        assert!(
+            logs.contains("WARN") && logs.contains("misplaced-agent-type.toml"),
+            "must warn and name the suspect file, got: {logs}"
+        );
+        assert!(
+            logs.contains("agent-types"),
+            "warning must point at the canonical directory, got: {logs}"
+        );
+        assert!(
+            misplaced.exists(),
+            "the file must never be moved or deleted — diagnostic only"
+        );
+        assert!(
+            !tmp.path().join("agent-types").exists(),
+            "no agent-types/ directory should be created as a side effect"
         );
     }
 }

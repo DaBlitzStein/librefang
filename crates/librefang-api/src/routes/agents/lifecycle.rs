@@ -39,22 +39,23 @@ async fn resolve_manifest(
                     message: t.t("api-error-template-invalid-name"),
                 });
             }
-            // Real agent-type templates (`~/.librefang/templates/<name>.toml`)
+            // Real agent-type templates (`~/.librefang/agent-types/<name>.toml`)
             // resolve first, falling back to a workspace agent's own
             // manifest by name — same precedence as
             // `resolve_ephemeral_manifest` (messaging.rs) and
             // `load_agent_manifest_from_template_dirs` (spawn.rs). Before
             // this fix, this was the ONLY one of the three template
-            // resolvers that skipped `templates/` entirely, so spawning a
-            // persistent agent "from template" via `POST /api/agents
-            // {"template": name}` 404'd for every real template and only
-            // worked when `name` happened to match an existing agent's own
-            // workspace — the opposite of what the endpoint promises. The
-            // workspace fallback is kept for backward compatibility with
-            // callers that already resolve `template` by an existing
-            // agent's name.
+            // resolvers that skipped the agent-types store entirely, so
+            // spawning a persistent agent "from template" via `POST
+            // /api/agents {"template": name}` 404'd for every real template
+            // and only worked when `name` happened to match an existing
+            // agent's own workspace — the opposite of what the endpoint
+            // promises. The workspace fallback is kept for backward
+            // compatibility with callers that already resolve `template` by
+            // an existing agent's name.
             let home_dir = &state.kernel.config_ref().home_dir;
-            let tmpl_path = home_dir.join("templates").join(format!("{safe_name}.toml"));
+            let tmpl_path = librefang_types::registry_paths::installed_agent_types_dir(home_dir)
+                .join(format!("{safe_name}.toml"));
             let agent_path = home_dir
                 .join("workspaces")
                 .join("agents")

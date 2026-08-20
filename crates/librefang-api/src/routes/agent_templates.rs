@@ -210,14 +210,14 @@ mod agent_type_name_validation_tests {
 }
 
 /// GET /api/agent-types — List available agent types from
-/// `~/.librefang/templates/` (source = "template").
+/// `~/.librefang/agent-types/` (source = "template").
 ///
 /// Used to also merge in `~/.librefang/workspaces/agents/` (source =
 /// "agent") — dropped in the fix for the "Agent Types page is uneditable"
 /// bug reported against an install with 42 agents and 0 templates. That
 /// merge meant every live agent showed up here with no way to edit or
 /// delete it (the dashboard's `AgentTypesPage` can only manage files under
-/// `templates/`), and the confusing "Managed via Agents" label was the
+/// `agent-types/`), and the confusing "Managed via Agents" label was the
 /// symptom, not the cause. The underlying capability — spawning a worker
 /// from an existing agent's manifest by name — still exists at the
 /// resolution layer (`resolve_ephemeral_manifest`, `resolve_manifest`,
@@ -226,7 +226,7 @@ mod agent_type_name_validation_tests {
 /// *listing* stops conflating the two concepts. The bridge from "I have
 /// agents, not templates" to a populated, editable list is
 /// `POST /api/agents/{id}/save-as-agent-type`, which extracts a live agent's
-/// manifest into a real, editable `templates/<name>.toml` file.
+/// manifest into a real, editable `agent-types/<name>.toml` file.
 #[utoipa::path(get, path = "/api/agent-types", tag = "system", operation_id = "list_agent_types", responses((status = 200, description = "List agent types", body = Vec<serde_json::Value>)))]
 pub async fn list_agent_types() -> impl IntoResponse {
     let mut templates = Vec::new();
@@ -448,13 +448,13 @@ pub async fn get_agent_type_toml_deprecated(
 //
 // Agent types are named manifests consumed by the ephemeral-worker spawn
 // path (`EphemeralSpawnRequest.agent_type`). They live as `<name>.toml`
-// under `~/.librefang/templates/`. Write operations are wired into
+// under `~/.librefang/agent-types/`. Write operations are wired into
 // `/api/agent-types` (and the deprecated `/api/templates` alias) in the
 // unified `router()` above; the read endpoints serve both sources.
 
-/// Directory holding agent-type manifests (`~/.librefang/templates/`).
+/// Directory holding agent-type manifests (`~/.librefang/agent-types/`).
 pub(crate) fn agent_types_dir() -> std::path::PathBuf {
-    super::system::librefang_home().join("templates")
+    librefang_types::registry_paths::installed_agent_types_dir(&super::system::librefang_home())
 }
 
 /// Flatten a manifest into the JSON shape the dashboard expects.

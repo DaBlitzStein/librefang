@@ -1824,9 +1824,10 @@ impl App {
                     if t.custom {
                         // Operator-created agent type: spawn from the real
                         // template file so tools/skills/model carry over.
-                        let path = crate::commands::common::cli_librefang_home()
-                            .join("templates")
-                            .join(format!("{}.toml", t.name));
+                        let path = librefang_types::registry_paths::installed_agent_types_dir(
+                            &crate::commands::common::cli_librefang_home(),
+                        )
+                        .join(format!("{}.toml", t.name));
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             self.spawn_agent(content);
                         }

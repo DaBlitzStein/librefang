@@ -18,7 +18,7 @@ pub struct TemplateInfo {
     pub provider: String,
     pub model: String,
     /// True for operator-created agent types loaded from
-    /// ~/.librefang/templates/*.toml (spawn from the real file, not the
+    /// ~/.librefang/agent-types/*.toml (spawn from the real file, not the
     /// builtin inline manifest).
     pub custom: bool,
 }
@@ -151,14 +151,22 @@ impl TemplatesState {
             .collect();
         // Operator-created agent types (agent_type_create / the API) —
         // listed after the builtins so the TUI mirrors the API surface.
-        let custom_dir = crate::commands::common::cli_librefang_home().join("templates");
+        let custom_dir = librefang_types::registry_paths::installed_agent_types_dir(
+            &crate::commands::common::cli_librefang_home(),
+        );
         if let Ok(entries) = std::fs::read_dir(&custom_dir) {
             let mut custom: Vec<TemplateInfo> = entries
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
                 .filter_map(|e| {
                     let content = std::fs::read_to_string(e.path()).ok()?;
-                    let value: toml::Value = content.parse().ok()?;
+                    // `.parse::<toml::Value>()` (this crate's `FromStr` impl)
+                    // does not accept a full multi-line document — it errors
+                    // out on anything past the first bare key, which made
+                    // every real custom agent-type manifest here silently
+                    // vanish via the `.ok()?` short-circuit below.
+                    // `toml::from_str` parses the whole document correctly.
+                    let value: toml::Value = toml::from_str(&content).ok()?;
                     let name = value
                         .get("name")
                         .and_then(|v| v.as_str())

@@ -1071,6 +1071,17 @@ impl LibreFangKernel {
         // pure waste.
         librefang_runtime::catalog_sync::remove_legacy_cache_dirs(&config.home_dir);
 
+        // Read-only diagnostic (runs regardless of `registry.auto_sync`):
+        // warn if `templates/` — the unrelated starter-TOML scaffolding
+        // directory for agent/hand/skill/channel/workflow authoring (#7758)
+        // — contains files that look like agent-type manifests, left there
+        // by a now-fixed bug that used to write agent-types into that
+        // directory instead of the canonical `agent-types/`. Never moves or
+        // deletes anything; see the function's own doc comment.
+        librefang_types::registry_paths::warn_on_agent_type_like_files_in_templates_dir(
+            &config.home_dir,
+        );
+
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);

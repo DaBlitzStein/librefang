@@ -1374,9 +1374,10 @@ impl LibreFangKernel {
                      only [A-Za-z0-9_-] permitted"
                 ))));
             }
-            // Load from ~/.librefang/templates/<name>.toml
-            let templates_dir = self.home_dir_boot.join("templates");
-            let path = templates_dir.join(format!("{type_name}.toml"));
+            // Load from ~/.librefang/agent-types/<name>.toml
+            let agent_types_dir =
+                librefang_types::registry_paths::installed_agent_types_dir(&self.home_dir_boot);
+            let path = agent_types_dir.join(format!("{type_name}.toml"));
             if path.exists() {
                 let content = std::fs::read_to_string(&path).map_err(|e| {
                     KernelError::LibreFang(LibreFangError::Internal(format!(
@@ -1417,7 +1418,7 @@ impl LibreFangKernel {
                                 "agent_type '{type_name}' is not a template, and an agent may \
                                  only fall back to its own workspace manifest — spawning under \
                                  another agent's identity is denied. Create a template at \
-                                 templates/{type_name}.toml instead."
+                                 agent-types/{type_name}.toml instead."
                             ),
                         )));
                     }
@@ -4305,9 +4306,9 @@ mod tests {
     async fn ephemeral_agent_type_capabilities_tools_reach_the_driver() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().to_path_buf();
-        std::fs::create_dir_all(home.join("templates")).unwrap();
+        std::fs::create_dir_all(home.join("agent-types")).unwrap();
         std::fs::write(
-            home.join("templates").join("tooled-mission.toml"),
+            home.join("agent-types").join("tooled-mission.toml"),
             "name = \"tooled-mission\"\nmodule = \"builtin:chat\"\n\n[capabilities]\ntools = [\"shell_exec\"]\n",
         )
         .unwrap();
@@ -4401,9 +4402,9 @@ mod tests {
         for expect_ok in [true, false] {
             let dir = tempfile::tempdir().expect("tempdir");
             let home = dir.path().to_path_buf();
-            std::fs::create_dir_all(home.join("templates")).unwrap();
+            std::fs::create_dir_all(home.join("agent-types")).unwrap();
             std::fs::write(
-                home.join("templates").join("qa-mission.toml"),
+                home.join("agent-types").join("qa-mission.toml"),
                 "name = \"qa-mission\"\nmodule = \"builtin:chat\"\n",
             )
             .unwrap();

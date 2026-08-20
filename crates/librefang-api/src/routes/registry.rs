@@ -221,11 +221,14 @@ async fn create_registry_content(
         "provider" => home_dir
             .join("providers")
             .join(format!("{identifier}.toml")),
-        "agent" => home_dir
-            .join("workspaces")
-            .join("agents")
-            .join(&identifier)
-            .join("agent.toml"),
+        // "agent" here is registry-schema-speak for an agent TYPE (see
+        // `registry_schema.rs`'s `[agent]` content-type block) — NOT a
+        // deployed agent instance. It belongs in this installation's
+        // canonical agent-type store, flat (`<id>.toml`), matching every
+        // other agent-type reader/writer — not `workspaces/agents/`, which
+        // holds deployed agent instances with their own sessions/memory.
+        "agent" => librefang_types::registry_paths::installed_agent_types_dir(home_dir)
+            .join(format!("{identifier}.toml")),
         "hand" => home_dir.join("hands").join(&identifier).join("HAND.toml"),
         "mcp" => home_dir
             .join("mcp")

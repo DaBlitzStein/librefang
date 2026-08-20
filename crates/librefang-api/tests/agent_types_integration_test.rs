@@ -350,7 +350,7 @@ async fn agent_types_update_preserves_unmentioned_manifest_fields() {
     // type" JSON shape has never covered: [compaction] and
     // max_history_messages. `#[serde(default)]` on `AgentManifest` means
     // every other field can be left out of the fixture.
-    let templates_dir = home.path().join("templates");
+    let templates_dir = home.path().join("agent-types");
     std::fs::create_dir_all(&templates_dir).unwrap();
     // `max_history_messages` must sit before the `[model]` table header —
     // once a TOML table opens, every bare `key = value` line belongs to
@@ -676,7 +676,7 @@ async fn agent_types_update_manifest_toml_replaces_whole_document() {
 
     // Seed a template with a field the replacement document below never
     // mentions.
-    let templates_dir = home.path().join("templates");
+    let templates_dir = home.path().join("agent-types");
     std::fs::create_dir_all(&templates_dir).unwrap();
     let seed_toml = r#"
 name = "manifest-toml-update-test"

@@ -3,7 +3,7 @@
 //! every agent listed as an unusable agent type):
 //!
 //!  1. `POST /api/agents {"template": name}` now resolves a real
-//!     `~/.librefang/templates/<name>.toml` template FIRST. Before this
+//!     `~/.librefang/agent-types/<name>.toml` template FIRST. Before this
 //!     fix `resolve_manifest` (`routes/agents/lifecycle.rs`) only ever
 //!     checked `workspaces/agents/<name>/agent.toml` — spawning a
 //!     persistent agent "from template" 404'd for every real template and
@@ -11,13 +11,13 @@
 //!     workspace, the opposite of what the endpoint promises. The
 //!     workspace fallback is kept second, for backward compatibility.
 //!  2. `POST /api/agents/{id}/save-as-agent-type` extracts a live agent's
-//!     manifest into a reusable `templates/<name>.toml` file — the bridge
+//!     manifest into a reusable `agent-types/<name>.toml` file — the bridge
 //!     from "I have agents, not templates" to a populated, editable Agent
 //!     Types page.
 //!
 //! `LIBREFANG_HOME` and `KernelConfig::home_dir` are pinned to the SAME
 //! tempdir per test: `agent_templates.rs`'s reads/writes
-//! (`GET/POST/PUT/DELETE /api/agent-types`) resolve `templates/` through
+//! (`GET/POST/PUT/DELETE /api/agent-types`) resolve `agent-types/` through
 //! `LIBREFANG_HOME`, while the kernel's own template-dir fallback resolves
 //! it through `KernelConfig::home_dir` — the two have to agree for a file
 //! this test writes (or the save-as-agent-type handler writes) to be
@@ -151,7 +151,7 @@ async fn spawn_from_real_template_succeeds() {
     let _guard = home_lock().lock().await;
     let h = boot().await;
 
-    let templates_dir = h.state.kernel.config_ref().home_dir.join("templates");
+    let templates_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
     std::fs::create_dir_all(&templates_dir).unwrap();
     std::fs::write(
         templates_dir.join("real-template.toml"),
@@ -217,7 +217,7 @@ async fn spawn_from_template_prefers_templates_dir_over_workspace_agent() {
     // precedence `resolve_ephemeral_manifest` (messaging.rs) and
     // `load_agent_manifest_from_template_dirs` (spawn.rs) already use.
     let home = h.state.kernel.config_ref().home_dir.clone();
-    let templates_dir = home.join("templates");
+    let templates_dir = home.join("agent-types");
     std::fs::create_dir_all(&templates_dir).unwrap();
     std::fs::write(
         templates_dir.join("shadowed-name.toml"),
@@ -313,7 +313,7 @@ async fn save_agent_as_agent_type_round_trip() {
     // The template file must exist and its `workspace` must be cleared —
     // otherwise spawning from it later would point the new agent at the
     // SOURCE agent's own workspace directory instead of a fresh one.
-    let templates_dir = h.state.kernel.config_ref().home_dir.join("templates");
+    let templates_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
     let content = std::fs::read_to_string(templates_dir.join("researcher-template.toml"))
         .expect("template file must exist on disk");
     let saved: AgentManifest = toml::from_str(&content).unwrap();
@@ -377,7 +377,7 @@ async fn save_agent_as_agent_type_rejects_duplicate_template_name() {
     let _guard = home_lock().lock().await;
     let h = boot().await;
 
-    let templates_dir = h.state.kernel.config_ref().home_dir.join("templates");
+    let templates_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
     std::fs::create_dir_all(&templates_dir).unwrap();
     std::fs::write(
         templates_dir.join("existing-template.toml"),

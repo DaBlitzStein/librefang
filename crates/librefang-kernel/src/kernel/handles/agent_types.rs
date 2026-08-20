@@ -35,7 +35,7 @@ impl kernel_handle::AgentTypeTools for LibreFangKernel {
         }
 
         let toml_content = librefang_types::agent::agent_type_json_to_toml(&v);
-        let dir = self.home_dir_boot.join("templates");
+        let dir = librefang_types::registry_paths::installed_agent_types_dir(&self.home_dir_boot);
         let path = dir.join(format!("{name}.toml"));
         if path.exists() {
             return Err(KernelOpError::Internal(format!(
@@ -55,9 +55,9 @@ impl kernel_handle::AgentTypeTools for LibreFangKernel {
             )));
         }
 
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| KernelOpError::Internal(format!("Failed to create templates dir: {e}")))?;
+        tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+            KernelOpError::Internal(format!("Failed to create agent-types dir: {e}"))
+        })?;
         tokio::fs::write(&path, toml_content)
             .await
             .map_err(|e| KernelOpError::Internal(format!("Failed to write agent type: {e}")))?;
@@ -103,7 +103,7 @@ mod tests {
         .to_string();
         let created = tools.create_agent_type(&json).await.expect("must create");
         assert_eq!(created, "qa-type");
-        let path = home.join("templates").join("qa-type.toml");
+        let path = home.join("agent-types").join("qa-type.toml");
         assert!(path.exists(), "template file must exist on disk");
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(

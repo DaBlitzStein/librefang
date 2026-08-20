@@ -1,10 +1,11 @@
-//! Discover and load agent types (agent templates) from the agents directory.
+//! Discover and load agent types (agent templates) from the canonical
+//! `~/.librefang/agent-types/` store.
 
 use std::path::PathBuf;
 
 /// A discovered agent type (agent template).
 pub struct AgentType {
-    /// Agent type name (directory name).
+    /// Agent type name (file stem).
     pub name: String,
     /// Description from the manifest.
     pub description: String,
@@ -13,13 +14,21 @@ pub struct AgentType {
 }
 
 /// Discover agent-type directories. Checks:
-/// 1. The repo `agents/` dir (for dev builds)
-/// 2. `~/.librefang/workspaces/agents/` (installed agent types)
-/// 3. `LIBREFANG_AGENTS_DIR` env var
+/// 1. `~/.librefang/agent-types/` (installed agent types — both
+///    registry-synced and operator/tool-created; respects `LIBREFANG_HOME`)
+/// 2. `LIBREFANG_AGENTS_DIR` env var
+///
+/// Deliberately does NOT scan `~/.librefang/workspaces/agents/` — that
+/// directory holds DEPLOYED agent instances (their own sessions, memory,
+/// workspace files), not reusable types. An earlier version of this
+/// function did scan it, which made every live agent show up here as
+/// "spawnable from template" alongside real templates, with no way to tell
+/// the two apart and no way to edit or delete the deployed-agent entries
+/// from this list.
 pub fn discover_agent_type_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    // Installed templates (respects LIBREFANG_HOME)
+    // Installed agent types (respects LIBREFANG_HOME)
     let of_home = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
         PathBuf::from(h)
     } else if let Some(home) = dirs::home_dir() {
@@ -28,9 +37,9 @@ pub fn discover_agent_type_dirs() -> Vec<PathBuf> {
         std::env::temp_dir().join(".librefang")
     };
     {
-        let agents = of_home.join("workspaces").join("agents");
-        if agents.is_dir() && !dirs.contains(&agents) {
-            dirs.push(agents);
+        let agent_types = librefang_types::registry_paths::installed_agent_types_dir(&of_home);
+        if agent_types.is_dir() && !dirs.contains(&agent_types) {
+            dirs.push(agent_types);
         }
     }
 
@@ -45,28 +54,32 @@ pub fn discover_agent_type_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Load all templates from discovered directories, falling back to bundled templates.
+/// Load all agent types from discovered directories.
+///
+/// Agent-type manifests are stored flat — `<name>.toml` directly inside the
+/// discovered directory — matching every other agent-type reader/writer
+/// (`GET /api/agent-types`, the ephemeral/persistent spawn resolvers,
+/// `agent_type_create`).
 pub fn load_all_agent_types() -> Vec<AgentType> {
     let mut agent_types = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    // First: load from filesystem (user-installed or dev repo)
     for dir in discover_agent_type_dirs() {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_dir() {
+                if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("toml") {
                     continue;
                 }
-                let manifest = path.join("agent.toml");
-                if !manifest.exists() {
-                    continue;
-                }
-                let name = entry.file_name().to_string_lossy().to_string();
+                let name = path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if name == "custom" || !seen_names.insert(name.clone()) {
                     continue;
                 }
-                if let Ok(content) = std::fs::read_to_string(&manifest) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
                     let description = extract_description(&content);
                     agent_types.push(AgentType {
                         name,

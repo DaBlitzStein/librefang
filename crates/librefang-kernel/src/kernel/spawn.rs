@@ -619,7 +619,7 @@ impl LibreFangKernel {
 }
 
 /// Load an agent-type template manifest, mirroring `resolve_ephemeral_manifest`'s
-/// directory order: `templates/<name>.toml` first, `workspaces/agents/<name>/agent.toml`
+/// directory order: `agent-types/<name>.toml` first, `workspaces/agents/<name>/agent.toml`
 /// second (deliberately not refactored to share — messaging.rs stays untouched).
 /// Returns None when no template exists; a read/parse failure is logged and
 /// treated as missing so the workflow step surfaces the ByType "not found"
@@ -638,8 +638,8 @@ pub(crate) fn load_agent_manifest_from_template_dirs(
         warn!(agent_type = %template, "workflow step: agent type contains disallowed characters");
         return None;
     }
-    let templates_dir = home_dir_boot.join("templates");
-    let path = templates_dir.join(format!("{template}.toml"));
+    let agent_types_dir = librefang_types::registry_paths::installed_agent_types_dir(home_dir_boot);
+    let path = agent_types_dir.join(format!("{template}.toml"));
     if path.exists() {
         return load_manifest_file(&path, template);
     }

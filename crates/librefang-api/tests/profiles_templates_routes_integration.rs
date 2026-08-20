@@ -11,7 +11,7 @@
 //!
 //! ### Templates and `LIBREFANG_HOME`
 //!
-//! `list_agent_templates` lists ONLY `librefang_home()/templates/`
+//! `list_agent_templates` lists ONLY `librefang_home()/agent-types/`
 //! (source = "template"); it used to also merge in
 //! `librefang_home()/workspaces/agents/` (source = "agent"), which made
 //! every live agent show up as an uneditable, undeletable "agent type" —
@@ -190,7 +190,7 @@ fn templates_root() -> PathBuf {
 /// Real agent-type template fixtures (`source = "template"`) — the only
 /// thing the LIST endpoint reads.
 fn real_templates_root() -> PathBuf {
-    librefang_home_root().join("templates")
+    librefang_home_root().join("agent-types")
 }
 
 /// Serialise template-mutating tests so unique-name fixtures don't read each
