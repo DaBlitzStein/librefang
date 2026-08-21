@@ -9,6 +9,16 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- A model's context window now records where it came from, so a number nobody measured stops passing for one that was.
+  A model discovered from an OpenAI-compatible gateway was admitted to the catalog with a hardcoded 131072-token window, because that listing shape carries no capacity field and nothing upstream could supply a real value.
+  The guess was then presented as a fact on every surface, and it fails in both directions: too large and the daemon packs a prompt the model refuses after the tokens are paid for, too small and compaction fires early or a turn is refused as an overflow that never happened.
+  Discovery now reads the capacity when the endpoint offers one — LiteLLM's `/model/info` is the case this was built for — and uses it instead of the literal.
+  When the endpoint reports nothing the entry still carries a number, because compaction and budget math need one, but it is labelled as inferred rather than measured.
+  Each entry now names which of the four origins produced its capacities: the operator, the shipped registry, the gateway, or nobody.
+  Only the first three count as a limit, so an invented ceiling can no longer be warned against or clamped to, and a warning credits the source that actually supplied the figure instead of attributing everything to the registry.
+  An operator's hand-set value still outranks both and survives a registry sync and a re-probe.
+  A catalog written before this field existed reads back unchanged: an absent origin means the registry, which is what those files hold (#7780, #7788) (@DaBlitzStein)
+
 - An agent's own inference settings now win over the per-model override instead of losing to it.
   Two instances of one agent type can finally run the same model at different temperatures — tuning the shared model no longer overwrites both of them with one value and discards their individual settings in silence.
   The inversion was not a decision about precedence but a workaround for a missing state: `ModelConfig.max_tokens` / `.temperature` were plain numbers, so every agent carried a concrete 4096 / 0.7 whether or not anyone chose them, and letting the manifest win would have made per-model overrides unreachable for every agent in existence.

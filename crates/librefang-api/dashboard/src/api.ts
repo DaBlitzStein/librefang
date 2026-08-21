@@ -1781,8 +1781,22 @@ export interface ModelItem {
    * `false` marks them as discovery placeholders rather than measurements (#7780) — the daemon has
    * to put *some* number in for compaction and budget math, but nothing may present it as measured.
    * Absent on older daemons, where the field did not exist; treat that as `true`.
+   *
+   * Derived from {@link limits_source}: true for everything except `"inferred"`.
+   * Gate ceilings and advisories on this one; read `limits_source` when the surface wants to name
+   * who vouched for the number rather than only whether somebody did.
    */
   limits_known?: boolean;
+  /**
+   * Which of the four origins produced the capacities (#7780).
+   *
+   * `"operator"` hand-set them, `"registry"` shipped them, `"gateway"` reported them over its own
+   * model-info surface, and `"inferred"` means nobody did — the daemon supplied a placeholder so
+   * compaction and budget math had a number to work with.
+   * Absent on older daemons; treat that as `"registry"`, which is what the daemon itself does when
+   * the field is missing from a persisted catalog.
+   */
+  limits_source?: "operator" | "registry" | "gateway" | "inferred";
   input_cost_per_m?: number;
   output_cost_per_m?: number;
   pricing_known?: boolean;

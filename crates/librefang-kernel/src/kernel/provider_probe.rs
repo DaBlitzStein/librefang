@@ -54,14 +54,12 @@ pub async fn probe_and_update_local_provider(
                         .discovered_models
                         .iter()
                         .map(
+                            // Names only: the probe surfaced no enriched info,
+                            // so every optional field — the reported capacities
+                            // included — is legitimately absent (#7780).
                             |name| librefang_runtime::provider_health::DiscoveredModelInfo {
                                 name: name.clone(),
-                                parameter_size: None,
-                                quantization_level: None,
-                                family: None,
-                                families: None,
-                                size: None,
-                                capabilities: vec![],
+                                ..Default::default()
                             },
                         )
                         .collect(),

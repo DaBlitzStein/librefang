@@ -409,7 +409,8 @@ pub async fn list_models(
                 "max_output_tokens": m.max_output_tokens,
                 // See `get_model` — `false` means the capacities above are
                 // placeholders, not measurements (#7780).
-                "limits_known": m.limits_known,
+                "limits_known": m.limits_known(),
+                "limits_source": m.limits_source.as_str(),
                 "input_cost_per_m": m.input_cost_per_m,
                 "output_cost_per_m": m.output_cost_per_m,
                 "pricing_known": m.pricing_known,
@@ -647,7 +648,13 @@ pub async fn get_model(
                     // carries a number nothing sourced (#7780). Surfaces render
                     // the difference, and neither the editors' ladders nor the
                     // save-time limit check treat an unknown limit as a ceiling.
-                    "limits_known": m.limits_known,
+                    //
+                    // `limits_source` names which of the four origins produced
+                    // the pair: `operator`, `registry`, `gateway`, `inferred`.
+                    // `limits_known` is the derived boolean and stays on the
+                    // wire so existing consumers keep working.
+                    "limits_known": m.limits_known(),
+                    "limits_source": m.limits_source.as_str(),
                     "input_cost_per_m": m.input_cost_per_m,
                     "output_cost_per_m": m.output_cost_per_m,
                     "pricing_known": m.pricing_known,
@@ -829,14 +836,12 @@ fn attach_probe_result(
                     .discovered_models
                     .iter()
                     .map(
+                        // Names only: this arm runs when the probe surfaced no
+                        // enriched info, so every optional field — capacities
+                        // included — is legitimately absent (#7780).
                         |name| librefang_kernel::provider_health::DiscoveredModelInfo {
                             name: name.clone(),
-                            parameter_size: None,
-                            quantization_level: None,
-                            family: None,
-                            families: None,
-                            size: None,
-                            capabilities: vec![],
+                            ..Default::default()
                         },
                     )
                     .collect()
@@ -1231,7 +1236,8 @@ pub async fn get_provider(
                             "max_output_tokens": m.max_output_tokens,
                             // See `get_model` — `false` means the capacities above are
                             // placeholders, not measurements (#7780).
-                            "limits_known": m.limits_known,
+                            "limits_known": m.limits_known(),
+                            "limits_source": m.limits_source.as_str(),
                             "input_cost_per_m": m.input_cost_per_m,
                             "output_cost_per_m": m.output_cost_per_m,
                             "pricing_known": m.pricing_known,
@@ -1321,14 +1327,15 @@ pub async fn add_custom_model(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or(default_provider);
-    let context_window = body
-        .get("context_window")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(128_000);
-    let max_output = body
-        .get("max_output_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(8_192);
+    // Kept as `Option` rather than collapsed straight to a default, because
+    // whether the operator supplied a number is what decides the entry's
+    // provenance below. Reading presence off `body.get(...)` alone would count
+    // an explicit `null` — or any non-numeric value — as an operator-set
+    // capacity while still storing the literal (#7780).
+    let requested_context = body.get("context_window").and_then(|v| v.as_u64());
+    let requested_max_output = body.get("max_output_tokens").and_then(|v| v.as_u64());
+    let context_window = requested_context.unwrap_or(128_000);
+    let max_output = requested_max_output.unwrap_or(8_192);
 
     if id.is_empty() {
         return ApiErrorResponse::bad_request("Missing required field: id").into_json_tuple();
@@ -1356,15 +1363,18 @@ pub async fn add_custom_model(
         modality,
         context_window,
         max_output_tokens: max_output,
-        // Known only when the operator actually typed both numbers. Letting
+        // `Operator` only when they actually typed both numbers. Letting
         // either default to the `128_000` / `8_192` literals above is the same
         // invention as a discovery placeholder, and a limit nobody asserted is
         // not a ceiling to warn against (#7780). Conservative on purpose: the
         // only consequence of marking a real limit unknown is one missing
         // advisory, whereas the reverse tells an operator they crossed a
         // ceiling that this handler made up.
-        limits_known: body.get("context_window").is_some()
-            && body.get("max_output_tokens").is_some(),
+        limits_source: if requested_context.is_some() && requested_max_output.is_some() {
+            librefang_types::model_catalog::LimitProvenance::Operator
+        } else {
+            librefang_types::model_catalog::LimitProvenance::Inferred
+        },
         input_cost_per_m: body
             .get("input_cost_per_m")
             .and_then(|v| v.as_f64())
@@ -2602,14 +2612,10 @@ pub async fn set_provider_url(
                 probe
                     .discovered_models
                     .iter()
+                    // Names only — see the equivalent arm in `probe_entry`.
                     .map(|n| librefang_kernel::provider_health::DiscoveredModelInfo {
                         name: n.clone(),
-                        parameter_size: None,
-                        quantization_level: None,
-                        family: None,
-                        families: None,
-                        size: None,
-                        capabilities: vec![],
+                        ..Default::default()
                     })
                     .collect()
             } else {

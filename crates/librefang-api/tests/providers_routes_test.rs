@@ -435,6 +435,123 @@ async fn add_custom_model_then_get_then_delete_round_trips() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// Every model surface names where its capacities came from (#7780).
+///
+/// The two halves of the assertion differ in one input — whether the operator
+/// supplied the numbers — and the endpoint must report that difference rather
+/// than presenting the handler's `128_000` / `8_192` fallbacks as though
+/// somebody had chosen them.
+#[tokio::test(flavor = "multi_thread")]
+async fn model_endpoints_report_where_the_capacities_came_from() {
+    let h = boot();
+
+    // Operator typed both numbers.
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "operator-sourced-7780",
+            "provider": "openai",
+            "display_name": "Operator sourced",
+            "context_window": 64_000,
+            "max_output_tokens": 4_096,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Operator typed neither, so the handler's fallbacks are placeholders.
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "unsourced-7780",
+            "provider": "openai",
+            "display_name": "Unsourced",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, sourced) =
+        json_request(&h, Method::GET, "/api/models/operator-sourced-7780", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sourced["limits_source"].as_str(), Some("operator"));
+    assert_eq!(sourced["limits_known"].as_bool(), Some(true));
+    assert_eq!(sourced["context_window"].as_u64(), Some(64_000));
+
+    let (status, unsourced) =
+        json_request(&h, Method::GET, "/api/models/unsourced-7780", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        unsourced["limits_source"].as_str(),
+        Some("inferred"),
+        "a capacity the handler defaulted was asserted by nobody: {unsourced}"
+    );
+    assert_eq!(unsourced["limits_known"].as_bool(), Some(false));
+
+    // The list endpoint agrees with the detail endpoint — a surface that reads
+    // one and not the other must not see a different provenance.
+    let (status, list) = json_request(&h, Method::GET, "/api/models?provider=openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let find = |id: &str| {
+        list["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|m| m["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("{id} missing from the list response"))
+            .clone()
+    };
+    assert_eq!(
+        find("operator-sourced-7780")["limits_source"].as_str(),
+        Some("operator")
+    );
+    assert_eq!(
+        find("unsourced-7780")["limits_source"].as_str(),
+        Some("inferred")
+    );
+}
+
+/// A capacity sent as `null` is not a capacity the operator set.
+///
+/// The key is present in the body, so a presence check alone would call the
+/// entry operator-sourced while the handler stored its own literal — exactly
+/// the mismatch between a number and its claimed origin that #7780 is about.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_null_capacity_is_not_treated_as_operator_set() {
+    let h = boot();
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "null-capacity-7780",
+            "provider": "openai",
+            "context_window": serde_json::Value::Null,
+            "max_output_tokens": serde_json::Value::Null,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/models/null-capacity-7780", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["limits_source"].as_str(),
+        Some("inferred"),
+        "a null is the absence of an answer, not an answer: {body}"
+    );
+    assert_eq!(
+        body["context_window"].as_u64(),
+        Some(128_000),
+        "the handler's own fallback is what got stored"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Per-model overrides — GET / PUT / DELETE /api/models/overrides/{id}
 // ---------------------------------------------------------------------------
@@ -793,15 +910,14 @@ async fn provider_max_output_tokens_reports_capacity_not_a_preference() {
 /// figure (#7780).
 ///
 /// `merge_discovered_models` stamps a gateway-discovered entry with a
-/// placeholder capacity it has no source for — `DiscoveredModelInfo` carries
-/// no such field and the OpenAI-compatible `/v1/models` shape carries none
-/// either. Rendering that as "this provider emits at most 16K" states an
-/// authority it does not have, so the column goes blank instead and the
-/// dashboard shows "-".
+/// placeholder capacity when the endpoint reports none, because the
+/// OpenAI-compatible `/v1/models` shape carries no capacity field. Rendering
+/// that as "this provider emits at most 16K" states an authority it does not
+/// have, so the column goes blank instead and the dashboard shows "-".
 #[tokio::test(flavor = "multi_thread")]
 async fn provider_max_output_tokens_is_absent_when_the_limit_was_never_sourced() {
     // Two providers whose entries differ in exactly one field, so the assertion
-    // isolates `limits_known` and nothing else.
+    // isolates `limits_source` and nothing else.
     let provider = |id: &str| ProviderInfo {
         id: id.to_string(),
         display_name: id.to_string(),
@@ -812,7 +928,7 @@ async fn provider_max_output_tokens_is_absent_when_the_limit_was_never_sourced()
         model_count: 1,
         ..ProviderInfo::default()
     };
-    let model = |provider_id: &str, limits_known: bool| ModelCatalogEntry {
+    let model = |provider_id: &str, limits_source: LimitProvenance| ModelCatalogEntry {
         id: format!("{provider_id}-model"),
         display_name: format!("{provider_id} model"),
         provider: provider_id.to_string(),
@@ -820,13 +936,16 @@ async fn provider_max_output_tokens_is_absent_when_the_limit_was_never_sourced()
         modality: Modality::Text,
         context_window: 131_072,
         max_output_tokens: 16_384,
-        limits_known,
+        limits_source,
         ..Default::default()
     };
 
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_catalog_seed((
         vec![provider("sourced"), provider("guessed")],
-        vec![model("sourced", true), model("guessed", false)],
+        vec![
+            model("sourced", LimitProvenance::Gateway),
+            model("guessed", LimitProvenance::Inferred),
+        ],
     )));
     let state = test.state.clone();
     let h = Harness {
@@ -1521,7 +1640,8 @@ async fn copilot_oauth_poll_unknown_id_returns_404() {
 // ---------------------------------------------------------------------------
 
 use librefang_types::model_catalog::{
-    AuthStatus, Modality, ModelCatalogEntry, ModelTier, ProviderInfo, ReasoningEchoPolicy,
+    AuthStatus, LimitProvenance, Modality, ModelCatalogEntry, ModelTier, ProviderInfo,
+    ReasoningEchoPolicy,
 };
 
 /// Boot a harness seeded with a single named provider in the given
@@ -1543,7 +1663,7 @@ fn boot_with_provider(provider: ProviderInfo) -> Harness {
         modality: Modality::default(),
         context_window: 8_192,
         max_output_tokens: 2_048,
-        limits_known: true,
+        limits_source: LimitProvenance::Registry,
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
         pricing_known: true,

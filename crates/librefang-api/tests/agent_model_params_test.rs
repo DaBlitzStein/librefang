@@ -23,7 +23,7 @@ use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::agent::{AgentId, AgentManifest};
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
-use librefang_types::model_catalog::{Modality, ModelCatalogEntry, ModelTier};
+use librefang_types::model_catalog::{LimitProvenance, Modality, ModelCatalogEntry, ModelTier};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -44,10 +44,10 @@ impl Drop for Harness {
 /// Boots the production router and seeds two catalog entries that differ only
 /// in whether their capacities were sourced:
 ///
-/// * `ollama:known-model` — curated limits, `limits_known = true`.
+/// * `ollama:known-model` — curated limits, `limits_source = Registry`.
 /// * `ollama:discovered-model` — the `merge_discovered_models` shape: the same
-///   `131_072` / `16_384` placeholders a gateway probe leaves behind, flagged
-///   `limits_known = false` because nothing asserted them.
+///   `131_072` / `16_384` placeholders a gateway probe leaves behind when the
+///   endpoint reports nothing, flagged `limits_source = Inferred`.
 async fn boot() -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
@@ -84,7 +84,7 @@ async fn boot() -> Harness {
                 modality: Modality::Text,
                 context_window: 200_000,
                 max_output_tokens: 16_384,
-                limits_known: true,
+                limits_source: LimitProvenance::Registry,
                 ..Default::default()
             });
             catalog.add_custom_model(ModelCatalogEntry {
@@ -95,7 +95,7 @@ async fn boot() -> Harness {
                 modality: Modality::Text,
                 context_window: 131_072,
                 max_output_tokens: 16_384,
-                limits_known: false,
+                limits_source: LimitProvenance::Inferred,
                 ..Default::default()
             });
         },
