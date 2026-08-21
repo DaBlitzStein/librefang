@@ -29,6 +29,13 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   A `ModelCatalogEntry` now carries `limits_known`, and `merge_discovered_models` marks its `131_072` / `16_384` placeholders as unknown, because a gateway-discovered model has no capacity to source — `DiscoveredModelInfo` has no such field and the OpenAI-compatible `/v1/models` shape carries none either.
   Warning against a ceiling invented from a model's name is noise, and noise is what trains people to stop reading warnings (#7780, #7781, #7786) (@DaBlitzStein)
 
+- The response-length and context-window fields are now step ladders with a custom entry, replacing free sliders.
+  The useful values for a token count are an order-of-magnitude sequence, so the ladder offers 8K · 32K · 128K · 256K · 512K · 1M · 2M for context and 1K · 4K · 8K · 16K · 32K · 64K · 128K for output, plus a field for anything else.
+  The two ladders are deliberately different: output tokens are not context tokens, Gemini's 1M / 2M are how much it can *read*, and no model generates a million tokens of reply — a ladder offering 1M output would assert a value the provider will refuse.
+  `inherit` is a rung rather than an empty box, so "this agent has no opinion" is something you can point at.
+  A limit the model actually declared trims the ladder; a limit nobody measured leaves it whole.
+  Available in the agent editor, the agent-type editor, the TUI (agent detail → `p`), and the CLI (`librefang agent set <id> temperature 0.2`, or `inherit` to clear) (#7781, #7782) (@DaBlitzStein)
+
 ## [2026.8.19] - 2026-08-19
 
 _474 PRs from 5 contributors since v2026.7.31._
