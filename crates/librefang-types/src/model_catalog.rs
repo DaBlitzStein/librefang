@@ -195,14 +195,14 @@ pub struct ModelCatalogEntry {
     /// downstream calculations.
     #[serde(default)]
     pub max_output_tokens: u64,
-    /// Whether `context_window` / `max_output_tokens` were actually sourced.
+    /// Where `context_window` / `max_output_tokens` came from.
     ///
-    /// `false` marks an entry whose capacities are placeholders: `merge_discovered_models` admits a gateway-discovered model with hardcoded `131_072` / `16_384` because the OpenAI-compatible `/v1/models` shape carries no capacity field at all (#7780).
-    /// The number is still there — compaction and budget math need *something* — but nothing may present it to an operator as measured, and [`Self::known_max_output_tokens`] refuses to hand it out as a ceiling to warn against.
+    /// The number is always present — compaction and budget math need *something* — so the entry alone never said whether anyone had actually measured it (#7780).
+    /// [`LimitProvenance::Inferred`] marks the placeholder case: `merge_discovered_models` admits a gateway-discovered model with the hardcoded `131_072` / `16_384` when the endpoint reports no capacity, and nothing may then present that number to an operator as measured or warn against it as a ceiling.
     ///
-    /// Registry-shipped entries carry curated values, and older files predate the field, so a missing value defaults to `true` — the same convention as [`Self::pricing_known`].
-    #[serde(default = "default_true")]
-    pub limits_known: bool,
+    /// A missing value reads back as [`LimitProvenance::Registry`], which is the convention [`Self::pricing_known`] already uses: files written before this field existed are registry-shipped or operator-authored and carry real numbers.
+    #[serde(default)]
+    pub limits_source: LimitProvenance,
     /// Cost per million input tokens (USD) — text tokens for image/audio models.
     pub input_cost_per_m: f64,
     /// Cost per million output tokens (USD) — text tokens for image/audio models.
@@ -241,6 +241,66 @@ pub struct ModelCatalogEntry {
     /// Aliases for this model (e.g. ["sonnet", "claude-sonnet"]).
     #[serde(default)]
     pub aliases: Vec<String>,
+}
+
+/// Where a catalog entry's `context_window` / `max_output_tokens` came from.
+///
+/// A capacity always has a number attached, and until this existed the four ways that number arrives were indistinguishable once written into a [`ModelCatalogEntry`] (#7780).
+/// Three of them are assertions by somebody identifiable — an operator, the shipped registry, the endpoint itself.
+/// The fourth is a literal this codebase made up because the discovery surface offered nothing, and it is not a measurement.
+///
+/// [`Self::asserted`] is the line between the two groups, and it is what [`ModelCatalogEntry::known_context_window`] gates on: a limit nobody sourced is never handed out as a ceiling to warn against or clamp to.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LimitProvenance {
+    /// Hand-set by the operator — a custom model added with both capacities
+    /// filled in, or an `agent.toml` `[model]` override.
+    Operator,
+    /// Curated value shipped in the model registry.
+    ///
+    /// Also what an entry with no `limits_source` field reads back as, because
+    /// every file written before the field existed came from the registry or
+    /// from an operator typing real numbers.
+    #[default]
+    Registry,
+    /// Reported by the provider or gateway during discovery — LiteLLM's
+    /// `/model/info` with non-null capacities is the case this was built for.
+    Gateway,
+    /// Nobody sourced it. The `131_072` / `16_384` discovery literals and the
+    /// `add_custom_model` defaults land here: a plausible number that keeps
+    /// compaction and budget math running, carrying no claim to be right.
+    Inferred,
+}
+
+impl LimitProvenance {
+    /// The assertion behind these capacities, or `None` when there is none.
+    ///
+    /// The `None` arm is the whole point of the type: [`crate::inference_params::KnownLimit`] cannot be constructed without a [`crate::inference_params::LimitSource`], so a placeholder capacity is structurally unable to become a limit anything warns against.
+    pub fn asserted(self) -> Option<crate::inference_params::LimitSource> {
+        use crate::inference_params::LimitSource;
+        match self {
+            Self::Operator => Some(LimitSource::Operator),
+            Self::Registry => Some(LimitSource::Registry),
+            Self::Gateway => Some(LimitSource::Gateway),
+            Self::Inferred => None,
+        }
+    }
+
+    /// Whether the capacities came from a real source rather than a placeholder.
+    pub fn limits_known(self) -> bool {
+        self.asserted().is_some()
+    }
+
+    /// Stable identifier for logs and API payloads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Registry => "registry",
+            Self::Gateway => "gateway",
+            Self::Inferred => "inferred",
+        }
+    }
 }
 
 /// How the OpenAI-compatible driver must handle the `reasoning_content`
@@ -295,13 +355,26 @@ impl ModelCatalogEntry {
         self.modality == Modality::Image
     }
 
+    /// Whether this entry's capacities came from a real source rather than a
+    /// placeholder. Shorthand for `self.limits_source.limits_known()`.
+    pub fn limits_known(&self) -> bool {
+        self.limits_source.limits_known()
+    }
+
     /// This entry's context window as a limit that may be warned against, or
     /// `None` when it is absent (`0`) or a discovery placeholder.
     ///
-    /// The `limits_known` gate is what keeps a `131_072` that nobody measured
-    /// from being reported to an operator as a ceiling they crossed (#7780).
+    /// The [`LimitProvenance`] gate is what keeps a `131_072` that nobody
+    /// measured from being reported to an operator as a ceiling they crossed
+    /// (#7780).
+    ///
+    /// The reported [`crate::inference_params::LimitSource`] is still
+    /// hardcoded, so a warning credits the registry for every trustworthy
+    /// capacity including an operator's own. Wiring it to
+    /// [`LimitProvenance::asserted`] is a separate change, landing with the
+    /// discovery path that makes a third source reachable at all.
     pub fn known_context_window(&self) -> Option<crate::inference_params::KnownLimit> {
-        if !self.limits_known {
+        if !self.limits_known() {
             return None;
         }
         crate::inference_params::KnownLimit::new(
@@ -313,7 +386,7 @@ impl ModelCatalogEntry {
     /// This entry's maximum output tokens as a warnable limit.
     /// See [`Self::known_context_window`].
     pub fn known_max_output_tokens(&self) -> Option<crate::inference_params::KnownLimit> {
-        if !self.limits_known {
+        if !self.limits_known() {
             return None;
         }
         crate::inference_params::KnownLimit::new(
@@ -359,7 +432,7 @@ impl Default for ModelCatalogEntry {
             modality: Modality::default(),
             context_window: 0,
             max_output_tokens: 0,
-            limits_known: true,
+            limits_source: LimitProvenance::Registry,
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
             pricing_known: true,

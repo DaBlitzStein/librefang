@@ -27,7 +27,7 @@
 //! `agent_loop.rs:1285`.
 
 use chrono::{DateTime, Utc};
-use librefang_types::model_catalog::{Modality, ModelCatalogEntry, ModelTier};
+use librefang_types::model_catalog::{LimitProvenance, Modality, ModelCatalogEntry, ModelTier};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -66,7 +66,7 @@ pub enum MetadataSource {
 }
 
 impl MetadataSource {
-    /// Whether the capacities this layer produced came from a real source.
+    /// Which of the four provenances this layer's capacities carry.
     ///
     /// The first four layers each have someone who asserted the number — the
     /// operator, the registry, a prior probe, the endpoint itself. The L5 tail
@@ -74,14 +74,26 @@ impl MetadataSource {
     /// on a model name, which is the same class of invention as the discovery
     /// literals in `merge_discovered_models` (#7780). Warning an operator for
     /// exceeding a limit that was guessed from their model's *name* is noise,
-    /// so entries from those layers are marked unknown.
-    pub fn limits_known(self) -> bool {
+    /// so those layers resolve to [`LimitProvenance::Inferred`].
+    ///
+    /// `PersistedCache` maps to `Gateway` rather than a provenance of its own
+    /// because that is what the cache holds: `write_cache_entry` is only ever
+    /// called from the L4 probe arm, so a cache hit is an endpoint report read
+    /// back from disk, not a separate kind of claim.
+    pub fn provenance(self) -> LimitProvenance {
         match self {
-            Self::AgentManifest | Self::Registry | Self::PersistedCache | Self::RuntimeProbe => {
-                true
+            Self::AgentManifest => LimitProvenance::Operator,
+            Self::Registry => LimitProvenance::Registry,
+            Self::PersistedCache | Self::RuntimeProbe => LimitProvenance::Gateway,
+            Self::HardcodedFallback | Self::Default200kAnthropic | Self::Default32k => {
+                LimitProvenance::Inferred
             }
-            Self::HardcodedFallback | Self::Default200kAnthropic | Self::Default32k => false,
         }
+    }
+
+    /// Whether the capacities this layer produced came from a real source.
+    pub fn limits_known(self) -> bool {
+        self.provenance().limits_known()
     }
 
     /// Stable string used in tracing and the dashboard surface.
@@ -286,9 +298,8 @@ fn lookup_hardcoded(model_id: &str) -> Option<u64> {
 /// Build a synthetic `ModelCatalogEntry` for a layer that doesn't have a
 /// registry-backed entry to borrow (L1 / L3 / L4 / L5).
 ///
-/// `source` is carried in so the entry records whether its capacities were
-/// asserted by someone or invented by the layer — see
-/// [`MetadataSource::limits_known`].
+/// `source` is carried in so the entry records where its capacities came from
+/// rather than only whether they exist — see [`MetadataSource::provenance`].
 fn synthesize_entry(
     model: &str,
     provider: &str,
@@ -304,7 +315,7 @@ fn synthesize_entry(
         modality: Modality::Text,
         context_window,
         max_output_tokens,
-        limits_known: source.limits_known(),
+        limits_source: source.provenance(),
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
         pricing_known: false,
@@ -818,7 +829,7 @@ mod tests {
             modality: Modality::Text,
             context_window,
             max_output_tokens: 4096,
-            limits_known: true,
+            limits_source: LimitProvenance::Registry,
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
             pricing_known: true,

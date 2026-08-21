@@ -27,7 +27,7 @@
 
 use crate::commands::prelude::*;
 use librefang_types::model_catalog::{
-    Modality, ModelCatalogEntry, ModelCatalogFile, ModelTier, ProviderCatalogToml,
+    LimitProvenance, Modality, ModelCatalogEntry, ModelCatalogFile, ModelTier, ProviderCatalogToml,
 };
 
 /// The only `models connect` target implemented today.
@@ -581,11 +581,20 @@ pub(crate) fn synthesize_catalog(
             modality,
             context_window: metadata.context_window,
             max_output_tokens: metadata.max_output_tokens,
-            // Every branch of `resolve_metadata` reads a real source — the
-            // gateway's own `/model/info`, the pricing feed, or the bundled
-            // OpenRouter snapshot. `token_limits_borrowed` records *which*
-            // for the report; all three count as known (#7780).
-            limits_known: metadata.context_window > 0 || metadata.max_output_tokens > 0,
+            // Every branch of `resolve_metadata` reads a real source, and
+            // `token_limits_borrowed` already records which one, so the entry
+            // can name it instead of only asserting that one existed (#7780).
+            // The gateway's own listing and its pricing feed are both the
+            // endpoint speaking for itself; a figure taken from the bundled
+            // OpenRouter snapshot is the registry speaking for it. Neither
+            // limit resolving at all leaves nothing to attribute.
+            limits_source: if metadata.context_window == 0 && metadata.max_output_tokens == 0 {
+                LimitProvenance::Inferred
+            } else if metadata.token_limits_borrowed {
+                LimitProvenance::Registry
+            } else {
+                LimitProvenance::Gateway
+            },
             // Always emitted, never omitted: neither cost field carries
             // `#[serde(default)]`, so a missing one fails the whole file's
             // parse. `pricing_known` is the flag that distinguishes "free"

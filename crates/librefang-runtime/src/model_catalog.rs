@@ -4,8 +4,8 @@
 //! with alias resolution, auth status detection, and pricing lookups.
 
 use librefang_types::model_catalog::{
-    AliasesCatalogFile, AuthStatus, EffectiveCapabilities, ModelCatalogEntry, ModelCatalogFile,
-    ModelOverrides, ModelTier, ProviderInfo,
+    AliasesCatalogFile, AuthStatus, EffectiveCapabilities, LimitProvenance, ModelCatalogEntry,
+    ModelCatalogFile, ModelOverrides, ModelTier, ProviderInfo,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -1419,12 +1419,12 @@ impl ModelCatalog {
                 // has no capacity field and the OpenAI-compatible
                 // `/v1/models` shape carries none either, so there is no
                 // value to source here — but compaction and budget math
-                // still need a number. `limits_known: false` is what keeps
-                // that number from being presented to an operator as a
+                // still need a number. `LimitProvenance::Inferred` is what
+                // keeps that number from being presented to an operator as a
                 // measured ceiling, or warned against as one (#7780).
                 context_window: 131_072,
                 max_output_tokens: 16_384,
-                limits_known: false,
+                limits_source: LimitProvenance::Inferred,
                 input_cost_per_m: 0.0,
                 output_cost_per_m: 0.0,
                 supports_tools,

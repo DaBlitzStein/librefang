@@ -59,15 +59,22 @@ Being wrong loudly beats being wrong quietly.
 
 A limit only warns when something actually asserted it.
 
-`ModelCatalogEntry::limits_known` is the discriminator, and it follows the same convention as the older `pricing_known`: absent means `true`, because registry entries predate the field and carry curated values.
+`ModelCatalogEntry::limits_source` is the discriminator, and it records *which* of four origins produced the pair rather than only whether one existed.
+It follows the same absence convention as the older `pricing_known`: a file written before the field existed reads back as `Registry`, because those entries are registry-shipped or operator-authored and carry real numbers.
+Reading absence as `Inferred` instead would silently strip working limits from every existing install.
+`ModelCatalogEntry::limits_known()` is the derived boolean — true for everything except `Inferred` — and it is what surfaces and the save-time check gate on.
 
-| Source | `limits_known` | Warns? |
+| Source | `limits_source` | Warns? |
 |---|---|---|
-| `agent.toml: [model] context_window` / `max_output_tokens` | operator-set, always known | yes |
-| Shipped registry / curated catalog entry | `true` | yes |
-| Gateway that reported a capacity (LiteLLM `/model/info`, OpenRouter snapshot) | `true` | yes |
-| `merge_discovered_models` placeholders (`131_072` / `16_384`) | `false` | **no** |
-| `model_metadata.rs` L5 tail — substring table, `DEFAULT_GENERIC_CONTEXT`, `DEFAULT_ANTHROPIC_CONTEXT` | `false` | **no** |
+| `agent.toml: [model] context_window` / `max_output_tokens`, custom model added with both capacities typed | `operator` | yes |
+| Shipped registry / curated catalog entry, or a figure borrowed from the bundled OpenRouter snapshot | `registry` | yes |
+| Gateway that reported a capacity (LiteLLM `/model/info`, the gateway's own listing or pricing feed) | `gateway` | yes |
+| `merge_discovered_models` placeholders (`131_072` / `16_384`) | `inferred` | **no** |
+| `model_metadata.rs` L5 tail — substring table, `DEFAULT_GENERIC_CONTEXT`, `DEFAULT_ANTHROPIC_CONTEXT` | `inferred` | **no** |
+| `add_custom_model` fallbacks (`128_000` / `8_192`) when the operator typed neither | `inferred` | **no** |
+
+The three asserted origins map onto `LimitSource`, which is what a `KnownLimit` carries.
+`LimitProvenance::asserted()` returns `None` for `Inferred`, and `KnownLimit` cannot be built without a `LimitSource` — a placeholder is therefore *structurally* unable to become a limit anything warns against, rather than relying on every call site to remember to check.
 
 A discovered model has no capacity to source: `DiscoveredModelInfo` has no such field, and the OpenAI-compatible `/v1/models` shape carries none either (#7780).
 The daemon still needs a number for compaction and budget math, so a placeholder goes in — but nothing may present it to an operator as measured, and nothing may warn against it.

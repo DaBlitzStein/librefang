@@ -1360,6 +1360,76 @@ fn test_merge_never_downgrades_capabilities() {
     assert!(entry.supports_thinking, "must not downgrade thinking");
 }
 
+// ── Capacity provenance (#7780) ───────────────────────────────────────────
+
+/// A catalog file written before `limits_source` existed still loads, and every
+/// entry in it keeps its capacities and stays usable as a ceiling.
+///
+/// The absent field means [`LimitProvenance::Registry`] — defined and
+/// deliberate, because every file that predates the field is registry-shipped
+/// or operator-authored and carries real numbers. Reading absence as `Inferred`
+/// would silently strip working limits from every existing install.
+#[test]
+fn a_catalog_written_without_the_provenance_field_loads_as_registry() {
+    let legacy = serde_json::json!([{
+        "id": "legacy-model",
+        "display_name": "Legacy model",
+        "provider": "openai",
+        "tier": "balanced",
+        "context_window": 128_000,
+        "max_output_tokens": 4_096,
+        "input_cost_per_m": 1.0,
+        "output_cost_per_m": 2.0
+    }]);
+
+    let entries: Vec<ModelCatalogEntry> =
+        serde_json::from_value(legacy).expect("a pre-provenance catalog must still deserialize");
+    let entry = &entries[0];
+
+    assert_eq!(entry.limits_source, LimitProvenance::Registry);
+    assert!(
+        entry.limits_known(),
+        "an existing install must not lose its limits to a field it never wrote"
+    );
+    assert_eq!(entry.context_window, 128_000);
+    assert_eq!(entry.max_output_tokens, 4_096);
+    assert_eq!(
+        entry.known_context_window().expect("still a limit").tokens,
+        128_000
+    );
+}
+
+/// Round-trip: what the daemon writes today, it reads back identically.
+#[test]
+fn provenance_round_trips_through_serialization() {
+    for source in [
+        LimitProvenance::Operator,
+        LimitProvenance::Registry,
+        LimitProvenance::Gateway,
+        LimitProvenance::Inferred,
+    ] {
+        let entry = ModelCatalogEntry {
+            id: "round-trip".to_string(),
+            provider: "openai".to_string(),
+            context_window: 1_024,
+            max_output_tokens: 512,
+            limits_source: source,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let back: ModelCatalogEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.limits_source, source);
+        assert_eq!(back.limits_known(), source.limits_known());
+    }
+
+    // The wire spelling is the snake_case one every surface reads.
+    assert_eq!(
+        serde_json::to_value(LimitProvenance::Gateway).unwrap(),
+        serde_json::json!("gateway")
+    );
+    assert_eq!(LimitProvenance::Inferred.as_str(), "inferred");
+}
+
 #[test]
 fn test_custom_model_keeps_assigned_provider() {
     let mut catalog = test_catalog();

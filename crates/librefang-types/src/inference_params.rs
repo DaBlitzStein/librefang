@@ -47,7 +47,7 @@ pub const MAX_OUTPUT_TOKENS_LADDER: &[u32] =
 /// A model limit that some identifiable source actually asserted.
 ///
 /// Constructing one is the assertion that the number came from an operator, the shipped registry, or a gateway that reported it — never from a placeholder.
-/// [`crate::model_catalog::ModelCatalogEntry::limits_known`] is the flag that keeps the two apart: `merge_discovered_models` stamps a discovered entry with the `131_072` / `16_384` literals it has no source for and marks it unknown, so nothing downstream can mistake the placeholder for a measurement.
+/// [`crate::model_catalog::LimitProvenance`] is what keeps the two apart: `merge_discovered_models` stamps a discovered entry the endpoint reported nothing for with the `131_072` / `16_384` literals and marks it [`crate::model_catalog::LimitProvenance::Inferred`], whose `asserted()` is `None`, so nothing downstream can mistake the placeholder for a measurement.
 ///
 /// Code that cannot tell the difference must pass `None` rather than guess.
 /// Warning an operator that 200000 exceeds a ceiling that was itself invented is noise, and noise trains people to ignore the real warnings.
