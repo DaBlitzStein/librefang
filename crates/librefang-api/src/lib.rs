@@ -203,6 +203,7 @@ pub mod acp_uds;
 pub mod approval;
 pub mod channel_bridge;
 pub mod client_ip;
+pub mod custom_gateway_catalog;
 pub mod error;
 pub mod everyapi_catalog;
 pub mod extensions;
