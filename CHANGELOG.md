@@ -16,6 +16,11 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   `reasoning_effort` deliberately keeps the opposite rule: it is a fact about the endpoint rather than a preference, a gateway that rejects it rejects every turn that carries it (#7770), so the model level still wins there and an agent cannot force it on.
   Existing agents are unaffected on upgrade — every persisted manifest carries explicit numbers, which stay explicit; the inherit state appears only on new agents and where an operator picks it (#7781, #7786) (@DaBlitzStein)
 
+- The providers table now reports what a provider can emit instead of what somebody asked it for.
+  The "max output tokens" column answered with a per-model `max_tokens` override when one was set — a preference published under a capacity's name, so an operator reading "this provider gives at most N" was shown a request length.
+  It was not a correct preference display either, which is what settles it: an unset override does not mean the catalog maximum gets requested, it means the chain falls through to the compiled default, so the old value was neither the capacity nor the effective request length.
+  The column is now the representative model's capacity, and it goes blank rather than publishing a figure nothing sourced (#7780).
+  The field that edits the preference stays, relabelled for what it does, and it no longer treats a typed value equal to the model's capacity as "same as the default, so clear it" — that rule silently discarded a deliberate setting and left the model on the compiled default instead (#6209, #7781, #7788) (@DaBlitzStein)
 - An agent can now set all five sampling preferences, not just two.
   `top_p`, `frequency_penalty` and `presence_penalty` existed per model but had no per-agent equivalent, so an agent that wanted its own `top_p` had no way to ask for one.
   The two endpoint limits, `context_window` and `max_output_tokens`, are editable per agent from every surface as well (#7781, #7786) (@DaBlitzStein)
