@@ -904,6 +904,63 @@ async fn goal_run_start_distinguishes_a_corrupt_agent_id_from_an_unassigned_one_
     );
 }
 
+/// Rejecting the run is only half of it: the branch that now returns 400 used
+/// to auto-spawn an agent carrying `shell: ["*"]` plus `shell_exec`,
+/// `file_write` and `agent_spawn`, and that agent outlived the run.
+///
+/// The 400 assertions above would still pass if a future change reinstated the
+/// spawn and merely refused to drive it, so assert the property that actually
+/// matters — an unusable `agent_id` provisions nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_with_an_unusable_agent_id_provisions_no_agent() {
+    for stored in ["", "not-a-uuid"] {
+        let h = boot().await;
+        let goal = create_goal(&h, serde_json::json!({"title": "No usable agent"})).await;
+        let id = goal["id"].as_str().unwrap().to_string();
+
+        if !stored.is_empty() {
+            let seeded = h._state.kernel.memory_substrate().structured_modify(
+                librefang_types::goal::goals_storage_agent_id(),
+                librefang_types::goal::GOALS_STORAGE_KEY,
+                |cur| {
+                    let mut goals = match cur {
+                        Some(serde_json::Value::Array(a)) => a,
+                        _ => Vec::new(),
+                    };
+                    for g in goals.iter_mut() {
+                        if g["id"].as_str() == Some(id.as_str()) {
+                            g["agent_id"] = serde_json::Value::String(stored.to_string());
+                        }
+                    }
+                    Ok((serde_json::Value::Array(goals), ()))
+                },
+            );
+            assert!(seeded.is_ok(), "seeding {stored:?} must succeed");
+        }
+
+        let before = h._state.kernel.agent_registry().list_arcs().len();
+        let (status, body) =
+            json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "stored={stored:?}: {body:?}"
+        );
+
+        let after = h._state.kernel.agent_registry().list_arcs();
+        assert_eq!(
+            after.len(),
+            before,
+            "a rejected run must not provision an agent (stored={stored:?}); registry now holds: {:?}",
+            after.iter().map(|a| a.manifest.name.clone()).collect::<Vec<_>>()
+        );
+        assert!(
+            !after.iter().any(|a| a.manifest.name.starts_with("goal-")),
+            "no goal-* agent may be auto-spawned (stored={stored:?})"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn goal_run_start_then_stop_with_agent() {
     let h = boot().await;
