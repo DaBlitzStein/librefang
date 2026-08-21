@@ -745,14 +745,12 @@ fn test_spawn_agent_applies_local_default_model_override() {
                 model: ModelConfig {
                     provider: "default".to_string(),
                     model: "default".to_string(),
-                    max_tokens: 4096,
-                    temperature: 0.7,
+                    max_tokens: Some(4096),
+                    temperature: Some(0.7),
                     system_prompt: String::new(),
                     api_key_env: None,
                     base_url: None,
-                    context_window: None,
-                    max_output_tokens: None,
-                    extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -1229,14 +1227,12 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                 model: ModelConfig {
                     provider: "cloudverse".to_string(),
                     model: "anthropic-claude-4-5-sonnet".to_string(),
-                    max_tokens: 4096,
-                    temperature: 0.7,
+                    max_tokens: Some(4096),
+                    temperature: Some(0.7),
                     system_prompt: String::new(),
                     api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
                     base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
-                    context_window: None,
-                    max_output_tokens: None,
-                    extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -1492,11 +1488,13 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
         "provider override should not survive a new hand activation"
     );
     assert_ne!(
-        second_manifest.model.max_tokens, 12345,
+        second_manifest.model.max_tokens,
+        Some(12345),
         "max_tokens override should be cleared on fresh activation"
     );
     assert_ne!(
-        second_manifest.model.temperature, 0.2,
+        second_manifest.model.temperature,
+        Some(0.2),
         "temperature override should be cleared on fresh activation"
     );
     assert_ne!(
@@ -1573,8 +1571,8 @@ fn reactivate_builds_from_hand_toml_not_override() {
         overridden_entry.manifest.model.base_url.as_deref(),
         Some("https://override.invalid/v1")
     );
-    assert_eq!(overridden_entry.manifest.model.max_tokens, 12345);
-    assert!((overridden_entry.manifest.model.temperature - 0.2).abs() < 1e-6);
+    assert_eq!(overridden_entry.manifest.model.max_tokens, Some(12345));
+    assert_eq!(overridden_entry.manifest.model.temperature, Some(0.2));
     assert_eq!(
         overridden_entry.manifest.web_search_augmentation,
         WebSearchAugmentationMode::Always
@@ -1655,11 +1653,11 @@ fn reactivate_builds_from_hand_toml_not_override() {
     );
     assert_ne!(
         reactivated_manifest.model.max_tokens,
-        runtime_override.max_tokens.unwrap()
+        runtime_override.max_tokens
     );
     assert_ne!(
         reactivated_manifest.model.temperature,
-        runtime_override.temperature.unwrap()
+        runtime_override.temperature
     );
     assert_ne!(
         reactivated_manifest.web_search_augmentation,
@@ -5758,8 +5756,8 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
             .expect("apitester hand agent entry");
         assert_eq!(entry.manifest.model.model, "test-override-model");
         assert_eq!(entry.manifest.model.provider, "test-override-provider");
-        assert_eq!(entry.manifest.model.max_tokens, 54321);
-        assert!((entry.manifest.model.temperature - 0.37).abs() < 1e-6);
+        assert_eq!(entry.manifest.model.max_tokens, Some(54321));
+        assert_eq!(entry.manifest.model.temperature, Some(0.37));
         assert_eq!(
             entry.manifest.web_search_augmentation,
             WebSearchAugmentationMode::Always
@@ -5845,13 +5843,14 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
         "provider override must be re-applied on restart"
     );
     assert_eq!(
-        m.model.max_tokens, 54321,
+        m.model.max_tokens,
+        Some(54321),
         "max_tokens override must be re-applied on restart"
     );
-    assert!(
-        (m.model.temperature - 0.37).abs() < 1e-6,
-        "temperature override must be re-applied on restart (got {})",
-        m.model.temperature
+    assert_eq!(
+        m.model.temperature,
+        Some(0.37),
+        "temperature override must be re-applied on restart"
     );
     assert_eq!(
         m.web_search_augmentation,
@@ -5950,8 +5949,8 @@ fn hand_runtime_override_survives_restart_via_start_background_agents() {
     let m = &entry.manifest;
     assert_eq!(m.model.model, "e2e-override-model");
     assert_eq!(m.model.provider, "e2e-override-provider");
-    assert_eq!(m.model.max_tokens, 13579);
-    assert!((m.model.temperature - 0.42).abs() < 1e-6);
+    assert_eq!(m.model.max_tokens, Some(13579));
+    assert_eq!(m.model.temperature, Some(0.42));
     assert_eq!(m.web_search_augmentation, WebSearchAugmentationMode::Always);
 
     // Explicitly drop the runtime before shutdown so background tasks can
@@ -6301,7 +6300,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
         .get(agent_id)
         .expect("apitester hand agent entry post-override");
     assert_eq!(overridden.manifest.model.model, "clear-override-model");
-    assert_eq!(overridden.manifest.model.max_tokens, 9999);
+    assert_eq!(overridden.manifest.model.max_tokens, Some(9999));
 
     // Clear and check the manifest is back to defaults.
     kernel
@@ -6332,8 +6331,8 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
         cleared.manifest.model.max_tokens, default_manifest.model.max_tokens,
         "max_tokens must match the HAND.toml default after clear"
     );
-    assert!(
-        (cleared.manifest.model.temperature - default_manifest.model.temperature).abs() < 1e-6,
+    assert_eq!(
+        cleared.manifest.model.temperature, default_manifest.model.temperature,
         "temperature must match the HAND.toml default after clear"
     );
     assert_eq!(
@@ -14049,14 +14048,12 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                 model: ModelConfig {
                     provider: "default".to_string(),
                     model: "default".to_string(),
-                    max_tokens: 4096,
-                    temperature: 0.7,
+                    max_tokens: Some(4096),
+                    temperature: Some(0.7),
                     system_prompt: String::new(),
                     api_key_env: None,
                     base_url: None,
-                    context_window: None,
-                    max_output_tokens: None,
-                    extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -14077,14 +14074,12 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                 model: ModelConfig {
                     provider: "anthropic".to_string(),
                     model: "claude-old-default".to_string(),
-                    max_tokens: 4096,
-                    temperature: 0.7,
+                    max_tokens: Some(4096),
+                    temperature: Some(0.7),
                     system_prompt: String::new(),
                     api_key_env: None,
                     base_url: None,
-                    context_window: None,
-                    max_output_tokens: None,
-                    extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -14385,14 +14380,12 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                 model: ModelConfig {
                     provider: "openrouter".to_string(),
                     model: "poolside/laguna-xs.2:free".to_string(),
-                    max_tokens: 4096,
-                    temperature: 0.7,
+                    max_tokens: Some(4096),
+                    temperature: Some(0.7),
                     system_prompt: String::new(),
                     api_key_env: None,
                     base_url: None,
-                    context_window: None,
-                    max_output_tokens: None,
-                    extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -14414,14 +14407,12 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                 model: ModelConfig {
                     provider: "openrouter".to_string(),
                     model: "openai/gpt-4o".to_string(),
-                    max_tokens: 4096,
-                    temperature: 0.7,
+                    max_tokens: Some(4096),
+                    temperature: Some(0.7),
                     system_prompt: String::new(),
                     api_key_env: None,
                     base_url: None,
-                    context_window: None,
-                    max_output_tokens: None,
-                    extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
