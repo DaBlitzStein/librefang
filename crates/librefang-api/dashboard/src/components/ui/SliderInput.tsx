@@ -71,13 +71,19 @@ export function SliderInput({
               // switch is an interactive control, so it needs contrast against
               // the surface in both states, not the hairline treatment a
               // divider gets.
-              className={`relative w-8 h-[18px] shrink-0 rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${
+              // Geometry that contains the knob by construction rather than by
+              // arithmetic that has to be re-derived every time a size changes:
+              // the track carries the 2px inset as padding (w-9 = 36px, p-0.5
+              // leaves 32px of usable width), the knob is 16px, so its travel
+              // is exactly 32 - 16 = 16px = translate-x-4. Off is translate-x-0,
+              // flush against the padding. Nothing can spill past either edge.
+              className={`flex items-center w-9 h-5 p-0.5 shrink-0 rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${
                 enabled ? "bg-brand" : "bg-text-dim hover:bg-text-dim/80"
               }`}
             >
               <span
-                className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${
-                  enabled ? "translate-x-4" : "translate-x-0.5"
+                className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                  enabled ? "translate-x-4" : "translate-x-0"
                 }`}
               />
             </button>

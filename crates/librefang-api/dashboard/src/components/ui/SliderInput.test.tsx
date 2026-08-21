@@ -96,6 +96,42 @@ describe("SliderInput", () => {
   });
 
   /**
+   * The knob used to be absolutely positioned inside a 32px track and nudged
+   * with translate values that had to be re-derived by hand whenever a size
+   * changed; the user saw it spill past the right edge of its own track.
+   * The track now carries the inset as padding, so containment is arithmetic
+   * anyone can check: 36px track - 4px padding = 32px usable, 16px knob,
+   * 16px travel. These pin that relationship.
+   */
+  describe("toggle geometry", () => {
+    it("moves the knob by exactly the room the track leaves it", () => {
+      const { rerender } = render(
+        <SliderInput {...base} enabled={false} onChange={() => {}} onToggle={() => {}} />,
+      );
+      const knobOf = () =>
+        screen.getByRole("switch").firstElementChild as HTMLElement;
+
+      // Off: flush against the padding, no negative or fractional offset.
+      expect(knobOf().className).toMatch(/(^|\s)translate-x-0(\s|$)/);
+
+      rerender(<SliderInput {...base} enabled onChange={() => {}} onToggle={() => {}} />);
+      // On: 32px usable - 16px knob = 16px = translate-x-4. Any larger value
+      // pushes the knob past the track's right edge.
+      expect(knobOf().className).toMatch(/(^|\s)translate-x-4(\s|$)/);
+    });
+
+    it("keeps track and knob sizes in the ratio the travel assumes", () => {
+      render(<SliderInput {...base} enabled onChange={() => {}} onToggle={() => {}} />);
+      const toggle = screen.getByRole("switch");
+
+      // w-9 (36px) with p-0.5 (2px each side) and a w-4 (16px) knob.
+      expect(toggle.className).toMatch(/(^|\s)w-9(\s|$)/);
+      expect(toggle.className).toMatch(/(^|\s)p-0\.5(\s|$)/);
+      expect((toggle.firstElementChild as HTMLElement).className).toMatch(/(^|\s)w-4(\s|$)/);
+    });
+  });
+
+  /**
    * The legend is a reading aid for the track above it, so a label has to sit
    * over the position its own value occupies. Even spacing (`justify-between`)
    * looks tidy and lies: on the real context-window row — min 1024, max 2M,
