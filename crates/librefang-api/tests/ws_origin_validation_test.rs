@@ -224,13 +224,18 @@ async fn listed_origin_is_accepted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn wildcard_entry_does_not_abort_the_scan_of_a_mixed_list() {
-    // `"*"` is not a URL. Before the fix the scan hit it, returned
-    // "Invalid extra origin URL: *", and never reached the entry that follows —
-    // so a list of `["*", "https://dash.example.com"]` rejected
-    // dash.example.com. Only reachable when the wildcard branch itself is
-    // declined, which on the terminal route it is whenever `allow_remote` is
-    // false; pinned here because the scan is shared between both routes.
+async fn a_mixed_list_containing_the_wildcard_still_accepts() {
+    // A list that mixes `"*"` with concrete entries is accepted on this route.
+    //
+    // Deliberately NOT the regression test for the `"*"`-aborts-the-scan bug,
+    // even though it is the shape that triggered it: this route passes
+    // `allow_wildcard = true`, so the wildcard branch returns before the scan
+    // runs and this assertion would hold with the bug still in place. The scan
+    // itself is pinned where it is actually reachable — with
+    // `allow_wildcard = false`, in `ws::tests::validate_ws_origin_wildcard_entry_does_not_abort_the_list_scan`
+    // and `..._does_not_poison_the_rejection_reason`. What this case is good
+    // for is the end-to-end guarantee that a mixed list does not break the
+    // upgrade.
     let server = start(vec![
         "*".to_string(),
         "https://dash.example.com".to_string(),
@@ -239,7 +244,7 @@ async fn wildcard_entry_does_not_abort_the_scan_of_a_mixed_list() {
     let res = ws_handshake(&server, SERVER_HOST, Some("https://dash.example.com")).await;
     assert_eq!(
         res.status, 400,
-        "a wildcard entry must not mask the rest of the list. Body: {}",
+        "a mixed list must not break the upgrade. Body: {}",
         res.body
     );
 }

@@ -2990,10 +2990,36 @@ mod tests {
         // `"*"` is not a URL. Parsing it as one aborted the whole scan with
         // "Invalid extra origin URL: *", so every entry after the wildcard was
         // unreachable whenever the wildcard branch itself was declined.
+        //
+        // `allow_wildcard = false` is what gives this test teeth: with `true`
+        // the wildcard branch returns `Ok` before the scan is ever reached, and
+        // the assertion would hold with the bug still in place. This is the
+        // terminal route's configuration — `terminal.allow_remote = false` plus
+        // a `"*"` an operator left in `terminal.allowed_origins` — which is the
+        // only way the broken path was reachable from config.
         let mut headers = HeaderMap::new();
         headers.insert("origin", "https://dash.example.com".parse().unwrap());
         let list = vec!["*".to_string(), "https://dash.example.com".to_string()];
         assert!(validate_ws_origin(&headers, Some(4545), &list, false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_entry_does_not_poison_the_rejection_reason() {
+        // The other half of the same bug. When the scan aborted on `"*"`, an
+        // origin that genuinely should be rejected was rejected for the wrong
+        // reason — `Invalid extra origin URL: *`, which names neither the
+        // origin nor the list and sends the operator hunting a config typo that
+        // is not there. The wildcard must be skipped, and the caller must get
+        // the real rejection.
+        let headers = browser_headers("192.168.1.161:4545", "http://evil.example");
+        let list = vec!["*".to_string(), "https://dash.example.com".to_string()];
+        let err = validate_ws_origin(&headers, Some(4545), &list, false).unwrap_err();
+        assert!(
+            !err.contains("Invalid extra origin URL"),
+            "the wildcard must not hijack the rejection reason: {err}"
+        );
+        assert!(err.contains("http://evil.example"), "{err}");
+        assert!(err.contains("https://dash.example.com"), "{err}");
     }
 
     #[test]
