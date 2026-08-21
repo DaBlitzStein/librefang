@@ -589,6 +589,13 @@ fn main() {
                 target,
                 set_default,
             } => cmd_models_connect(&target, set_default),
+            ModelsCommands::Overrides {
+                model,
+                context_window,
+                max_output_tokens,
+                clear,
+                json,
+            } => cmd_models_overrides(&model, context_window, max_output_tokens, clear, json),
         },
         Some(Commands::Gateway(sub)) => match sub {
             GatewayCommands::Start { tail, foreground } => {

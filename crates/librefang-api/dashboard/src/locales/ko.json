@@ -3052,6 +3052,8 @@
     "provider": "공급자",
     "provider_placeholder": "예: openai",
     "context_window": "컨텍스트 창",
+    "estimated": "추정값",
+    "context_window_estimated_hint": "이 모델의 카탈로그에 신뢰할 수 있는 컨텍스트 창 값이 없어, 런타임이 보수적인 8K 토큰 추정값으로 대체하고 있습니다. 재정의를 설정하여 수정하세요.",
     "max_output": "최대 출력 토큰",
     "input_cost": "입력 비용($/M 토큰)",
     "output_cost": "출력 비용($/M 토큰)",

@@ -106,6 +106,13 @@ type SettingsState = {
   topPEnabled: boolean;
   maxTokens: number;
   maxTokensEnabled: boolean;
+  // #7774: corrects the catalog's context_window / max_output_tokens when
+  // wrong or missing (e.g. a self-hosted gateway that reports neither) —
+  // distinct from maxTokens above, which caps the completion request size.
+  contextWindow: number;
+  contextWindowEnabled: boolean;
+  maxOutputTokens: number;
+  maxOutputTokensEnabled: boolean;
   freqPenalty: number;
   freqEnabled: boolean;
   presPenalty: number;
@@ -132,6 +139,10 @@ const settingsInitial: SettingsState = {
   topPEnabled: false,
   maxTokens: 4096,
   maxTokensEnabled: false,
+  contextWindow: 128000,
+  contextWindowEnabled: false,
+  maxOutputTokens: 8192,
+  maxOutputTokensEnabled: false,
   freqPenalty: 0.0,
   freqEnabled: false,
   presPenalty: 0.0,
@@ -231,7 +242,10 @@ const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onTog
 
       {/* Middle row: context + cost */}
       <div className="flex items-center gap-3 text-[11px] text-text-dim">
-        <span className="font-mono" title={t("models.context_window")}>{formatCtx(m.context_window)}</span>
+        <span className="font-mono inline-flex items-center gap-1" title={m.context_window_is_estimated ? t("models.context_window_estimated_hint") : t("models.context_window")}>
+          {formatCtx(m.context_window)}
+          {m.context_window_is_estimated && <AlertCircle className="w-3 h-3 text-warning" />}
+        </span>
         <span className="text-border-subtle">·</span>
         {m.pricing_known === false
           ? <span className="font-mono">—</span>
@@ -339,7 +353,15 @@ function ModelDetailBody({
         </div>
         <div>
           <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_context")}</div>
-          <span className="font-mono">{formatCtx(m.context_window)}</span>
+          <span className="font-mono inline-flex items-center gap-1">
+            {formatCtx(m.context_window)}
+            {m.context_window_is_estimated && (
+              <span className="inline-flex items-center gap-1 text-warning" title={t("models.context_window_estimated_hint")}>
+                <AlertCircle className="w-3 h-3" />
+                {t("models.estimated")}
+              </span>
+            )}
+          </span>
         </div>
         <div>
           <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_input")}</div>
@@ -817,6 +839,8 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (o.temperature != null) { payload.temperature = o.temperature; payload.tempEnabled = true; }
     if (o.top_p != null) { payload.topP = o.top_p; payload.topPEnabled = true; }
     if (o.max_tokens != null) { payload.maxTokens = o.max_tokens; payload.maxTokensEnabled = true; }
+    if (o.context_window != null) { payload.contextWindow = o.context_window; payload.contextWindowEnabled = true; }
+    if (o.max_output_tokens != null) { payload.maxOutputTokens = o.max_output_tokens; payload.maxOutputTokensEnabled = true; }
     if (o.frequency_penalty != null) { payload.freqPenalty = o.frequency_penalty; payload.freqEnabled = true; }
     if (o.presence_penalty != null) { payload.presPenalty = o.presence_penalty; payload.presEnabled = true; }
     if (o.reasoning_effort) payload.reasoningEffort = o.reasoning_effort;
@@ -839,6 +863,8 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (s.tempEnabled) overrides.temperature = s.temperature;
     if (s.topPEnabled) overrides.top_p = s.topP;
     if (s.maxTokensEnabled) overrides.max_tokens = s.maxTokens;
+    if (s.contextWindowEnabled) overrides.context_window = s.contextWindow;
+    if (s.maxOutputTokensEnabled) overrides.max_output_tokens = s.maxOutputTokens;
     if (s.freqEnabled) overrides.frequency_penalty = s.freqPenalty;
     if (s.presEnabled) overrides.presence_penalty = s.presPenalty;
     if (s.reasoningEffort) overrides.reasoning_effort = s.reasoningEffort;
@@ -964,14 +990,35 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
         <div className="space-y-3">
           <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.parameters")}</label>
 
+          {/* #7774: editable — corrects a wrong or missing catalog window
+              (e.g. a self-hosted gateway reporting neither), persisted as a
+              per-model override that survives a registry sync. The "Auto"
+              value shown when disabled is the raw catalog default, not the
+              (possibly already-overridden) effective value the card shows
+              elsewhere — same "revert target" convention as the capability
+              toggles above. */}
           <SliderInput
             label={t("models.context_window")}
-            value={model.context_window ?? 128000}
-            onChange={() => {}}
-            min={1024} max={1048576} step={1024}
-            enabled={false}
+            value={state.contextWindow} onChange={(v) => dispatch({ type: "SET_FIELD", field: "contextWindow", value: Math.round(v) })}
+            min={1024} max={2097152} step={1024}
+            enabled={state.contextWindowEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "contextWindowEnabled", value: v })}
             ticks={[32768, 131072, 524288, 1048576]}
-            formatTick={(v) => v >= 1048576 ? "1M" : `${Math.round(v/1024)}K`}
+            formatTick={(v) => v >= 1048576 ? `${Math.round(v/1048576)}M` : `${Math.round(v/1024)}K`}
+          />
+          {model.context_window_is_estimated && !state.contextWindowEnabled && (
+            <p className="text-[11px] text-warning flex items-center gap-1 -mt-1.5">
+              <AlertCircle className="w-3 h-3" />
+              {t("models.context_window_estimated_hint")}
+            </p>
+          )}
+
+          <SliderInput
+            label={t("models.max_output")}
+            value={state.maxOutputTokens} onChange={(v) => dispatch({ type: "SET_FIELD", field: "maxOutputTokens", value: Math.round(v) })}
+            min={256} max={1048576} step={256}
+            enabled={state.maxOutputTokensEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "maxOutputTokensEnabled", value: v })}
+            ticks={[256, 8192, 65536, 1048576]}
+            formatTick={(v) => v >= 1048576 ? "1M" : v >= 1024 ? `${Math.round(v/1024)}K` : String(v)}
           />
 
           <SliderInput

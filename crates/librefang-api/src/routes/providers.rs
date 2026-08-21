@@ -238,9 +238,14 @@ fn synthesized_cli_model_row(
         "modality": "text",
         // Unknown at config-read time; the agent loop resolves the real window
         // from model_metadata when the CLI runs. `0` is the catalog's documented
-        // "unknown" sentinel.
+        // "unknown" sentinel. This synthesized row is not a catalog entry, so
+        // it has no per-model override lookup (#7774) — an operator wanting to
+        // fix this window has to fall back to `agent.toml: model.context_window`.
         "context_window": 0,
         "max_output_tokens": 0,
+        "context_window_catalog": 0,
+        "max_output_tokens_catalog": 0,
+        "context_window_is_estimated": true,
         "input_cost_per_m": 0.0,
         "output_cost_per_m": 0.0,
         "pricing_known": true,
@@ -264,6 +269,42 @@ fn synthesized_cli_model_row(
         // static catalog (UI/debug hint, and the dashboard's "not deletable" signal).
         "source": "cli_config",
     }))
+}
+
+/// Context-window / max-output-tokens facts for a catalog entry, resolved
+/// the same way the agent loop resolves them at request time (#7774):
+/// per-model `ModelOverrides` win over the catalog's own value.
+///
+/// `is_estimated` flags a text model whose effective context window is
+/// unknown from either source — the case the runtime's
+/// `UNKNOWN_MODEL_CONTEXT_WINDOW` (8192) fallback silently covers today
+/// (only visible in the daemon log). Surfacing it here lets the WebUI / TUI
+/// show a "guessing" badge next to the model so the operator knows there's
+/// an assumption in play and can correct it with an override. Non-text
+/// (image / audio) entries are never flagged: `0` there means "not
+/// applicable", not "missing".
+struct ContextWindowFacts {
+    context_window: Option<u64>,
+    max_output_tokens: Option<u64>,
+    context_window_catalog: u64,
+    max_output_tokens_catalog: u64,
+    is_estimated: bool,
+}
+
+fn model_context_window_facts(
+    catalog: &librefang_kernel::model_catalog::ModelCatalog,
+    m: &librefang_types::model_catalog::ModelCatalogEntry,
+) -> ContextWindowFacts {
+    let context_window = catalog.effective_context_window(m);
+    let is_estimated =
+        m.modality == librefang_types::model_catalog::Modality::Text && context_window.is_none();
+    ContextWindowFacts {
+        context_window,
+        max_output_tokens: catalog.effective_max_output_tokens(m),
+        context_window_catalog: m.context_window,
+        max_output_tokens_catalog: m.max_output_tokens,
+        is_estimated,
+    }
 }
 
 #[utoipa::path(
@@ -399,14 +440,22 @@ pub async fn list_models(
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
             // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
             let eff = catalog.effective_capabilities(m);
+            // Effective context_window / max_output_tokens reflect
+            // ModelOverrides on top of the catalog value, same convention
+            // as `eff` above; `*_catalog` ships the raw catalog default and
+            // `context_window_is_estimated` flags a guessed window (#7774).
+            let ctx = model_context_window_facts(&catalog, m);
             serde_json::json!({
                 "id": m.id,
                 "display_name": m.display_name,
                 "provider": m.provider,
                 "tier": m.tier,
                 "modality": m.modality,
-                "context_window": m.context_window,
-                "max_output_tokens": m.max_output_tokens,
+                "context_window": ctx.context_window.unwrap_or(0),
+                "max_output_tokens": ctx.max_output_tokens.unwrap_or(0),
+                "context_window_catalog": ctx.context_window_catalog,
+                "max_output_tokens_catalog": ctx.max_output_tokens_catalog,
+                "context_window_is_estimated": ctx.is_estimated,
                 "input_cost_per_m": m.input_cost_per_m,
                 "output_cost_per_m": m.output_cost_per_m,
                 "pricing_known": m.pricing_known,
@@ -629,6 +678,7 @@ pub async fn get_model(
             let overrides = catalog.get_overrides(&override_key);
             // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
             let eff = catalog.effective_capabilities(m);
+            let ctx = model_context_window_facts(&catalog, m);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -637,8 +687,11 @@ pub async fn get_model(
                     "provider": m.provider,
                     "tier": m.tier,
                     "modality": m.modality,
-                    "context_window": m.context_window,
-                    "max_output_tokens": m.max_output_tokens,
+                    "context_window": ctx.context_window.unwrap_or(0),
+                    "max_output_tokens": ctx.max_output_tokens.unwrap_or(0),
+                    "context_window_catalog": ctx.context_window_catalog,
+                    "max_output_tokens_catalog": ctx.max_output_tokens_catalog,
+                    "context_window_is_estimated": ctx.is_estimated,
                     "input_cost_per_m": m.input_cost_per_m,
                     "output_cost_per_m": m.output_cost_per_m,
                     "pricing_known": m.pricing_known,
@@ -697,6 +750,13 @@ pub async fn get_model(
 // ── Per-model overrides ─────────────────────────────────────────────────────
 
 /// GET /api/models/overrides/{id} — Get inference parameter overrides for a model.
+#[utoipa::path(
+    get,
+    path = "/api/models/overrides/{id}",
+    tag = "models",
+    params(("id" = String, Path, description = "Override key, `provider:model_id`")),
+    responses((status = 200, description = "Inference parameter overrides for the model (empty object if none set)", body = crate::types::JsonObject))
+)]
 pub async fn get_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -709,6 +769,19 @@ pub async fn get_model_overrides(
 }
 
 /// PUT /api/models/overrides/{id} — Set inference parameter overrides for a model.
+///
+/// The body **replaces** the whole `ModelOverrides` entity for this model
+/// (not a partial patch) — round-trip a `GET` first when changing a single
+/// field so unrelated overrides (e.g. a capability override set from a
+/// different surface) are not dropped.
+#[utoipa::path(
+    put,
+    path = "/api/models/overrides/{id}",
+    tag = "models",
+    params(("id" = String, Path, description = "Override key, `provider:model_id`")),
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Persisted inference parameter overrides for the model", body = crate::types::JsonObject))
+)]
 pub async fn set_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -760,6 +833,13 @@ pub async fn set_model_overrides(
 }
 
 /// DELETE /api/models/overrides/{id} — Remove inference parameter overrides for a model.
+#[utoipa::path(
+    delete,
+    path = "/api/models/overrides/{id}",
+    tag = "models",
+    params(("id" = String, Path, description = "Override key, `provider:model_id`")),
+    responses((status = 204, description = "Overrides removed"))
+)]
 pub async fn delete_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

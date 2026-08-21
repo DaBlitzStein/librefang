@@ -30,8 +30,13 @@ pub struct ModelInfo {
     pub provider: String,
     pub tier: String,
     pub context_window: u64,
+    pub max_output_tokens: u64,
     pub cost_input: f64,
     pub cost_output: f64,
+    /// True when `context_window` resolved to neither an override nor a
+    /// known catalog value — the runtime falls back to a conservative 8192
+    /// tokens in this case (#7774). Only ever set for text models.
+    pub context_window_is_estimated: bool,
 }
 
 #[derive(Clone, Default)]
@@ -72,6 +77,24 @@ pub struct SettingsState {
     pub loading: bool,
     pub tick: usize,
     pub status_msg: String,
+    // ── Model override editor (#7774) ──────────────────────────────
+    /// True while the context_window / max_output_tokens editor is open.
+    pub model_edit_mode: bool,
+    /// True while waiting for the `GET /api/models/overrides/{id}`
+    /// round-trip that precedes opening the editor — the whole existing
+    /// `ModelOverrides` entity has to be fetched first so saving doesn't
+    /// clobber fields set from another surface (the API replaces the whole
+    /// entity, it does not patch a single field).
+    pub model_edit_loading: bool,
+    /// Override key (`provider:model_id`) of the model being edited.
+    pub model_edit_key: String,
+    /// 0 = context_window field focused, 1 = max_output_tokens field focused.
+    pub model_edit_field: usize,
+    pub model_edit_ctx: String,
+    pub model_edit_max_out: String,
+    /// The overrides entity as fetched, so saving preserves every field the
+    /// editor doesn't touch (temperature, capability overrides, …).
+    pub model_edit_base: librefang_types::model_catalog::ModelOverrides,
 }
 
 pub enum SettingsAction {
@@ -79,9 +102,22 @@ pub enum SettingsAction {
     RefreshProviders,
     RefreshModels,
     RefreshTools,
-    SaveProviderKey { name: String, key: String },
+    SaveProviderKey {
+        name: String,
+        key: String,
+    },
     DeleteProviderKey(String),
     TestProvider(String),
+    /// Fetch the current overrides for a model before opening the editor
+    /// (#7774) — `model_key` is `provider:model_id`.
+    FetchModelOverrides(String),
+    /// Persist the merged overrides entity for a model.
+    SaveModelOverrides {
+        model_key: String,
+        overrides: librefang_types::model_catalog::ModelOverrides,
+    },
+    /// Clear every override for a model (mirrors the dashboard's "Reset").
+    ResetModelOverrides(String),
 }
 
 impl SettingsState {
@@ -101,6 +137,13 @@ impl SettingsState {
             loading: false,
             tick: 0,
             status_msg: String::new(),
+            model_edit_mode: false,
+            model_edit_loading: false,
+            model_edit_key: String::new(),
+            model_edit_field: 0,
+            model_edit_ctx: String::new(),
+            model_edit_max_out: String::new(),
+            model_edit_base: librefang_types::model_catalog::ModelOverrides::default(),
         }
     }
 
@@ -111,6 +154,10 @@ impl SettingsState {
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return SettingsAction::Continue;
+        }
+
+        if self.model_edit_mode {
+            return self.handle_model_edit(key);
         }
 
         if self.input_mode {
@@ -230,10 +277,84 @@ impl SettingsState {
                 let next = (i + 1) % total;
                 self.model_list.select(Some(next));
             }
+            KeyCode::Char('e') => {
+                if let Some(sel) = self.model_list.selected() {
+                    if let Some(m) = self.models.get(sel) {
+                        self.model_edit_loading = true;
+                        return SettingsAction::FetchModelOverrides(format!(
+                            "{}:{}",
+                            m.provider, m.id
+                        ));
+                    }
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(sel) = self.model_list.selected() {
+                    if let Some(m) = self.models.get(sel) {
+                        return SettingsAction::ResetModelOverrides(format!(
+                            "{}:{}",
+                            m.provider, m.id
+                        ));
+                    }
+                }
+            }
             KeyCode::Char('r') => return SettingsAction::RefreshModels,
             _ => {}
         }
         SettingsAction::Continue
+    }
+
+    /// Handles input while the context_window / max_output_tokens editor
+    /// (#7774) is open. Tab switches the focused field; digits type into it;
+    /// Enter merges the two fields into `model_edit_base` (preserving every
+    /// other override untouched) and submits; Esc cancels without saving.
+    fn handle_model_edit(&mut self, key: KeyEvent) -> SettingsAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.model_edit_mode = false;
+                self.model_edit_ctx.clear();
+                self.model_edit_max_out.clear();
+            }
+            KeyCode::Tab | KeyCode::Up | KeyCode::Down | KeyCode::BackTab => {
+                self.model_edit_field = 1 - self.model_edit_field;
+            }
+            KeyCode::Enter => {
+                self.model_edit_mode = false;
+                let mut overrides = self.model_edit_base.clone();
+                overrides.context_window =
+                    self.model_edit_ctx.parse::<u64>().ok().filter(|v| *v > 0);
+                overrides.max_output_tokens = self
+                    .model_edit_max_out
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|v| *v > 0);
+                let model_key = std::mem::take(&mut self.model_edit_key);
+                self.model_edit_ctx.clear();
+                self.model_edit_max_out.clear();
+                return SettingsAction::SaveModelOverrides {
+                    model_key,
+                    overrides,
+                };
+            }
+            KeyCode::Backspace => {
+                let buf = self.model_edit_active_buf();
+                buf.pop();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                let buf = self.model_edit_active_buf();
+                buf.push(c);
+            }
+            _ => {}
+        }
+        SettingsAction::Continue
+    }
+
+    fn model_edit_active_buf(&mut self) -> &mut String {
+        if self.model_edit_field == 0 {
+            &mut self.model_edit_ctx
+        } else {
+            &mut self.model_edit_max_out
+        }
     }
 
     fn handle_tools(&mut self, key: KeyEvent) -> SettingsAction {
@@ -287,6 +408,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     let hint_text = match state.sub {
         SettingsSub::Providers if state.input_mode => crate::i18n::t("tui-settings-hints-input"),
         SettingsSub::Providers => crate::i18n::t("tui-settings-hints-providers"),
+        SettingsSub::Models if state.model_edit_mode => {
+            crate::i18n::t("tui-settings-hints-models-edit")
+        }
         SettingsSub::Models => crate::i18n::t("tui-settings-hints-models"),
         SettingsSub::Tools => crate::i18n::t("tui-settings-hints-tools"),
     };
@@ -490,6 +614,11 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
 }
 
 fn draw_models(f: &mut Frame, area: Rect, state: &mut SettingsState) {
+    if state.model_edit_mode {
+        draw_model_edit(f, area, state);
+        return;
+    }
+
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
         Constraint::Min(3),    // list
@@ -543,6 +672,14 @@ fn draw_models(f: &mut Frame, area: Rect, state: &mut SettingsState) {
                     _ => theme::dim_style(),
                 };
                 let ctx = format_context(m.context_window);
+                // #7774: flag a guessed context window (the runtime falls
+                // back to a conservative 8192-token default in this case)
+                // so the operator knows to set an override.
+                let ctx_marker = if m.context_window_is_estimated {
+                    format!("{ctx}*")
+                } else {
+                    ctx
+                };
                 let cost = format!("${:.2}/${:.2}", m.cost_input, m.cost_output);
                 ListItem::new(Line::from(vec![
                     Span::styled(
@@ -554,7 +691,14 @@ fn draw_models(f: &mut Frame, area: Rect, state: &mut SettingsState) {
                         theme::dim_style(),
                     ),
                     Span::styled(format!(" {:<10}", m.tier), tier_style),
-                    Span::styled(format!(" {:<10}", ctx), Style::default().fg(theme::YELLOW)),
+                    Span::styled(
+                        format!(" {:<11}", ctx_marker),
+                        if m.context_window_is_estimated {
+                            Style::default().fg(theme::RED)
+                        } else {
+                            Style::default().fg(theme::YELLOW)
+                        },
+                    ),
                     Span::styled(format!(" {cost}"), theme::dim_style()),
                 ]))
             })
@@ -563,6 +707,127 @@ fn draw_models(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.model_list);
     }
+}
+
+/// The context_window / max_output_tokens override editor (#7774) — opened
+/// via `[e]` on a selected model in the Models sub-tab, once the existing
+/// `ModelOverrides` entity has round-tripped through `GET
+/// /api/models/overrides/{id}` so saving doesn't clobber other overrides.
+fn draw_model_edit(f: &mut Frame, area: Rect, state: &mut SettingsState) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // title
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // context_window field
+        Constraint::Length(1), // max_output_tokens field
+        Constraint::Length(1), // spacer
+        Constraint::Min(1),    // estimated-window notice
+    ])
+    .split(area);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!(
+                "  {} — {}",
+                crate::i18n::t("tui-settings-models-edit-title"),
+                state.model_edit_key
+            ),
+            Style::default()
+                .fg(theme::TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        )])),
+        chunks[0],
+    );
+
+    if state.model_edit_loading {
+        f.render_widget(
+            widgets::spinner(state.tick, &crate::i18n::t("tui-settings-models-loading")),
+            chunks[2],
+        );
+        return;
+    }
+
+    // The catalog/effective value shown as a placeholder when the field is
+    // empty (mirrors the dashboard's "Auto = catalog default" convention).
+    let catalog_defaults = state
+        .models
+        .iter()
+        .find(|m| format!("{}:{}", m.provider, m.id) == state.model_edit_key);
+
+    draw_model_edit_field(
+        f,
+        chunks[2],
+        &crate::i18n::t("tui-settings-models-edit-context-window"),
+        &state.model_edit_ctx,
+        state.model_edit_field == 0,
+        catalog_defaults.map(|m| format_context(m.context_window)),
+    );
+    draw_model_edit_field(
+        f,
+        chunks[3],
+        &crate::i18n::t("tui-settings-models-edit-max-output"),
+        &state.model_edit_max_out,
+        state.model_edit_field == 1,
+        catalog_defaults.map(|m| format_context(m.max_output_tokens)),
+    );
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!(
+                "  {}",
+                crate::i18n::t("tui-settings-models-edit-empty-hint")
+            ),
+            theme::dim_style(),
+        )])),
+        chunks[5],
+    );
+}
+
+fn draw_model_edit_field(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
+    catalog_default: Option<String>,
+) {
+    let label_style = if focused {
+        Style::default()
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        theme::dim_style()
+    };
+    let marker = if focused { "❯" } else { " " };
+    let placeholder = catalog_default
+        .map(|d| format!("— ({d})"))
+        .unwrap_or_else(|| "—".to_string());
+    let display = if value.is_empty() {
+        placeholder
+    } else {
+        value.to_string()
+    };
+    let value_style = if focused {
+        theme::input_style()
+    } else {
+        theme::dim_style()
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("  {marker} {label:<24}"), label_style),
+            Span::styled(display, value_style),
+            if focused {
+                Span::styled(
+                    "\u{2588}",
+                    Style::default()
+                        .fg(theme::GREEN)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                )
+            } else {
+                Span::raw("")
+            },
+        ])),
+        area,
+    );
 }
 
 fn draw_tools(f: &mut Frame, area: Rect, state: &mut SettingsState) {

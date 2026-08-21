@@ -418,6 +418,34 @@ pub struct ModelOverrides {
     /// User override for `supports_thinking`. See [`Self::supports_tools`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_thinking: Option<bool>,
+    /// User override for the model's context window (in tokens).
+    ///
+    /// Unlike the other fields above, this has no catalog-editable
+    /// counterpart: the catalog's own `context_window` comes from the
+    /// registry sync and is silently replaced on every sync, so a value
+    /// written directly onto a `ModelCatalogEntry` would not survive
+    /// (librefang/librefang#7774). Persisting the correction here — in the
+    /// `overrides` side-table, keyed by `provider:model_id` and untouched by
+    /// `load_cached_catalog_for` / `load_catalog_file` — is what lets an
+    /// operator fix a wrong or missing catalog value (e.g. a self-hosted
+    /// LiteLLM gateway that reports `max_tokens: null` and forces the
+    /// runtime's conservative 8192-token fallback) permanently, the same way
+    /// [`Self::max_tokens`] already does for the completion cap.
+    ///
+    /// Distinct from `agent.toml: model.context_window`
+    /// ([`crate::agent::ModelConfig::context_window`]), which is a
+    /// per-agent, higher-precedence override — see
+    /// `manifest_helpers::resolve_context_window` in `librefang-kernel` for
+    /// the full precedence chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// User override for the model's maximum output tokens.
+    ///
+    /// Same rationale and persistence path as [`Self::context_window`]: the
+    /// catalog's `max_output_tokens` (see [`ModelCatalogEntry::max_output_tokens`])
+    /// is registry-sync-owned, so an operator correction belongs here instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 
 impl ModelOverrides {
@@ -437,6 +465,8 @@ impl ModelOverrides {
             && self.supports_vision.is_none()
             && self.supports_streaming.is_none()
             && self.supports_thinking.is_none()
+            && self.context_window.is_none()
+            && self.max_output_tokens.is_none()
     }
 }
 

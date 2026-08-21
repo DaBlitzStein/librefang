@@ -1050,6 +1050,38 @@ impl ModelCatalog {
             .map(|m| self.effective_capabilities(m))
     }
 
+    /// Effective context window for a catalog entry: the per-model override
+    /// (`ModelOverrides::context_window`) when set, else the catalog's own
+    /// value. `None` when neither source knows the window — the caller (the
+    /// agent loop, via `resolve_context_window`) falls back to the
+    /// conservative `UNKNOWN_MODEL_CONTEXT_WINDOW` default in that case.
+    ///
+    /// A `0` on either source is treated as "unknown" (the catalog's
+    /// documented sentinel — see [`ModelCatalogEntry::context_window`]),
+    /// never propagated as a real budget (#7774).
+    pub fn effective_context_window(&self, entry: &ModelCatalogEntry) -> Option<u64> {
+        let key = format!("{}:{}", entry.provider, entry.id);
+        self.overrides
+            .get(&key)
+            .and_then(|o| o.context_window)
+            .filter(|v| *v > 0)
+            .or_else(|| Some(entry.context_window).filter(|v| *v > 0))
+    }
+
+    /// Effective maximum output tokens for a catalog entry. Same override ∘
+    /// catalog resolution as [`Self::effective_context_window`], for the
+    /// same reason (#7774): the catalog's `max_output_tokens` is
+    /// registry-sync-owned, so an operator correction has to live in the
+    /// overrides side-table to survive a sync.
+    pub fn effective_max_output_tokens(&self, entry: &ModelCatalogEntry) -> Option<u64> {
+        let key = format!("{}:{}", entry.provider, entry.id);
+        self.overrides
+            .get(&key)
+            .and_then(|o| o.max_output_tokens)
+            .filter(|v| *v > 0)
+            .or_else(|| Some(entry.max_output_tokens).filter(|v| *v > 0))
+    }
+
     /// Load model overrides from a JSON file.
     pub fn load_overrides(&mut self, path: &std::path::Path) {
         let data = match std::fs::read_to_string(path) {

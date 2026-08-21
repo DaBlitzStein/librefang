@@ -1843,8 +1843,19 @@ export interface ModelItem {
   display_name?: string;
   provider: string;
   tier?: string;
+  // Effective (override ?? catalog) — use for "what the model actually
+  // does". Refs #7774, mirrors the supports_* convention below.
   context_window?: number;
   max_output_tokens?: number;
+  // Raw catalog defaults — use for "Auto = revert target" in the override
+  // editor's hint text (#7774).
+  context_window_catalog?: number;
+  max_output_tokens_catalog?: number;
+  // True when context_window resolved to neither an override nor a known
+  // catalog value — the runtime silently falls back to a conservative 8192
+  // tokens in this case (#7774). Only ever set for text models; image/audio
+  // entries legitimately have no context window.
+  context_window_is_estimated?: boolean;
   input_cost_per_m?: number;
   output_cost_per_m?: number;
   pricing_known?: boolean;
@@ -1913,6 +1924,12 @@ export interface ModelOverrides {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Refs #7774: corrects a wrong or missing catalog context window / max
+  // output tokens (e.g. a self-hosted gateway that never reports them) —
+  // persisted here instead of on the catalog entry so it survives a
+  // registry sync. undefined = use the catalog value.
+  context_window?: number;
+  max_output_tokens?: number;
 }
 
 export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {

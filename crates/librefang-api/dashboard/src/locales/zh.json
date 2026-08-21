@@ -3018,6 +3018,8 @@
     "provider": "供应商",
     "provider_placeholder": "例如 openai",
     "context_window": "上下文窗口",
+    "estimated": "估算值",
+    "context_window_estimated_hint": "目录中没有该模型可靠的上下文窗口值——运行时正在回退到保守的 8K token 估算值。设置覆盖值以更正。",
     "max_output": "最大输出 Token",
     "input_cost": "输入价格 ($/M tokens)",
     "output_cost": "输出价格 ($/M tokens)",

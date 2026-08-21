@@ -2372,6 +2372,109 @@ fn load_overrides_keeps_existing_on_parse_failure() {
         "a malformed overrides.json must not silently drop existing overrides (#5137)"
     );
 }
+/// #7774: `ModelOverrides::context_window` / `max_output_tokens` must
+/// survive a registry sync. `reconcile_live_provider_models` is the
+/// mechanism that actually replaces catalog entries wholesale (unlike
+/// `load_catalog_file`, which only adds new ids) — e.g. the periodic
+/// OpenRouter / EveryAPI live-catalog refresh — so it's the sharpest test of
+/// "survives sync". A value written directly onto a `ModelCatalogEntry`
+/// field would be wiped by this call; the override, stored in the separate
+/// `overrides` side-table, must not be.
+#[test]
+fn model_overrides_context_window_and_max_output_tokens_survive_a_registry_resync() {
+    let mut catalog = ModelCatalog::from_entries(
+        vec![ModelCatalogEntry {
+            id: "test/model-a".to_string(),
+            display_name: "Test Model A".to_string(),
+            provider: "openrouter".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 100_000,
+            max_output_tokens: 4_096,
+            ..Default::default()
+        }],
+        vec![],
+    );
+    let key = "openrouter:test/model-a".to_string();
+    catalog.set_overrides(
+        key.clone(),
+        ModelOverrides {
+            context_window: Some(32_768),
+            max_output_tokens: Some(2_048),
+            ..Default::default()
+        },
+    );
+
+    // Simulate a live-catalog resync reporting a *different* (fresh)
+    // context_window / max_output_tokens for the same model id — this is
+    // the call site that actually replaces `self.models` wholesale.
+    catalog.reconcile_live_provider_models(
+        "openrouter",
+        vec!["test/model-a".to_string()],
+        vec![ModelCatalogEntry {
+            id: "test/model-a".to_string(),
+            display_name: "Test Model A".to_string(),
+            provider: "openrouter".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 500_000,
+            max_output_tokens: 65_536,
+            ..Default::default()
+        }],
+    );
+
+    let entry = catalog
+        .find_model("test/model-a")
+        .expect("entry survives resync");
+    assert_eq!(
+        entry.context_window, 500_000,
+        "the raw catalog value IS replaced by the resync — proves a direct field edit would not survive"
+    );
+    assert_eq!(
+        catalog.effective_context_window(entry),
+        Some(32_768),
+        "the override must still win after the resync replaced the catalog entry"
+    );
+    assert_eq!(
+        catalog.effective_max_output_tokens(entry),
+        Some(2_048),
+        "same guarantee for max_output_tokens"
+    );
+    assert!(
+        catalog.get_overrides(&key).is_some(),
+        "the override entry itself must not be dropped by the resync"
+    );
+}
+
+#[test]
+fn effective_context_window_falls_back_to_catalog_without_an_override() {
+    let catalog = test_catalog();
+    let entry = catalog
+        .find_model("sonnet")
+        .expect("builtin catalog has a sonnet alias");
+    assert_eq!(
+        catalog.effective_context_window(entry),
+        Some(entry.context_window),
+    );
+}
+
+#[test]
+fn effective_context_window_zero_override_is_treated_as_unset() {
+    let mut catalog = test_catalog();
+    let entry = catalog.find_model("sonnet").unwrap().clone();
+    let key = format!("{}:{}", entry.provider, entry.id);
+    catalog.set_overrides(
+        key,
+        ModelOverrides {
+            context_window: Some(0),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        catalog.effective_context_window(&entry),
+        Some(entry.context_window),
+        "a 0 override must fall through to the catalog value, not poison the budget math"
+    );
+}
+
 #[test]
 fn managed_everyapi_registration_is_auto_detected_and_builtin() {
     let mut catalog = ModelCatalog::default();

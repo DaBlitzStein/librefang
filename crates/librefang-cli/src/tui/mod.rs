@@ -417,7 +417,12 @@ impl App {
                     Tab::Hands => self.hands.status_msg = err,
                     Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
-                    Tab::Settings => self.settings.status_msg = err,
+                    Tab::Settings => {
+                        // A failed model-overrides fetch must not leave the
+                        // editor's spinner (#7774) spinning forever.
+                        self.settings.model_edit_loading = false;
+                        self.settings.status_msg = err;
+                    }
                     _ => {}
                 }
             }
@@ -588,6 +593,34 @@ impl App {
             }
             AppEvent::ProviderTestResult(result) => {
                 self.settings.test_result = Some(result);
+            }
+            AppEvent::ModelOverridesLoaded {
+                model_key,
+                overrides,
+            } => {
+                self.settings.model_edit_loading = false;
+                self.settings.model_edit_mode = true;
+                self.settings.model_edit_field = 0;
+                self.settings.model_edit_ctx = overrides
+                    .context_window
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                self.settings.model_edit_max_out = overrides
+                    .max_output_tokens
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                self.settings.model_edit_key = model_key;
+                self.settings.model_edit_base = overrides;
+            }
+            AppEvent::ModelOverridesSaved(model_key) => {
+                self.settings.status_msg =
+                    crate::i18n::t_args("tui-mod-model-overrides-saved", &[("model", &model_key)]);
+                self.refresh_settings_models();
+            }
+            AppEvent::ModelOverridesReset(model_key) => {
+                self.settings.status_msg =
+                    crate::i18n::t_args("tui-mod-model-overrides-reset", &[("model", &model_key)]);
+                self.refresh_settings_models();
             }
             AppEvent::PeersLoaded(list) => {
                 self.peers.peers = list;
@@ -1894,6 +1927,29 @@ impl App {
             settings::SettingsAction::TestProvider(name) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_test_provider(backend, name, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::FetchModelOverrides(model_key) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_model_overrides(backend, model_key, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::SaveModelOverrides {
+                model_key,
+                overrides,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_model_overrides(
+                        backend,
+                        model_key,
+                        overrides,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
+            settings::SettingsAction::ResetModelOverrides(model_key) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_reset_model_overrides(backend, model_key, self.event_tx.clone());
                 }
             }
         }

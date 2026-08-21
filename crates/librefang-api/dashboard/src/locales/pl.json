@@ -3054,6 +3054,8 @@
     "provider": "Dostawca",
     "provider_placeholder": "np. openai",
     "context_window": "Okno kontekstowe",
+    "estimated": "Szacowane",
+    "context_window_estimated_hint": "Katalog nie ma wiarygodnej wartości okna kontekstowego dla tego modelu — środowisko uruchomieniowe stosuje ostrożne oszacowanie 8K tokenów. Ustaw nadpisanie, aby to poprawić.",
     "max_output": "Maksymalna liczba tokenów wyjściowych",
     "input_cost": "Koszt wejścia ($/M tokenów)",
     "output_cost": "Koszt wyjścia ($/M tokenów)",

@@ -513,6 +513,106 @@ async fn model_overrides_set_then_get_then_delete_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
+// context_window / max_output_tokens overrides (#7774)
+//
+// The defect the issue was filed for: `ModelOverrides` had no persistence
+// path for `context_window`, so an operator correcting a wrong or missing
+// catalog window had nowhere durable to put it. These tests pin that PUT
+// persists, GET reads it back, and the effective (override ∘ catalog) value
+// surfaces everywhere the raw catalog value used to.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_window_override_persists_and_is_readable() {
+    let h = boot();
+    let key = "openai:gpt-4o-mini";
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({ "context_window": 999_000_u64, "max_output_tokens": 4_096_u64 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["context_window"].as_u64(), Some(999_000));
+    assert_eq!(body["max_output_tokens"].as_u64(), Some(4_096));
+
+    // GET the overrides entity back — the value must have actually persisted,
+    // not just been echoed by the PUT response.
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/models/overrides/{key}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["context_window"].as_u64(), Some(999_000));
+    assert_eq!(body["max_output_tokens"].as_u64(), Some(4_096));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_window_override_surfaces_as_the_effective_value_in_get_model() {
+    let h = boot();
+    let model_id = "gpt-4o-mini";
+    let key = "openai:gpt-4o-mini";
+
+    // Catalog baseline (`test_catalog_baseline`) seeds context_window = 128_000.
+    let (status, base) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let base_ctx = base["context_window"].as_u64().unwrap();
+    assert_eq!(base_ctx, 128_000);
+    assert_eq!(base["context_window_is_estimated"].as_bool(), Some(false));
+
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({ "context_window": 32_768_u64 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // GET /api/models/{id}: top-level context_window is now the override,
+    // and context_window_catalog still ships the unmerged catalog default so
+    // an "Auto = revert target" editor can render correctly.
+    let (status, body) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["context_window"].as_u64(), Some(32_768));
+    assert_eq!(body["context_window_catalog"].as_u64(), Some(base_ctx));
+    assert_eq!(body["context_window_is_estimated"].as_bool(), Some(false));
+
+    // GET /api/models (list) reflects the same effective value.
+    let (status, listed) = json_request(&h, Method::GET, "/api/models?provider=openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(model_id))
+        .expect("gpt-4o-mini should be in the openai catalog slice");
+    assert_eq!(entry["context_window"].as_u64(), Some(32_768));
+    assert_eq!(entry["context_window_catalog"].as_u64(), Some(base_ctx));
+
+    // DELETE reverts to the catalog default.
+    let (status, _) = json_request(
+        &h,
+        Method::DELETE,
+        &format!("/api/models/overrides/{key}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["context_window"].as_u64(), Some(base_ctx));
+}
+
+// ---------------------------------------------------------------------------
 // Capability overrides (refs #4745)
 // User overrides on `supports_tools / vision / streaming / thinking` must
 // surface in the GET /api/models/{id}, GET /api/models, and

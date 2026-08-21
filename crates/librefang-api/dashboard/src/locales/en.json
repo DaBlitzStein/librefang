@@ -3052,6 +3052,8 @@
     "provider": "Provider",
     "provider_placeholder": "e.g. openai",
     "context_window": "Context Window",
+    "estimated": "Estimated",
+    "context_window_estimated_hint": "The catalog has no reliable context window for this model — the runtime is falling back to a conservative 8K-token estimate. Set an override to correct it.",
     "max_output": "Max Output Tokens",
     "input_cost": "Input Cost ($/M tokens)",
     "output_cost": "Output Cost ($/M tokens)",

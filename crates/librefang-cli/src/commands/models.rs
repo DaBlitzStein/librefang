@@ -272,6 +272,93 @@ pub(crate) fn cmd_models_set(model: Option<String>) {
     }
 }
 
+/// View, set, or clear per-model inference overrides (#7774).
+///
+/// This is the persistence path for correcting a wrong or missing catalog
+/// `context_window` / `max_output_tokens` — e.g. a self-hosted gateway that
+/// reports neither, forcing the runtime's conservative 8192-token fallback.
+/// The PUT endpoint replaces the whole override entity, so a `--context-window`
+/// or `--max-output-tokens` write first fetches the current entity and merges
+/// in the new value(s), leaving every other override (temperature, capability
+/// overrides, …) set from another surface untouched.
+pub(crate) fn cmd_models_overrides(
+    model: &str,
+    context_window: Option<u64>,
+    max_output_tokens: Option<u64>,
+    clear: bool,
+    json: bool,
+) {
+    let base = require_daemon("models overrides");
+    let client = daemon_client();
+    let url = format!("{base}/api/models/overrides/{model}");
+
+    if clear {
+        let (status, _) = daemon_json_checked(client.delete(&url).send());
+        if status.is_success() {
+            ui::success(&i18n::t_args(
+                "model-overrides-cleared",
+                &[("model", model)],
+            ));
+        } else {
+            ui::error(&i18n::t_args(
+                "model-overrides-clear-failed",
+                &[("model", model), ("status", &status.to_string())],
+            ));
+        }
+        return;
+    }
+
+    if context_window.is_none() && max_output_tokens.is_none() {
+        let body = daemon_json(client.get(&url).send());
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+            return;
+        }
+        let header_field = i18n::t("model-overrides-header-field");
+        let header_value = i18n::t("model-overrides-header-value");
+        let mut t = crate::table::Table::new(&[&header_field, &header_value]);
+        if let Some(obj) = body.as_object() {
+            if obj.is_empty() {
+                ui::hint(&i18n::t_args(
+                    "model-overrides-none-set",
+                    &[("model", model)],
+                ));
+                return;
+            }
+            for (field, value) in obj {
+                t.add_row(&[field.as_str(), &value.to_string()]);
+            }
+        }
+        t.print();
+        return;
+    }
+
+    // Round-trip the current entity so a single-field write doesn't clear
+    // overrides set from the dashboard or the TUI.
+    let mut overrides = daemon_json(client.get(&url).send());
+    if !overrides.is_object() {
+        overrides = serde_json::json!({});
+    }
+    if let Some(cw) = context_window {
+        overrides["context_window"] = serde_json::json!(cw);
+    }
+    if let Some(mot) = max_output_tokens {
+        overrides["max_output_tokens"] = serde_json::json!(mot);
+    }
+    let (status, _) = daemon_json_checked(client.put(&url).json(&overrides).send());
+    if status.is_success() {
+        ui::success(&i18n::t_args("model-overrides-saved", &[("model", model)]));
+    } else {
+        ui::error(&i18n::t_args(
+            "model-overrides-save-failed",
+            &[("model", model), ("status", &status.to_string())],
+        ));
+    }
+}
+
 /// Interactive model picker — shows numbered list, accepts number or model ID.
 pub(crate) fn pick_model() -> String {
     let catalog = librefang_runtime::model_catalog::ModelCatalog::default();

@@ -166,6 +166,15 @@ pub enum AppEvent {
     ProviderKeyDeleted(String),
     /// Provider test result.
     ProviderTestResult(TestResult),
+    /// Model overrides fetched for the settings-models editor (#7774).
+    ModelOverridesLoaded {
+        model_key: String,
+        overrides: librefang_types::model_catalog::ModelOverrides,
+    },
+    /// Model overrides saved.
+    ModelOverridesSaved(String),
+    /// Model overrides reset (all overrides removed for the model).
+    ModelOverridesReset(String),
     /// Peers loaded.
     PeersLoaded(Vec<PeerInfo>),
     /// Log entries loaded.
@@ -2291,8 +2300,21 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                                     provider: m["provider"].as_str().unwrap_or("").to_string(),
                                     tier: m["tier"].as_str().unwrap_or("").to_string(),
                                     context_window: m["context_window"].as_u64().unwrap_or(0),
-                                    cost_input: m["cost_input"].as_f64().unwrap_or(0.0),
-                                    cost_output: m["cost_output"].as_f64().unwrap_or(0.0),
+                                    max_output_tokens: m["max_output_tokens"].as_u64().unwrap_or(0),
+                                    // The API emits `input_cost_per_m` /
+                                    // `output_cost_per_m` (see
+                                    // routes/providers.rs::list_models), not
+                                    // `cost_input` / `cost_output` — the old
+                                    // keys here never matched, so this
+                                    // column silently showed $0.00/$0.00 for
+                                    // every model. Fixed in passing while
+                                    // touching this same struct literal for
+                                    // #7774.
+                                    cost_input: m["input_cost_per_m"].as_f64().unwrap_or(0.0),
+                                    cost_output: m["output_cost_per_m"].as_f64().unwrap_or(0.0),
+                                    context_window_is_estimated: m["context_window_is_estimated"]
+                                        .as_bool()
+                                        .unwrap_or(false),
                                 })
                                 .collect()
                         })
@@ -2391,6 +2413,119 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
                         "tui-event-provider-delete-key-failed",
                         &[("name", &name)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-provider-key-management-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Fetch the current `ModelOverrides` entity for a model (#7774) — the
+/// settings-models editor round-trips this before opening so a save only
+/// touching context_window / max_output_tokens doesn't drop other overrides
+/// (temperature, capability overrides, …) the PUT endpoint would otherwise
+/// silently clear.
+pub fn spawn_fetch_model_overrides(
+    backend: BackendRef,
+    model_key: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .get(format!("{base_url}/api/models/overrides/{model_key}"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let overrides = resp
+                        .json::<librefang_types::model_catalog::ModelOverrides>()
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::ModelOverridesLoaded {
+                        model_key,
+                        overrides,
+                    });
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-model-overrides-fetch-failed",
+                        &[("model", &model_key)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::ModelOverridesLoaded {
+                model_key,
+                overrides: librefang_types::model_catalog::ModelOverrides::default(),
+            });
+        }
+    });
+}
+
+/// Persist a merged `ModelOverrides` entity for a model (#7774). The PUT
+/// endpoint replaces the whole entity, so the caller must have already
+/// merged in every field it wants to keep (see `spawn_fetch_model_overrides`).
+pub fn spawn_save_model_overrides(
+    backend: BackendRef,
+    model_key: String,
+    overrides: librefang_types::model_catalog::ModelOverrides,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .put(format!("{base_url}/api/models/overrides/{model_key}"))
+                .json(&overrides)
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::ModelOverridesSaved(model_key));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-model-overrides-save-failed",
+                        &[("model", &model_key)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-provider-key-management-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Clear every override for a model (#7774) — mirrors the dashboard's
+/// "Reset" action, which also clears the whole entity, not just the
+/// context_window / max_output_tokens fields the TUI editor exposes.
+pub fn spawn_reset_model_overrides(
+    backend: BackendRef,
+    model_key: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .delete(format!("{base_url}/api/models/overrides/{model_key}"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::ModelOverridesReset(model_key));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-model-overrides-reset-failed",
+                        &[("model", &model_key)],
                     )));
                 }
             }

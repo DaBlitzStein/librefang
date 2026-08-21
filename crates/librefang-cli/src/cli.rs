@@ -1412,6 +1412,26 @@ pub(crate) enum ModelsCommands {
         #[arg(long)]
         set_default: bool,
     },
+    /// View, set, or clear per-model inference overrides.
+    #[command(
+        long_about = "View, set, or clear per-model inference overrides — the persistence path for correcting a wrong or missing catalog context_window / max_output_tokens (e.g. a self-hosted gateway that reports neither, forcing the runtime's conservative 8192-token fallback).\n\nWith no --context-window / --max-output-tokens / --clear flag, shows the current overrides.\n\nExamples:\n  librefang models overrides openai:gpt-4o-mini\n  librefang models overrides litellm:gateway-model --context-window 32768\n  librefang models overrides litellm:gateway-model --max-output-tokens 4096\n  librefang models overrides litellm:gateway-model --clear"
+    )]
+    Overrides {
+        /// Override key `provider:model_id` (e.g. "openai:gpt-4o-mini").
+        model: String,
+        /// Set (or update) the context window override, in tokens.
+        #[arg(long)]
+        context_window: Option<u64>,
+        /// Set (or update) the max output tokens override.
+        #[arg(long)]
+        max_output_tokens: Option<u64>,
+        /// Clear every override for this model.
+        #[arg(long, conflicts_with_all = ["context_window", "max_output_tokens"])]
+        clear: bool,
+        /// Output as JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
