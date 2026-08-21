@@ -318,13 +318,8 @@ pub(super) async fn tool_agent_spawn(
             (None, tools) => tools,
         };
 
-        // #6930 review: `system_prompt` becomes the worker's actual system
-        // prompt (`resolve_ephemeral_manifest` sets
-        // `manifest.model.system_prompt = prompt.clone()`), the same taint
-        // surface the permanent-agent branch below already checks for
-        // `name` and `system_prompt`. Tainted content from earlier in the
-        // parent's turn (a file read, a web page) must not seed a fresh
-        // worker's system prompt unchecked.
+        // #6930 review: `system_prompt` becomes the worker's actual system prompt (`resolve_ephemeral_manifest` sets `manifest.model.system_prompt = prompt.clone()`), the same taint surface the permanent-agent branch below already checks for `name` and `system_prompt`.
+        // Tainted content from earlier in the parent's turn (a file read, a web page) must not seed a fresh worker's system prompt unchecked.
         if let Some(prompt) = input["system_prompt"].as_str() {
             if let Some(violation) = check_taint_outbound_text(prompt, &spawn_sink) {
                 return Err(ToolError::PermissionDenied(format!(
@@ -348,12 +343,8 @@ pub(super) async fn tool_agent_spawn(
                         ..Default::default()
                     })
                 } else {
-                    // Object form: accept ONLY provider/model. Do not
-                    // pass base_url / api_key_env through — a
-                    // prompt-injected agent could point the worker at an
-                    // attacker-controlled endpoint with a real env key
-                    // (#6930 review — credential-exfiltration
-                    // primitive).
+                    // Object form: accept ONLY provider/model.
+                    // Do not pass base_url / api_key_env through — a prompt-injected agent could point the worker at an attacker-controlled endpoint with a real env key (#6930 review — credential-exfiltration primitive).
                     let obj = v.as_object()?;
                     let provider = obj.get("provider")?.as_str()?.to_string();
                     let model = obj.get("model")?.as_str()?.to_string();
@@ -372,11 +363,8 @@ pub(super) async fn tool_agent_spawn(
             }),
             message: message.to_string(),
             max_iterations: input["max_iterations"].as_u64().map(|v| v as u32),
-            // Never read from tool-call input: the tool call's own `parent_id`
-            // above is the trusted execution-context value (which agent is
-            // actually running this turn). `parent_agent_id` only exists for
-            // the operator-authenticated HTTP route, which has no such
-            // context to derive a caller identity from (#6930 review).
+            // Never read from tool-call input: the tool call's own `parent_id` above is the trusted execution-context value (which agent is actually running this turn).
+            // `parent_agent_id` only exists for the operator-authenticated HTTP route, which has no such context to derive a caller identity from (#6930 review).
             parent_agent_id: None,
         };
 

@@ -995,10 +995,8 @@ pub struct EphemeralSpawnRequest {
     pub parent_agent_id: Option<String>,
 }
 
-/// Result of an ephemeral worker run, carrying the metering the API surface
-/// reports back to callers. The plain `spawn_ephemeral` handle returns only
-/// `response`; this struct is returned by the detailed handle so cost and
-/// iteration counts survive the trait boundary.
+/// Result of an ephemeral worker run, carrying the metering the API surface reports back to callers.
+/// The plain `spawn_ephemeral` handle returns only `response`; this struct is returned by the detailed handle so cost and iteration counts survive the trait boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EphemeralSpawnResult {
     /// The worker's final text response.

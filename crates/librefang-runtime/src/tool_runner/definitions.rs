@@ -392,13 +392,8 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                             "description": "Shell commands to allow (permanent spawn only)."
                         }
                     },
-                    // #6930 review: keyed on the same `ephemeral` flag the runtime
-                    // dispatches on (`tool_runner/agent.rs`'s
-                    // `if input["ephemeral"].as_bool().unwrap_or(false)`), instead
-                    // of a presence-based `oneOf` that could diverge from it — a
-                    // caller redundantly sending both shapes at once no longer
-                    // fails validation for a request the runtime would have
-                    // handled fine.
+                    // #6930 review: keyed on the same `ephemeral` flag the runtime dispatches on (`tool_runner/agent.rs`'s `if input["ephemeral"].as_bool().unwrap_or(false)`), instead of a presence-based `oneOf` that could diverge from it.
+                    // A caller redundantly sending both shapes at once no longer fails validation for a request the runtime would have handled fine.
                     "if": {
                         "properties": { "ephemeral": { "const": true } },
                         "required": ["ephemeral"]
