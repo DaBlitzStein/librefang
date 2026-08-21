@@ -418,15 +418,16 @@ impl LibreFangKernel {
                 agent_provider.clone(),
             )];
             for fb in &effective_fallbacks {
-                // Resolve "default" to the actual default provider, but if the
-                // model name implies a specific provider (e.g. "gemini-2.0-flash"
-                // → "gemini"), use that instead of blindly falling back to the
-                // default provider which may be a completely different service.
-                let fb_provider = if fb.provider.is_empty() || fb.provider == "default" {
-                    infer_provider_from_model(&fb.model).unwrap_or_else(|| default_provider.clone())
-                } else {
-                    fb.provider.clone()
-                };
+                // Resolve the slot's `model` and `provider` sentinels
+                // together — see `resolve_fallback_model_and_provider` for
+                // why the model must resolve before the provider is
+                // inferred from it.
+                let (fb_model, fb_provider) = resolve_fallback_model_and_provider(
+                    &fb.model,
+                    &fb.provider,
+                    &effective_default.model,
+                    default_provider,
+                );
                 if fb_provider == "everyapi"
                     && self.llm.model_catalog.load().is_suppressed(&fb_provider)
                 {
@@ -521,7 +522,7 @@ impl LibreFangKernel {
                 match fallback_driver {
                     Ok(d) => chain.push((
                         d,
-                        strip_provider_prefix(&fb.model, &fb_provider),
+                        strip_provider_prefix(&fb_model, &fb_provider),
                         fb_provider.clone(),
                     )),
                     Err(e) => {
@@ -570,6 +571,44 @@ mod managed_everyapi_tests {
             "everyapi", false, false, false, true
         ));
     }
+}
+
+/// Pure helper: resolve a fallback chain slot's `model` and `provider`
+/// sentinels to the values that will actually be sent to the driver.
+///
+/// `"default"` (and an empty string) mean "use whatever this daemon's
+/// operator has configured as the default" for either field — that
+/// resolution already existed for `provider` before this fix; without the
+/// matching resolution for `model`, a fallback slot left as
+/// `model = "default"` (the common case: only `provider` gets explicitly
+/// set in a fallback entry, `model` is left at its zero value) sent the
+/// literal string `"default"` straight to the provider, which rejects it
+/// ("Invalid model name passed in model=default").
+///
+/// Order matters: `model` is resolved FIRST. `provider` inference below
+/// reads the (already-resolved) model name to guess a provider from it
+/// (e.g. `"gemini-2.0-flash"` → `"gemini"`) when `provider` is itself
+/// `"default"`/empty — inferring from the unresolved literal `"default"`
+/// would always fail and silently mask a real per-model provider hint,
+/// falling through to `default_provider` even when the model implies a
+/// different one.
+pub(crate) fn resolve_fallback_model_and_provider(
+    fb_model: &str,
+    fb_provider: &str,
+    default_model: &str,
+    default_provider: &str,
+) -> (String, String) {
+    let model = if fb_model.is_empty() || fb_model == "default" {
+        default_model.to_string()
+    } else {
+        fb_model.to_string()
+    };
+    let provider = if fb_provider.is_empty() || fb_provider == "default" {
+        infer_provider_from_model(&model).unwrap_or_else(|| default_provider.to_string())
+    } else {
+        fb_provider.to_string()
+    };
+    (model, provider)
 }
 
 /// Pure helper: resolve the effective fallback list for an agent turn.
@@ -673,6 +712,90 @@ mod tests {
             result[0].model, "gpt-4o-mini",
             "model must match agent chain"
         );
+    }
+
+    /// Regression test: a fallback slot with `model = "default"` must never
+    /// send that literal string to the provider — this is the root cause of
+    /// the "Invalid model name passed in model=default" failure. Only the
+    /// model resolves here; the explicit provider is left untouched.
+    #[test]
+    fn model_default_resolves_to_configured_default_model() {
+        let (model, provider) = resolve_fallback_model_and_provider(
+            "default",
+            "groq",
+            "claude-sonnet-4-5",
+            "anthropic",
+        );
+        assert_eq!(model, "claude-sonnet-4-5");
+        assert_ne!(
+            model, "default",
+            "the literal sentinel must never survive resolution"
+        );
+        assert_eq!(
+            provider, "groq",
+            "an explicit provider must not be overridden"
+        );
+    }
+
+    /// An empty model string is the same sentinel as `"default"` (mirrors
+    /// the existing empty/`"default"` treatment for `provider`).
+    #[test]
+    fn empty_model_resolves_to_configured_default_model() {
+        let (model, provider) =
+            resolve_fallback_model_and_provider("", "groq", "claude-sonnet-4-5", "anthropic");
+        assert_eq!(model, "claude-sonnet-4-5");
+        assert_eq!(provider, "groq");
+    }
+
+    /// Order regression: when BOTH model and provider are `"default"`, the
+    /// provider must be inferred from the *resolved* model — proving
+    /// resolution order is model-first. If the implementation regressed to
+    /// inferring from the raw (unresolved) `"default"` literal, inference
+    /// would always miss and this would silently fall through to
+    /// `default_provider` ("anthropic") instead of the model-implied
+    /// "gemini".
+    #[test]
+    fn provider_default_is_inferred_from_the_resolved_model_not_the_raw_sentinel() {
+        let (model, provider) = resolve_fallback_model_and_provider(
+            "default",
+            "default",
+            "gemini-2.0-flash",
+            "anthropic",
+        );
+        assert_eq!(model, "gemini-2.0-flash");
+        assert_eq!(
+            provider, "gemini",
+            "provider must be inferred from the resolved model, not fall through to default_provider"
+        );
+    }
+
+    /// An explicit model is never overridden by the configured default, and
+    /// provider inference still runs against it when provider is
+    /// `"default"`.
+    #[test]
+    fn explicit_model_is_never_overridden_by_the_default() {
+        let (model, provider) = resolve_fallback_model_and_provider(
+            "gpt-4o-mini",
+            "default",
+            "claude-sonnet-4-5",
+            "anthropic",
+        );
+        assert_eq!(model, "gpt-4o-mini");
+        assert_eq!(provider, "openai");
+    }
+
+    /// When both model and provider are explicit, neither the default model
+    /// nor default provider participate at all.
+    #[test]
+    fn fully_explicit_slot_is_left_untouched() {
+        let (model, provider) = resolve_fallback_model_and_provider(
+            "llama-3.3-70b",
+            "groq",
+            "claude-sonnet-4-5",
+            "anthropic",
+        );
+        assert_eq!(model, "llama-3.3-70b");
+        assert_eq!(provider, "groq");
     }
 
     /// Regression test for #5755: a custom provider whose `api_key_env` doesn't

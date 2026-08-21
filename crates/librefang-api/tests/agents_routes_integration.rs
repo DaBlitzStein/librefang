@@ -2102,6 +2102,91 @@ async fn test_patch_config_can_restore_global_default_inheritance() {
     assert!(entry.manifest.model.base_url.is_none());
 }
 
+/// A `provider`-only PATCH (no `model` field at all) must actually apply the
+/// provider change and leave the model untouched — before this fix, the
+/// handler only ever called `set_agent_model` when a non-empty `model`
+/// accompanied the request, so `{"provider": "litellm"}` alone returned 200
+/// while silently changing nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_config_provider_only_applies_without_model() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "provider-only-agent");
+
+    // Seed a known model + provider.
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({
+                "provider": "custom-provider",
+                "model": "custom-model",
+            }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "seed failed: {body:?}");
+
+    // Provider-only PATCH: no `model` key in the body at all.
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({ "provider": "another-provider" }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent exists");
+    assert_eq!(
+        entry.manifest.model.provider, "another-provider",
+        "provider-only PATCH must apply the new provider"
+    );
+    assert_eq!(
+        entry.manifest.model.model, "custom-model",
+        "provider-only PATCH must leave the current model unchanged"
+    );
+}
+
+/// A PATCH carrying both `provider` and `model` keeps working exactly as
+/// before the fix — the provider-only fallback path must not regress the
+/// existing combined-update behaviour.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_config_provider_and_model_together_still_works() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "provider-and-model-agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({
+                "provider": "custom-provider",
+                "model": "custom-model",
+            }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent exists");
+    assert_eq!(entry.manifest.model.provider, "custom-provider");
+    assert_eq!(entry.manifest.model.model, "custom-model");
+}
+
 // ---------------------------------------------------------------------------
 // PATCH /api/agents/{id}/identity — merge semantics (refs #6608)
 // ---------------------------------------------------------------------------

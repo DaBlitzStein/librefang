@@ -17,6 +17,25 @@ struct ManifestError {
     message: String,
 }
 
+/// Build a debug-loggable summary of a `SpawnRequest`.
+///
+/// `manifest_toml` is raw TOML supplied by the caller and can itself embed
+/// `api_key_env`, `base_url`, or `system_prompt` — the exact fields
+/// `scrub_patch_config_body_for_log` (`routes/agents/config.rs`) redacts for
+/// `PATCH /config`, just arriving here as unstructured text instead of typed
+/// JSON fields. `signed_manifest` is a signed envelope that itself carries
+/// manifest content. Neither is logged verbatim; only presence/length is,
+/// mirroring the same presence-vs-value split used for the config-patch log.
+/// `template` and `name` are short, non-secret identifiers and log as-is.
+fn scrub_spawn_body_for_log(req: &SpawnRequest) -> serde_json::Value {
+    serde_json::json!({
+        "manifest_toml_len": req.manifest_toml.len(),
+        "template": req.template,
+        "name": req.name,
+        "signed_manifest_set": req.signed_manifest.is_some(),
+    })
+}
+
 /// Resolve a `SpawnRequest` into a parsed `AgentManifest`.
 ///
 /// Handles template lookup, path sanitization, size guard, signed manifest
@@ -201,6 +220,18 @@ async fn spawn_agent_inner(
             );
         }
     };
+
+    // Logged so a failed/unexpected spawn can be diagnosed from the daemon
+    // log alone — the access log (`middleware::request_logging`) only
+    // records method, route, status, and latency. `manifest_toml` and
+    // `signed_manifest` are never logged verbatim: the manifest TOML can
+    // itself carry `api_key_env` / `base_url` / `system_prompt`, and
+    // `signed_manifest` is a signed credential-bearing envelope. Only their
+    // presence and length are logged; see `scrub_spawn_body_for_log`.
+    tracing::debug!(
+        body = %scrub_spawn_body_for_log(&req),
+        "POST /api/agents request body"
+    );
 
     let resolved = match resolve_manifest(&state, &req, l).await {
         Ok(r) => r,
@@ -1609,5 +1640,64 @@ pub async fn get_agent_manifest_toml(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod spawn_body_log_scrub_tests {
+    use super::scrub_spawn_body_for_log;
+    use crate::types::SpawnRequest;
+
+    /// `manifest_toml` can embed `api_key_env`, `base_url`, and
+    /// `system_prompt` as raw TOML text — none of it may reach the log,
+    /// only its length.
+    #[test]
+    fn manifest_toml_is_never_logged_verbatim() {
+        let req = SpawnRequest {
+            manifest_toml: "[model]\napi_key_env = \"MY_SECRET_PROVIDER_KEY\"\nbase_url = \"https://internal.example/v1\"\n".to_string(),
+            template: None,
+            name: None,
+            signed_manifest: None,
+        };
+        let logged = scrub_spawn_body_for_log(&req);
+        let rendered = logged.to_string();
+        assert!(
+            !rendered.contains("MY_SECRET_PROVIDER_KEY"),
+            "manifest_toml leaked into the log: {rendered}"
+        );
+        assert!(
+            !rendered.contains("internal.example"),
+            "manifest_toml leaked into the log: {rendered}"
+        );
+        assert_eq!(logged["manifest_toml_len"], req.manifest_toml.len());
+    }
+
+    /// `signed_manifest` is a signed envelope — presence only, never content.
+    #[test]
+    fn signed_manifest_is_redacted_to_presence_only() {
+        let req = SpawnRequest {
+            manifest_toml: String::new(),
+            template: None,
+            name: None,
+            signed_manifest: Some("{\"manifest\":\"...\",\"signature\":\"deadbeef\"}".to_string()),
+        };
+        let logged = scrub_spawn_body_for_log(&req);
+        assert_eq!(logged["signed_manifest_set"], true);
+        assert!(!logged.to_string().contains("deadbeef"));
+    }
+
+    /// `template` / `name` are short, non-secret identifiers — logged as-is
+    /// so a template-not-found report is diagnosable from the log.
+    #[test]
+    fn template_and_name_are_logged_verbatim() {
+        let req = SpawnRequest {
+            manifest_toml: String::new(),
+            template: Some("researcher".to_string()),
+            name: Some("my-agent".to_string()),
+            signed_manifest: None,
+        };
+        let logged = scrub_spawn_body_for_log(&req);
+        assert_eq!(logged["template"], "researcher");
+        assert_eq!(logged["name"], "my-agent");
     }
 }

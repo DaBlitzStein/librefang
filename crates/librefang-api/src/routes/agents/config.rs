@@ -857,6 +857,40 @@ pub struct PatchAgentConfigRequest {
     pub web_search_augmentation: Option<librefang_types::agent::WebSearchAugmentationMode>,
 }
 
+/// Build a debug-loggable summary of a `PatchAgentConfigRequest`.
+///
+/// The raw body is never logged: `api_key_env`, `base_url`, and
+/// `system_prompt` can carry secrets, internal endpoint URLs, or long
+/// free-form prompts, and `description` / `avatar_url` / `name` can be
+/// arbitrarily long (a `data:` URI, for instance). Those fields log only
+/// whether they were present in the request, not their value — the same
+/// presence-vs-value tri-state distinction `resolve()` already uses a few
+/// lines below for `api_key_env` / `base_url`. The remaining fields are
+/// short, low-risk scalars whose actual value is exactly the diagnostic
+/// signal needed to answer "did the browser send `provider` without
+/// `model`?" without reaching for a raw packet capture.
+fn scrub_patch_config_body_for_log(req: &PatchAgentConfigRequest) -> serde_json::Value {
+    serde_json::json!({
+        "name_set": req.name.is_some(),
+        "description_set": req.description.is_some(),
+        "system_prompt_set": req.system_prompt.is_some(),
+        "emoji": req.emoji,
+        "avatar_url_set": req.avatar_url.is_some(),
+        "color": req.color,
+        "archetype": req.archetype,
+        "vibe": req.vibe,
+        "greeting_style": req.greeting_style,
+        "model": req.model,
+        "provider": req.provider,
+        "api_key_env_set": req.api_key_env.is_some(),
+        "base_url_set": req.base_url.is_some(),
+        "max_tokens": req.max_tokens,
+        "temperature": req.temperature,
+        "fallback_models_set": req.fallback_models.is_some(),
+        "web_search_augmentation": req.web_search_augmentation,
+    })
+}
+
 /// PATCH /api/agents/{id}/config — Hot-update agent name, description, system prompt, and identity.
 #[utoipa::path(
     patch,
@@ -875,6 +909,18 @@ pub async fn patch_agent_config(
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<PatchAgentConfigRequest>,
 ) -> impl IntoResponse {
+    // Logged so a "my selection didn't persist" report can be diagnosed from
+    // the daemon log alone instead of guessing what the browser sent — the
+    // access log (`middleware::request_logging`) only records method, route,
+    // status, and latency. `api_key_env` / `base_url` / `system_prompt` can
+    // carry secrets or long free text, so they are never logged verbatim;
+    // see `scrub_patch_config_body_for_log`.
+    tracing::debug!(
+        agent_id = %id,
+        body = %scrub_patch_config_body_for_log(&req),
+        "PATCH /api/agents/{id}/config request body"
+    );
+
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
@@ -1043,18 +1089,38 @@ pub async fn patch_agent_config(
     // dashboard left stale CLOUDVERSE_API_KEY / cloudverse base_url on the
     // manifest, so the new provider's request was sent to the old URL with
     // the old credentials and rejected with "Missing Authentication header".
-    if let Some(ref new_model) = req.model {
-        if !new_model.is_empty() {
-            let explicit_provider = req.provider.as_deref().filter(|p| !p.is_empty());
-            if let Err(e) = state
-                .kernel
-                .set_agent_model(agent_id, new_model, explicit_provider)
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": scrub_500(&e, &t)})),
-                );
-            }
+    //
+    // `provider` must apply even when `model` is absent or empty. Before
+    // this fix, a `PATCH {"provider": "litellm"}` with no `model` field hit
+    // neither branch below and returned 200 while changing nothing — the
+    // same #2380 failure class (a field the OpenAPI schema advertises,
+    // silently discarded), just one field over. `set_agent_model` always
+    // needs a `model` argument, so a provider-only PATCH falls back to the
+    // agent's current model, which keeps the model unchanged while the
+    // provider switch still runs through the shared cleanup path above.
+    let explicit_provider = req.provider.as_deref().filter(|p| !p.is_empty());
+    let explicit_model = req.model.as_deref().filter(|m| !m.is_empty());
+    if explicit_model.is_some() || explicit_provider.is_some() {
+        let model_to_apply = match explicit_model {
+            Some(m) => m.to_string(),
+            None => match state.kernel.agent_registry().get(agent_id) {
+                Some(entry) => entry.manifest.model.model.clone(),
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                    );
+                }
+            },
+        };
+        if let Err(e) = state
+            .kernel
+            .set_agent_model(agent_id, &model_to_apply, explicit_provider)
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
+            );
         }
     }
 
@@ -1455,6 +1521,93 @@ mod inert_allowlist_tests {
             ),
             v(&["web_search", "agent_spawn"])
         );
+    }
+}
+
+#[cfg(test)]
+mod patch_config_log_scrub_tests {
+    use super::{scrub_patch_config_body_for_log, PatchAgentConfigRequest};
+
+    fn empty_req() -> PatchAgentConfigRequest {
+        PatchAgentConfigRequest {
+            name: None,
+            description: None,
+            system_prompt: None,
+            emoji: None,
+            avatar_url: None,
+            color: None,
+            archetype: None,
+            vibe: None,
+            greeting_style: None,
+            model: None,
+            provider: None,
+            api_key_env: None,
+            base_url: None,
+            max_tokens: None,
+            temperature: None,
+            fallback_models: None,
+            web_search_augmentation: None,
+        }
+    }
+
+    /// The scenario the daemon log has to answer: did the browser send
+    /// `provider` without `model`? Both must be visible verbatim — neither
+    /// is sensitive.
+    #[test]
+    fn model_and_provider_are_logged_verbatim() {
+        let mut req = empty_req();
+        req.provider = Some("litellm".to_string());
+        let logged = scrub_patch_config_body_for_log(&req);
+        assert_eq!(logged["provider"], "litellm");
+        assert_eq!(logged["model"], serde_json::Value::Null);
+    }
+
+    /// `api_key_env` and `base_url` are exactly the fields #2380 leaked —
+    /// a credential-shaped env var name and an internal endpoint URL must
+    /// never reach the log, even at debug level.
+    #[test]
+    fn api_key_env_and_base_url_are_redacted_to_presence_only() {
+        let mut req = empty_req();
+        req.api_key_env = Some("MY_SECRET_PROVIDER_KEY".to_string());
+        req.base_url = Some("https://internal.example/v1".to_string());
+        let logged = scrub_patch_config_body_for_log(&req);
+
+        let rendered = logged.to_string();
+        assert!(
+            !rendered.contains("MY_SECRET_PROVIDER_KEY"),
+            "api_key_env leaked into the log: {rendered}"
+        );
+        assert!(
+            !rendered.contains("internal.example"),
+            "base_url leaked into the log: {rendered}"
+        );
+        assert_eq!(logged["api_key_env_set"], true);
+        assert_eq!(logged["base_url_set"], true);
+    }
+
+    /// A long system prompt (which may itself embed instructions the
+    /// operator does not want mirrored into logs) is reported by presence
+    /// only, matching the `api_key_env` / `base_url` treatment.
+    #[test]
+    fn system_prompt_is_redacted_to_presence_only() {
+        let mut req = empty_req();
+        req.system_prompt =
+            Some("You are a helpful assistant with secret instructions.".to_string());
+        let logged = scrub_patch_config_body_for_log(&req);
+        assert_eq!(logged["system_prompt_set"], true);
+        assert!(!logged.to_string().contains("secret instructions"));
+    }
+
+    /// Absent fields stay absent/false rather than being logged as
+    /// misleading empty strings.
+    #[test]
+    fn absent_fields_are_reported_as_not_set() {
+        let logged = scrub_patch_config_body_for_log(&empty_req());
+        assert_eq!(logged["api_key_env_set"], false);
+        assert_eq!(logged["base_url_set"], false);
+        assert_eq!(logged["system_prompt_set"], false);
+        assert_eq!(logged["model"], serde_json::Value::Null);
+        assert_eq!(logged["provider"], serde_json::Value::Null);
     }
 }
 
