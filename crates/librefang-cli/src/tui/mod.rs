@@ -16,9 +16,9 @@ use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, ResetScope};
 use screens::{
-    agents, audit, chat, comms, dashboard, extensions, goals, groups, hands, logs, memory,
-    models, peers, security, sessions, settings, skills, templates, triggers, usage, welcome,
-    wizard, workflows,
+    agents, audit, chat, comms, dashboard, extensions, goals, groups, hands, logs, memory, models,
+    peers, security, sessions, settings, skills, templates, triggers, usage, welcome, wizard,
+    workflows,
 };
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
