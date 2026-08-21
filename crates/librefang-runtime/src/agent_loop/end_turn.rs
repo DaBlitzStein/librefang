@@ -8,6 +8,12 @@ use super::prompt::{remember_interaction_best_effort, reply_directives_from_pars
 use super::text_recovery::{looks_like_hallucinated_action, user_message_has_action_intent};
 use super::*;
 
+/// Headroom added on top of the two proactive-memory sub-call ceilings when
+/// budgeting the end-of-turn enrichment: connection setup, embedding of the
+/// extracted candidates, and the substrate write all sit outside those two
+/// ceilings but inside the same await.
+const AUTO_MEMORIZE_SLACK_SECS: u64 = 15;
+
 pub(super) struct FinalizeEndTurnContext<'a> {
     pub(super) manifest: &'a AgentManifest,
     pub(super) session: &'a mut Session,
@@ -327,16 +333,44 @@ pub(super) async fn finalize_successful_end_turn(
             let user_id = ctx.session.agent_id.0.to_string();
             let new_messages = &ctx.session.messages[end_turn.new_messages_start..];
             let messages_json = serialize_session_messages(new_messages);
-            match pm_store
-                .auto_memorize(
-                    &user_id,
-                    &messages_json,
-                    ctx.sender_user_id,
-                    ctx.sender_chat_scope,
-                )
-                .await
-            {
-                Ok(result) if result.has_content => {
+            // Proactive memory is a best-effort enrichment of a reply the user
+            // is already waiting on, so it gets a ceiling. Without one, a slow
+            // or unreachable extraction model turns every turn into its retry
+            // schedule: measured in production, a reply that was ready in two
+            // seconds was withheld for two minutes and twenty seconds while
+            // the extraction call timed out at 30 s and retried four times,
+            // then gave up anyway. The turn paid the full cost of the retries
+            // and stored nothing.
+            //
+            // The budget is derived from the two sub-calls it has to cover —
+            // extraction and the store/update decision — plus slack, so that
+            // raising either ceiling can never silently start cutting off
+            // extractions that were about to succeed. What it cuts is the
+            // retry cascade, which cannot produce a memory the first attempt
+            // could not. Exceeding it is handled exactly like an extraction
+            // error: warn and finish the turn.
+            const AUTO_MEMORIZE_BUDGET: std::time::Duration = std::time::Duration::from_secs(
+                crate::proactive_memory::EXTRACTION_TIMEOUT_SECS
+                    + crate::proactive_memory::DECISION_TIMEOUT_SECS
+                    + AUTO_MEMORIZE_SLACK_SECS,
+            );
+            let memorize = pm_store.auto_memorize(
+                &user_id,
+                &messages_json,
+                ctx.sender_user_id,
+                ctx.sender_chat_scope,
+            );
+            match tokio::time::timeout(AUTO_MEMORIZE_BUDGET, memorize).await {
+                Err(_) => {
+                    warn!(
+                        budget_secs = AUTO_MEMORIZE_BUDGET.as_secs(),
+                        streaming = ctx.streaming,
+                        "Proactive memory auto_memorize exceeded its budget and was abandoned; \
+                         the turn is answered without it. Point [proactive_memory] \
+                         extraction_model at a model that answers inside the budget."
+                    );
+                }
+                Ok(Ok(result)) if result.has_content => {
                     debug!(
                         memories = result.memories.len(),
                         relations = result.relations.len(),
@@ -350,8 +384,8 @@ pub(super) async fn finalize_successful_end_turn(
                         .extend(result.memories.iter().map(|m| m.content.clone()));
                     end_turn.memory_conflicts.extend(result.conflicts);
                 }
-                Ok(_) => {}
-                Err(e) => {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
                     if ctx.streaming {
                         warn!("Proactive memory auto_memorize failed (streaming): {e}");
                     } else {
@@ -534,5 +568,49 @@ pub(super) fn gated_proactive_memory_for_memorize<'a>(
             "Per-agent override disables auto_memorize; skipping proactive memory extraction"
         );
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::proactive_memory::{DECISION_TIMEOUT_SECS, EXTRACTION_TIMEOUT_SECS};
+
+    /// The end-of-turn enrichment runs under a ceiling so a slow extraction
+    /// model cannot hold a finished reply hostage — measured in production, a
+    /// reply ready in 2 s was withheld for 2 min 20 s while the extraction
+    /// timed out and retried four times, storing nothing.
+    ///
+    /// The ceiling has to clear one honest attempt at both sub-calls, or the
+    /// cure becomes the disease: extractions that would have succeeded get
+    /// cut off instead. Deriving it from the sub-call constants makes that
+    /// hold by construction; this pins the relationship so a future edit to
+    /// either constant fails loudly here rather than quietly truncating
+    /// working extractions.
+    #[test]
+    fn the_auto_memorize_budget_clears_one_honest_attempt_at_both_sub_calls() {
+        let one_attempt = EXTRACTION_TIMEOUT_SECS + DECISION_TIMEOUT_SECS;
+        let budget = one_attempt + super::AUTO_MEMORIZE_SLACK_SECS;
+
+        assert!(
+            budget > one_attempt,
+            "budget {budget}s must leave room beyond the {one_attempt}s both \
+             sub-calls are allowed, or a slow-but-working extraction is cut off"
+        );
+    }
+
+    /// The point of the ceiling is to cut the *retry cascade*, not a single
+    /// slow attempt. Four attempts at the extraction ceiling is what produced
+    /// the 2 min 20 s stall, so the budget must sit well below that.
+    #[test]
+    fn the_auto_memorize_budget_cuts_the_retry_cascade() {
+        let budget =
+            EXTRACTION_TIMEOUT_SECS + DECISION_TIMEOUT_SECS + super::AUTO_MEMORIZE_SLACK_SECS;
+        let observed_cascade = EXTRACTION_TIMEOUT_SECS * 4;
+
+        assert!(
+            budget < observed_cascade,
+            "budget {budget}s must come in under the {observed_cascade}s retry \
+             cascade it exists to cut"
+        );
     }
 }
