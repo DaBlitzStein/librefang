@@ -6,4 +6,5 @@ An evaluator model (`evaluator_model`) makes one cheap yes/no read of the goal a
 The agent can also record a reusable lesson with `GOAL_LEARNED: <one sentence>`; captured lessons are replayed into later iterations' prompts, persisted to the shared store, and written into a `goal-learned-*` skill through the same prompt-injection scan every other skill-creation path uses.
 All three are inert unless the goal opts in, so a goal that does not ask for them sends the same prompt and makes the same single LLM call per iteration it always did.
 Sub-agents are delegated rather than provisioned: the prompt directs the agent to its own `agent_spawn` / `agent_send` tools, which run under the capabilities its operator granted it, and neither the runner nor the API ever creates an agent on a caller's behalf.
-A run now also gives up after five consecutive non-rate-limit tick failures instead of spending its whole iteration budget rediscovering a deleted agent or a revoked key (#6505) (@DaBlitzStein)
+A run now also gives up after five consecutive non-rate-limit tick failures instead of spending its whole iteration budget rediscovering a deleted agent or a revoked key.
+First of the five PRs splitting the closed #6505 (#7785) (@DaBlitzStein)
