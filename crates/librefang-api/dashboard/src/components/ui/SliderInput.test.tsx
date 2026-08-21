@@ -94,4 +94,60 @@ describe("SliderInput", () => {
     render(<SliderInput {...base} enabled onChange={() => {}} />);
     expect(screen.queryByRole("switch")).toBeNull();
   });
+
+  /**
+   * The legend is a reading aid for the track above it, so a label has to sit
+   * over the position its own value occupies. Even spacing (`justify-between`)
+   * looks tidy and lies: on the real context-window row — min 1024, max 2M,
+   * ticks 32K/128K/512K/1M — it drew "1M" hard right when 1M is the midpoint,
+   * and "128K" a third of the way across when its true position is 6%.
+   */
+  describe("tick legend", () => {
+    const ladder = {
+      label: "Context window",
+      value: 131072,
+      min: 1024,
+      max: 2097152,
+      ticks: [32768, 131072, 524288, 1048576],
+      formatTick: (v: number) =>
+        v >= 1048576 ? `${Math.round(v / 1048576)}M` : `${Math.round(v / 1024)}K`,
+    };
+
+    const leftOf = (text: string) =>
+      parseFloat((screen.getByText(text) as HTMLElement).style.left);
+
+    it("places each label at the position its value maps to", () => {
+      render(<SliderInput {...ladder} enabled onChange={() => {}} />);
+
+      // (value - min) / (max - min), the same formula the filled track uses.
+      expect(leftOf("32K")).toBeCloseTo(1.51, 1);
+      expect(leftOf("128K")).toBeCloseTo(6.2, 1);
+      expect(leftOf("512K")).toBeCloseTo(24.96, 1);
+      expect(leftOf("1M")).toBeCloseTo(49.97, 1);
+    });
+
+    it("does not space labels evenly regardless of value", () => {
+      render(<SliderInput {...ladder} enabled onChange={() => {}} />);
+
+      // The exact regression: evenly spaced would be 0 / 33 / 66 / 100.
+      expect(leftOf("1M")).toBeLessThan(60);
+      expect(leftOf("128K")).toBeLessThan(20);
+    });
+
+    it("keeps end labels inside the track", () => {
+      render(
+        <SliderInput
+          {...ladder}
+          ticks={[1024, 2097152]}
+          formatTick={(v) => String(v)}
+          enabled
+          onChange={() => {}}
+        />,
+      );
+
+      // Centring a label on 0% or 100% would hang half the text off the edge.
+      expect(screen.getByText("1024").className).toMatch(/translate-x-0/);
+      expect(screen.getByText("2097152").className).toMatch(/-translate-x-full/);
+    });
+  });
 });

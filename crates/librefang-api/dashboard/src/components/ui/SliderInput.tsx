@@ -101,10 +101,38 @@ export function SliderInput({
         }}
       />
       {ticks ? (
-        <div className={`flex justify-between text-[9px] text-text-dim/50 font-mono px-0.5 ${dim}`}>
-          {ticks.map((t) => (
-            <span key={t}>{formatTick ? formatTick(t) : t}</span>
-          ))}
+        // Each tick sits at the position its own value maps to, using the same
+        // formula as the filled track above — so the legend and the thumb agree.
+        //
+        // This used to be `flex justify-between`, which spaces labels evenly
+        // regardless of what they say. On a range whose ticks are not evenly
+        // spaced that is actively misleading: with min=1024 max=2097152 and
+        // ticks 32K/128K/512K/1M, the "1M" label was drawn hard right while
+        // 1M actually falls at the halfway point, and "128K" sat at a third of
+        // the width against a true position of 6%. Reading a value off the
+        // legend gave an answer that was wrong by an order of magnitude.
+        <div className={`relative h-3 text-[9px] text-text-dim/50 font-mono ${dim}`}>
+          {ticks.map((t) => {
+            const p = max === min ? 0 : ((t - min) / (max - min)) * 100;
+            const clamped = Math.min(100, Math.max(0, p));
+            // Centre each label on its mark, except at the ends, where centring
+            // would push half the text outside the track.
+            const align =
+              clamped <= 0
+                ? "translate-x-0"
+                : clamped >= 100
+                  ? "-translate-x-full"
+                  : "-translate-x-1/2";
+            return (
+              <span
+                key={t}
+                className={`absolute whitespace-nowrap ${align}`}
+                style={{ left: `${clamped}%` }}
+              >
+                {formatTick ? formatTick(t) : t}
+              </span>
+            );
+          })}
         </div>
       ) : null}
     </div>
