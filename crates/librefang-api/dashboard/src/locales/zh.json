@@ -1388,6 +1388,7 @@
     "records_filtered_to_agent": "已按当前 agent 过滤",
     "embedding_model_default": "自动 / 走 provider 默认",
     "extraction_model_default": "使用内核默认",
+    "extraction_model_inherited": "继承自系统默认模型：{{model}}。提取在每次回复后运行，因此此处使用较慢的模型会拖慢每一次回答。",
     "extraction_model_placeholder": "例如 openai/gpt-4o-mini",
     "custom_model_option": "自定义…",
     "decay_rate_hint": "应用于记忆置信度的每日衰减率。值越低，记忆衰减越慢。",

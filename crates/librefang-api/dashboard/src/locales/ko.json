@@ -1388,6 +1388,7 @@
     "records_filtered_to_agent": "이 에이전트로 필터링됨",
     "embedding_model_default": "자동/공급자 기본값",
     "extraction_model_default": "커널 기본값 사용",
+    "extraction_model_inherited": "시스템 기본 모델에서 상속됨: {{model}}. 추출은 모든 응답 후에 실행되므로, 여기에 느린 모델을 쓰면 모든 답변이 지연됩니다.",
     "extraction_model_placeholder": "예를 들어 openai/gpt-4o-mini",
     "custom_model_option": "사용자 지정…",
     "decay_rate_hint": "기억력 신뢰도에 일일 감쇠가 적용됩니다. 낮음 = 기억의 노화가 더 느려집니다.",
