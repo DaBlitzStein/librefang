@@ -385,10 +385,13 @@ fn delete_persisted_run(store: &Option<GoalRunStore>, goal_id: GoalId) {
 /// A single goal run entry: the spawned loop task plus its observable state
 /// and a cooperative stop flag.
 struct RunHandle {
-    /// The spawned loop task. `None` for a terminal entry reconstructed at boot
-    /// by [`GoalRunner::recover_stale_runs`] — that run's process already died,
-    /// so there is no live loop to abort; the entry exists only so the demoted
-    /// `Stopped` state stays observable via [`GoalRunner::state`].
+    /// The spawned loop task.
+    ///
+    /// `None` in three cases, none of which have a task to abort: a terminal
+    /// entry reconstructed at boot by [`GoalRunner::recover_stale_runs`] (that
+    /// run's process already died); the brief window inside [`GoalRunner::start`]
+    /// between registering the handle and backfilling the join handle; and a
+    /// run whose loop finished before that backfill could happen.
     task: Option<JoinHandle<()>>,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
@@ -581,6 +584,28 @@ impl GoalRunner {
         let loop_stop = stop.clone();
         let loop_store = self.store.clone();
 
+        // Register the handle BEFORE spawning, so the spawned task's
+        // self-cleanup always has an entry to find.
+        //
+        // Inserting afterwards leaves a window in which the loop can run to
+        // completion on another worker thread and execute its `remove_if`
+        // before this thread reaches the insert. The removal then finds
+        // nothing, the insert lands a handle for a loop that has already
+        // ended, and that entry is never collected: `state()` reports the run
+        // forever and the registry grows by one per occurrence. The window is
+        // small but the exits that fit inside it are the fast ones — a
+        // pre-signalled shutdown, or a goal deleted between the API's read and
+        // this call, both of which end the loop before its first agent turn.
+        self.runs.insert(
+            goal_id,
+            RunHandle {
+                task: None,
+                state,
+                stop,
+                generation,
+            },
+        );
+
         let task = tokio::spawn(async move {
             run_loop(
                 goal_id,
@@ -607,15 +632,20 @@ impl GoalRunner {
             runs.remove_if(&goal_id, |_, h| h.generation == generation);
         });
 
-        self.runs.insert(
-            goal_id,
-            RunHandle {
-                task: Some(task),
-                state,
-                stop,
-                generation,
-            },
-        );
+        // Backfill the join handle so `stop()` can abort the task.
+        //
+        // The entry is gone when the loop already finished and cleaned up,
+        // which is exactly the case the insert-first ordering exists to handle:
+        // dropping `task` there detaches a `JoinHandle` whose task has already
+        // returned, which is correct — there is nothing left to abort. The
+        // generation check keeps a replacement run's handle from being
+        // overwritten. `stop()` cannot interleave here: it takes `start_lock`,
+        // which this function holds for the whole sequence.
+        if let Some(mut entry) = self.runs.get_mut(&goal_id) {
+            if entry.generation == generation {
+                entry.task = Some(task);
+            }
+        }
         info!(goal_id = %goal_id, agent_id = %agent_id, max_iterations, "Goal run started");
     }
 
@@ -2476,5 +2506,69 @@ mod tests {
             MAX_ERROR_STREAK,
             "the breaker must fire at the streak limit, not at the iteration cap"
         );
+    }
+
+    /// The registry must never retain an entry for a loop that has ended.
+    ///
+    /// `start()` used to spawn the loop and register its handle afterwards. A
+    /// loop that finishes inside that window runs its self-cleanup `remove_if`
+    /// against a registry that does not hold it yet; the removal finds
+    /// nothing, the registration then lands a handle for a run that is already
+    /// over, and nothing ever collects it — `state()` reports the run forever
+    /// and the map grows by one every time it happens.
+    ///
+    /// Shutdown is pre-signalled here so the loop breaks on its very first
+    /// check, before any store read or agent turn: the shortest path from
+    /// `tokio::spawn` to `remove_if`, and so the widest that window ever gets.
+    ///
+    /// Hitting the race is probabilistic, which is why this runs many rounds
+    /// on a multi-threaded runtime. The invariant it asserts is not: with the
+    /// handle registered before the spawn there is no ordering in which a
+    /// finished loop leaves an entry behind, so this test cannot fail
+    /// spuriously — only when the ordering regresses.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_that_ends_immediately_leaves_no_entry_behind() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+
+        for round in 0..100 {
+            let (_tx, rx) = watch::channel(true);
+            let runner = GoalRunner::new(rx);
+            let goal_id = GoalId::new();
+            let agent_id = AgentId::new();
+
+            runner.start(
+                goal_id,
+                agent_id,
+                10,
+                substrate.clone(),
+                |_a: AgentId, _p: String| async move { Ok::<String, String>(String::new()) },
+                no_learnings_hook,
+                no_evaluator,
+                false,
+                None,
+                None,
+                None,
+            );
+
+            // Probe the registry directly rather than through `state()`:
+            // `state()` answers `None` both for "no entry" and for "the state
+            // lock was momentarily held", and the run loop takes that lock on
+            // its way out. Conflating the two would let a transient lock read
+            // as a clean registry.
+            //
+            // A stale entry is never collected, so exhausting this budget is a
+            // real failure rather than a slow machine.
+            for _ in 0..200 {
+                if !runner.runs.contains_key(&goal_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+
+            assert!(
+                !runner.runs.contains_key(&goal_id),
+                "round {round}: a finished goal loop left its registry entry behind"
+            );
+        }
     }
 }
