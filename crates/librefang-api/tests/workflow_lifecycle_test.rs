@@ -615,7 +615,7 @@ async fn list_workflows_success_rate_excludes_cancelled() {
         engine
             .execute_run(
                 run_id,
-                |_agent| Some((AgentId::new(), "mock".to_string(), false)),
+                |_agent| Ok((AgentId::new(), "mock".to_string(), false)),
                 |_id: AgentId, _msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
                     Ok(("done".to_string(), 0u64, 0u64))
                 },
@@ -737,7 +737,8 @@ async fn rerun_invalid_run_id_returns_400() {
 #[tokio::test(flavor = "multi_thread")]
 async fn run_detail_exposes_per_step_error_for_failed_step() {
     use librefang_kernel::workflow::{
-        ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
+        ErrorMode, StepAgent, StepAgentError, StepAgentResolution, StepMode, Workflow, WorkflowId,
+        WorkflowStep,
     };
 
     let h = boot().await;
@@ -777,8 +778,7 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
         .await
         .expect("create run");
 
-    let resolver =
-        |_a: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> { None };
+    let resolver = |_a: &StepAgent| -> StepAgentResolution { Err(StepAgentError::NotFound) };
     let sender =
         |_id: librefang_types::agent::AgentId,
          msg: String,

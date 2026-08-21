@@ -352,6 +352,33 @@ pub enum StepAgent {
     ByType { template: String, fresh: bool },
 }
 
+/// Why a step's [`StepAgent`] could not be turned into a concrete agent.
+///
+/// The two variants are different operator problems and must not be
+/// collapsed into one. "The template does not exist" sends the operator
+/// looking for a missing file; "the template exists but starting an agent
+/// from it was refused" sends them to the reason it was refused — most
+/// often the capability-inheritance gate, which rejects a step agent whose
+/// manifest asks for more than the run's owner holds. The resolver used to
+/// return a bare `None` for both, so a refusal was reported as a missing
+/// file and the operator went hunting for a template that was sitting right
+/// there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepAgentError {
+    /// No agent matches the reference: no registered agent, and for
+    /// [`StepAgent::ByType`], no template file either.
+    NotFound,
+    /// A template was found, but spawning an agent from it was rejected.
+    /// Carries the rejection reason verbatim so the run error names it.
+    SpawnRejected(String),
+}
+
+/// What a workflow step's agent resolver returns.
+///
+/// `Ok((agent id, agent name, inherit_parent_context))` on success; on
+/// failure a [`StepAgentError`] that says which kind of failure it was.
+pub type StepAgentResolution = Result<(AgentId, String, bool), StepAgentError>;
+
 impl<'de> Deserialize<'de> for StepAgent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1343,9 +1370,9 @@ fn lock_workflow_persistence(lock: &std::sync::Mutex<()>) -> std::sync::MutexGua
     })
 }
 
-/// Format the error returned when a workflow step's `agent_resolver` returns
-/// `None` — i.e. the referenced registry agent does not exist (or, for
-/// `StepAgent::ById`, the UUID is malformed / unregistered).
+/// Format the error returned when a workflow step's `agent_resolver` reports
+/// [`StepAgentError::NotFound`] — i.e. the referenced registry agent does not
+/// exist (or, for `StepAgent::ById`, the UUID is malformed / unregistered).
 ///
 /// We surface both the step name and the agent reference the workflow
 /// configured so an operator reading the failure can fix the workflow without
@@ -1366,6 +1393,37 @@ fn format_missing_agent_error(step_name: &str, agent: &StepAgent) -> String {
             "Agent type '{template}' not found for workflow step '{step_name}' \
              (no template file and no registered agent with that name)"
         ),
+    }
+}
+
+/// Format the run error for any `agent_resolver` failure, telling a missing
+/// reference apart from a refused spawn.
+///
+/// [`StepAgentError::NotFound`] keeps the wording of
+/// [`format_missing_agent_error`] verbatim. [`StepAgentError::SpawnRejected`]
+/// reports the reason the kernel gave instead: the template *was* found, so
+/// telling the operator it was not is a lie that costs them a search through
+/// `agent-types/` for a file that is already there.
+fn format_agent_resolution_error(
+    step_name: &str,
+    agent: &StepAgent,
+    error: &StepAgentError,
+) -> String {
+    match error {
+        StepAgentError::NotFound => format_missing_agent_error(step_name, agent),
+        StepAgentError::SpawnRejected(reason) => match agent {
+            StepAgent::ByType { template, .. } => format!(
+                "Agent type '{template}' could not be started for workflow step '{step_name}': \
+                 {reason}"
+            ),
+            StepAgent::ByName { name } => format!(
+                "Agent '{name}' could not be started for workflow step '{step_name}': {reason}"
+            ),
+            StepAgent::ById { id } => format!(
+                "Agent with id '{id}' could not be started for workflow step '{step_name}': \
+                 {reason}"
+            ),
+        },
     }
 }
 
@@ -3068,7 +3126,7 @@ impl WorkflowEngine {
         &self,
         run_id: WorkflowRunId,
         resume_token: Uuid,
-        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        agent_resolver: impl Fn(&StepAgent) -> StepAgentResolution,
         send_message: F,
         skill_check: C,
     ) -> Result<String, ResumeRunError>
@@ -3567,7 +3625,7 @@ impl WorkflowEngine {
         run_id: WorkflowRunId,
         action: OperatorAction,
         payload: Option<String>,
-        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        agent_resolver: impl Fn(&StepAgent) -> StepAgentResolution,
         send_message: F,
         skill_check: C,
     ) -> Result<String, ResumeRunError>
@@ -3646,7 +3704,7 @@ impl WorkflowEngine {
         run_id: WorkflowRunId,
         operator_step_index: usize,
         timeout_action: OperatorTimeoutAction,
-        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        agent_resolver: impl Fn(&StepAgent) -> StepAgentResolution,
         send_message: F,
         skill_check: C,
     ) -> Result<String, ResumeRunError>
@@ -3705,7 +3763,7 @@ impl WorkflowEngine {
         run_id: WorkflowRunId,
         operator_step_index: usize,
         outcome: OperatorOutcome,
-        agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        agent_resolver: &impl Fn(&StepAgent) -> StepAgentResolution,
         send_message: &F,
         skill_check: &C,
     ) -> Result<String, ResumeRunError>
@@ -3827,7 +3885,7 @@ impl WorkflowEngine {
     pub async fn execute_run<F, Fut, C>(
         &self,
         run_id: WorkflowRunId,
-        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        agent_resolver: impl Fn(&StepAgent) -> StepAgentResolution,
         send_message: F,
         skill_check: C,
     ) -> Result<String, String>
@@ -3955,7 +4013,7 @@ impl WorkflowEngine {
         run_id: WorkflowRunId,
         workflow: &Workflow,
         input: &str,
-        agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        agent_resolver: &impl Fn(&StepAgent) -> StepAgentResolution,
         send_message: &F,
         skill_check: &C,
     ) -> Result<String, String>
@@ -4091,9 +4149,9 @@ impl WorkflowEngine {
             match &step.mode {
                 StepMode::Sequential => {
                     let (agent_id, agent_name, agent_inherit) = match agent_resolver(&step.agent) {
-                        Some(v) => v,
-                        None => {
-                            let e = format_missing_agent_error(&step.name, &step.agent);
+                        Ok(v) => v,
+                        Err(err) => {
+                            let e = format_agent_resolution_error(&step.name, &step.agent, &err);
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 if !matches!(r.state, WorkflowRunState::Cancelled) {
                                     r.state = WorkflowRunState::Failed;
@@ -4227,10 +4285,13 @@ impl WorkflowEngine {
                     for (idx, fan_step) in &fan_out_steps {
                         let (agent_id, agent_name, agent_inherit) =
                             match agent_resolver(&fan_step.agent) {
-                                Some(v) => v,
-                                None => {
-                                    let e =
-                                        format_missing_agent_error(&fan_step.name, &fan_step.agent);
+                                Ok(v) => v,
+                                Err(err) => {
+                                    let e = format_agent_resolution_error(
+                                        &fan_step.name,
+                                        &fan_step.agent,
+                                        &err,
+                                    );
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         if !matches!(r.state, WorkflowRunState::Cancelled) {
                                             r.state = WorkflowRunState::Failed;
@@ -4392,9 +4453,9 @@ impl WorkflowEngine {
 
                     // Condition met — execute like sequential
                     let (agent_id, agent_name, agent_inherit) = match agent_resolver(&step.agent) {
-                        Some(v) => v,
-                        None => {
-                            let e = format_missing_agent_error(&step.name, &step.agent);
+                        Ok(v) => v,
+                        Err(err) => {
+                            let e = format_agent_resolution_error(&step.name, &step.agent, &err);
                             mark_run_failed(&self.runs, &run_id, &e);
                             return Err(e);
                         }
@@ -4476,9 +4537,9 @@ impl WorkflowEngine {
                     until,
                 } => {
                     let (agent_id, agent_name, agent_inherit) = match agent_resolver(&step.agent) {
-                        Some(v) => v,
-                        None => {
-                            let e = format_missing_agent_error(&step.name, &step.agent);
+                        Ok(v) => v,
+                        Err(err) => {
+                            let e = format_agent_resolution_error(&step.name, &step.agent, &err);
                             mark_run_failed(&self.runs, &run_id, &e);
                             return Err(e);
                         }
@@ -5366,7 +5427,7 @@ impl WorkflowEngine {
         run_id: WorkflowRunId,
         workflow: &Workflow,
         input: &str,
-        agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        agent_resolver: &impl Fn(&StepAgent) -> StepAgentResolution,
         send_message: &F,
         skill_check: &C,
     ) -> Result<String, String>
@@ -5467,9 +5528,9 @@ impl WorkflowEngine {
                 }
 
                 let (agent_id, agent_name, _agent_inherit) = match agent_resolver(&step.agent) {
-                    Some(v) => v,
-                    None => {
-                        let e = format_missing_agent_error(&step.name, &step.agent);
+                    Ok(v) => v,
+                    Err(err) => {
+                        let e = format_agent_resolution_error(&step.name, &step.agent, &err);
                         mark_run_failed(&self.runs, &run_id, &e);
                         return Err(e);
                     }
@@ -5569,9 +5630,10 @@ impl WorkflowEngine {
                         (AgentId::new(), String::new(), false)
                     } else {
                         match agent_resolver(&step.agent) {
-                            Some(v) => v,
-                            None => {
-                                let e = format_missing_agent_error(&step.name, &step.agent);
+                            Ok(v) => v,
+                            Err(err) => {
+                                let e =
+                                    format_agent_resolution_error(&step.name, &step.agent, &err);
                                 mark_run_failed(&self.runs, &run_id, &e);
                                 return Err(e);
                             }
@@ -5740,7 +5802,7 @@ impl WorkflowEngine {
         &self,
         workflow_id: WorkflowId,
         input: &str,
-        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        agent_resolver: impl Fn(&StepAgent) -> StepAgentResolution,
     ) -> Result<Vec<DryRunStep>, String> {
         let workflow = self
             .workflows
@@ -5767,8 +5829,8 @@ impl WorkflowEngine {
                     let prev_lower = current_input.to_lowercase();
                     let condition_met = evaluate_condition(&prev_lower, condition);
                     let (agent_name, agent_found) = match agent_resolver(&step.agent) {
-                        Some((_, name, _)) => (Some(name), true),
-                        None => (None, false),
+                        Ok((_, name, _)) => (Some(name), true),
+                        Err(_) => (None, false),
                     };
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
@@ -5941,8 +6003,8 @@ impl WorkflowEngine {
                 }
                 _ => {
                     let (agent_name, agent_found) = match agent_resolver(&step.agent) {
-                        Some((_, name, _)) => (Some(name), true),
-                        None => (None, false),
+                        Ok((_, name, _)) => (Some(name), true),
+                        Err(_) => (None, false),
                     };
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
@@ -7007,19 +7069,19 @@ mod tests {
         }
     }
 
-    fn mock_resolver(agent: &StepAgent) -> Option<(AgentId, String, bool)> {
+    fn mock_resolver(agent: &StepAgent) -> StepAgentResolution {
         let _ = agent;
-        Some((AgentId::new(), "mock-agent".to_string(), true))
+        Ok((AgentId::new(), "mock-agent".to_string(), true))
     }
 
-    fn mock_resolver_no_inherit(agent: &StepAgent) -> Option<(AgentId, String, bool)> {
+    fn mock_resolver_no_inherit(agent: &StepAgent) -> StepAgentResolution {
         let _ = agent;
-        Some((AgentId::new(), "mock-agent".to_string(), false))
+        Ok((AgentId::new(), "mock-agent".to_string(), false))
     }
 
-    /// Resolver for a deleted / unregistered agent — always `None`.
-    fn none_resolver(_agent: &StepAgent) -> Option<(AgentId, String, bool)> {
-        None
+    /// Resolver for a deleted / unregistered agent — always `NotFound`.
+    fn none_resolver(_agent: &StepAgent) -> StepAgentResolution {
+        Err(StepAgentError::NotFound)
     }
 
     /// Regression (#6441 follow-up): a Conditional step whose referenced agent

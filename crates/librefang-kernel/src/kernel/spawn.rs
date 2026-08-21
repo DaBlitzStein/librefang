@@ -51,9 +51,16 @@ impl LibreFangKernel {
 
     /// Find-or-spawn for workflow steps that reference an agent type:
     /// reuse the registered agent with that name, else load the template
-    /// manifest (templates/ then workspaces/agents/) and spawn it top-level.
-    /// None = no template and no agent. Sync — callable from the resolver
-    /// closures (all of them are `Fn`, not async).
+    /// manifest (`agent-types/` then `workspaces/agents/`) and spawn it
+    /// top-level. Sync — callable from the resolver closures (all of them
+    /// are `Fn`, not async).
+    ///
+    /// `Err(StepAgentError::NotFound)` means no template and no agent;
+    /// `Err(StepAgentError::SpawnRejected)` means the template was found but
+    /// the spawn was refused, and carries the kernel's reason. The two are
+    /// kept apart because the workflow engine turns this into the run's
+    /// error text: collapsing a refusal into "not found" tells the operator
+    /// to go find a template file that is already on disk.
     ///
     /// Spawns are permanent: the canonical name-derived UUID (race-safe via
     /// `agent_identities`, #4614) makes concurrent runs converge on one
@@ -64,14 +71,20 @@ impl LibreFangKernel {
         template: &str,
         owner: Option<AgentId>,
         fresh: bool,
-    ) -> Option<(AgentId, String, bool)> {
+    ) -> crate::workflow::StepAgentResolution {
+        use crate::workflow::StepAgentError;
+
         if !fresh {
             if let Some(entry) = self.agents.registry.find_by_name(template) {
                 let inherit = entry.manifest.inherit_parent_context;
-                return Some((entry.id, entry.name.clone(), inherit));
+                return Ok((entry.id, entry.name.clone(), inherit));
             }
         }
-        let mut manifest = load_agent_manifest_from_template_dirs(&self.home_dir_boot, template)?;
+        let Some(mut manifest) =
+            load_agent_manifest_from_template_dirs(&self.home_dir_boot, template)
+        else {
+            return Err(StepAgentError::NotFound);
+        };
         let inherit = manifest.inherit_parent_context;
         let name = manifest.name.clone();
         // Deterministic canonical id for reuse across runs (race-safe via
@@ -104,15 +117,15 @@ impl LibreFangKernel {
                     if let Some(entry) = self.agents.registry.find_by_name(&name) {
                         warn!(agent_type = %template, error = %e,
                             "workflow step: lost the spawn race — reusing the winning instance");
-                        return Some((entry.id, entry.name.clone(), inherit));
+                        return Ok((entry.id, entry.name.clone(), inherit));
                     }
                 }
                 warn!(agent_type = %template, error = %e,
                     "workflow step: template found but agent spawn failed");
-                return None;
+                return Err(StepAgentError::SpawnRejected(e.to_string()));
             }
         };
-        Some((id, spawned_name, inherit))
+        Ok((id, spawned_name, inherit))
     }
 
     /// Pure, side-effect-free spawn pre-checks shared by `spawn_agent_inner` and destructive callers that must validate before mutating state.
@@ -253,10 +266,13 @@ impl LibreFangKernel {
                         %violation,
                         "Rejecting child spawn — requested capabilities exceed parent"
                     );
+                    // `violation` already opens with "Privilege escalation
+                    // denied: " — re-prefixing it stuttered, which nobody
+                    // saw while this string only reached the logs, and which
+                    // is now the operator-facing text of a failed workflow
+                    // run.
                     return Err(KernelError::LibreFang(
-                        librefang_types::error::LibreFangError::Internal(format!(
-                            "Privilege escalation denied: {violation}"
-                        )),
+                        librefang_types::error::LibreFangError::Internal(violation),
                     ));
                 }
             } else {

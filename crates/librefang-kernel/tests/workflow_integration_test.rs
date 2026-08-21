@@ -819,9 +819,8 @@ async fn workflow_engine_substitutes_input_schema_vars_into_step_prompt() {
             Ok::<(String, u64, u64), String>((format!("ack:{msg}"), 1u64, 1u64))
         }
     };
-    let resolver = |_a: &librefang_kernel::workflow::StepAgent| {
-        Some((AgentId::new(), "stub".to_string(), true))
-    };
+    let resolver =
+        |_a: &librefang_kernel::workflow::StepAgent| Ok((AgentId::new(), "stub".to_string(), true));
     let result = engine
         .execute_run(run_id, resolver, sender, |_, _| Ok(()))
         .await;

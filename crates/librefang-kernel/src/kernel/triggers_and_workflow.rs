@@ -1273,18 +1273,26 @@ impl LibreFangKernel {
 
         // Agent resolver: looks up by name or ID in the registry.
         // Returns (AgentId, agent_name, inherit_parent_context).
-        let resolver = |agent_ref: &StepAgent| -> Option<(AgentId, String, bool)> {
+        let resolver = |agent_ref: &StepAgent| -> StepAgentResolution {
             match agent_ref {
                 StepAgent::ById { id } => {
-                    let agent_id: AgentId = id.parse().ok()?;
-                    let entry = self.agents.registry.get(agent_id)?;
+                    let agent_id: AgentId = id.parse().map_err(|_| StepAgentError::NotFound)?;
+                    let entry = self
+                        .agents
+                        .registry
+                        .get(agent_id)
+                        .ok_or(StepAgentError::NotFound)?;
                     let inherit = entry.manifest.inherit_parent_context;
-                    Some((agent_id, entry.name.clone(), inherit))
+                    Ok((agent_id, entry.name.clone(), inherit))
                 }
                 StepAgent::ByName { name } => {
-                    let entry = self.agents.registry.find_by_name(name)?;
+                    let entry = self
+                        .agents
+                        .registry
+                        .find_by_name(name)
+                        .ok_or(StepAgentError::NotFound)?;
                     let inherit = entry.manifest.inherit_parent_context;
-                    Some((entry.id, entry.name.clone(), inherit))
+                    Ok((entry.id, entry.name.clone(), inherit))
                 }
                 StepAgent::ByType { template, fresh } => {
                     self.resolve_agent_by_type_or_spawn(template, owner, *fresh)
@@ -1382,40 +1390,49 @@ impl LibreFangKernel {
         workflow_id: WorkflowId,
         input: String,
     ) -> KernelResult<Vec<DryRunStep>> {
-        let resolver =
-            |agent_ref: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> {
-                match agent_ref {
-                    StepAgent::ById { id } => {
-                        let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                        let entry = self.agents.registry.get(agent_id)?;
+        let resolver = |agent_ref: &StepAgent| -> StepAgentResolution {
+            match agent_ref {
+                StepAgent::ById { id } => {
+                    let agent_id: librefang_types::agent::AgentId =
+                        id.parse().map_err(|_| StepAgentError::NotFound)?;
+                    let entry = self
+                        .agents
+                        .registry
+                        .get(agent_id)
+                        .ok_or(StepAgentError::NotFound)?;
+                    let inherit = entry.manifest.inherit_parent_context;
+                    Ok((agent_id, entry.name.clone(), inherit))
+                }
+                StepAgent::ByName { name } => {
+                    let entry = self
+                        .agents
+                        .registry
+                        .find_by_name(name)
+                        .ok_or(StepAgentError::NotFound)?;
+                    let inherit = entry.manifest.inherit_parent_context;
+                    Ok((entry.id, entry.name.clone(), inherit))
+                }
+                StepAgent::ByType { template, .. } => {
+                    // Dry runs must not mutate the registry — never
+                    // spawn here. Reuse an existing instance, or, when
+                    // the template exists on disk, report its name as
+                    // "will spawn on a real run".
+                    if let Some(entry) = self.agents.registry.find_by_name(template) {
                         let inherit = entry.manifest.inherit_parent_context;
-                        Some((agent_id, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByName { name } => {
-                        let entry = self.agents.registry.find_by_name(name)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((entry.id, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByType { template, .. } => {
-                        // Dry runs must not mutate the registry — never
-                        // spawn here. Reuse an existing instance, or, when
-                        // the template exists on disk, report its name as
-                        // "will spawn on a real run".
-                        if let Some(entry) = self.agents.registry.find_by_name(template) {
-                            let inherit = entry.manifest.inherit_parent_context;
-                            Some((entry.id, entry.name.clone(), inherit))
-                        } else {
-                            let manifest = super::spawn::load_agent_manifest_from_template_dirs(
-                                &self.home_dir_boot,
-                                template,
-                            )?;
-                            let inherit = manifest.inherit_parent_context;
-                            let name = manifest.name.clone();
-                            Some((librefang_types::agent::AgentId::new(), name, inherit))
-                        }
+                        Ok((entry.id, entry.name.clone(), inherit))
+                    } else {
+                        let manifest = super::spawn::load_agent_manifest_from_template_dirs(
+                            &self.home_dir_boot,
+                            template,
+                        )
+                        .ok_or(StepAgentError::NotFound)?;
+                        let inherit = manifest.inherit_parent_context;
+                        let name = manifest.name.clone();
+                        Ok((librefang_types::agent::AgentId::new(), name, inherit))
                     }
                 }
-            };
+            }
+        };
 
         self.workflows
             .engine
@@ -1514,18 +1531,26 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
         let run_owner = kernel.workflows.engine.run_owner(run_id);
         let resolver = {
             let kernel = kernel.clone();
-            move |agent_ref: &StepAgent| -> Option<(AgentId, String, bool)> {
+            move |agent_ref: &StepAgent| -> StepAgentResolution {
                 match agent_ref {
                     StepAgent::ById { id } => {
-                        let agent_id: AgentId = id.parse().ok()?;
-                        let entry = kernel.agents.registry.get(agent_id)?;
+                        let agent_id: AgentId = id.parse().map_err(|_| StepAgentError::NotFound)?;
+                        let entry = kernel
+                            .agents
+                            .registry
+                            .get(agent_id)
+                            .ok_or(StepAgentError::NotFound)?;
                         let inherit = entry.manifest.inherit_parent_context;
-                        Some((agent_id, entry.name.clone(), inherit))
+                        Ok((agent_id, entry.name.clone(), inherit))
                     }
                     StepAgent::ByName { name } => {
-                        let entry = kernel.agents.registry.find_by_name(name)?;
+                        let entry = kernel
+                            .agents
+                            .registry
+                            .find_by_name(name)
+                            .ok_or(StepAgentError::NotFound)?;
                         let inherit = entry.manifest.inherit_parent_context;
-                        Some((entry.id, entry.name.clone(), inherit))
+                        Ok((entry.id, entry.name.clone(), inherit))
                     }
                     StepAgent::ByType { template, fresh } => {
                         kernel.resolve_agent_by_type_or_spawn(template, run_owner, *fresh)

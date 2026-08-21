@@ -7168,14 +7168,15 @@ async fn workflow_required_skills_gate_rejects_missing_and_pending() {
 
     let run_once = |_skills: Vec<String>| async {
         let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
-        let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
-            match agent_ref {
-                crate::workflow::StepAgent::ByType { template, fresh } => {
-                    kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+        let resolver =
+            |agent_ref: &crate::workflow::StepAgent| -> crate::workflow::StepAgentResolution {
+                match agent_ref {
+                    crate::workflow::StepAgent::ByType { template, fresh } => {
+                        kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+                    }
+                    _ => Err(crate::workflow::StepAgentError::NotFound),
                 }
-                _ => None,
-            }
-        };
+            };
         let sender = |_id: AgentId,
                       msg: String,
                       _sm: Option<librefang_types::agent::SessionMode>| async move {
@@ -7505,8 +7506,30 @@ fn by_type_probe_workflow(template: &str) -> crate::workflow::Workflow {
 }
 
 /// Write a minimal `workspaces/agents/<name>/agent.toml` template so the
-/// find-or-spawn path has a manifest to load.
+/// find-or-spawn path has a manifest to load — exercising the fallback
+/// directory of `load_agent_manifest_from_template_dirs`.
 fn write_agent_template(kernel: &LibreFangKernel, name: &str) {
+    write_agent_template_body(kernel, name, "");
+}
+
+/// Same as [`write_agent_template`], with `extra` appended to the manifest
+/// body (a `[capabilities]` block, say).
+///
+/// Deletes any `agent-types/<name>.toml` first. The boot registry sync
+/// installs the upstream catalogue there — around thirty types including
+/// `researcher`, `analyst` and `coder` — and
+/// `load_agent_manifest_from_template_dirs` reads that canonical directory
+/// *before* the `workspaces/agents/` fallback this fixture writes to. Without
+/// the delete, a fixture whose name collides with a shipped type is silently
+/// ignored and the test runs against whatever the registry ships that day,
+/// over the network, which is neither what the test says it does nor
+/// reproducible.
+fn write_agent_template_body(kernel: &LibreFangKernel, name: &str, extra: &str) {
+    let installed =
+        librefang_types::registry_paths::installed_agent_types_dir(&kernel.home_dir_boot)
+            .join(format!("{name}.toml"));
+    let _ = std::fs::remove_file(&installed);
+
     let agent_dir = kernel
         .home_dir_boot
         .join("workspaces")
@@ -7515,7 +7538,7 @@ fn write_agent_template(kernel: &LibreFangKernel, name: &str) {
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
         agent_dir.join("agent.toml"),
-        format!("name = \"{name}\"\nmodule = \"builtin:chat\"\n"),
+        format!("name = \"{name}\"\nmodule = \"builtin:chat\"\n{extra}"),
     )
     .unwrap();
 }
@@ -7530,14 +7553,15 @@ async fn workflow_step_by_type_spawns_agent_from_template() {
     let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
 
     let sent_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
-        match agent_ref {
-            crate::workflow::StepAgent::ByType { template, fresh } => {
-                kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+    let resolver =
+        |agent_ref: &crate::workflow::StepAgent| -> crate::workflow::StepAgentResolution {
+            match agent_ref {
+                crate::workflow::StepAgent::ByType { template, fresh } => {
+                    kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+                }
+                _ => Err(crate::workflow::StepAgentError::NotFound),
             }
-            _ => None,
-        }
-    };
+        };
     let sender = {
         let sent_ids = sent_ids.clone();
         move |id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| {
@@ -7582,14 +7606,15 @@ async fn workflow_step_by_type_reuses_existing_agent() {
         let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
         let sent_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let kernel = std::sync::Arc::clone(kernel);
-        let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
-            match agent_ref {
-                crate::workflow::StepAgent::ByType { template, fresh } => {
-                    kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+        let resolver =
+            |agent_ref: &crate::workflow::StepAgent| -> crate::workflow::StepAgentResolution {
+                match agent_ref {
+                    crate::workflow::StepAgent::ByType { template, fresh } => {
+                        kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+                    }
+                    _ => Err(crate::workflow::StepAgentError::NotFound),
                 }
-                _ => None,
-            }
-        };
+            };
         let sender = {
             let sent_ids = sent_ids.clone();
             move |id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| {
@@ -7631,14 +7656,15 @@ async fn workflow_step_by_type_missing_template_fails_run() {
     let wf_id = engine.register(by_type_probe_workflow("ghost")).await;
     let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
 
-    let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
-        match agent_ref {
-            crate::workflow::StepAgent::ByType { template, fresh } => {
-                kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+    let resolver =
+        |agent_ref: &crate::workflow::StepAgent| -> crate::workflow::StepAgentResolution {
+            match agent_ref {
+                crate::workflow::StepAgent::ByType { template, fresh } => {
+                    kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+                }
+                _ => Err(crate::workflow::StepAgentError::NotFound),
             }
-            _ => None,
-        }
-    };
+        };
     let sender = |_id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
         Ok((msg, 0u64, 0u64))
     };
@@ -7660,6 +7686,82 @@ async fn workflow_step_by_type_missing_template_fails_run() {
     );
 }
 
+/// A refused spawn must be reported as a refusal, not as a missing template.
+///
+/// A step whose run owner holds fewer capabilities than the agent type it
+/// names is rejected by the capability-inheritance gate in
+/// `spawn_agent_inner`. That rejection is correct and stays. What was wrong
+/// was what the operator got told: the resolver collapsed every spawn failure
+/// into a bare `None`, so the run failed with "no template file and no
+/// registered agent with that name" while the template sat on disk, and the
+/// operator went looking for a file that was already there.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_step_by_type_reports_a_refused_spawn_not_a_missing_template() {
+    let kernel = boot_kernel_for_display_tests();
+    // The agent type asks for unrestricted network access…
+    write_agent_template_body(
+        &kernel,
+        "greedy-type",
+        "[capabilities]\nnetwork = [\"*\"]\n",
+    );
+    // …while the run's owner declares no capabilities at all.
+    let owner = register_test_agent(&kernel, "restricted-owner");
+
+    let engine = &kernel.workflows.engine;
+    let wf_id = engine.register(by_type_probe_workflow("greedy-type")).await;
+    let run_id = engine
+        .create_run_with_owner(wf_id, "input".to_string(), Some(owner))
+        .await
+        .unwrap();
+
+    let resolver =
+        |agent_ref: &crate::workflow::StepAgent| -> crate::workflow::StepAgentResolution {
+            match agent_ref {
+                crate::workflow::StepAgent::ByType { template, fresh } => {
+                    kernel.resolve_agent_by_type_or_spawn(template, Some(owner), *fresh)
+                }
+                _ => Err(crate::workflow::StepAgentError::NotFound),
+            }
+        };
+    let sender = |_id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
+        Ok((msg, 0u64, 0u64))
+    };
+    let result = engine
+        .execute_run(run_id, resolver, sender, |_, _| Ok(()))
+        .await;
+    assert!(result.is_err(), "a refused spawn must fail the run");
+
+    let run = engine.get_run(run_id).await.unwrap();
+    assert!(
+        matches!(run.state, crate::workflow::WorkflowRunState::Failed),
+        "run must be Failed, not stuck in Running: {:?}",
+        run.state
+    );
+    let err = run.error.as_deref().unwrap_or("");
+    assert!(
+        err.contains("Agent type 'greedy-type' could not be started"),
+        "error must name the type and say it could not be started: {err}"
+    );
+    assert!(
+        err.contains("child requests NetConnect"),
+        "error must carry the reason the spawn was refused: {err}"
+    );
+    assert!(
+        !err.contains("not found"),
+        "the template exists — the error must not claim otherwise: {err}"
+    );
+    assert!(
+        kernel.agents.registry.find_by_name("greedy-type").is_none(),
+        "a refused spawn must not leave an agent registered"
+    );
+}
+
+/// A run created with an owner spawns its step agents as children of that
+/// owner; an ownerless run spawns them top-level.
+///
+/// The fixture template declares no capabilities, so it is trivially within
+/// whatever the owner holds and the capability-inheritance gate does not
+/// enter into it — that gate has its own test above.
 #[tokio::test(flavor = "multi_thread")]
 async fn workflow_step_by_type_spawns_with_parent_owner() {
     let kernel = boot_kernel_for_display_tests();
@@ -7678,14 +7780,15 @@ async fn workflow_step_by_type_spawns_with_parent_owner() {
         .await
         .unwrap();
 
-    let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
-        match agent_ref {
-            crate::workflow::StepAgent::ByType { template, fresh } => {
-                kernel.resolve_agent_by_type_or_spawn(template, Some(owner), *fresh)
+    let resolver =
+        |agent_ref: &crate::workflow::StepAgent| -> crate::workflow::StepAgentResolution {
+            match agent_ref {
+                crate::workflow::StepAgent::ByType { template, fresh } => {
+                    kernel.resolve_agent_by_type_or_spawn(template, Some(owner), *fresh)
+                }
+                _ => Err(crate::workflow::StepAgentError::NotFound),
             }
-            _ => None,
-        }
-    };
+        };
     let sender = |_id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
         Ok((msg, 0u64, 0u64))
     };
@@ -7712,14 +7815,15 @@ async fn workflow_step_by_type_spawns_with_parent_owner() {
         .create_run(wf_id2, "input".to_string())
         .await
         .unwrap();
-    let resolver2 = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
-        match agent_ref {
-            crate::workflow::StepAgent::ByType { template, fresh } => {
-                kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+    let resolver2 =
+        |agent_ref: &crate::workflow::StepAgent| -> crate::workflow::StepAgentResolution {
+            match agent_ref {
+                crate::workflow::StepAgent::ByType { template, fresh } => {
+                    kernel.resolve_agent_by_type_or_spawn(template, None, *fresh)
+                }
+                _ => Err(crate::workflow::StepAgentError::NotFound),
             }
-            _ => None,
-        }
-    };
+        };
     engine
         .execute_run(run_id2, resolver2, sender, |_, _| Ok(()))
         .await

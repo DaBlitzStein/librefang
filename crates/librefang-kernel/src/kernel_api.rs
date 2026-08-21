@@ -89,16 +89,19 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry>;
     /// Find-or-spawn for workflow steps that reference an agent type:
     /// reuse the registered agent with that name, else load the template
-    /// manifest (templates/ then workspaces/agents/) and spawn it top-level.
-    /// Returns (agent_id, agent_name, inherit_parent_context), or None when
-    /// no template exists and no agent is registered. Sync — callable from
-    /// the resolver closures the workflow engine injects.
+    /// manifest (`agent-types/` then `workspaces/agents/`) and spawn it
+    /// top-level. `Ok((agent_id, agent_name, inherit_parent_context))` on
+    /// success; `Err(StepAgentError::NotFound)` when no template exists and
+    /// no agent is registered; `Err(StepAgentError::SpawnRejected)` when a
+    /// template was found but the spawn was refused, carrying the reason.
+    /// Sync — callable from the resolver closures the workflow engine
+    /// injects.
     fn resolve_agent_by_type_or_spawn(
         &self,
         template: &str,
         owner: Option<AgentId>,
         fresh: bool,
-    ) -> Option<(AgentId, String, bool)>;
+    ) -> crate::workflow::StepAgentResolution;
     /// Check that a workflow step's required skills are satisfiable by the
     /// resolved agent (#7721) — see
     /// `LibreFangKernel::check_step_required_skills`.
@@ -863,7 +866,7 @@ impl KernelApi for LibreFangKernel {
         template: &str,
         owner: Option<AgentId>,
         fresh: bool,
-    ) -> Option<(AgentId, String, bool)> {
+    ) -> crate::workflow::StepAgentResolution {
         LibreFangKernel::resolve_agent_by_type_or_spawn(self, template, owner, fresh)
     }
     fn check_step_required_skills(

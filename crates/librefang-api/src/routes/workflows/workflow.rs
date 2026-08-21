@@ -536,20 +536,28 @@ fn spawn_background_run(
             .workflow_engine()
             .execute_run(
                 run_id,
-                move |agent_ref| {
-                    use librefang_kernel::workflow::StepAgent;
+                move |agent_ref| -> librefang_kernel::workflow::StepAgentResolution {
+                    use librefang_kernel::workflow::{StepAgent, StepAgentError};
                     match agent_ref {
                         StepAgent::ById { id } => {
-                            let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                            let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
+                            let agent_id: librefang_types::agent::AgentId =
+                                id.parse().map_err(|_| StepAgentError::NotFound)?;
+                            let entry = state_for_resolver
+                                .kernel
+                                .agent_registry()
+                                .get(agent_id)
+                                .ok_or(StepAgentError::NotFound)?;
                             let inherit = entry.manifest.inherit_parent_context;
-                            Some((agent_id, entry.name.clone(), inherit))
+                            Ok((agent_id, entry.name.clone(), inherit))
                         }
                         StepAgent::ByName { name } => {
-                            let entry =
-                                state_for_resolver.kernel.agent_registry().find_by_name(name)?;
+                            let entry = state_for_resolver
+                                .kernel
+                                .agent_registry()
+                                .find_by_name(name)
+                                .ok_or(StepAgentError::NotFound)?;
                             let inherit = entry.manifest.inherit_parent_context;
-                            Some((entry.id, entry.name.clone(), inherit))
+                            Ok((entry.id, entry.name.clone(), inherit))
                         }
                         StepAgent::ByType { template, fresh } => state_for_resolver
                             .kernel
@@ -1111,22 +1119,28 @@ pub async fn resume_workflow_run(
     let state_for_resolver = state.clone();
     let state_for_sender = state.clone();
 
-    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
-        use librefang_kernel::workflow::StepAgent;
+    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| -> librefang_kernel::workflow::StepAgentResolution {
+        use librefang_kernel::workflow::{StepAgent, StepAgentError};
         match agent_ref {
             StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
+                let agent_id: librefang_types::agent::AgentId =
+                    id.parse().map_err(|_| StepAgentError::NotFound)?;
+                let entry = state_for_resolver
+                    .kernel
+                    .agent_registry()
+                    .get(agent_id)
+                    .ok_or(StepAgentError::NotFound)?;
                 let inherit = entry.manifest.inherit_parent_context;
-                Some((agent_id, entry.name.clone(), inherit))
+                Ok((agent_id, entry.name.clone(), inherit))
             }
             StepAgent::ByName { name } => {
                 let entry = state_for_resolver
                     .kernel
                     .agent_registry()
-                    .find_by_name(name)?;
+                    .find_by_name(name)
+                    .ok_or(StepAgentError::NotFound)?;
                 let inherit = entry.manifest.inherit_parent_context;
-                Some((entry.id, entry.name.clone(), inherit))
+                Ok((entry.id, entry.name.clone(), inherit))
             }
             StepAgent::ByType { template, fresh } => state_for_resolver
                 .kernel
@@ -1401,22 +1415,28 @@ pub async fn operator_action_workflow_run(
     let payload = payload_opt.clone();
     let owner_for_resolver = state.kernel.workflow_engine().run_owner(run_id);
     let state_for_resolver = state.clone();
-    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
-        use librefang_kernel::workflow::StepAgent;
+    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| -> librefang_kernel::workflow::StepAgentResolution {
+        use librefang_kernel::workflow::{StepAgent, StepAgentError};
         match agent_ref {
             StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
+                let agent_id: librefang_types::agent::AgentId =
+                    id.parse().map_err(|_| StepAgentError::NotFound)?;
+                let entry = state_for_resolver
+                    .kernel
+                    .agent_registry()
+                    .get(agent_id)
+                    .ok_or(StepAgentError::NotFound)?;
                 let inherit = entry.manifest.inherit_parent_context;
-                Some((agent_id, entry.name.clone(), inherit))
+                Ok((agent_id, entry.name.clone(), inherit))
             }
             StepAgent::ByName { name } => {
                 let entry = state_for_resolver
                     .kernel
                     .agent_registry()
-                    .find_by_name(name)?;
+                    .find_by_name(name)
+                    .ok_or(StepAgentError::NotFound)?;
                 let inherit = entry.manifest.inherit_parent_context;
-                Some((entry.id, entry.name.clone(), inherit))
+                Ok((entry.id, entry.name.clone(), inherit))
             }
             StepAgent::ByType { template, fresh } => state_for_resolver
                 .kernel

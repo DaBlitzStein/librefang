@@ -362,19 +362,29 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             // on each invocation rather than moving it into the closure body.
             let k1 = std::sync::Arc::clone(&kernel_arc);
             let k2 = std::sync::Arc::clone(&kernel_arc);
-            let resolver = move |agent_ref: &crate::workflow::StepAgent| {
+            let resolver = move |agent_ref: &crate::workflow::StepAgent| -> crate::workflow::StepAgentResolution {
+                use crate::workflow::StepAgentError;
                 use librefang_types::agent::AgentId;
                 match agent_ref {
                     crate::workflow::StepAgent::ById { id } => {
-                        let agent_id: AgentId = id.parse().ok()?;
-                        let entry = k1.agents.registry.get(agent_id)?;
+                        let agent_id: AgentId =
+                            id.parse().map_err(|_| StepAgentError::NotFound)?;
+                        let entry = k1
+                            .agents
+                            .registry
+                            .get(agent_id)
+                            .ok_or(StepAgentError::NotFound)?;
                         let inherit = entry.manifest.inherit_parent_context;
-                        Some((agent_id, entry.name.clone(), inherit))
+                        Ok((agent_id, entry.name.clone(), inherit))
                     }
                     crate::workflow::StepAgent::ByName { name } => {
-                        let entry = k1.agents.registry.find_by_name(name)?;
+                        let entry = k1
+                            .agents
+                            .registry
+                            .find_by_name(name)
+                            .ok_or(StepAgentError::NotFound)?;
                         let inherit = entry.manifest.inherit_parent_context;
-                        Some((entry.id, entry.name.clone(), inherit))
+                        Ok((entry.id, entry.name.clone(), inherit))
                     }
                     crate::workflow::StepAgent::ByType { template, fresh } => {
                         k1.resolve_agent_by_type_or_spawn(template, owner, *fresh)

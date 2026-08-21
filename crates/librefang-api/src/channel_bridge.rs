@@ -3,7 +3,7 @@
 //! Implements `ChannelBridgeHandle` on `LibreFangKernel` and provides the
 //! `start_channel_bridge()` entry point called by the daemon.
 
-use crate::workflow::{StepAgent, WorkflowId};
+use crate::workflow::{StepAgent, StepAgentError, StepAgentResolution, WorkflowId};
 use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
@@ -1310,20 +1310,24 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .workflow_engine()
             .execute_run(
                 run_id,
-                |step_agent| match step_agent {
-                    StepAgent::ById { id } => {
-                        let aid: AgentId = id.parse().ok()?;
-                        let entry = registry_ref.get(aid)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((aid, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByName { name } => {
-                        let entry = registry_ref.find_by_name(name)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((entry.id, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByType { template, fresh } => {
-                        kernel.resolve_agent_by_type_or_spawn(template, owner, *fresh)
+                |step_agent| -> StepAgentResolution {
+                    match step_agent {
+                        StepAgent::ById { id } => {
+                            let aid: AgentId = id.parse().map_err(|_| StepAgentError::NotFound)?;
+                            let entry = registry_ref.get(aid).ok_or(StepAgentError::NotFound)?;
+                            let inherit = entry.manifest.inherit_parent_context;
+                            Ok((aid, entry.name.clone(), inherit))
+                        }
+                        StepAgent::ByName { name } => {
+                            let entry = registry_ref
+                                .find_by_name(name)
+                                .ok_or(StepAgentError::NotFound)?;
+                            let inherit = entry.manifest.inherit_parent_context;
+                            Ok((entry.id, entry.name.clone(), inherit))
+                        }
+                        StepAgent::ByType { template, fresh } => {
+                            kernel.resolve_agent_by_type_or_spawn(template, owner, *fresh)
+                        }
                     }
                 },
                 |agent_id, message, session_mode_override| {

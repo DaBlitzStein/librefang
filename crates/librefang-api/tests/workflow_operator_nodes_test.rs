@@ -43,8 +43,9 @@
 //! the mock panic on call.
 
 use librefang_kernel::workflow::{
-    BranchArm, ErrorMode, GateCondition, GateOp, StepAgent, StepMode, Workflow, WorkflowId,
-    WorkflowRunState, WorkflowStep, MAX_TRANSFORM_OUTPUT_BYTES, MAX_WAIT_SECS,
+    BranchArm, ErrorMode, GateCondition, GateOp, StepAgent, StepAgentResolution, StepMode,
+    Workflow, WorkflowId, WorkflowRunState, WorkflowStep, MAX_TRANSFORM_OUTPUT_BYTES,
+    MAX_WAIT_SECS,
 };
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::{AgentId, SessionMode};
@@ -99,7 +100,7 @@ fn workflow_with_op_step(name: &str, mode: StepMode) -> Workflow {
 
 /// Resolver closure that panics on call. Operator-node executors must
 /// NEVER call `agent_resolver`; this enforces the contract.
-fn panicking_agent_resolver(_agent: &StepAgent) -> Option<(AgentId, String, bool)> {
+fn panicking_agent_resolver(_agent: &StepAgent) -> StepAgentResolution {
     panic!("operator-node executor must not call agent_resolver");
 }
 
@@ -1275,13 +1276,9 @@ async fn dry_run_reports_operator_nodes_as_found_with_synthetic_agent_names() {
     // those, so it must never be called. We pass a panicking resolver
     // to enforce the contract.
     let preview = engine
-        .dry_run(
-            wf_id,
-            "seed",
-            |_agent: &StepAgent| -> Option<(AgentId, String, bool)> {
-                panic!("dry_run must not call agent_resolver for operator nodes");
-            },
-        )
+        .dry_run(wf_id, "seed", |_agent: &StepAgent| -> StepAgentResolution {
+            panic!("dry_run must not call agent_resolver for operator nodes");
+        })
         .await
         .expect("dry_run");
 
@@ -1357,13 +1354,9 @@ async fn dry_run_marks_unparseable_transform_template_as_skipped() {
     engine.register(wf).await;
 
     let preview = engine
-        .dry_run(
-            wf_id,
-            "seed",
-            |_agent: &StepAgent| -> Option<(AgentId, String, bool)> {
-                panic!("dry_run must not call agent_resolver for Transform");
-            },
-        )
+        .dry_run(wf_id, "seed", |_agent: &StepAgent| -> StepAgentResolution {
+            panic!("dry_run must not call agent_resolver for Transform");
+        })
         .await
         .expect("dry_run");
 
@@ -1457,13 +1450,9 @@ async fn dry_run_transform_advances_current_input_for_downstream_previews() {
     engine.register(wf).await;
 
     let preview = engine
-        .dry_run(
-            wf_id,
-            "seed",
-            |_agent: &StepAgent| -> Option<(AgentId, String, bool)> {
-                panic!("dry_run must not call agent_resolver for operator nodes");
-            },
-        )
+        .dry_run(wf_id, "seed", |_agent: &StepAgent| -> StepAgentResolution {
+            panic!("dry_run must not call agent_resolver for operator nodes");
+        })
         .await
         .expect("dry_run");
 

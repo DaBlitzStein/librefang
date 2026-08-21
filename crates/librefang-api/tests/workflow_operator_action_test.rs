@@ -148,7 +148,7 @@ async fn run_to_operator_pause(h: &Harness, wf: Workflow) -> WorkflowRunId {
     engine
         .execute_run(
             run_id,
-            |_a: &StepAgent| Some((AgentId::new(), "mock".to_string(), false)),
+            |_a: &StepAgent| Ok((AgentId::new(), "mock".to_string(), false)),
             |_id: AgentId, prompt: String, _m: Option<SessionMode>| async move {
                 // Producer sees the seed; downstream steps echo their input
                 // so the test can assert what flowed through.
@@ -405,7 +405,7 @@ async fn operator_http_non_operator_pause_is_409() {
     engine
         .execute_run(
             run_id,
-            |_a: &StepAgent| Some((AgentId::new(), "m".to_string(), false)),
+            |_a: &StepAgent| Ok((AgentId::new(), "m".to_string(), false)),
             |_i: AgentId, _p: String, _m: Option<SessionMode>| async {
                 Ok(("x".to_string(), 0u64, 0u64))
             },
@@ -543,7 +543,7 @@ async fn operator_http_inspect_non_operator_pause_is_409() {
     engine
         .execute_run(
             run_id,
-            |_a: &StepAgent| Some((AgentId::new(), "m".to_string(), false)),
+            |_a: &StepAgent| Ok((AgentId::new(), "m".to_string(), false)),
             |_i: AgentId, _p: String, _m: Option<SessionMode>| async {
                 Ok(("x".to_string(), 0u64, 0u64))
             },
