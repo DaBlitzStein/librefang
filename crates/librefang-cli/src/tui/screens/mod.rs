@@ -14,6 +14,7 @@ pub mod hands;
 pub mod init_wizard;
 pub mod logs;
 pub mod memory;
+pub mod model_params;
 pub mod models;
 pub mod peers;
 pub mod security;
