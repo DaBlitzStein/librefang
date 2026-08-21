@@ -2778,4 +2778,68 @@ mod tests {
             "the breaker must fire at the streak limit, not at the iteration cap"
         );
     }
+
+    /// The registry must never retain an entry for a loop that has ended.
+    ///
+    /// `start()` used to spawn the loop and register its handle afterwards. A
+    /// loop that finishes inside that window runs its self-cleanup `remove_if`
+    /// against a registry that does not hold it yet; the removal finds
+    /// nothing, the registration then lands a handle for a run that is already
+    /// over, and nothing ever collects it — `state()` reports the run forever
+    /// and the map grows by one every time it happens.
+    ///
+    /// Shutdown is pre-signalled here so the loop breaks on its very first
+    /// check, before any store read or agent turn: the shortest path from
+    /// `tokio::spawn` to `remove_if`, and so the widest that window ever gets.
+    ///
+    /// Hitting the race is probabilistic, which is why this runs many rounds
+    /// on a multi-threaded runtime. The invariant it asserts is not: with the
+    /// handle registered before the spawn there is no ordering in which a
+    /// finished loop leaves an entry behind, so this test cannot fail
+    /// spuriously — only when the ordering regresses.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_that_ends_immediately_leaves_no_entry_behind() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+
+        for round in 0..100 {
+            let (_tx, rx) = watch::channel(true);
+            let runner = GoalRunner::new(rx);
+            let goal_id = GoalId::new();
+            let agent_id = AgentId::new();
+
+            runner.start(
+                goal_id,
+                agent_id,
+                10,
+                substrate.clone(),
+                |_a: AgentId, _p: String| async move { Ok::<String, String>(String::new()) },
+                no_learnings_hook,
+                no_evaluator,
+                false,
+                None,
+                None,
+                None,
+            );
+
+            // Probe the registry directly rather than through `state()`:
+            // `state()` answers `None` both for "no entry" and for "the state
+            // lock was momentarily held", and the run loop takes that lock on
+            // its way out. Conflating the two would let a transient lock read
+            // as a clean registry.
+            //
+            // A stale entry is never collected, so exhausting this budget is a
+            // real failure rather than a slow machine.
+            for _ in 0..200 {
+                if !runner.runs.contains_key(&goal_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+
+            assert!(
+                !runner.runs.contains_key(&goal_id),
+                "round {round}: a finished goal loop left its registry entry behind"
+            );
+        }
+    }
 }
