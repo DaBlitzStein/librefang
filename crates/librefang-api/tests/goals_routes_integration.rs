@@ -953,10 +953,10 @@ async fn goal_run_start_with_an_unusable_agent_id_provisions_no_agent() {
             after.len(),
             before,
             "a rejected run must not provision an agent (stored={stored:?}); registry now holds: {:?}",
-            after.iter().map(|a| a.manifest.name.clone()).collect::<Vec<_>>()
+            after.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
         );
         assert!(
-            !after.iter().any(|a| a.manifest.name.starts_with("goal-")),
+            !after.iter().any(|a| a.name.starts_with("goal-")),
             "no goal-* agent may be auto-spawned (stored={stored:?})"
         );
     }
@@ -994,13 +994,10 @@ async fn loop_engineering_without_a_verifier_provisions_no_agent() {
         after.len(),
         before,
         "starting a loop-engineered run must not provision a verifier; registry now holds: {:?}",
-        after
-            .iter()
-            .map(|a| a.manifest.name.clone())
-            .collect::<Vec<_>>()
+        after.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
     );
     assert!(
-        !after.iter().any(|a| a.manifest.name.starts_with("goal-")),
+        !after.iter().any(|a| a.name.starts_with("goal-")),
         "no goal-* agent may be auto-spawned"
     );
 
