@@ -267,9 +267,11 @@ pub(super) async fn tool_agent_spawn(
 
     // Ephemeral path: spawn a temporary worker, run task, return result directly
     if input["ephemeral"].as_bool().unwrap_or(false) {
-        // Ephemeral spawn runs the agent loop inline on the caller's task, so
-        // each nesting level stacks another ~56 KB of future (#6659). Reject
-        // before we build the request, same as agent_send.
+        // Ephemeral spawn runs the agent loop inline on the caller's task, so each nesting level stacks another ~56 KB of future (#6659).
+        // Reject before we build the request, same as agent_send.
+        //
+        // This duplicates the check in `spawn_ephemeral_worker` (`kernel/messaging.rs`), which is intentional: `run_agent_loop` for an ephemeral worker is always called with `kernel: None`, so a kernel-dependent tool dispatched *inside* that worker's own loop — including `agent_spawn` itself — fails fast at `require_kernel_typed` regardless of this guard.
+        // A worker cannot currently spawn a further worker at all; this check exists for the day a kernel handle is wired through to ephemeral workers, at which point it becomes load-bearing rather than defence-in-depth.
         let max_depth = kh.max_agent_call_depth();
         let current_depth = super::current_agent_depth();
         if current_depth >= max_depth {
@@ -290,9 +292,8 @@ pub(super) async fn tool_agent_spawn(
             )));
         }
 
-        // Enforce parent's tool allowlist on the ephemeral worker, same as the
-        // permanent-agent path below. An unrestricted parent (None) passes
-        // through the caller's requested tools unfiltered.
+        // Enforce parent's tool allowlist on the ephemeral worker, same as the permanent-agent path below.
+        // An unrestricted parent (None) passes through the caller's requested tools unfiltered.
         let requested_tools: Option<Vec<String>> = input["tools"].as_array().map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
@@ -316,6 +317,21 @@ pub(super) async fn tool_agent_spawn(
             (Some(_), _) => None,
             (None, tools) => tools,
         };
+
+        // #6930 review: `system_prompt` becomes the worker's actual system
+        // prompt (`resolve_ephemeral_manifest` sets
+        // `manifest.model.system_prompt = prompt.clone()`), the same taint
+        // surface the permanent-agent branch below already checks for
+        // `name` and `system_prompt`. Tainted content from earlier in the
+        // parent's turn (a file read, a web page) must not seed a fresh
+        // worker's system prompt unchecked.
+        if let Some(prompt) = input["system_prompt"].as_str() {
+            if let Some(violation) = check_taint_outbound_text(prompt, &spawn_sink) {
+                return Err(ToolError::PermissionDenied(format!(
+                    "Taint violation (system_prompt): {violation}"
+                )));
+            }
+        }
 
         let request = librefang_types::agent::EphemeralSpawnRequest {
             system_prompt: input["system_prompt"].as_str().map(String::from),
@@ -356,6 +372,12 @@ pub(super) async fn tool_agent_spawn(
             }),
             message: message.to_string(),
             max_iterations: input["max_iterations"].as_u64().map(|v| v as u32),
+            // Never read from tool-call input: the tool call's own `parent_id`
+            // above is the trusted execution-context value (which agent is
+            // actually running this turn). `parent_agent_id` only exists for
+            // the operator-authenticated HTTP route, which has no such
+            // context to derive a caller identity from (#6930 review).
+            parent_agent_id: None,
         };
 
         return kh

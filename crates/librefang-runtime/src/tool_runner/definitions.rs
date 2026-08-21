@@ -376,7 +376,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "skills": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Skill names to enable (ephemeral spawn only)."
+                            "description": "Skill names to request (ephemeral spawn only). Currently accepted but not applied — the skill registry is not wired up for ephemeral workers yet, so a non-empty value is logged and dropped."
                         },
                         "max_iterations": {
                             "type": "integer",
@@ -392,16 +392,25 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                             "description": "Shell commands to allow (permanent spawn only)."
                         }
                     },
-                    "oneOf": [
-                        {
-                            "required": ["message"],
-                            "description": "Ephemeral spawn: message is the task to execute."
-                        },
-                        {
-                            "required": ["name", "system_prompt"],
-                            "description": "Permanent spawn: name and system_prompt define the new agent."
-                        }
-                    ]
+                    // #6930 review: keyed on the same `ephemeral` flag the runtime
+                    // dispatches on (`tool_runner/agent.rs`'s
+                    // `if input["ephemeral"].as_bool().unwrap_or(false)`), instead
+                    // of a presence-based `oneOf` that could diverge from it — a
+                    // caller redundantly sending both shapes at once no longer
+                    // fails validation for a request the runtime would have
+                    // handled fine.
+                    "if": {
+                        "properties": { "ephemeral": { "const": true } },
+                        "required": ["ephemeral"]
+                    },
+                    "then": {
+                        "required": ["message"],
+                        "description": "Ephemeral spawn: message is the task to execute."
+                    },
+                    "else": {
+                        "required": ["name", "system_prompt"],
+                        "description": "Permanent spawn: name and system_prompt define the new agent."
+                    }
                 }),
             },
             ToolDefinition {

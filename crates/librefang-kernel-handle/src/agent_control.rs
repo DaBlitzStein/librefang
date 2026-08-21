@@ -76,11 +76,9 @@ pub trait AgentControl: Send + Sync {
         Err(KernelOpError::unavailable("spawn_ephemeral"))
     }
 
-    /// Like [`spawn_ephemeral`](Self::spawn_ephemeral), but returns the run's
-    /// metering (cost, iterations) alongside the response text. The default
-    /// delegates to `spawn_ephemeral`, so implementations that only wire the
-    /// text path still work — cost is `None` and iterations `0`. The kernel
-    /// overrides this to report real values.
+    /// Like [`spawn_ephemeral`](Self::spawn_ephemeral), but returns the run's metering (cost, iterations) alongside the response text.
+    /// The default delegates to `spawn_ephemeral`, so implementations that only wire the text path still work — cost is `None` and iterations `0`.
+    /// The kernel overrides this to report real values.
     async fn spawn_ephemeral_detailed(
         &self,
         request: librefang_types::agent::EphemeralSpawnRequest,

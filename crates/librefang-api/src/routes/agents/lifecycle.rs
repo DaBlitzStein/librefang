@@ -233,15 +233,15 @@ async fn spawn_agent_inner(
     }
 }
 
-/// POST /api/agents/spawn-ephemeral — Run a throwaway worker (no workspace,
-/// no DB, no registry entry) for a single turn and return its result.
+/// POST /api/agents/spawn-ephemeral — Run a throwaway worker (no workspace, no DB, no registry entry) for a single turn and return its result.
 #[utoipa::path(
     post,
     path = "/api/agents/spawn-ephemeral",
     tag = "agents",
-    request_body = serde_json::Value,
+    request_body = crate::types::EphemeralSpawnRequestSchema,
     responses(
-        (status = 200, description = "Ephemeral worker result", body = crate::types::JsonObject),
+        (status = 200, description = "Ephemeral worker result", body = crate::types::EphemeralSpawnResponseSchema),
+        (status = 400, description = "parent_agent_id is not a valid agent id, or names an agent that is not registered"),
         (status = 429, description = "Provider budget exhausted"),
         (status = 500, description = "Ephemeral spawn failed")
     )
@@ -254,7 +254,41 @@ pub async fn spawn_ephemeral_agent(
     let l = super::resolve_lang(lang.as_ref());
     let start = std::time::Instant::now();
 
-    match state.kernel.spawn_ephemeral_detailed(req, None).await {
+    // #6930 review: `parent_id` was hardcoded to `None` for every direct HTTP caller, so cost never showed up under any per-agent budget and the route's "budget-attributed" description was false for this path.
+    // Validate up front: a malformed id, or one that names no registered agent, gets an explicit 400 instead of the run silently billing the ephemeral worker's own throwaway id.
+    // This route already requires `Admin`+ (`middleware.rs::user_role_allows_request`), and an Admin credential can already reconfigure or delete any agent, so accepting a caller-supplied billing target adds no privilege an Admin caller did not already have.
+    let parent_id: Option<String> = match req.parent_agent_id {
+        Some(ref raw) if raw.parse::<librefang_types::agent::AgentId>().is_err() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "parent_agent_id must be a valid agent id",
+                    "code": "invalid_parent_agent_id",
+                    "type": "invalid_parent_agent_id",
+                })),
+            )
+                .into_response();
+        }
+        Some(ref raw) if !state.kernel.list_agents().iter().any(|a| &a.id == raw) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("parent_agent_id '{raw}' does not name a registered agent"),
+                    "code": "parent_agent_not_found",
+                    "type": "parent_agent_not_found",
+                })),
+            )
+                .into_response();
+        }
+        Some(ref raw) => Some(raw.clone()),
+        None => None,
+    };
+
+    match state
+        .kernel
+        .spawn_ephemeral_detailed(req, parent_id.as_deref())
+        .await
+    {
         Ok(result) => {
             let latency_ms = start.elapsed().as_millis() as u64;
             (
@@ -271,8 +305,7 @@ pub async fn spawn_ephemeral_agent(
         Err(e) => {
             tracing::warn!("Ephemeral spawn failed: {e}");
             let t = ErrorTranslator::new(l);
-            // Surface the quota message (safe, no internal detail); scrub
-            // everything else to a generic 500 — same policy as spawn_agent.
+            // Surface the quota message (safe, no internal detail); scrub everything else to a generic 500 — same policy as spawn_agent.
             let (status, code, msg) = match &e {
                 librefang_types::error::LibreFangError::QuotaExceeded(m) => {
                     (StatusCode::TOO_MANY_REQUESTS, "quota_exceeded", m.clone())
