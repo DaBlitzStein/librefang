@@ -36,7 +36,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   The two ladders are deliberately different: output tokens are not context tokens, Gemini's 1M / 2M are how much it can *read*, and no model generates a million tokens of reply — a ladder offering 1M output would assert a value the provider will refuse.
   `inherit` is a rung rather than an empty box, so "this agent has no opinion" is something you can point at.
   A limit the model actually declared trims the ladder; a limit nobody measured leaves it whole.
-  Available in the agent editor, the agent-type editor, the TUI (agent detail → `p`), and the CLI (`librefang agent set <id> temperature 0.2`, or `inherit` to clear) (#7781, #7782) (@DaBlitzStein)
+  Available in the agent editor, the agent-type editor, the TUI (agent detail → `p`), and the CLI (`librefang agent set <id> temperature 0.2`, or `inherit` to clear) (#7781, #7782, #7787) (@DaBlitzStein)
 
 ## [2026.8.19] - 2026-08-19
 
