@@ -2432,6 +2432,221 @@ async fn everyapi_refresh_keeps_the_registered_catalog_when_the_gateway_is_down(
         .unwrap_or_else(|| panic!("registered catalog must survive: {body}"));
     assert_eq!(sonnet["max_output_tokens"], 64_000);
 }
+// ---------------------------------------------------------------------------
+// GET /api/models live discovery for custom OpenAI-compatible gateways
+// (litellm, a self-hosted vLLM/llama.cpp proxy under its own provider id,
+// …) — #7775.
+// ---------------------------------------------------------------------------
+
+/// The reported bug: a self-hosted gateway (litellm in the report) served
+/// its models fine over `/v1/models`, but `GET /api/models?provider=<id>`
+/// returned nothing because only OpenRouter/EveryAPI ever refreshed a live
+/// catalog. No opt-in flag is required — an unregistered provider id with a
+/// base URL and a usable auth state is discovered automatically, exactly
+/// like OpenRouter/EveryAPI already are.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_gateway_models_appear_in_the_list_after_a_live_refresh() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base_url = format!("{}/v1", server.uri());
+    librefang_api::custom_gateway_catalog::clear_refresh_attempts(&base_url);
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "sensor-model-generic"},
+                {"id": "pakllm"},
+                {"id": "embedding-high"},
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "litellm".to_string(),
+        display_name: "LiteLLM".to_string(),
+        api_key_env: "LIBREFANG_TEST_LITELLM_KEY_LIST".to_string(),
+        base_url: base_url.clone(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) = json_request(&h, Method::GET, "/api/models?provider=litellm", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    for expected in ["sensor-model-generic", "pakllm", "embedding-high"] {
+        assert!(
+            ids.contains(&expected),
+            "expected {expected} in the live-discovered list; got {ids:?}"
+        );
+    }
+}
+
+/// A down/slow gateway must never break the listing — the static/previously
+/// registered catalog keeps serving and the failure is only warn-logged.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_down_custom_gateway_keeps_the_previous_catalog_and_does_not_fail_the_request() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base_url = format!("{}/v1", server.uri());
+    librefang_api::custom_gateway_catalog::clear_refresh_attempts(&base_url);
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "litellm".to_string(),
+        display_name: "LiteLLM".to_string(),
+        api_key_env: "LIBREFANG_TEST_LITELLM_KEY_DOWN".to_string(),
+        base_url: base_url.clone(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        ..ProviderInfo::default()
+    });
+    let registered = ModelCatalogEntry {
+        id: "previously-registered".to_string(),
+        display_name: "previously-registered".to_string(),
+        provider: "litellm".to_string(),
+        tier: ModelTier::Balanced,
+        modality: Modality::Text,
+        context_window: 32_768,
+        max_output_tokens: 4_096,
+        supports_streaming: true,
+        ..ModelCatalogEntry::default()
+    };
+    h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.reconcile_live_provider_models(
+            "litellm",
+            vec!["previously-registered".to_string()],
+            vec![registered.clone()],
+        );
+        catalog.clear_provider_available_models("litellm");
+    });
+
+    let (status, body) = json_request(&h, Method::GET, "/api/models?provider=litellm", None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a down gateway must not fail the request: {body}"
+    );
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"previously-registered"),
+        "the checked-in/previous snapshot must survive a failed refresh; got {ids:?}"
+    );
+}
+
+/// The 60-second retry window / 15-minute TTL means a second listing inside
+/// the window must not hit the network again. `.expect(1)` on the mock
+/// enforces this — wiremock panics on drop if the mock was called more than
+/// the expectation allows.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_listing_inside_the_ttl_does_not_repeat_the_network_call() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base_url = format!("{}/v1", server.uri());
+    librefang_api::custom_gateway_catalog::clear_refresh_attempts(&base_url);
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "pakllm"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "litellm".to_string(),
+        display_name: "LiteLLM".to_string(),
+        api_key_env: "LIBREFANG_TEST_LITELLM_KEY_TTL".to_string(),
+        base_url: base_url.clone(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        ..ProviderInfo::default()
+    });
+
+    let (status1, _) = json_request(&h, Method::GET, "/api/models?provider=litellm", None).await;
+    assert_eq!(status1, StatusCode::OK);
+    let (status2, body2) =
+        json_request(&h, Method::GET, "/api/models?provider=litellm", None).await;
+    assert_eq!(status2, StatusCode::OK, "body: {body2}");
+    let ids: Vec<&str> = body2["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"pakllm"),
+        "the first fetch's result must still be served on the second call; got {ids:?}"
+    );
+}
+
+/// A provider that IS known to the built-in driver registry (here `openai`,
+/// pointed at the mock server via `set_provider_url` the way a test/dev
+/// override would) must never trigger this discovery path — its curated
+/// static catalog metadata is authoritative, and the `.expect(0)` mock
+/// enforces that no request ever reaches the mock server.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_without_a_compatible_base_url_never_triggers_discovery() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base_url = format!("{}/v1", server.uri());
+    librefang_api::custom_gateway_catalog::clear_refresh_attempts(&base_url);
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "should-never-be-fetched"}]
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let h = boot();
+    h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.set_provider_url("openai", &base_url);
+    });
+
+    let (status, body) = json_request(&h, Method::GET, "/api/models?provider=openai", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        !ids.contains(&"should-never-be-fetched"),
+        "a registry-known provider must never be live-discovered here; got {ids:?}"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Model discovery for custom OpenAI-compatible providers (#6702) and API keys
