@@ -1,5 +1,7 @@
 use super::*;
 use crate::provider_health::DiscoveredModelInfo;
+use librefang_types::inference_params::LimitSource;
+use librefang_types::model_catalog::Modality;
 
 fn test_catalog() -> ModelCatalog {
     let home = crate::registry_sync::resolve_home_dir_for_tests();
@@ -13,12 +15,7 @@ fn names_to_info(names: &[&str]) -> Vec<DiscoveredModelInfo> {
         .iter()
         .map(|n| DiscoveredModelInfo {
             name: n.to_string(),
-            parameter_size: None,
-            quantization_level: None,
-            family: None,
-            families: None,
-            size: None,
-            capabilities: vec![],
+            ..Default::default()
         })
         .collect()
 }
@@ -1173,40 +1170,24 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
             name: "llava:latest".to_string(),
             families: Some(vec!["llama".to_string(), "clip".to_string()]),
             family: Some("llama".to_string()),
-            parameter_size: None,
-            quantization_level: None,
-            size: None,
-            capabilities: vec![],
+            ..Default::default()
         },
         // Embedding model: name contains "embed"
         DiscoveredModelInfo {
             name: "nomic-embed-text:latest".to_string(),
-            families: None,
-            family: None,
-            parameter_size: None,
-            quantization_level: None,
-            size: None,
-            capabilities: vec![],
+            ..Default::default()
         },
         // Thinking model: name contains "deepseek-r1"
         DiscoveredModelInfo {
             name: "deepseek-r1:8b".to_string(),
-            families: None,
-            family: None,
-            parameter_size: None,
-            quantization_level: None,
-            size: None,
-            capabilities: vec![],
+            ..Default::default()
         },
         // Plain chat model
         DiscoveredModelInfo {
             name: "llama3.2:latest".to_string(),
             families: Some(vec!["llama".to_string()]),
             family: Some("llama".to_string()),
-            parameter_size: None,
-            quantization_level: None,
-            size: None,
-            capabilities: vec![],
+            ..Default::default()
         },
     ];
     catalog.merge_discovered_models("ollama", &models);
@@ -1244,15 +1225,13 @@ fn test_merge_honours_explicit_thinking_and_vision_capabilities() {
         name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
         families: Some(vec!["gemma".to_string()]),
         family: Some("gemma".to_string()),
-        parameter_size: None,
-        quantization_level: None,
-        size: None,
         capabilities: vec![
             "completion".to_string(),
             "vision".to_string(),
             "thinking".to_string(),
             "tools".to_string(),
         ],
+        ..Default::default()
     }];
     catalog.merge_discovered_models("ollama", &models);
 
@@ -1280,12 +1259,7 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
         "ollama",
         &[DiscoveredModelInfo {
             name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
-            families: None,
-            family: None,
-            parameter_size: None,
-            quantization_level: None,
-            size: None,
-            capabilities: vec![],
+            ..Default::default()
         }],
     );
     let pre = catalog
@@ -1299,16 +1273,12 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
         "ollama",
         &[DiscoveredModelInfo {
             name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
-            families: None,
-            family: None,
-            parameter_size: None,
-            quantization_level: None,
-            size: None,
             capabilities: vec![
                 "vision".to_string(),
                 "thinking".to_string(),
                 "tools".to_string(),
             ],
+            ..Default::default()
         }],
     );
     let post = catalog
@@ -1333,12 +1303,8 @@ fn test_merge_never_downgrades_capabilities() {
         "ollama",
         &[DiscoveredModelInfo {
             name: "vlm-model:latest".to_string(),
-            families: None,
-            family: None,
-            parameter_size: None,
-            quantization_level: None,
-            size: None,
             capabilities: vec!["vision".to_string(), "thinking".to_string()],
+            ..Default::default()
         }],
     );
     // Re-probe with empty capabilities — must NOT clear the previously
@@ -1347,12 +1313,7 @@ fn test_merge_never_downgrades_capabilities() {
         "ollama",
         &[DiscoveredModelInfo {
             name: "vlm-model:latest".to_string(),
-            families: None,
-            family: None,
-            parameter_size: None,
-            quantization_level: None,
-            size: None,
-            capabilities: vec![],
+            ..Default::default()
         }],
     );
     let entry = catalog.find_model("vlm-model:latest").unwrap();
@@ -1361,6 +1322,209 @@ fn test_merge_never_downgrades_capabilities() {
 }
 
 // ── Capacity provenance (#7780) ───────────────────────────────────────────
+
+/// A model discovered from an endpoint that reports no capacity is admitted
+/// with the placeholder pair *and says so*.
+///
+/// This is the case the issue was filed about: `/v1/models` carries no capacity
+/// field, so the `131_072` is a guess. It has to be *some* number for
+/// compaction and budget math, but `Inferred` is what stops it being read as a
+/// measurement — `known_context_window` returns `None`, so nothing clamps to it
+/// or warns against it.
+#[test]
+fn discovered_model_without_reported_capacity_is_marked_inferred() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models("ollama", &names_to_info(&["gateway-model:latest"]));
+
+    let entry = catalog.find_model("gateway-model:latest").expect("merged");
+    assert_eq!(
+        entry.limits_source,
+        LimitProvenance::Inferred,
+        "an endpoint that reported nothing cannot have vouched for the capacity"
+    );
+    assert!(!entry.limits_known());
+    // The placeholder is still present — the daemon needs a number.
+    assert_eq!(entry.context_window, 131_072);
+    assert_eq!(entry.max_output_tokens, 16_384);
+    // ...but it is structurally unavailable as a ceiling.
+    assert!(
+        entry.known_context_window().is_none(),
+        "an invented window must never be handed out as a limit"
+    );
+    assert!(entry.known_max_output_tokens().is_none());
+}
+
+/// A model discovered from an endpoint that *does* report its capacity keeps
+/// the reported numbers and is attributed to the gateway.
+#[test]
+fn discovered_model_with_reported_capacity_is_marked_gateway() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "ollama",
+        &[DiscoveredModelInfo {
+            name: "sourced-model:latest".to_string(),
+            context_window: Some(262_144),
+            max_output_tokens: Some(32_768),
+            ..Default::default()
+        }],
+    );
+
+    let entry = catalog.find_model("sourced-model:latest").expect("merged");
+    assert_eq!(entry.limits_source, LimitProvenance::Gateway);
+    assert!(entry.limits_known());
+    assert_eq!(
+        entry.context_window, 262_144,
+        "the reported value must replace the placeholder, not sit beside it"
+    );
+    assert_eq!(entry.max_output_tokens, 32_768);
+
+    // The warning names the gateway rather than crediting the registry for a
+    // number the registry never supplied.
+    let limit = entry.known_context_window().expect("sourced limit");
+    assert_eq!(limit.tokens, 262_144);
+    assert_eq!(limit.source, LimitSource::Gateway);
+}
+
+/// A half-answer is not an answer. Whichever real number arrived is kept —
+/// it beats the literal — but the pair is only attributed to the gateway when
+/// the endpoint reported both, matching the rule `add_custom_model` applies to
+/// an operator filling the same two fields in by hand.
+#[test]
+fn discovered_model_with_partial_capacity_keeps_the_value_but_not_the_attribution() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "ollama",
+        &[DiscoveredModelInfo {
+            name: "half-model:latest".to_string(),
+            context_window: Some(200_000),
+            max_output_tokens: None,
+            ..Default::default()
+        }],
+    );
+
+    let entry = catalog.find_model("half-model:latest").expect("merged");
+    assert_eq!(
+        entry.context_window, 200_000,
+        "a reported number is worth keeping even when its partner is missing"
+    );
+    assert_eq!(
+        entry.max_output_tokens, 16_384,
+        "the partner is the literal"
+    );
+    assert_eq!(
+        entry.limits_source,
+        LimitProvenance::Inferred,
+        "half the pair invented means the pair cannot be called measured"
+    );
+}
+
+/// Capacities follow the same never-downgrade rule the capability flags do: a
+/// later probe that reports real numbers replaces the placeholder, and one that
+/// reports nothing leaves a sourced value alone.
+#[test]
+fn rediscovery_upgrades_an_inferred_capacity_and_never_reverts_a_sourced_one() {
+    let mut catalog = test_catalog();
+
+    // First probe: gateway was cold, reported nothing.
+    catalog.merge_discovered_models("ollama", &names_to_info(&["late-model:latest"]));
+    assert_eq!(
+        catalog
+            .find_model("late-model:latest")
+            .unwrap()
+            .limits_source,
+        LimitProvenance::Inferred
+    );
+
+    // Second probe: gateway now knows.
+    catalog.merge_discovered_models(
+        "ollama",
+        &[DiscoveredModelInfo {
+            name: "late-model:latest".to_string(),
+            context_window: Some(1_048_576),
+            max_output_tokens: Some(65_536),
+            ..Default::default()
+        }],
+    );
+    let upgraded = catalog.find_model("late-model:latest").unwrap();
+    assert_eq!(upgraded.limits_source, LimitProvenance::Gateway);
+    assert_eq!(upgraded.context_window, 1_048_576);
+    assert_eq!(upgraded.max_output_tokens, 65_536);
+
+    // Third probe: transient blip, reports nothing again. The sourced value
+    // must survive — reverting it to a guess would be a silent regression.
+    catalog.merge_discovered_models("ollama", &names_to_info(&["late-model:latest"]));
+    let after_blip = catalog.find_model("late-model:latest").unwrap();
+    assert_eq!(
+        after_blip.limits_source,
+        LimitProvenance::Gateway,
+        "a probe that reports nothing must not downgrade a sourced capacity"
+    );
+    assert_eq!(after_blip.context_window, 1_048_576);
+}
+
+/// The operator's number outranks both the registry and the gateway, and
+/// survives the two things that overwrite a catalog: a discovery probe and a
+/// registry snapshot replacement.
+#[test]
+fn operator_capacity_outranks_discovery_and_survives_a_registry_sync() {
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(ModelCatalogEntry {
+        id: "corrected-model".to_string(),
+        display_name: "Corrected model".to_string(),
+        provider: "ollama".to_string(),
+        tier: ModelTier::Custom,
+        modality: Modality::Text,
+        context_window: 40_960,
+        max_output_tokens: 4_096,
+        limits_source: LimitProvenance::Operator,
+        ..Default::default()
+    }));
+
+    // A probe reporting something entirely different must not touch it.
+    catalog.merge_discovered_models(
+        "ollama",
+        &[DiscoveredModelInfo {
+            name: "corrected-model".to_string(),
+            context_window: Some(131_072),
+            max_output_tokens: Some(16_384),
+            ..Default::default()
+        }],
+    );
+    let after_probe = catalog.find_model("corrected-model").expect("still there");
+    assert_eq!(after_probe.limits_source, LimitProvenance::Operator);
+    assert_eq!(after_probe.context_window, 40_960);
+    assert_eq!(after_probe.max_output_tokens, 4_096);
+
+    // Neither must a registry sync that ships its own entry for the same id.
+    catalog.reconcile_live_provider_models(
+        "ollama",
+        vec!["corrected-model".to_string()],
+        vec![ModelCatalogEntry {
+            id: "corrected-model".to_string(),
+            display_name: "Registry copy".to_string(),
+            provider: "ollama".to_string(),
+            tier: ModelTier::Balanced,
+            modality: Modality::Text,
+            context_window: 8_192,
+            max_output_tokens: 1_024,
+            limits_source: LimitProvenance::Registry,
+            ..Default::default()
+        }],
+    );
+    let after_sync = catalog
+        .find_model("corrected-model")
+        .expect("survives the sync");
+    assert_eq!(
+        after_sync.limits_source,
+        LimitProvenance::Operator,
+        "a registry sync must not relabel a capacity the operator set"
+    );
+    assert_eq!(after_sync.context_window, 40_960);
+    assert_eq!(after_sync.max_output_tokens, 4_096);
+
+    let limit = after_sync.known_context_window().expect("operator limit");
+    assert_eq!(limit.source, LimitSource::Operator);
+}
 
 /// A catalog file written before `limits_source` existed still loads, and every
 /// entry in it keeps its capacities and stays usable as a ceiling.

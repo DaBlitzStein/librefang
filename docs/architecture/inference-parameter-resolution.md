@@ -59,7 +59,7 @@ Being wrong loudly beats being wrong quietly.
 
 A limit only warns when something actually asserted it.
 
-`ModelCatalogEntry::limits_source` is the discriminator, and it records *which* of four origins produced the pair rather than only whether one existed.
+`ModelCatalogEntry::limits_source` is the discriminator, and it records *which* of four origins produced the pair rather than only whether one existed (#7780).
 It follows the same absence convention as the older `pricing_known`: a file written before the field existed reads back as `Registry`, because those entries are registry-shipped or operator-authored and carry real numbers.
 Reading absence as `Inferred` instead would silently strip working limits from every existing install.
 `ModelCatalogEntry::limits_known()` is the derived boolean — true for everything except `Inferred` — and it is what surfaces and the save-time check gate on.
@@ -69,16 +69,26 @@ Reading absence as `Inferred` instead would silently strip working limits from e
 | `agent.toml: [model] context_window` / `max_output_tokens`, custom model added with both capacities typed | `operator` | yes |
 | Shipped registry / curated catalog entry, or a figure borrowed from the bundled OpenRouter snapshot | `registry` | yes |
 | Gateway that reported a capacity (LiteLLM `/model/info`, the gateway's own listing or pricing feed) | `gateway` | yes |
-| `merge_discovered_models` placeholders (`131_072` / `16_384`) | `inferred` | **no** |
+| `merge_discovered_models` placeholders (`131_072` / `16_384`) when the endpoint reported nothing | `inferred` | **no** |
 | `model_metadata.rs` L5 tail — substring table, `DEFAULT_GENERIC_CONTEXT`, `DEFAULT_ANTHROPIC_CONTEXT` | `inferred` | **no** |
 | `add_custom_model` fallbacks (`128_000` / `8_192`) when the operator typed neither | `inferred` | **no** |
 
-The three asserted origins map onto `LimitSource`, which is what a `KnownLimit` carries.
+The three asserted origins map onto `LimitSource`, which is what a `KnownLimit` carries, so a warning names the source that actually supplied the figure instead of attributing everything to the registry.
 `LimitProvenance::asserted()` returns `None` for `Inferred`, and `KnownLimit` cannot be built without a `LimitSource` — a placeholder is therefore *structurally* unable to become a limit anything warns against, rather than relying on every call site to remember to check.
 
-A discovered model has no capacity to source: `DiscoveredModelInfo` has no such field, and the OpenAI-compatible `/v1/models` shape carries none either (#7780).
-The daemon still needs a number for compaction and budget math, so a placeholder goes in — but nothing may present it to an operator as measured, and nothing may warn against it.
+Discovery reads the capacity when the endpoint offers one.
+The OpenAI-compatible `/v1/models` shape carries none, so after a successful listing the probe also asks `{base_url}/model/info`, which LiteLLM serves and most other servers 404; any failure is silently treated as "reported nothing".
+The reported figures land on `DiscoveredModelInfo::context_window` / `max_output_tokens` and are used instead of the literals.
+That extra request is deliberately excluded from the probe's `latency_ms`, which measures the listing round-trip alone.
+
+Attribution to `gateway` requires **both** figures, mirroring the rule `add_custom_model` applies to an operator filling the same two fields in by hand.
+A single reported number is still kept — it beats the literal — but a half-answer does not earn the label.
+Erring this way costs at most one missing advisory; erring the other way tells an operator they crossed a ceiling the daemon made up, and only that failure is silent.
+
+The daemon still needs a number for compaction and budget math, so a placeholder goes in when nothing reported one — but nothing may present it to an operator as measured, and nothing may warn against it.
 Warning someone for exceeding a ceiling that was invented from their model's *name* is noise, and noise is what trains people to stop reading warnings.
+
+Re-discovery is monotonic, like the capability flags: a probe that starts reporting real figures replaces an `inferred` placeholder, a later probe that reports nothing leaves a sourced value alone, and an `operator` or `registry` entry is never overwritten by discovery at all.
 
 The same rule governs the editors' step ladders: a known cap trims the ladder so no unusable rung is offered, and an unknown cap trims nothing.
 

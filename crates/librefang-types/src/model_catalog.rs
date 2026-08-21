@@ -366,32 +366,21 @@ impl ModelCatalogEntry {
     ///
     /// The [`LimitProvenance`] gate is what keeps a `131_072` that nobody
     /// measured from being reported to an operator as a ceiling they crossed
-    /// (#7780).
-    ///
-    /// The reported [`crate::inference_params::LimitSource`] is still
-    /// hardcoded, so a warning credits the registry for every trustworthy
-    /// capacity including an operator's own. Wiring it to
-    /// [`LimitProvenance::asserted`] is a separate change, landing with the
-    /// discovery path that makes a third source reachable at all.
+    /// (#7780). The warning also names the source, so it reports the gateway
+    /// that supplied a capacity rather than crediting the registry for it.
     pub fn known_context_window(&self) -> Option<crate::inference_params::KnownLimit> {
-        if !self.limits_known() {
-            return None;
-        }
         crate::inference_params::KnownLimit::new(
             self.context_window,
-            crate::inference_params::LimitSource::Registry,
+            self.limits_source.asserted()?,
         )
     }
 
     /// This entry's maximum output tokens as a warnable limit.
     /// See [`Self::known_context_window`].
     pub fn known_max_output_tokens(&self) -> Option<crate::inference_params::KnownLimit> {
-        if !self.limits_known() {
-            return None;
-        }
         crate::inference_params::KnownLimit::new(
             self.max_output_tokens,
-            crate::inference_params::LimitSource::Registry,
+            self.limits_source.asserted()?,
         )
     }
 

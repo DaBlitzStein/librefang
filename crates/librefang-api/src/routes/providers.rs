@@ -836,14 +836,12 @@ fn attach_probe_result(
                     .discovered_models
                     .iter()
                     .map(
+                        // Names only: this arm runs when the probe surfaced no
+                        // enriched info, so every optional field — capacities
+                        // included — is legitimately absent (#7780).
                         |name| librefang_kernel::provider_health::DiscoveredModelInfo {
                             name: name.clone(),
-                            parameter_size: None,
-                            quantization_level: None,
-                            family: None,
-                            families: None,
-                            size: None,
-                            capabilities: vec![],
+                            ..Default::default()
                         },
                     )
                     .collect()
@@ -2614,14 +2612,10 @@ pub async fn set_provider_url(
                 probe
                     .discovered_models
                     .iter()
+                    // Names only — see the equivalent arm in `probe_entry`.
                     .map(|n| librefang_kernel::provider_health::DiscoveredModelInfo {
                         name: n.clone(),
-                        parameter_size: None,
-                        quantization_level: None,
-                        family: None,
-                        families: None,
-                        size: None,
-                        capabilities: vec![],
+                        ..Default::default()
                     })
                     .collect()
             } else {

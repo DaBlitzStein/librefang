@@ -12,7 +12,10 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// Enriched metadata for a discovered model (Ollama-specific fields are optional).
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// `Default` is derived so call sites that only know a model's name can build
+/// one with `..Default::default()` and stay correct as fields are added.
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct DiscoveredModelInfo {
     /// Model name/ID (e.g., "llama3.2:latest").
     pub name: String,
@@ -36,6 +39,23 @@ pub struct DiscoveredModelInfo {
     /// Newer Ollama versions (≥0.7) include this in /api/tags; older versions omit it.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub capabilities: Vec<String>,
+    /// Context window in tokens, as reported by the discovery endpoint.
+    ///
+    /// `None` is the ordinary case and means the endpoint said nothing: the
+    /// OpenAI-compatible `/v1/models` shape has no capacity field at all, and
+    /// Ollama's `/api/tags` does not carry one either. It is populated when a
+    /// richer surface on the same server does report it — LiteLLM's
+    /// `/model/info` is the case this was built for (#7780).
+    ///
+    /// `None` is not "unlimited" and not a licence to substitute a default at
+    /// the read site: [`crate::model_catalog::ModelCatalog::merge_discovered_models`]
+    /// records the difference as provenance rather than erasing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Maximum output tokens, as reported by the discovery endpoint.
+    /// Same rules as [`Self::context_window`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 
 /// Result of probing a provider endpoint.
@@ -352,9 +372,20 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
                 .await
                 {
                     EndpointOutcome::Ok { models, model_info } => {
+                        // Latency is the listing round-trip and nothing else —
+                        // see the note in the non-ollama branch below.
+                        let latency_ms = start.elapsed().as_millis() as u64;
+                        let model_info = enrich_with_reported_capacities(
+                            base_url,
+                            api_key,
+                            is_loopback,
+                            &models,
+                            model_info,
+                        )
+                        .await;
                         return ProbeResult {
                             reachable: true,
-                            latency_ms: start.elapsed().as_millis() as u64,
+                            latency_ms,
                             discovered_models: models,
                             discovered_model_info: model_info,
                             error: None,
@@ -401,14 +432,33 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
     };
     let probe_url = format!("{}{}", base_url.trim_end_matches('/'), probe_path);
     match try_probe_endpoint(&probe_url, shape, api_key, is_loopback).await {
-        EndpointOutcome::Ok { models, model_info } => ProbeResult {
-            reachable: true,
-            latency_ms: start.elapsed().as_millis() as u64,
-            discovered_models: models,
-            discovered_model_info: model_info,
-            error: None,
-            ..Default::default()
-        },
+        EndpointOutcome::Ok { models, model_info } => {
+            // Stop the clock on the listing before the optional capacity
+            // lookup. `latency_ms` is what the dashboard shows as the
+            // provider's responsiveness, and charging it for a second request
+            // that inference never makes would misreport the provider — the
+            // same class of error #7788 fixed on the capacity column.
+            let latency_ms = start.elapsed().as_millis() as u64;
+            // Only the OpenAI-compatible shape gets the follow-up. Anthropic's
+            // `/v1/models` has no `/model/info` sibling, and its 401/403/404
+            // arm returns an empty list on purpose — spending a round-trip
+            // there would add latency to a provider that already told us it
+            // will not enumerate.
+            let model_info = if matches!(shape, EndpointShape::OpenAiModels) {
+                enrich_with_reported_capacities(base_url, api_key, is_loopback, &models, model_info)
+                    .await
+            } else {
+                model_info
+            };
+            ProbeResult {
+                reachable: true,
+                latency_ms,
+                discovered_models: models,
+                discovered_model_info: model_info,
+                error: None,
+                ..Default::default()
+            }
+        }
         EndpointOutcome::Failed { error } => ProbeResult {
             latency_ms: start.elapsed().as_millis() as u64,
             error: Some(error),
@@ -594,6 +644,11 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
                 families,
                 size: m.get("size").and_then(|v| v.as_u64()),
                 capabilities,
+                // `/api/tags` carries no capacity. Ollama exposes one via the
+                // per-model `/api/show`, which `model_metadata`'s L4 probe
+                // already covers at resolution time; paying an extra
+                // round-trip per model here would duplicate it.
+                ..Default::default()
             })
         })
         .collect();
@@ -602,6 +657,177 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
         models: names,
         model_info: info,
     }
+}
+
+/// Capacities a discovery endpoint reported for a single model.
+///
+/// Every field is `Option` and absence is preserved all the way into the
+/// catalog entry's [`librefang_types::model_catalog::LimitProvenance`]. Nothing
+/// here substitutes a default; that is the entire point (#7780).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReportedCapacity {
+    /// Context window in tokens.
+    context_window: Option<u64>,
+    /// Maximum output tokens.
+    max_output_tokens: Option<u64>,
+}
+
+impl ReportedCapacity {
+    /// Whether the endpoint reported anything at all.
+    fn is_empty(&self) -> bool {
+        self.context_window.is_none() && self.max_output_tokens.is_none()
+    }
+}
+
+/// Path appended to an OpenAI-compatible base URL to reach LiteLLM's richer
+/// model listing.
+///
+/// LiteLLM mounts the handler at both `/model/info` and `/v1/model/info`, so
+/// appending to the configured base works whether the operator wrote
+/// `http://host:4000` or `http://host:4000/v1`. Servers that do not implement
+/// it answer 404, which [`fetch_reported_capacities`] treats as "reported
+/// nothing" rather than a probe failure.
+const LITELLM_MODEL_INFO_PATH: &str = "/model/info";
+
+/// Parse a LiteLLM `GET /model/info` body into per-model reported capacities.
+///
+/// The envelope is `{"data": [{"model_name": "...", "model_info": {...}}]}`.
+/// Inside `model_info` the relevant keys are `max_input_tokens`,
+/// `max_output_tokens` and `max_tokens`, all of which are frequently `null`
+/// — that is the observed shape on a gateway fronting models absent from
+/// LiteLLM's cost map, and it is why provenance rather than discovery is the
+/// load-bearing half of #7780.
+///
+/// Mapping rules, deliberately asymmetric:
+///
+/// * `context_window` takes `max_input_tokens`, falling back to `max_tokens`.
+///   LiteLLM's cost map uses the latter for a model's total window when it
+///   carries no separate input figure.
+/// * `max_output_tokens` takes only `max_output_tokens`. Reading a total-token
+///   figure as an output ceiling would invent a number under a reported label,
+///   which is the defect this whole change exists to remove.
+///
+/// Entries the endpoint said nothing useful about are omitted, so a returned
+/// key always carries at least one real value. `as_u64` yields `None` for JSON
+/// `null`, so a null field is indistinguishable from an absent one — correct
+/// here, since both mean "the gateway does not know".
+///
+/// A `BTreeMap` keeps iteration order stable across probes (#3298); discovered
+/// model lists reach prompt-visible surfaces downstream.
+fn parse_litellm_model_info(
+    body: &serde_json::Value,
+) -> std::collections::BTreeMap<String, ReportedCapacity> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(arr) = body.get("data").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for item in arr {
+        let Some(name) = item.get("model_name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let info = item.get("model_info");
+        let field = |key: &str| info.and_then(|i| i.get(key)).and_then(|v| v.as_u64());
+        let cap = ReportedCapacity {
+            context_window: field("max_input_tokens").or_else(|| field("max_tokens")),
+            max_output_tokens: field("max_output_tokens"),
+        };
+        if cap.is_empty() {
+            continue;
+        }
+        // Last write wins: LiteLLM lists one row per *deployment*, so several
+        // rows can share a public `model_name` when a group load-balances.
+        // Any of them describes the same model group's capacity.
+        out.insert(name.to_string(), cap);
+    }
+    out
+}
+
+/// Ask an OpenAI-compatible endpoint for the capacities it knows, if it has a
+/// surface that reports them.
+///
+/// Best-effort by construction: every failure mode — no such route, wrong
+/// dialect, transport error, unparseable body, all-null fields — returns an
+/// empty map, and the caller carries on with whatever the plain listing gave
+/// it. A gateway that cannot answer is the normal case, not an error worth
+/// failing a health probe over.
+async fn fetch_reported_capacities(
+    base_url: &str,
+    api_key: Option<&str>,
+    is_loopback: bool,
+) -> std::collections::BTreeMap<String, ReportedCapacity> {
+    let url = format!(
+        "{}{}",
+        base_url.trim_end_matches('/'),
+        LITELLM_MODEL_INFO_PATH
+    );
+    let client = probe_client();
+    let mut req = client.get(&url);
+    if is_loopback {
+        req = req.timeout(Duration::from_secs(PROBE_TIMEOUT_SECS));
+    }
+    if let Some(key) = api_key {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            req = req.header("Authorization", format!("Bearer {trimmed}"));
+        }
+    }
+
+    let empty = std::collections::BTreeMap::new();
+    let Ok(resp) = req.send().await else {
+        return empty;
+    };
+    if !resp.status().is_success() {
+        return empty;
+    }
+    let Ok(body) = resp.json::<serde_json::Value>().await else {
+        return empty;
+    };
+    parse_litellm_model_info(&body)
+}
+
+/// Attach reported capacities to a probe's discovered models.
+///
+/// Runs only for OpenAI-compatible listings, which are the ones that carry no
+/// capacity of their own. When the endpoint reports nothing the input is
+/// returned untouched — including staying empty, so the existing
+/// "synthesise `DiscoveredModelInfo` from bare names" fallback in the kernel
+/// and API probe paths keeps behaving exactly as before for every server that
+/// is not a LiteLLM-style gateway.
+async fn enrich_with_reported_capacities(
+    base_url: &str,
+    api_key: Option<&str>,
+    is_loopback: bool,
+    models: &[String],
+    model_info: Vec<DiscoveredModelInfo>,
+) -> Vec<DiscoveredModelInfo> {
+    let reported = fetch_reported_capacities(base_url, api_key, is_loopback).await;
+    if reported.is_empty() {
+        return model_info;
+    }
+
+    // `/v1/models` parses to an empty info list, so materialise one entry per
+    // discovered name before stamping. When the caller already has enriched
+    // entries (the Ollama-native shape) they are preserved and only the
+    // capacities are filled in.
+    let mut model_info = if model_info.is_empty() {
+        models
+            .iter()
+            .map(|name| DiscoveredModelInfo {
+                name: name.clone(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        model_info
+    };
+
+    for entry in &mut model_info {
+        if let Some(cap) = reported.get(&entry.name) {
+            entry.context_window = cap.context_window;
+            entry.max_output_tokens = cap.max_output_tokens;
+        }
+    }
+    model_info
 }
 
 /// Parse an OpenAI-compatible `/v1/models` response into discovered model IDs.
@@ -904,9 +1130,9 @@ mod tests {
             parameter_size: Some("3.2B".to_string()),
             quantization_level: Some("Q4_K_M".to_string()),
             family: Some("llama".to_string()),
-            families: None,
             size: Some(1_928_000_000),
             capabilities: vec!["completion".to_string()],
+            ..Default::default()
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["name"], "llama3.2:latest");
@@ -920,12 +1146,7 @@ mod tests {
     fn test_discovered_model_info_skips_none_fields() {
         let info = DiscoveredModelInfo {
             name: "gpt-4".to_string(),
-            parameter_size: None,
-            quantization_level: None,
-            family: None,
-            families: None,
-            size: None,
-            capabilities: vec![],
+            ..Default::default()
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["name"], "gpt-4");
@@ -1041,6 +1262,108 @@ mod tests {
         let body = serde_json::json!({"models": []}); // Ollama shape, no "data"
         let err = fail_or_panic(parse_openai_models(&body));
         assert!(err.contains("data"));
+    }
+
+    /// The shape LiteLLM actually serves: a `data` array of per-deployment
+    /// rows, each with a public `model_name` and a `model_info` block.
+    #[test]
+    fn parse_litellm_model_info_reads_the_reported_capacities() {
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "model_name": "sensor-model-generic",
+                    "litellm_params": {"model": "openai/whatever"},
+                    "model_info": {
+                        "max_input_tokens": 200_000,
+                        "max_output_tokens": 64_000,
+                        "max_tokens": 200_000
+                    }
+                }
+            ]
+        });
+        let caps = parse_litellm_model_info(&body);
+        let entry = caps.get("sensor-model-generic").expect("model present");
+        assert_eq!(entry.context_window, Some(200_000));
+        assert_eq!(entry.max_output_tokens, Some(64_000));
+    }
+
+    /// The measured behaviour of the gateway in #7780: the endpoint exists,
+    /// answers, and knows nothing. Reporting `null` must be indistinguishable
+    /// from reporting nothing, so the model is omitted entirely and the merge
+    /// downstream falls through to the placeholder-plus-`Inferred` path.
+    #[test]
+    fn parse_litellm_model_info_omits_models_whose_capacities_are_null() {
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "model_name": "pakllm",
+                    "model_info": {
+                        "max_input_tokens": null,
+                        "max_output_tokens": null,
+                        "max_tokens": null
+                    }
+                },
+                {"model_name": "rodela-testing-model", "model_info": {}},
+                {"model_name": "embedding-high"}
+            ]
+        });
+        assert!(
+            parse_litellm_model_info(&body).is_empty(),
+            "a gateway that knows nothing must not look like one that reported zeros"
+        );
+    }
+
+    /// `max_tokens` is a total-token figure, so it backs the context window and
+    /// never the output ceiling. Reading it as an output limit would invent a
+    /// number under a reported label, which is the defect being removed.
+    #[test]
+    fn parse_litellm_model_info_falls_back_to_max_tokens_for_context_only() {
+        let body = serde_json::json!({
+            "data": [{"model_name": "m", "model_info": {"max_tokens": 32_768}}]
+        });
+        let caps = parse_litellm_model_info(&body);
+        let entry = caps.get("m").expect("model present");
+        assert_eq!(entry.context_window, Some(32_768));
+        assert_eq!(
+            entry.max_output_tokens, None,
+            "a total-token figure says nothing about how long a reply may be"
+        );
+    }
+
+    /// Anything that is not the expected envelope yields an empty map rather
+    /// than an error — a server without the route is the normal case.
+    #[test]
+    fn parse_litellm_model_info_tolerates_a_foreign_shape() {
+        assert!(parse_litellm_model_info(&serde_json::json!({"data": "nope"})).is_empty());
+        assert!(parse_litellm_model_info(&serde_json::json!({"object": "list"})).is_empty());
+        assert!(parse_litellm_model_info(&serde_json::json!([])).is_empty());
+        assert!(
+            parse_litellm_model_info(
+                &serde_json::json!({"data": [{"model_info": {"max_tokens": 8}}]})
+            )
+            .is_empty(),
+            "a row with no model_name cannot be attributed to a model"
+        );
+    }
+
+    /// A probe against a server with no `/model/info` leaves the discovered
+    /// list exactly as the plain listing produced it, so every non-LiteLLM
+    /// endpoint keeps its existing behaviour.
+    #[tokio::test]
+    async fn enrichment_is_a_no_op_when_the_endpoint_has_no_capacity_surface() {
+        let models = vec!["a".to_string(), "b".to_string()];
+        let out = enrich_with_reported_capacities(
+            "http://127.0.0.1:19993/v1",
+            None,
+            true,
+            &models,
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            out.is_empty(),
+            "an unreachable capacity surface must not fabricate entries"
+        );
     }
 
     #[tokio::test]

@@ -74,6 +74,55 @@ fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, b
     (supports_vision, true, supports_thinking)
 }
 
+/// Context window written into a discovered entry when the endpoint reported none.
+///
+/// Every text model needs a number for compaction and budget math to run at
+/// all, so discovery cannot simply leave the field empty. This is that number,
+/// and it is a guess: it is only ever paired with
+/// [`LimitProvenance::Inferred`], which stops it short of anything that treats
+/// a capacity as a ceiling (#7780).
+const INFERRED_DISCOVERED_CONTEXT_WINDOW: u64 = 131_072;
+
+/// Maximum output tokens written into a discovered entry when the endpoint
+/// reported none. See [`INFERRED_DISCOVERED_CONTEXT_WINDOW`].
+const INFERRED_DISCOVERED_MAX_OUTPUT_TOKENS: u64 = 16_384;
+
+/// Decide a discovered model's capacities and where they came from.
+///
+/// Returns `(context_window, max_output_tokens, limits_source)`.
+///
+/// A reported value is always preferred over the placeholder, even when it
+/// arrives alone — a real number is worth keeping regardless of what label the
+/// pair ends up with.
+///
+/// The label itself is stricter: the entry counts as
+/// [`LimitProvenance::Gateway`] only when the endpoint reported **both**
+/// capacities. This mirrors the rule `add_custom_model` already applies to an
+/// operator filling the same two fields in by hand, and it errs the same way
+/// on purpose. Marking a real limit unknown costs one missing advisory;
+/// marking an invented one known tells an operator they crossed a ceiling that
+/// this code made up. Only the second failure is silent, so the conservative
+/// side is the one where a half-answer lands.
+///
+/// In practice the mixed case is rare: a LiteLLM deployment that knows a model
+/// generally knows both figures, and one that does not returns `null` for all
+/// of them — which is what the gateway in #7780 was measured doing.
+fn discovered_capacity(
+    reported_context: Option<u64>,
+    reported_max_output: Option<u64>,
+) -> (u64, u64, LimitProvenance) {
+    let both_reported = reported_context.is_some() && reported_max_output.is_some();
+    (
+        reported_context.unwrap_or(INFERRED_DISCOVERED_CONTEXT_WINDOW),
+        reported_max_output.unwrap_or(INFERRED_DISCOVERED_MAX_OUTPUT_TOKENS),
+        if both_reported {
+            LimitProvenance::Gateway
+        } else {
+            LimitProvenance::Inferred
+        },
+    )
+}
+
 /// Resolve capabilities from the explicit Ollama ≥0.7 `capabilities` array, falling back to name heuristics when empty.
 fn resolve_discovered_capabilities(
     name: &str,
@@ -1388,6 +1437,8 @@ impl ModelCatalog {
                     info.families.as_deref(),
                     &info.capabilities,
                 );
+            let (context_window, max_output_tokens, limits_source) =
+                discovered_capacity(info.context_window, info.max_output_tokens);
             // Upgrade the previously-discovered Local entry in place when the
             // current probe reports stronger capabilities. We never downgrade:
             // a transient probe that drops the `capabilities` array (e.g. an
@@ -1407,6 +1458,24 @@ impl ModelCatalog {
                         entry.supports_streaming = true;
                     }
                 }
+                // Capacities follow the same never-downgrade rule. A gateway
+                // that starts reporting figures — because it was restarted
+                // with a fuller config, or because the first probe caught it
+                // cold — replaces the placeholder the entry was admitted
+                // with. A later probe that reports nothing leaves the sourced
+                // value alone rather than reverting it to a guess, and an
+                // entry an operator corrected by hand is never overwritten by
+                // discovery at all (#7780).
+                if limits_source == LimitProvenance::Gateway
+                    && matches!(
+                        entry.limits_source,
+                        LimitProvenance::Inferred | LimitProvenance::Gateway
+                    )
+                {
+                    entry.context_window = context_window;
+                    entry.max_output_tokens = max_output_tokens;
+                    entry.limits_source = limits_source;
+                }
                 continue;
             }
             let display = format!("{} ({})", info.name, provider);
@@ -1415,16 +1484,9 @@ impl ModelCatalog {
                 display_name: display,
                 provider: provider.to_string(),
                 tier: ModelTier::Local,
-                // Placeholders, and flagged as such. `DiscoveredModelInfo`
-                // has no capacity field and the OpenAI-compatible
-                // `/v1/models` shape carries none either, so there is no
-                // value to source here — but compaction and budget math
-                // still need a number. `LimitProvenance::Inferred` is what
-                // keeps that number from being presented to an operator as a
-                // measured ceiling, or warned against as one (#7780).
-                context_window: 131_072,
-                max_output_tokens: 16_384,
-                limits_source: LimitProvenance::Inferred,
+                context_window,
+                max_output_tokens,
+                limits_source,
                 input_cost_per_m: 0.0,
                 output_cost_per_m: 0.0,
                 supports_tools,

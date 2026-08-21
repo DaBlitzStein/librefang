@@ -9,6 +9,19 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- A gateway is now asked what its models' context windows are, instead of being assumed.
+  A model discovered from an OpenAI-compatible endpoint was admitted to the catalog with a hardcoded 131072-token window, because that listing shape carries no capacity field and nothing upstream could supply a real value.
+  The guess failed in both directions: too large and the daemon packs a prompt the model refuses after the tokens are paid for, too small and compaction fires early or a turn is refused as an overflow that never happened.
+  After a successful listing the probe now also asks the gateway's richer model-info surface — LiteLLM's is the case this was built for — and uses whatever it reports.
+  A server without that surface answers 404, which is treated as "reported nothing" rather than a failed health check, and the extra request is excluded from the reported provider latency so it cannot inflate it.
+  A model the endpoint describes is attributed to the gateway; one it stays silent about keeps the placeholder and says so.
+  Attribution needs both figures, matching the rule already applied to an operator filling the same two fields in by hand — a lone reported number is still kept, because it beats the literal, but half an answer does not earn the label.
+  Re-discovery is monotonic: a gateway that starts reporting real figures replaces the placeholder, a later probe that reports nothing leaves a sourced value alone, and an entry the operator corrected by hand is never touched by discovery (#7780) (@DaBlitzStein)
+
+- An over-limit warning now names the source that actually supplied the limit.
+  The catalog reported every trustworthy capacity as coming from the registry, so an operator who set a custom model's window by hand was told the registry had reported it, and a figure from a gateway would have been credited the same way.
+  Misattributing a limit is the same defect as inventing one, one step further along (#7780) (@DaBlitzStein)
+
 - An agent's own inference settings now win over the per-model override instead of losing to it.
   Two instances of one agent type can finally run the same model at different temperatures — tuning the shared model no longer overwrites both of them with one value and discards their individual settings in silence.
   The inversion was not a decision about precedence but a workaround for a missing state: `ModelConfig.max_tokens` / `.temperature` were plain numbers, so every agent carried a concrete 4096 / 0.7 whether or not anyone chose them, and letting the manifest win would have made per-model overrides unreachable for every agent in existence.
