@@ -491,9 +491,9 @@ export function WorkflowsPage() {
     workflowDetailQuery.isLoading,
   ]);
 
-  // Show the "My Workflows" empty state on first visit so users see
-  // the "Create your first workflow" and "Ask an agent" options
-  // before being nudged toward templates.
+  // A first visit stays on "My Workflows" so the empty state can offer "Create your first workflow" and "Ask an agent" before nudging anyone toward templates.
+  // The mount-once effect that used to flip `activeTab` to "templates" on an empty list is gone: an agent can now author a workflow mid-conversation (#6943), and a user with zero workflows was the only one the auto-jump navigated away from that framing.
+  // The template library is still one tab click away.
 
   useEffect(() => {
     if (!workflowsQuery.isSuccess) return;

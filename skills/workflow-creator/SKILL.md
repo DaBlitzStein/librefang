@@ -55,14 +55,21 @@ Each step needs:
 
 ### Input parameters
 
-Declare `input_schema` so callers know what to pass to `workflow_run`:
+Declare `input_schema` so callers know what to pass to `workflow_run`.
+The type key is `param_type` — the same spelling `workflow_describe` reports back, so a described workflow round-trips through `workflow_create` unchanged.
+One of `string`, `number`, `boolean`, `file`, `image`, `agent_id`; anything else is rejected.
 
 ```json
 [
-  { "name": "repo_url", "type": "string", "description": "Repository URL to analyze", "required": true },
-  { "name": "max_depth", "type": "number", "description": "Max analysis depth", "required": false }
+  { "name": "repo_url", "param_type": "string", "description": "Repository URL to analyze", "required": true },
+  { "name": "max_depth", "param_type": "number", "description": "Max analysis depth", "required": false }
 ]
 ```
+
+### Limits
+
+A single `workflow_create` call may declare at most 50 steps, a `timeout_secs` of at most 3600 (1 hour) per step, and a `total_timeout_secs` of at most 86400 (24 hours).
+These are enforced when the workflow is saved, so a design that exceeds them is rejected rather than silently truncated.
 
 ## Examples
 
@@ -96,7 +103,7 @@ Ask the user which agents they have, then design:
     }
   ],
   "input_schema": [
-    { "name": "code_diff", "type": "string", "description": "Git diff or code to review", "required": true }
+    { "name": "code_diff", "param_type": "string", "description": "Git diff or code to review", "required": true }
   ]
 }
 ```
@@ -127,7 +134,7 @@ Ask the user which agents they have, then design:
     }
   ],
   "input_schema": [
-    { "name": "topic", "type": "string", "description": "Topic for the briefing", "required": true }
+    { "name": "topic", "param_type": "string", "description": "Topic for the briefing", "required": true }
   ]
 }
 ```
@@ -137,7 +144,7 @@ Ask the user which agents they have, then design:
 1. **Name workflows descriptively** — `code-review` not `wf1`
 2. **Use `depends_on` for parallelism** — independent steps can run concurrently
 3. **Use `output_var` for key results** — makes later steps cleaner
-4. **Set appropriate `timeout_secs`** — longer for research, shorter for simple tasks
+4. **Set appropriate `timeout_secs`** — longer for research, shorter for simple tasks; the ceiling is 3600s per step
 5. **Use `error_mode: skip` for non-critical steps** — keeps the workflow running
 6. **Declare `input_schema`** — makes the workflow self-documenting
 7. **Validate agent names** with `agent_find` before creating

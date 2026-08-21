@@ -18,7 +18,9 @@ import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
-import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
+import { applyForeignTerminalFrame, extractWorkflowJson, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
+import { workflowStepsToCanvasState, type WorkflowCreateStepInput } from "../lib/canvas";
+import { CANVAS_DRAFT_KEY, type CanvasDraft } from "./CanvasPage";
 import {
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
@@ -2984,22 +2986,37 @@ export function ChatPage() {
   );
 
   const handleSaveWorkflow = useCallback((content: string) => {
-    // Extract the first JSON code block or object from the message
-    const jsonMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) ??
-      content.match(/(\{[\s\S]*"steps"[\s\S]*\})/);
-    if (jsonMatch) {
-      try {
-        const parsed = JSON.parse(jsonMatch[1]);
-        sessionStorage.setItem("canvas-draft", JSON.stringify(parsed));
-        addToast(t("workflows.saved_to_canvas"), "success");
-        navigate({ to: "/canvas" });
-      } catch {
-        addToast(t("workflows.invalid_json"), "error");
-      }
-    } else {
+    const jsonText = extractWorkflowJson(content);
+    if (jsonText === null) {
       addToast(t("workflows.no_json_found"), "error");
+      return;
     }
-  }, [navigate, t]);
+    try {
+      const parsed = JSON.parse(jsonText) as {
+        name?: string;
+        description?: string;
+        steps?: WorkflowCreateStepInput[];
+      };
+      if (!Array.isArray(parsed.steps)) {
+        addToast(t("workflows.invalid_json"), "error");
+        return;
+      }
+      // The canvas reads a `CanvasDraft` (`{nodes, edges, workflowName, workflowDescription}`), not the raw `workflow_create` shape, so the steps become nodes and edges before the draft is persisted.
+      // Storing the raw JSON under a mismatched key is what made this button a no-op: `readCanvasDraft()` never found the payload, and would have defaulted `nodes`/`edges` to `[]` even if it had (#6943 review).
+      const { nodes, edges } = workflowStepsToCanvasState(parsed.steps);
+      const draft: CanvasDraft = {
+        nodes,
+        edges,
+        workflowName: parsed.name ?? "",
+        workflowDescription: parsed.description ?? "",
+      };
+      sessionStorage.setItem(CANVAS_DRAFT_KEY, JSON.stringify(draft));
+      addToast(t("workflows.saved_to_canvas"), "success");
+      navigate({ to: "/canvas" });
+    } catch {
+      addToast(t("workflows.invalid_json"), "error");
+    }
+  }, [addToast, navigate, t]);
 
   const handleCopy = useCallback(async (messageId: string, content: string) => {
     if (await copyToClipboard(content)) {

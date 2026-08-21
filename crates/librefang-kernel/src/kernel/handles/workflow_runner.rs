@@ -510,7 +510,7 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
     async fn create_workflow(
         &self,
         workflow_json: &str,
-        _caller_agent_id: Option<&str>,
+        caller_agent_id: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
         use crate::workflow::Workflow;
         use kernel_handle::KernelOpError;
@@ -519,20 +519,9 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         let wf: Workflow = serde_json::from_str(workflow_json)
             .map_err(|e| KernelOpError::Internal(format!("Invalid workflow JSON: {e}")))?;
 
-        if wf.name.is_empty() || wf.name.len() > 64 {
-            return Err(KernelOpError::Internal(
-                "Workflow name must be 1-64 chars".to_string(),
-            ));
-        }
-        if !wf
-            .name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(KernelOpError::Internal(
-                "Workflow name must be [A-Za-z0-9_-]".to_string(),
-            ));
-        }
+        // The runtime tool checks this too, but `create_workflow` is a trait method any caller can reach, so the persistence surface validates independently. Both sides call the same canonical rule (#6943 review — the check used to be copy-pasted here).
+        librefang_types::naming::validate_resource_name(&wf.name)
+            .map_err(|e| KernelOpError::Internal(format!("Workflow name {e}")))?;
 
         // Run semantic validation (same as HTTP API)
         let validation_errors = wf.validate();
@@ -571,9 +560,13 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         // Register in engine (hot-reload). `register` persists the
         // canonical JSON copy and returns the canonical id.
         let registered_id = self.workflows.engine.register(wf).await;
+        // #6943 review: `workflow_create` sits in `ALWAYS_NATIVE_TOOLS`, so every agent has it unconditionally, and its sibling `workflow_run` (also always-native) can immediately execute whatever `steps[].agent` the new workflow names — including a more privileged agent than the caller, a confused-deputy path a prompt injection could ride.
+        // There is no ownership/quota model on `Workflow` today to gate that, and adding one is a maintainer design decision rather than this fix's job, but dropping `caller_agent_id` on the floor left this call with no audit trail at all.
+        // Log the caller so a security investigation can at least trace which agent turn synthesized which workflow.
         tracing::info!(
             workflow = %name_lower,
             registered_id = %registered_id.0,
+            caller = ?caller_agent_id,
             "Workflow created via tool"
         );
 
