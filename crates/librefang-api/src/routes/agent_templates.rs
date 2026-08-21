@@ -536,7 +536,7 @@ pub async fn create_agent_type(
     )
 }
 
-/// PUT /api/agent-types/:name — Update an existing agent type from JSON.
+/// PUT /api/templates/{name} — Update an existing agent type from JSON.
 #[utoipa::path(put, path = "/api/templates/{name}", tag = "system", operation_id = "update_template", params(("name" = String, Path, description = "Template name")), request_body = crate::types::JsonObject, responses((status = 200, description = "Template updated", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 404, description = "Template not found")))]
 pub async fn update_agent_type(
     Path(name): Path<String>,
@@ -572,7 +572,7 @@ pub async fn update_agent_type(
     )
 }
 
-/// DELETE /api/agent-types/:name — Delete an agent type file.
+/// DELETE /api/templates/{name} — Delete an agent type file.
 #[utoipa::path(delete, path = "/api/templates/{name}", tag = "system", operation_id = "delete_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template deleted", body = crate::types::JsonObject), (status = 404, description = "Template not found")))]
 pub async fn delete_agent_type(
     Path(name): Path<String>,

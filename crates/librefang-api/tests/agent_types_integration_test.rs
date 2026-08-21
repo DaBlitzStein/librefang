@@ -388,3 +388,186 @@ async fn agent_types_escapes_toml_special_chars() {
         .unwrap();
     let _ = h.app.clone().oneshot(req).await;
 }
+
+// ---------------------------------------------------------------------------
+// Production-router coverage (#6931 review)
+//
+// Everything above drives `routes::agent_templates::router()` directly. That
+// proves the handlers behave, and proves nothing about whether `server.rs`
+// ever mounts them: delete the `.merge()` in `api_v1_routes()` and every test
+// above still passes while the endpoints 404 in the running daemon.
+//
+// The two tests below close that gap by driving `server::build_router` — the
+// same call the daemon makes — so a missing registration fails here rather
+// than on someone's install.
+// ---------------------------------------------------------------------------
+
+struct ProdHarness {
+    app: Router,
+    state: Arc<AppState>,
+    _tmp: tempfile::TempDir,
+}
+
+impl Drop for ProdHarness {
+    fn drop(&mut self) {
+        self.state.kernel.shutdown();
+    }
+}
+
+/// Build the production router with RBAC users wired in.
+///
+/// Each tuple is `(name, role, api_key)`. `allow_no_auth` stays false so an
+/// unauthenticated request is rejected at the middleware layer, which is what
+/// makes the role assertions below mean anything.
+async fn boot_production_router(api_key: &str, users: Vec<(&str, &str, &str)>) -> ProdHarness {
+    use librefang_api::{middleware, server};
+    use librefang_kernel::auth::UserRole as KernelUserRole;
+    use librefang_types::agent::UserId;
+    use librefang_types::config::{DefaultModelConfig, KernelConfig, UserConfig};
+
+    let tmp = tempfile::tempdir().expect("tempdir for production-router harness");
+
+    let mut user_configs: Vec<UserConfig> = Vec::with_capacity(users.len());
+    let mut api_user_records: Vec<middleware::ApiUserAuth> = Vec::with_capacity(users.len());
+    for (name, role_str, key) in &users {
+        let hash =
+            librefang_api::password_hash::hash_password(key).expect("password hash should succeed");
+        user_configs.push(UserConfig {
+            name: (*name).to_string(),
+            role: (*role_str).to_string(),
+            channel_bindings: std::collections::HashMap::new(),
+            api_key_hash: Some(hash.clone()),
+            ..Default::default()
+        });
+        api_user_records.push(middleware::ApiUserAuth {
+            name: (*name).to_string(),
+            role: KernelUserRole::from_str_role(role_str),
+            api_key_hash: hash,
+            user_id: UserId::from_name(name),
+        });
+    }
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: api_key.to_string(),
+        users: user_configs,
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::BTreeMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel =
+        librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+    *state.user_api_keys.write().await = api_user_records;
+
+    ProdHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
+async fn prod_request(
+    h: &ProdHarness,
+    method: Method,
+    path: &str,
+    api_key: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> StatusCode {
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(key) = api_key {
+        builder = builder.header("Authorization", format!("Bearer {key}"));
+    }
+    let body_bytes = match body {
+        Some(v) => {
+            builder = builder.header("content-type", "application/json");
+            serde_json::to_vec(&v).expect("body serialises")
+        }
+        None => Vec::new(),
+    };
+    let req = builder
+        .body(Body::from(body_bytes))
+        .expect("request builds");
+    h.app
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("router responds")
+        .status()
+}
+
+/// The five CRUD routes are reachable through the router the daemon builds.
+///
+/// This asserts registration, not behaviour: anything other than 404 means
+/// `server.rs` mounted the route. The handler-level contracts are covered by
+/// the direct-router tests above.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_type_routes_are_registered_in_the_production_router() {
+    let h = boot_production_router("admin-key", vec![("admin", "admin", "admin-key")]).await;
+
+    for (method, path) in [
+        (Method::GET, "/api/templates"),
+        (Method::GET, "/api/templates/does-not-exist"),
+        (Method::POST, "/api/templates"),
+        (Method::PUT, "/api/templates/does-not-exist"),
+        (Method::DELETE, "/api/templates/does-not-exist"),
+    ] {
+        let body = matches!(method, Method::POST | Method::PUT)
+            .then(|| serde_json::json!({"name": "does-not-exist"}));
+        let status = prod_request(&h, method.clone(), path, Some("admin-key"), body).await;
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{method} {path} is not mounted by server::build_router — \
+             a missing merge in api_v1_routes() would 404 in the daemon \
+             while every direct-router test still passes"
+        );
+    }
+}
+
+/// An unauthenticated caller cannot write agent types.
+///
+/// The write endpoints create, overwrite and delete manifests that spawn
+/// agents, so the interesting assertion is that they are not reachable
+/// without credentials — the read path is deliberately not asserted here
+/// because `require_auth_for_reads` is a separate policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_type_writes_reject_an_unauthenticated_caller() {
+    let h = boot_production_router("admin-key", vec![("admin", "admin", "admin-key")]).await;
+
+    for (method, path, body) in [
+        (
+            Method::POST,
+            "/api/templates",
+            Some(serde_json::json!({"name": "unauthorised"})),
+        ),
+        (
+            Method::PUT,
+            "/api/templates/unauthorised",
+            Some(serde_json::json!({"name": "unauthorised"})),
+        ),
+        (Method::DELETE, "/api/templates/unauthorised", None),
+    ] {
+        let status = prod_request(&h, method.clone(), path, None, body).await;
+        assert!(
+            status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN,
+            "{method} {path} without credentials returned {status}, expected 401 or 403"
+        );
+    }
+}
