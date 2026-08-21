@@ -319,6 +319,87 @@ impl LibreFangKernel {
                 .is_empty()
     }
 
+    /// Pick a [`ModelProfile`](librefang_types::model_profile::ModelProfile)
+    /// for this turn, or `None` to leave the agent's own model in place.
+    ///
+    /// Returns `None` — meaning "not routed" — whenever any of these hold:
+    ///
+    /// - `[model_router] enabled = false` in `config.toml` (the default).
+    /// - The agent's manifest is not `mode = "flexible"` (the default).
+    /// - No permitted profile matched and no permitted fallback existed.
+    /// - The selected profile's provider has no API key configured.
+    ///
+    /// The last guard mirrors the tier router a few lines below: routing an
+    /// agent onto a provider the operator never configured would turn a
+    /// cost optimisation into a hard failure on every turn.
+    fn route_to_profile(
+        &self,
+        manifest: &librefang_types::agent::AgentManifest,
+        message: &str,
+        cfg: &librefang_types::config::KernelConfig,
+    ) -> Option<librefang_types::model_profile::ModelProfile> {
+        use librefang_types::agent::ModelMode;
+
+        if !cfg.model_router.enabled || manifest.model.mode != ModelMode::Flexible {
+            return None;
+        }
+
+        let complexity = crate::model_router::evaluate_complexity_heuristic(message);
+        let catalog = crate::model_router::ProfileCatalog::load_cached(
+            cfg.home_dir.as_path(),
+            &cfg.model_router,
+        );
+        let (matched, decision) = crate::model_router::match_profile(
+            message,
+            &complexity,
+            catalog.profiles(),
+            &cfg.model_router,
+            manifest.model.router_override.as_ref(),
+        );
+
+        let Some(profile) = matched else {
+            debug!(
+                agent = %manifest.name,
+                ?decision,
+                complexity = complexity.score,
+                "Profile routing declined — keeping the agent's own model"
+            );
+            return None;
+        };
+
+        // Resolve catalog aliases ("sonnet" -> "claude-sonnet-4-…") so the
+        // builtin profiles do not pin dated model snapshots.
+        let mut profile = profile.clone();
+        let model_catalog = self.llm.model_catalog.load();
+        if let Some(resolved) = model_catalog.resolve_alias(&profile.model) {
+            profile.model = resolved.to_string();
+        }
+
+        if profile.provider != manifest.model.provider {
+            let key_env = cfg.resolve_api_key_env(&profile.provider);
+            if std::env::var(&key_env).is_err() {
+                warn!(
+                    agent = %manifest.name,
+                    profile = %profile.name,
+                    provider = %profile.provider,
+                    "Profile routing skipped — provider API key not configured, using the agent's own model"
+                );
+                return None;
+            }
+        }
+
+        info!(
+            agent = %manifest.name,
+            profile = %profile.name,
+            provider = %profile.provider,
+            model = %profile.model,
+            complexity = complexity.score,
+            ?decision,
+            "Profile routing applied"
+        );
+        Some(profile)
+    }
+
     /// Execute the default LLM-based agent loop.
     #[instrument(
         skip_all,
@@ -905,6 +986,16 @@ impl LibreFangKernel {
                     "Stable mode: using pinned model"
                 );
                 manifest.model.model = pinned.clone();
+            }
+        } else if let Some(profile) = self.route_to_profile(&manifest, message, &cfg) {
+            // Profile routing wins over the tier router below: it is opt-in
+            // per agent (`mode = "flexible"`), so an agent that asked for it
+            // has made the more specific choice. Both write the same two
+            // fields, so only one may run.
+            manifest.model.provider = profile.provider;
+            manifest.model.model = profile.model;
+            if profile.context_window.is_some() {
+                manifest.model.context_window = profile.context_window;
             }
         } else if let Some(routing_config) =
             manifest.routing.as_ref().or(cfg.default_routing.as_ref())
