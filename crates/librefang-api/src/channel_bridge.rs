@@ -707,6 +707,37 @@ impl KernelBridgeAdapter {
             }
         }
     }
+
+    /// Key under which an agent's `/think` preference is stored.
+    ///
+    /// Single-sourced so the write (`set_thinking`) and every read
+    /// (the send paths) cannot drift onto different keys — a drift that
+    /// makes `/think` silently inert while every surrounding assertion
+    /// still passes.
+    fn thinking_pref_key(agent_id: AgentId) -> String {
+        agent_id.0.to_string()
+    }
+
+    /// Record the `/think` preference for `agent_id`.
+    fn store_thinking_pref(&self, agent_id: AgentId, on: bool) -> Result<(), String> {
+        self.thinking_prefs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(Self::thinking_pref_key(agent_id), on);
+        Ok(())
+    }
+
+    /// The per-turn extended-thinking override to apply to `agent_id`'s next
+    /// turn, or `None` when `/think` was never used for it (keep the agent's
+    /// configured default).
+    fn thinking_override_for(&self, agent_id: AgentId) -> Result<Option<bool>, String> {
+        Ok(self
+            .thinking_prefs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&Self::thinking_pref_key(agent_id))
+            .copied())
+    }
 }
 
 #[async_trait]
@@ -845,12 +876,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let language = self.kernel.config_snapshot().language.clone();
         // Apply the per-agent /think preference as the per-turn override on
         // the streaming path too — same as the non-streaming send above.
-        let thinking = self
-            .thinking_prefs
-            .lock()
-            .map_err(|e| e.to_string())?
-            .get(&agent_id.0.to_string())
-            .copied();
+        let thinking = self.thinking_override_for(agent_id)?;
         let (event_rx, kernel_handle) = self
             .kernel
             .clone()
@@ -911,12 +937,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             text
         };
         // Apply the per-agent /think preference as the per-turn override.
-        let thinking = self
-            .thinking_prefs
-            .lock()
-            .map_err(|e| e.to_string())?
-            .get(&agent_id.0.to_string())
-            .copied();
+        let thinking = self.thinking_override_for(agent_id)?;
         let result = self
             .kernel
             .send_message_with_blocks_and_sender_thinking(
@@ -1948,11 +1969,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn set_thinking(&self, agent_id: AgentId, on: bool) -> Result<String, String> {
         // Store the per-agent preference and apply it as the per-turn
         // thinking override on the next chat message.
-        let key = agent_id.0.to_string();
-        {
-            let mut prefs = self.thinking_prefs.lock().map_err(|e| e.to_string())?;
-            prefs.insert(key, on);
-        }
+        self.store_thinking_pref(agent_id, on)?;
         let state = if on { "enabled" } else { "disabled" };
         Ok(format!("Extended thinking {state} for this chat."))
     }
@@ -3540,9 +3557,7 @@ mod tests {
         // boolean's propagation into the driver call is pinned by the kernel's
         // `apply_thinking_override` unit tests; here we pin the adapter side:
         // the pref is stored, the pref read does not fail the send, and the
-        // streaming call returns a live stream. The provider-less test kernel
-        // fails the agent loop at the driver boundary, so the status oneshot
-        // resolves Err after the text stream drains.
+        // streaming call returns a live stream.
         use librefang_testing::MockKernelBuilder;
 
         let (kernel, _tmp) = MockKernelBuilder::new().build();
@@ -3588,17 +3603,24 @@ mod tests {
         // Whether the provider-less test kernel completes the turn or fails it at the driver boundary is a property of whichever driver the mock harness seeds, not of the code under test.
         // Asserting on it pinned the harness rather than the adapter, and broke as soon as the harness began resolving the loop successfully.
         //
-        // The adapter-side contract gets pinned instead: the stream started and the status resolved rather than hanging or being dropped (both asserted above), and the pref is still readable under the exact key the send path derives.
-        // That last one is the actual regression this PR fixes — `set_thinking` storing under `agent_id.0.to_string()` while the send path looks the pref up under some other key is what makes `/think` silently inert, and a status assertion cannot see it.
+        // The adapter-side contract gets pinned instead: the stream started and the status resolved rather than hanging or being dropped (both asserted above), and `/think` produced the override the send path will hand to the kernel.
+        // That last one is the actual regression this PR fixes — a `set_thinking` write the send path's read cannot see is what makes `/think` silently inert, and a status assertion cannot see it.
+        // The assertion deliberately calls `thinking_override_for`, the very accessor `send_message_streaming_with_sender_status` uses, rather than re-deriving the map key here: a test that restates the key would keep passing if the send path started reading a different one.
         assert_eq!(
             adapter
-                .thinking_prefs
-                .lock()
-                .expect("thinking_prefs lock must not be poisoned")
-                .get(&assistant.0.to_string())
-                .copied(),
+                .thinking_override_for(assistant)
+                .expect("pref read must not fail"),
             Some(true),
-            "the /think pref must stay readable under the key the send path derives",
+            "/think must yield Some(true) through the accessor the send path reads",
+        );
+        // And the untouched agent must stay on its configured default rather
+        // than inheriting another agent's toggle.
+        assert_eq!(
+            adapter
+                .thinking_override_for(AgentId(uuid::Uuid::new_v4()))
+                .expect("pref read must not fail"),
+            None,
+            "an agent that never used /think must get no override",
         );
 
         kernel.shutdown();
