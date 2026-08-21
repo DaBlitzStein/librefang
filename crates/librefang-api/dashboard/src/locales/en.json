@@ -1431,6 +1431,7 @@
     "records_filtered_to_agent": "filtered to this agent",
     "embedding_model_default": "Auto / provider default",
     "extraction_model_default": "Use kernel default",
+    "extraction_model_inherited": "Inherited from the system default model: {{model}}. Extraction runs after every reply, so a slow model here delays every answer.",
     "extraction_model_placeholder": "e.g. openai/gpt-4o-mini",
     "custom_model_option": "Custom…",
     "decay_rate_hint": "Per-day decay applied to memory confidence. Lower = memories age more slowly.",

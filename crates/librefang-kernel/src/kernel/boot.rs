@@ -1964,11 +1964,45 @@ impl LibreFangKernel {
         let cfg = kernel.config.load();
         if cfg.proactive_memory.enabled {
             let pm_config = cfg.proactive_memory.clone();
-            let extraction_spec = pm_config
-                .extraction_model
+            let configured_extraction_model =
+                pm_config.extraction_model.clone().filter(|s| !s.is_empty());
+            let extraction_spec = configured_extraction_model
                 .clone()
-                .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| cfg.default_model.model.clone());
+
+            // Say out loud which model ended up doing the extraction, and
+            // whether anyone chose it.
+            //
+            // The fallback to `default_model` used to be silent, and silence
+            // is what made it expensive: on a live deployment an agent was
+            // answering in 2 s on its own fast model while its memory
+            // extraction ran on the global default — a reasoning model that
+            // needs 30.5 s for the *smallest possible* extraction, against a
+            // 30 s ceiling it could therefore never meet. It failed on every
+            // single turn, retried four times, and held each finished reply
+            // for over two minutes. Nothing in the operator's config file
+            // mentioned that model in connection with memory at all, so there
+            // was nothing to read and no reason to suspect it.
+            //
+            // An inherited value is not a problem in itself — it is the
+            // documented default. What is a problem is not being able to find
+            // out. One line at boot is the whole fix.
+            if configured_extraction_model.is_some() {
+                debug!(
+                    extraction_model = %extraction_spec,
+                    "proactive memory: using the configured extraction model"
+                );
+            } else {
+                warn!(
+                    extraction_model = %extraction_spec,
+                    default_provider = %cfg.default_model.provider,
+                    "proactive memory: no [proactive_memory] extraction_model is set, so \
+                     extraction inherits the global default model. This runs on every turn \
+                     after the reply is ready, so a slow model here delays every answer. \
+                     Set [proactive_memory] extraction_model to a small, fast model to \
+                     decouple it from the model your agents converse with."
+                );
+            }
 
             let catalog = kernel.llm.model_catalog.load();
             let (extraction_provider, extraction_model_name) = resolve_extraction_model_target(

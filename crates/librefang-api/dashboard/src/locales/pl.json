@@ -1431,6 +1431,7 @@
     "records_filtered_to_agent": "przefiltrowane do tego agenta",
     "embedding_model_default": "Auto / domyślny dostawcy",
     "extraction_model_default": "Użyj domyślnego jądra",
+    "extraction_model_inherited": "Odziedziczone z domyślnego modelu systemu: {{model}}. Ekstrakcja uruchamia się po każdej odpowiedzi, więc wolny model opóźnia każdą odpowiedź.",
     "extraction_model_placeholder": "np. openai/gpt-4o-mini",
     "custom_model_option": "Własny…",
     "decay_rate_hint": "Dzienny spadek nakładany na pewność pamięci. Niższy = wspomnienia starzeją się wolniej.",
