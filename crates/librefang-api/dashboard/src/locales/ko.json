@@ -3116,7 +3116,7 @@
     "overrides_reset": "모델 설정이 기본값으로 재설정됨",
     "overrides_error": "모델 설정을 저장하지 못했습니다.",
     "reset_defaults": "재설정",
-    "reasoning_effort_unsupported": "이 모델은 추론 지원을 표시하지 않으므로, 제공자가 모든 요청에서 이 설정을 거부할 수 있습니다."
+    "reasoning_effort_unsupported": "카탈로그에는 이 모델의 추론 지원이 표시되어 있지 않습니다. 설정은 그대로 전송되며 이를 반영할지는 게이트웨이가 결정합니다."
   },
   "media": {
     "section": "미디어",

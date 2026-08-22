@@ -3116,7 +3116,7 @@
     "overrides_reset": "Model settings reset to defaults",
     "overrides_error": "Failed to save model settings",
     "reset_defaults": "Reset",
-    "reasoning_effort_unsupported": "This model does not advertise reasoning support, so the provider may reject this on every request."
+    "reasoning_effort_unsupported": "The catalog does not list thinking support for this model. The setting is sent as-is — your gateway decides whether it is honoured."
   },
   "media": {
     "section": "Media",

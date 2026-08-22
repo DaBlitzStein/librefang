@@ -41,11 +41,22 @@ pub struct OpenAIDriver {
     /// model alone already scopes to the provider+model combination). Set
     /// the first time a request for a given model hits that rejection (see
     /// the strip-and-retry branch in `complete`/`stream`); once cached,
-    /// `build_request` omits `reasoning_effort` for that model up front so
-    /// the same combination never round-trips a second 400. In-memory only —
-    /// resets on daemon restart, which is fine: the cost of relearning is one
-    /// extra round-trip, not a correctness issue.
-    reasoning_effort_unsupported: std::sync::Arc<dashmap::DashSet<String>>,
+    /// Models that answered `reasoning_effort` with a hard 400, mapped to when
+    /// they did. `build_request` omits the field for a muted model up front so
+    /// the same combination never round-trips a second guaranteed rejection.
+    ///
+    /// The mute is temporary, not a conviction: entries expire after
+    /// [`REASONING_EFFORT_MUTE_TTL`]. A gateway's parameter support is
+    /// configuration that operators change — a model was seen to reject the
+    /// field under one litellm setup and accept it under the next, and a
+    /// permanent mute would keep withholding it forever, with no way to revoke
+    /// it short of restarting the daemon. Expiry costs one relearned 400 at
+    /// worst, and needs no plumbing from the config surface to the driver.
+    reasoning_effort_unsupported: std::sync::Arc<dashmap::DashMap<String, std::time::Instant>>,
+
+    /// How long a model stays muted after rejecting `reasoning_effort`.
+    /// See the field above for why a TTL beats a permanent set.
+    reasoning_effort_mute_ttl: std::time::Duration,
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
@@ -99,6 +110,7 @@ impl OpenAIDriver {
             url_query: None,
             moonshot_file_cache: Default::default(),
             reasoning_effort_unsupported: Default::default(),
+            reasoning_effort_mute_ttl: REASONING_EFFORT_MUTE_TTL,
             request_timeout_secs,
             emit_caller_trace_headers: true,
             max_retries: 3,
@@ -146,6 +158,7 @@ impl OpenAIDriver {
             url_query: Some(format!("api-version={}", api_version)),
             moonshot_file_cache: Default::default(),
             reasoning_effort_unsupported: Default::default(),
+            reasoning_effort_mute_ttl: REASONING_EFFORT_MUTE_TTL,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
             max_retries: 3,
@@ -577,6 +590,13 @@ fn merge_extra_body(
 ///
 /// There is no cross-vendor convention for requesting extended thinking over the OpenAI-compatible wire; `reasoning_effort` (`low` / `medium` / `high`) is the most widely supported opt-in, with gateways translating it back into a token budget server-side.
 /// Budgets below 1024 tokens are treated as thinking-off — the same minimum-budget gate the anthropic driver applies.
+/// How long a model stays muted after rejecting `reasoning_effort`.
+///
+/// Short enough that an operator who reconfigures the gateway sees the field
+/// again without a daemon restart, long enough that a genuinely rejecting
+/// gateway is not retried on every single turn of every agent.
+const REASONING_EFFORT_MUTE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
 fn reasoning_effort_for_budget(budget_tokens: u32) -> Option<&'static str> {
     match budget_tokens {
         0..=1023 => None,
@@ -893,6 +913,18 @@ impl OpenAIDriver {
     ///
     /// Shared between `complete()` and `stream()`.  The caller sets
     /// `stream` / `stream_options` on the returned struct before sending.
+    /// Whether `reasoning_effort` is currently withheld for this model.
+    ///
+    /// Entries older than the mute TTL are pruned lazily here, so the mute
+    /// self-heals without a daemon restart once the operator has reconfigured
+    /// the gateway — see the field doc on `reasoning_effort_unsupported`.
+    fn is_reasoning_effort_muted(&self, model: &str) -> bool {
+        let now = std::time::Instant::now();
+        self.reasoning_effort_unsupported
+            .retain(|_, at| now.duration_since(*at) < self.reasoning_effort_mute_ttl);
+        self.reasoning_effort_unsupported.contains_key(model)
+    }
+
     fn build_request(&self, request: &CompletionRequest) -> Result<OaiRequest, LlmError> {
         use librefang_types::model_catalog::ReasoningEchoPolicy;
         let echo_policy = self.effective_reasoning_echo_policy(request);
@@ -1210,7 +1242,7 @@ impl OpenAIDriver {
             // second guaranteed rejection for a combination we already know
             // the gateway/adapter will not accept.
             reasoning_effort: if echo_policy == ReasoningEchoPolicy::None
-                && !self.reasoning_effort_unsupported.contains(&request.model)
+                && !self.is_reasoning_effort_muted(&request.model)
             {
                 request
                     .thinking
@@ -1410,7 +1442,7 @@ impl LlmDriver for OpenAIDriver {
                     );
                     oai_request.reasoning_effort = None;
                     self.reasoning_effort_unsupported
-                        .insert(oai_request.model.clone());
+                        .insert(oai_request.model.clone(), std::time::Instant::now());
                     tokio::time::sleep(std::time::Duration::from_millis(
                         100 * (attempt as u64 + 1),
                     ))
@@ -1861,7 +1893,7 @@ impl LlmDriver for OpenAIDriver {
                     );
                     oai_request.reasoning_effort = None;
                     self.reasoning_effort_unsupported
-                        .insert(oai_request.model.clone());
+                        .insert(oai_request.model.clone(), std::time::Instant::now());
                     tokio::time::sleep(std::time::Duration::from_millis(
                         100 * (attempt + 1) as u64,
                     ))
@@ -5029,6 +5061,47 @@ mod tests {
         );
     }
 
+    /// A mute must self-heal: the gateway that rejected the field is
+    /// configuration, and an operator who changes it deserves the field back
+    /// without a daemon restart. The mute expires after the TTL and the check
+    /// prunes lazily, so a build for the same model later emits the field
+    /// again — costing one relearned 400 at worst.
+    #[test]
+    fn reasoning_effort_mute_expires_after_the_ttl() {
+        let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
+        driver.reasoning_effort_unsupported.insert(
+            "expired-model".to_string(),
+            std::time::Instant::now()
+                - (driver.reasoning_effort_mute_ttl + std::time::Duration::from_secs(1)),
+        );
+
+        let req = driver
+            .build_request(&thinking_request("expired-model"))
+            .expect("build_request");
+        assert!(
+            req.reasoning_effort.is_some(),
+            "an expired mute must not withhold the field: the gateway may have changed"
+        );
+    }
+
+    /// A fresh mute still withholds — the expiry must not turn the blacklist
+    /// into a no-op for the case it exists for.
+    #[test]
+    fn a_fresh_rejection_still_mutes_the_field() {
+        let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
+        driver
+            .reasoning_effort_unsupported
+            .insert("fresh-model".to_string(), std::time::Instant::now());
+
+        let req = driver
+            .build_request(&thinking_request("fresh-model"))
+            .expect("build_request");
+        assert!(
+            req.reasoning_effort.is_none(),
+            "a fresh mute must withhold the field, or the cache does nothing"
+        );
+    }
+
     /// The cache is keyed per model, not blanket-disabled for the whole
     /// provider/driver instance — a different model must still get
     /// `reasoning_effort` even after another model on the same driver was
@@ -5038,7 +5111,7 @@ mod tests {
         let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
         driver
             .reasoning_effort_unsupported
-            .insert("rejected-model".to_string());
+            .insert("rejected-model".to_string(), std::time::Instant::now());
 
         let rejected = driver
             .build_request(&thinking_request("rejected-model"))

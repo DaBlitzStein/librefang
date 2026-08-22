@@ -1085,7 +1085,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
                 <AlertCircle className="w-3 h-3 shrink-0" />
                 {t("models.reasoning_effort_unsupported", {
                   defaultValue:
-                    "This model does not advertise reasoning support, so the provider may reject this on every request.",
+                    "The catalog does not list thinking support for this model. The setting is sent as-is — your gateway decides whether it is honoured.",
                 })}
               </p>
             )}
