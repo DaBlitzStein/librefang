@@ -50,6 +50,25 @@ pub trait AgentControl: Send + Sync {
         parent_id: Option<&str>,
     ) -> Result<(String, String), KernelOpError>;
 
+    /// The shared directories an agent is allowed to reach beyond its own
+    /// workspace, as declared in its manifest's `[workspaces]`.
+    ///
+    /// Exists so a spawned sub-agent can be given the same reach as the parent
+    /// that asked for it. Without this the child gets only its private
+    /// workspace, and a parent working out of a shared library cannot hand a
+    /// helper the files the task is about — the helper simply cannot see them.
+    ///
+    /// Returns an empty map by default, which is the safe answer: an
+    /// implementation that has not wired this grants no extra reach rather
+    /// than guessing at one. The kernel overrides it with the real manifest.
+    async fn agent_workspaces(
+        &self,
+        agent_id: &str,
+    ) -> std::collections::BTreeMap<String, librefang_types::agent::WorkspaceDecl> {
+        let _ = agent_id;
+        Default::default()
+    }
+
     /// Spawn an agent with capability inheritance enforcement.
     /// `parent_caps` are the parent's granted capabilities. The kernel MUST verify
     /// that every capability in the child manifest is covered by `parent_caps`.

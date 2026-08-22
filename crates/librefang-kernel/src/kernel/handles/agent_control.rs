@@ -402,6 +402,34 @@ impl kernel_handle::AgentControl for LibreFangKernel {
             .collect()
     }
 
+    async fn agent_workspaces(
+        &self,
+        agent_id: &str,
+    ) -> std::collections::BTreeMap<String, librefang_types::agent::WorkspaceDecl> {
+        // Resolve by name or id, matching every other caller in this impl: a
+        // sub-agent spawn carries whatever identifier the runtime had.
+        let Ok(id) = self.resolve_agent_identifier(agent_id) else {
+            return Default::default();
+        };
+        self.agents
+            .registry
+            .list()
+            .into_iter()
+            .find(|e| e.id == id)
+            .map(|e| {
+                // BTreeMap, not the manifest's HashMap: these names end up in
+                // a TOML table that reaches a prompt, and HashMap ordering
+                // varies per process, which invalidates provider prompt
+                // caches for content that never changed (#3298).
+                e.manifest
+                    .workspaces
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     async fn spawn_agent_checked(
         &self,
         manifest_toml: &str,

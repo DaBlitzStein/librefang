@@ -780,6 +780,7 @@ fn test_agent_spawn_manifest_all_cases() {
         None,
         None,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(toml.contains("name = \"test-agent\""));
@@ -798,6 +799,7 @@ fn test_agent_spawn_manifest_all_cases() {
         None,
         None,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(toml.contains("tools = [\"file_read\", \"file_write\"]"));
@@ -813,6 +815,7 @@ fn test_agent_spawn_manifest_all_cases() {
         None,
         None,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(toml.contains("web_fetch"));
@@ -828,6 +831,7 @@ fn test_agent_spawn_manifest_all_cases() {
         None,
         None,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(toml.contains("shell = [\"uv *\"]"));
@@ -843,6 +847,7 @@ fn test_agent_spawn_manifest_all_cases() {
         None,
         None,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(toml.contains("shell = [\"uv *\", \"cargo *\"]"));
@@ -860,6 +865,7 @@ fn test_agent_spawn_manifest_all_cases() {
         None,
         None,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(toml.contains("agent-with\"quotes"));
@@ -874,6 +880,7 @@ fn test_agent_spawn_manifest_all_cases() {
         None,
         None,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(toml.contains("web_fetch"));
@@ -1925,3 +1932,85 @@ impl AcpFsBridge for SpawnCheckKernel {}
 impl AcpTerminalBridge for SpawnCheckKernel {}
 
 // ---- END role-trait impls (#3746) ----
+
+/// A sub-agent used to get only its own private workspace, so a parent
+/// working out of a shared library could ask a helper to work on those files
+/// and the helper could not see them — `build_agent_manifest_toml` emitted
+/// name, model and capabilities and nothing else.
+///
+/// This asserts at the injection site, not the implementation site: a new
+/// field threaded through as `None` compiles cleanly and silently disables
+/// the feature, which is precisely the failure CLAUDE.md warns about.
+#[test]
+fn spawned_agent_inherits_the_parents_shared_directories() {
+    use librefang_types::agent::{WorkspaceDecl, WorkspaceMode};
+
+    let mut parent = std::collections::BTreeMap::new();
+    parent.insert(
+        "library".to_string(),
+        WorkspaceDecl {
+            path: Some("shared/library".into()),
+            mount: None,
+            mode: WorkspaceMode::ReadWrite,
+        },
+    );
+    parent.insert(
+        "archive".to_string(),
+        WorkspaceDecl {
+            path: Some("shared/archive".into()),
+            mount: None,
+            mode: WorkspaceMode::ReadOnly,
+        },
+    );
+
+    let toml = build_agent_manifest_toml(
+        "helper",
+        "You help.",
+        vec![],
+        vec![],
+        false,
+        None,
+        None,
+        None,
+        &parent,
+    )
+    .expect("manifest builds");
+
+    assert!(toml.contains("[workspaces"), "no workspaces table: {toml}");
+    assert!(toml.contains("shared/library"), "lost the rw path: {toml}");
+    assert!(toml.contains("shared/archive"), "lost the r path: {toml}");
+
+    // The mode has to survive too: a read-only share silently widened to
+    // read-write is worse than not inheriting at all.
+    let parsed: librefang_types::agent::AgentManifest =
+        toml::from_str(&toml).expect("the child manifest must parse");
+    assert_eq!(parsed.workspaces.len(), 2, "both shares must arrive");
+    assert!(matches!(
+        parsed.workspaces["archive"].mode,
+        WorkspaceMode::ReadOnly
+    ));
+    assert!(matches!(
+        parsed.workspaces["library"].mode,
+        WorkspaceMode::ReadWrite
+    ));
+}
+
+/// A parent with no shares must produce no table at all, not an empty one:
+/// the child's manifest should be byte-identical to the previous behaviour.
+#[test]
+fn a_parent_with_no_shares_adds_nothing() {
+    let toml = build_agent_manifest_toml(
+        "helper",
+        "You help.",
+        vec![],
+        vec![],
+        false,
+        None,
+        None,
+        None,
+        &Default::default(),
+    )
+    .expect("manifest builds");
+
+    assert!(!toml.contains("workspaces"), "empty table emitted: {toml}");
+}

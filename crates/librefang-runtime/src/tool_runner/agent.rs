@@ -186,6 +186,15 @@ pub(super) fn build_agent_manifest_toml(
     profile: Option<&str>,
     model_provider: Option<&str>,
     model_name: Option<&str>,
+    // Shared directories the parent can reach, copied verbatim.
+    //
+    // A sub-agent used to get only its own private workspace, so a parent
+    // working out of a shared library could ask a helper to work on those
+    // files and the helper could not see them. Copying the parent's
+    // declarations is also the whole enforcement: a child cannot end up with
+    // reach the parent did not already have, because there is no other
+    // source for the list.
+    parent_workspaces: &std::collections::BTreeMap<String, librefang_types::agent::WorkspaceDecl>,
 ) -> Result<String, String> {
     let mut tools = tools;
     let has_shell = !shell.is_empty();
@@ -219,11 +228,25 @@ pub(super) fn build_agent_manifest_toml(
         model_json["mode"] = serde_json::json!("flexible");
     }
 
-    let manifest_json = serde_json::json!({
+    let mut manifest_json = serde_json::json!({
         "name": name,
         "model": model_json,
         "capabilities": capabilities,
     });
+    if !parent_workspaces.is_empty() {
+        // Serialised through `WorkspaceDecl`'s own Serialize so `path` /
+        // `mount` / `mode` keep the shape the manifest parser expects, rather
+        // than a hand-rolled table that drifts the first time a field is
+        // added.
+        match serde_json::to_value(parent_workspaces) {
+            Ok(v) => {
+                manifest_json["workspaces"] = v;
+            }
+            Err(e) => {
+                return Err(format!("Failed to serialize inherited workspaces: {e}"));
+            }
+        }
+    }
 
     toml::to_string(&manifest_json).map_err(|e| format!("Failed to serialize to TOML: {}", e))
 }
@@ -476,6 +499,13 @@ pub(super) async fn tool_agent_spawn(
         .get("model")
         .and_then(|v| v.as_str());
 
+    // Ask the kernel what the parent can reach, so the child inherits it.
+    // Without a parent there is nothing to inherit and the child gets only
+    // its own workspace — the previous behaviour for every spawn.
+    let parent_workspaces = match parent_id {
+        Some(pid) => kh.agent_workspaces(pid).await,
+        None => Default::default(),
+    };
     let manifest_toml = build_agent_manifest_toml(
         name,
         system_prompt,
@@ -485,6 +515,7 @@ pub(super) async fn tool_agent_spawn(
         profile,
         model_provider,
         model_name,
+        &parent_workspaces,
     )
     .map_err(ToolError::upstream_msg)?;
     // Build parent capabilities from the parent's allowed tools list.
