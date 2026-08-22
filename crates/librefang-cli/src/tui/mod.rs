@@ -461,6 +461,20 @@ impl App {
                 self.goals.status_msg = crate::i18n::t_args("tui-goal-run-stopped", &[("id", &id)]);
                 self.refresh_goals();
             }
+            AppEvent::MemoryConfigSaved(ok) => {
+                self.memory.status_msg = crate::i18n::t(if ok {
+                    "tui-memory-config-saved"
+                } else {
+                    "tui-memory-config-save-failed"
+                });
+                // Re-read rather than trust the local copy: the daemon may
+                // normalise what it stored, and a save that silently differed
+                // from what the screen shows is the bug this panel exists to
+                // prevent.
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_memory_config(backend, self.event_tx.clone());
+                }
+            }
             AppEvent::MemoryConfigLoaded(config) => {
                 self.memory.config = Some(config);
                 self.memory.loading = false;
@@ -1734,6 +1748,21 @@ impl App {
             memory::MemoryUIAction::LoadConfig => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_memory_config(backend, self.event_tx.clone());
+                }
+            }
+            memory::MemoryUIAction::SaveConfig {
+                auto_memorize,
+                auto_retrieve,
+                extraction_model,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_memory_config(
+                        backend,
+                        auto_memorize,
+                        auto_retrieve,
+                        extraction_model,
+                        self.event_tx.clone(),
+                    );
                 }
             }
             memory::MemoryUIAction::LoadKv(agent_id) => {

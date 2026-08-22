@@ -128,6 +128,7 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
+    MemoryConfigSaved(bool),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -1722,6 +1723,42 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                     let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
                 }
             }
+        }
+    });
+}
+
+/// Persist the memory configuration edited in the terminal.
+///
+/// Sends only the fields the panel actually shows, so a PATCH from here
+/// cannot clobber settings the terminal never displayed. An empty
+/// `extraction_model` is sent as an explicit empty string, which is how the
+/// API spells "go back to inheriting the kernel default" — omitting the key
+/// would leave the previous pin in place and the operator would see their
+/// clear silently ignored.
+pub fn spawn_save_memory_config(
+    backend: BackendRef,
+    auto_memorize: bool,
+    auto_retrieve: bool,
+    extraction_model: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = serde_json::json!({
+                "proactive_memory": {
+                    "auto_memorize": auto_memorize,
+                    "auto_retrieve": auto_retrieve,
+                    "extraction_model": extraction_model,
+                }
+            });
+            let ok = client
+                .patch(format!("{base_url}/api/memory/config"))
+                .json(&body)
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            let _ = tx.send(AppEvent::MemoryConfigSaved(ok));
         }
     });
 }
