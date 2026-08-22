@@ -522,7 +522,17 @@
       "name_locked_hint": "이름 변경은 에이전트 헤더에서 해주세요 — 이 필드는 잠겨 있습니다.",
       "inherit_provider": "시스템 기본값 상속",
       "inherit_model": "시스템 기본값 상속",
-      "inherited_value": "현재: {{value}}"
+      "inherited_value": "현재: {{value}}",
+      "memory": "메모리",
+      "memory_override": "이 에이전트의 메모리 설정 재정의",
+      "memory_auto_memorize": "자동으로 기억",
+      "memory_auto_retrieve": "자동으로 회상",
+      "memory_inherit": "상속",
+      "memory_inherit_model": "시스템 설정 상속",
+      "memory_extraction_model": "기억을 작성하는 모델",
+      "memory_extraction_model_hint": "모든 응답 후에 실행되므로 느린 모델은 모든 답변을 지연시킵니다. 비워 두면 시스템 설정을 상속합니다.",
+      "memory_on": "켬",
+      "memory_off": "끔"
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
     "prompts": "프롬프트",

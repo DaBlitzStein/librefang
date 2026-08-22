@@ -81,6 +81,23 @@ export interface ManifestFormState {
     stream_thinking: boolean;
   };
 
+  /**
+   * Per-agent `[proactive_memory]`, which the kernel has read since #5475 and
+   * no surface ever offered.
+   *
+   * Every field is tri-state: "" (or `default`) means "inherit whatever the
+   * kernel-wide `[proactive_memory]` says". That distinction is load-bearing
+   * here — the extraction model runs after every reply, so inheriting a slow
+   * one delays every answer, and an operator needs to be able to pin a fast
+   * model for one talkative agent without touching the global.
+   */
+  proactive_memory: {
+    enabled: boolean;
+    auto_memorize: "default" | "on" | "off";
+    auto_retrieve: "default" | "on" | "off";
+    extraction_model: string;
+  };
+
   autonomous: {
     enabled: boolean;
     max_iterations: string;
@@ -191,6 +208,12 @@ export const emptyManifestForm = (): ManifestFormState => ({
     ofp_discover: false,
   },
   thinking: { enabled: false, budget_tokens: "", stream_thinking: false },
+  proactive_memory: {
+    enabled: false,
+    auto_memorize: "default",
+    auto_retrieve: "default",
+    extraction_model: "",
+  },
   autonomous: {
     enabled: false,
     max_iterations: "",
@@ -255,6 +278,7 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "capabilities",
   "fallback_models",
   "thinking",
+  "proactive_memory",
   "autonomous",
   "routing",
   "context_injection",
@@ -388,6 +412,16 @@ const parseFloatish = (raw: string): number | null => {
   if (!Number.isFinite(n)) return null;
   if (n < 0) return null; // all our float fields are cost/quota — never negative
   return n;
+};
+
+/// A per-agent override that may be absent, which is not the same as false:
+/// absent means "inherit the kernel-wide setting", false means "off for this
+/// agent regardless". Collapsing the two would silently pin every agent to
+/// whatever the global happened to be on the day the form was saved.
+const triState = (value: unknown): "default" | "on" | "off" => {
+  if (value === true) return "on";
+  if (value === false) return "off";
+  return "default";
 };
 
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
@@ -540,6 +574,26 @@ export const serializeManifestForm = (
     writeNumberScalar(body, "budget_tokens", parseInteger(form.thinking.budget_tokens));
     writeBoolScalar(body, "stream_thinking", form.thinking.stream_thinking);
     lines.push("", "[thinking]", ...body);
+  }
+
+  // [proactive_memory]
+  // Only emitted when the row is on: an absent table is what "inherit the
+  // kernel default" looks like on disk, and writing an empty one would turn
+  // an inheritance into a pin of the current values.
+  if (form.proactive_memory.enabled) {
+    const body: string[] = [];
+    if (form.proactive_memory.auto_memorize !== "default") {
+      writeBoolScalar(body, "auto_memorize", form.proactive_memory.auto_memorize === "on");
+    }
+    if (form.proactive_memory.auto_retrieve !== "default") {
+      writeBoolScalar(body, "auto_retrieve", form.proactive_memory.auto_retrieve === "on");
+    }
+    if (form.proactive_memory.extraction_model.trim()) {
+      writeStringScalar(body, "extraction_model", form.proactive_memory.extraction_model.trim());
+    }
+    if (body.length > 0) {
+      lines.push("", "[proactive_memory]", ...body);
+    }
   }
 
   // [autonomous]
@@ -1001,6 +1055,16 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.thinking.enabled = true;
     form.thinking.budget_tokens = asNumberString(parsed.thinking.budget_tokens);
     form.thinking.stream_thinking = asBoolean(parsed.thinking.stream_thinking, false);
+  }
+
+  // [proactive_memory]
+  if (isTomlTable(parsed.proactive_memory)) {
+    const pm = parsed.proactive_memory;
+    form.proactive_memory.enabled = true;
+    form.proactive_memory.auto_memorize = triState(pm.auto_memorize);
+    form.proactive_memory.auto_retrieve = triState(pm.auto_retrieve);
+    form.proactive_memory.extraction_model =
+      typeof pm.extraction_model === "string" ? pm.extraction_model : "";
   }
 
   // [autonomous]

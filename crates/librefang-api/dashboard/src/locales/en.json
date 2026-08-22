@@ -522,7 +522,17 @@
       "name_locked_hint": "Rename from the agent header instead — this field is locked here.",
       "inherit_provider": "Inherit system default",
       "inherit_model": "Inherit system default",
-      "inherited_value": "Currently: {{value}}"
+      "inherited_value": "Currently: {{value}}",
+      "memory": "Memory",
+      "memory_override": "Override memory settings for this agent",
+      "memory_auto_memorize": "Remember automatically",
+      "memory_auto_retrieve": "Recall automatically",
+      "memory_inherit": "Inherit",
+      "memory_inherit_model": "Inherit system setting",
+      "memory_extraction_model": "Model that writes memories",
+      "memory_extraction_model_hint": "Runs after every reply, so a slow model here delays every answer. Leave empty to inherit the system setting.",
+      "memory_on": "On",
+      "memory_off": "Off"
     },
     "delete_confirm": "Are you sure you want to delete agent \"{{name}}\"?",
     "prompts": "Prompts",

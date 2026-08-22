@@ -522,7 +522,17 @@
       "name_locked_hint": "请在智能体标题处重命名——此字段在此处已锁定。",
       "inherit_provider": "继承系统默认值",
       "inherit_model": "继承系统默认值",
-      "inherited_value": "当前：{{value}}"
+      "inherited_value": "当前：{{value}}",
+      "memory": "记忆",
+      "memory_override": "为该智能体覆盖记忆设置",
+      "memory_auto_memorize": "自动记住",
+      "memory_auto_retrieve": "自动回忆",
+      "memory_inherit": "继承",
+      "memory_inherit_model": "继承系统设置",
+      "memory_extraction_model": "撰写记忆的模型",
+      "memory_extraction_model_hint": "在每次回复后运行，因此此处使用较慢的模型会拖慢每一次回答。留空则继承系统设置。",
+      "memory_on": "开",
+      "memory_off": "关"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",

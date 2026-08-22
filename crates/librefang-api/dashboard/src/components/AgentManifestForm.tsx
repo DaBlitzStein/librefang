@@ -76,6 +76,9 @@ interface AgentManifestFormProps {
 /** The manifest sentinel meaning "inherit the kernel's `[default_model]`". */
 const INHERIT_SENTINEL = "default";
 
+/** Select value that reveals the free-text field for a model the catalog does not list. */
+const CUSTOM_EXTRACTION = "__custom__";
+
 export function AgentManifestForm({
   value,
   onChange,
@@ -104,6 +107,13 @@ export function AgentManifestForm({
     onChange({ ...value, capabilities: { ...value.capabilities, ...patch } });
   const updateThinking = (patch: Partial<ManifestFormState["thinking"]>): void =>
     onChange({ ...value, thinking: { ...value.thinking, ...patch } });
+  const updateProactiveMemory = (
+    patch: Partial<ManifestFormState["proactive_memory"]>,
+  ): void =>
+    onChange({
+      ...value,
+      proactive_memory: { ...value.proactive_memory, ...patch },
+    });
   const updateAutonomous = (patch: Partial<ManifestFormState["autonomous"]>): void =>
     onChange({ ...value, autonomous: { ...value.autonomous, ...patch } });
   const updateRouting = (patch: Partial<ManifestFormState["routing"]>): void =>
@@ -721,6 +731,124 @@ export function AgentManifestForm({
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_fallback")}
         </button>
+      </CollapsibleSection>
+
+      <CollapsibleSection title={t("agents.form.memory")} defaultOpen={false}>
+        {/* The kernel has honoured a per-agent `[proactive_memory]` since
+            #5475 and no surface ever offered it, so the only way to change
+            which model writes an agent's memories was the global setting --
+            which every other agent shares. That matters because extraction
+            runs after every reply: a model fast enough for one agent may be
+            the reason another one takes minutes to answer. */}
+        <Toggle
+          label={t("agents.form.memory_override", {
+            defaultValue: "Override memory settings for this agent",
+          })}
+          checked={value.proactive_memory.enabled}
+          onChange={(checked) => updateProactiveMemory({ enabled: checked })}
+        />
+        {value.proactive_memory.enabled && (
+          <div className="space-y-3 mt-2">
+            <div className="grid grid-cols-2 gap-3">
+              <Field
+                label={t("agents.form.memory_auto_memorize", {
+                  defaultValue: "Remember automatically",
+                })}
+              >
+                <select
+                  value={value.proactive_memory.auto_memorize}
+                  onChange={(e) =>
+                    updateProactiveMemory({
+                      auto_memorize: e.target
+                        .value as ManifestFormState["proactive_memory"]["auto_memorize"],
+                    })
+                  }
+                  className={inputClass}
+                >
+                  <option value="default">
+                    {t("agents.form.memory_inherit", { defaultValue: "Inherit" })}
+                  </option>
+                  <option value="on">{t("agents.form.memory_on", { defaultValue: "On" })}</option>
+                  <option value="off">{t("agents.form.memory_off", { defaultValue: "Off" })}</option>
+                </select>
+              </Field>
+              <Field
+                label={t("agents.form.memory_auto_retrieve", {
+                  defaultValue: "Recall automatically",
+                })}
+              >
+                <select
+                  value={value.proactive_memory.auto_retrieve}
+                  onChange={(e) =>
+                    updateProactiveMemory({
+                      auto_retrieve: e.target
+                        .value as ManifestFormState["proactive_memory"]["auto_retrieve"],
+                    })
+                  }
+                  className={inputClass}
+                >
+                  <option value="default">
+                    {t("agents.form.memory_inherit", { defaultValue: "Inherit" })}
+                  </option>
+                  <option value="on">{t("agents.form.memory_on", { defaultValue: "On" })}</option>
+                  <option value="off">{t("agents.form.memory_off", { defaultValue: "Off" })}</option>
+                </select>
+              </Field>
+            </div>
+            <Field
+              label={t("agents.form.memory_extraction_model", {
+                defaultValue: "Model that writes memories",
+              })}
+              hint={t("agents.form.memory_extraction_model_hint", {
+                defaultValue:
+                  "Runs after every reply, so a slow model here delays every answer. Leave empty to inherit the system setting.",
+              })}
+            >
+              <select
+                value={
+                  models.some((m) => m.id === value.proactive_memory.extraction_model)
+                    ? value.proactive_memory.extraction_model
+                    : value.proactive_memory.extraction_model
+                      ? CUSTOM_EXTRACTION
+                      : ""
+                }
+                onChange={(e) => {
+                  const v = e.target.value;
+                  updateProactiveMemory({
+                    extraction_model: v === CUSTOM_EXTRACTION ? "" : v,
+                  });
+                }}
+                className={inputClass}
+              >
+                <option value="">
+                  {t("agents.form.memory_inherit_model", {
+                    defaultValue: "Inherit system setting",
+                  })}
+                </option>
+                {models.map((m) => (
+                  <option key={`${m.provider}/${m.id}`} value={m.id}>
+                    {m.id} ({m.provider})
+                  </option>
+                ))}
+                <option value={CUSTOM_EXTRACTION}>
+                  {t("common.custom", { defaultValue: "Custom" })}
+                </option>
+              </select>
+              {value.proactive_memory.extraction_model !== "" &&
+                !models.some((m) => m.id === value.proactive_memory.extraction_model) && (
+                  <input
+                    type="text"
+                    value={value.proactive_memory.extraction_model}
+                    onChange={(e) =>
+                      updateProactiveMemory({ extraction_model: e.target.value })
+                    }
+                    placeholder="provider:model"
+                    className={`${inputClass} mt-2`}
+                  />
+                )}
+            </Field>
+          </div>
+        )}
       </CollapsibleSection>
 
       <CollapsibleSection title={t("agents.form.thinking")} defaultOpen={false}>

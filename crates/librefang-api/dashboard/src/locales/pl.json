@@ -522,7 +522,17 @@
       "name_locked_hint": "Zmień nazwę w nagłówku agenta — to pole jest tutaj zablokowane.",
       "inherit_provider": "Dziedzicz domyślne ustawienie systemu",
       "inherit_model": "Dziedzicz domyślne ustawienie systemu",
-      "inherited_value": "Obecnie: {{value}}"
+      "inherited_value": "Obecnie: {{value}}",
+      "memory": "Pamięć",
+      "memory_override": "Nadpisz ustawienia pamięci dla tego agenta",
+      "memory_auto_memorize": "Zapamiętuj automatycznie",
+      "memory_auto_retrieve": "Przypominaj automatycznie",
+      "memory_inherit": "Dziedzicz",
+      "memory_inherit_model": "Dziedzicz ustawienie systemu",
+      "memory_extraction_model": "Model zapisujący wspomnienia",
+      "memory_extraction_model_hint": "Uruchamia się po każdej odpowiedzi, więc wolny model opóźnia każdą odpowiedź. Zostaw puste, aby dziedziczyć ustawienie systemu.",
+      "memory_on": "Wł.",
+      "memory_off": "Wył."
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",

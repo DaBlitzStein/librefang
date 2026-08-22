@@ -844,3 +844,102 @@ params = { region = "us" }
     expect(reparsed.extras).toEqual(parsed.extras);
   });
 });
+
+/**
+ * The kernel has honoured a per-agent `[proactive_memory]` since #5475 —
+ * including its own `extraction_model` — and no surface ever offered it, so
+ * the only way to change which model writes an agent's memories was the
+ * global setting every other agent shares.
+ *
+ * That is not a cosmetic gap. Extraction runs after every reply, so a model
+ * fast enough for one agent can be the reason another takes minutes to
+ * answer; on a live deployment it was, for over two minutes per turn.
+ */
+describe("agentManifest per-agent memory", () => {
+  it("keeps the section out of the file while the row is off", () => {
+    const form = emptyManifestForm();
+    form.name = "deannatroi";
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+
+    // An absent table is what "inherit the kernel default" looks like on
+    // disk. Emitting an empty one would turn an inheritance into a pin.
+    expect(toml).not.toContain("[proactive_memory]");
+  });
+
+  it("writes only the fields the operator actually set", () => {
+    const form = emptyManifestForm();
+    form.name = "deannatroi";
+    form.proactive_memory.enabled = true;
+    form.proactive_memory.extraction_model = "litellm:sensor-model-generic";
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+
+    expect(toml).toContain("[proactive_memory]");
+    expect(toml).toContain('extraction_model = "litellm:sensor-model-generic"');
+    // Left on Inherit, so they must not appear — writing `false` would turn
+    // "follow the global" into "off for this agent forever".
+    expect(toml).not.toContain("auto_memorize");
+    expect(toml).not.toContain("auto_retrieve");
+  });
+
+  it("distinguishes off from inherit", () => {
+    const form = emptyManifestForm();
+    form.name = "quiet-agent";
+    form.proactive_memory.enabled = true;
+    form.proactive_memory.auto_memorize = "off";
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+
+    expect(toml).toContain("auto_memorize = false");
+    expect(toml).not.toContain("auto_retrieve");
+  });
+
+  it("survives the round trip", () => {
+    const form = emptyManifestForm();
+    form.name = "deannatroi";
+    form.proactive_memory.enabled = true;
+    form.proactive_memory.auto_memorize = "on";
+    form.proactive_memory.auto_retrieve = "off";
+    form.proactive_memory.extraction_model = "litellm:sensor-model-generic";
+
+    const parsed = parseManifestToml(serializeManifestForm(form, emptyManifestExtras()));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const reparsed = parsed.form;
+
+    expect(reparsed.proactive_memory.enabled).toBe(true);
+    expect(reparsed.proactive_memory.auto_memorize).toBe("on");
+    expect(reparsed.proactive_memory.auto_retrieve).toBe("off");
+    expect(reparsed.proactive_memory.extraction_model).toBe("litellm:sensor-model-generic");
+  });
+
+  it("reads an existing manifest that only overrides one field", () => {
+    const parsed = parseManifestToml(
+      ['name = "deannatroi"', "", "[proactive_memory]", "auto_memorize = false"].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const form = parsed.form;
+
+    expect(form.proactive_memory.enabled).toBe(true);
+    expect(form.proactive_memory.auto_memorize).toBe("off");
+    // Absent means inherit, not off — collapsing the two would silently pin
+    // every agent to whatever the global happened to be on save day.
+    expect(form.proactive_memory.auto_retrieve).toBe("default");
+    expect(form.proactive_memory.extraction_model).toBe("");
+  });
+
+  it("does not strand the section in extras", () => {
+    const parsed = parseManifestToml(
+      ['name = "deannatroi"', "", "[proactive_memory]", 'extraction_model = "x:y"'].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const extras = parsed.extras;
+
+    // A known section that lands in extras round-trips as opaque text and the
+    // form silently stops owning it.
+    expect(extras.topLevel).not.toHaveProperty("proactive_memory");
+  });
+});
