@@ -368,9 +368,20 @@ pub(super) async fn tool_agent_spawn(
             parent_agent_id: None,
         };
 
+        // `spawn_ephemeral_detailed`, not `spawn_ephemeral`: the detailed form
+        // exists precisely so the run's cost and iteration count come back with
+        // the response, which is what makes an ephemeral worker's spend
+        // attributable to the parent that asked for it. Calling the text-only
+        // form here discarded that metering at the one call site that needed
+        // it — the same budget-attribution gap this branch set out to close.
+        //
+        // The trait's default for `_detailed` delegates to `spawn_ephemeral`,
+        // so an implementation that only wires the text path still works; it
+        // just reports no cost.
         return kh
-            .spawn_ephemeral(request, parent_id)
+            .spawn_ephemeral_detailed(request, parent_id)
             .await
+            .map(|result| result.response)
             .map_err(ToolError::upstream);
     }
 
