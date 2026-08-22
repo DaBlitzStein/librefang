@@ -1228,6 +1228,18 @@ tui-triggers-type-channelmessage-desc = 通道收到消息时触发
 
 # --- Memory screen ---
 tui-memory-title-screen = 记忆
+tui-memory-config-remembering = 记住什么
+tui-memory-config-auto-memorize = 自动记住
+tui-memory-config-auto-retrieve = 自动回忆
+tui-memory-config-extraction-model = 撰写记忆的模型
+tui-memory-config-inherited = （继承自系统默认值）
+tui-memory-config-searching = 如何检索记忆
+tui-memory-config-embedding-provider = 检索提供方
+tui-memory-config-embedding-model = 检索模型
+tui-memory-config-on = 开
+tui-memory-config-off = 关
+tui-memory-config-loading = 正在读取配置...
+tui-memory-config-hint =   r 刷新 · Esc 返回
 tui-memory-label-select-agent =   选择一个 Agent 以浏览其记忆:
 tui-memory-header-agent-name = Agent 名称
 tui-memory-header-id = ID

@@ -2172,6 +2172,18 @@ tui-triggers-type-channelmessage-desc = Повідомлення, отриман
 
 # --- Memory screen ---
 tui-memory-title-screen = Пам'ять
+tui-memory-config-remembering = Що запам'ятовується
+tui-memory-config-auto-memorize = Запам'ятовувати автоматично
+tui-memory-config-auto-retrieve = Пригадувати автоматично
+tui-memory-config-extraction-model = Модель, що пише спогади
+tui-memory-config-inherited = (успадковано від типової моделі системи)
+tui-memory-config-searching = Як шукаються спогади
+tui-memory-config-embedding-provider = Провайдер пошуку
+tui-memory-config-embedding-model = Модель пошуку
+tui-memory-config-on = увімк.
+tui-memory-config-off = вимк.
+tui-memory-config-loading = Читання конфігурації...
+tui-memory-config-hint =   r оновити · Esc назад
 tui-memory-label-select-agent =   Виберіть агента для перегляду його пам'яті:
 tui-memory-header-agent-name = Ім'я агента
 tui-memory-header-id = ID

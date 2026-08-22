@@ -461,6 +461,10 @@ impl App {
                 self.goals.status_msg = crate::i18n::t_args("tui-goal-run-stopped", &[("id", &id)]);
                 self.refresh_goals();
             }
+            AppEvent::MemoryConfigLoaded(config) => {
+                self.memory.config = Some(config);
+                self.memory.loading = false;
+            }
             AppEvent::MemoryAgentsLoaded(agents) => {
                 self.memory.agents = agents;
                 if !self.memory.agents.is_empty() {
@@ -1727,6 +1731,11 @@ impl App {
         match action {
             memory::MemoryUIAction::Continue => {}
             memory::MemoryUIAction::LoadAgents => self.refresh_memory(),
+            memory::MemoryUIAction::LoadConfig => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_memory_config(backend, self.event_tx.clone());
+                }
+            }
             memory::MemoryUIAction::LoadKv(agent_id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     self.memory.loading = true;

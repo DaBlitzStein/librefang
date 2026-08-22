@@ -67,7 +67,10 @@ pub enum AppEvent {
     /// The kernel failed to boot.
     KernelError(String),
     /// An agent was successfully spawned (daemon mode).
-    AgentSpawned { id: String, name: String },
+    AgentSpawned {
+        id: String,
+        name: String,
+    },
     /// Agent spawn failed.
     AgentSpawnError(String),
     /// Daemon detection result from background thread.
@@ -109,7 +112,9 @@ pub enum AppEvent {
     /// Trigger deleted.
     TriggerDeleted(String),
     /// Agent killed successfully.
-    AgentKilled { id: String },
+    AgentKilled {
+        id: String,
+    },
     /// Agent kill failed.
     AgentKillError(String),
     /// Generic fetch error for any tab.
@@ -122,10 +127,13 @@ pub enum AppEvent {
     SessionDeleted(String),
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
+    MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
-    MemoryKvSaved { key: String },
+    MemoryKvSaved {
+        key: String,
+    },
     /// Memory KV deleted.
     MemoryKvDeleted(String),
     /// Skills loaded.
@@ -143,7 +151,10 @@ pub enum AppEvent {
     /// Security features loaded.
     SecurityLoaded(Vec<SecurityFeature>),
     /// Security chain verification result.
-    SecurityChainVerified { valid: bool, message: String },
+    SecurityChainVerified {
+        valid: bool,
+        message: String,
+    },
     /// Audit entries loaded (full audit screen).
     AuditEntriesLoaded(Vec<AuditEntry>),
     /// Audit chain verified.
@@ -248,7 +259,10 @@ pub enum AppEvent {
 
     // ── Async chat helpers (previously blocking on the event-loop thread) ──
     /// Agent model label fetched for chat header.
-    ChatModelLabelLoaded { agent_id: String, label: String },
+    ChatModelLabelLoaded {
+        agent_id: String,
+        label: String,
+    },
     /// Model list loaded for the model picker in chat.
     ChatModelsForPicker(Vec<super::screens::chat::ModelEntry>),
     /// Agent list loaded for the /agents chat command.
@@ -1674,6 +1688,44 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
 }
 
 /// Fetch agents for memory screen agent selector.
+/// Fetch the memory configuration for the terminal's config panel.
+///
+/// Reads `effective_extraction_model` and `extraction_model_source` rather
+/// than the raw `extraction_model`: unset means "inherit the kernel default",
+/// so the raw field answers "nobody chose one" instead of naming the model
+/// that runs after every reply.
+///
+/// Daemon-only. The in-process backend has no HTTP surface to ask, and the
+/// panel says so rather than showing a blank as if it were configuration.
+pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/memory/config")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let pm = &body["proactive_memory"];
+                    let view = crate::tui::screens::memory::MemoryConfigView {
+                        embedding_provider: body["embedding_provider"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        embedding_model: body["embedding_model"].as_str().unwrap_or("").to_string(),
+                        auto_memorize: pm["auto_memorize"].as_bool().unwrap_or(false),
+                        auto_retrieve: pm["auto_retrieve"].as_bool().unwrap_or(false),
+                        effective_extraction_model: pm["effective_extraction_model"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        extraction_model_inherited: pm["extraction_model_source"].as_str()
+                            == Some("inherited_default"),
+                    };
+                    let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
+                }
+            }
+        }
+    });
+}
+
 pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
