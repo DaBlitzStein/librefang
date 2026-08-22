@@ -517,7 +517,10 @@
       "schema_name_placeholder": "mój_schemat",
       "remove_fallback": "usuń opcję awaryjną",
       "remove_context_injection": "usuń wstrzykiwanie kontekstu",
-      "name_locked_hint": "Zmień nazwę w nagłówku agenta — to pole jest tutaj zablokowane."
+      "name_locked_hint": "Zmień nazwę w nagłówku agenta — to pole jest tutaj zablokowane.",
+      "inherit_provider": "Dziedzicz domyślne ustawienie systemu",
+      "inherit_model": "Dziedzicz domyślne ustawienie systemu",
+      "inherited_value": "Obecnie: {{value}}"
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",

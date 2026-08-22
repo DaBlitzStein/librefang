@@ -517,7 +517,10 @@
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "대체 제거",
       "remove_context_injection": "컨텍스트 주입 제거",
-      "name_locked_hint": "이름 변경은 에이전트 헤더에서 해주세요 — 이 필드는 잠겨 있습니다."
+      "name_locked_hint": "이름 변경은 에이전트 헤더에서 해주세요 — 이 필드는 잠겨 있습니다.",
+      "inherit_provider": "시스템 기본값 상속",
+      "inherit_model": "시스템 기본값 상속",
+      "inherited_value": "현재: {{value}}"
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
     "prompts": "프롬프트",

@@ -57,7 +57,24 @@ interface AgentManifestFormProps {
    * editor exists to eliminate elsewhere. Defaults to false (create flow).
    */
   nameLocked?: boolean;
+  /**
+   * The kernel's `[default_model]`, from `GET /api/status`.
+   *
+   * A manifest may carry the literal sentinel `"default"` for provider and
+   * model, meaning "whatever the system default is". The form used to render
+   * that as an unmatched `<select>` value, so the editor showed `default` — a
+   * word that names no model and no provider — while every other screen showed
+   * the real one. Two screens disagreeing about the same agent reads as a bug
+   * even though the manifest was correct.
+   *
+   * Optional: without it the sentinel is still labelled as inherited, just
+   * without naming the model it resolves to.
+   */
+  systemDefaultModel?: { provider?: string; model?: string };
 }
+
+/** The manifest sentinel meaning "inherit the kernel's `[default_model]`". */
+const INHERIT_SENTINEL = "default";
 
 export function AgentManifestForm({
   value,
@@ -70,8 +87,12 @@ export function AgentManifestForm({
   toolCatalog,
   mcpCatalog,
   nameLocked = false,
+  systemDefaultModel,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
+
+  const providerInherits = value.model.provider === INHERIT_SENTINEL;
+  const modelInherits = value.model.model === INHERIT_SENTINEL;
 
   // Curried setters for the nested-state update boilerplate.
   const update = (patch: Partial<ManifestFormState>): void => onChange({ ...value, ...patch });
@@ -194,12 +215,27 @@ export function AgentManifestForm({
               className={inputClass}
             >
               <option value="">{t("agents.form.select_provider")}</option>
+              {/* The sentinel needs a real option, or the select renders an
+                  unmatched value and the row reads as blank-or-broken. */}
+              <option value={INHERIT_SENTINEL}>
+                {t("agents.form.inherit_provider", {
+                  defaultValue: "Inherit system default",
+                })}
+              </option>
               {providers.map((p) => (
                 <option key={p.name} value={p.name}>
                   {p.name}
                 </option>
               ))}
             </select>
+            {providerInherits && systemDefaultModel?.provider && (
+              <p className="text-[11px] text-text-dim mt-1">
+                {t("agents.form.inherited_value", {
+                  defaultValue: "Currently: {{value}}",
+                  value: systemDefaultModel.provider,
+                })}
+              </p>
+            )}
           </Field>
           <Field label={t("agents.form.model_id")} required invalid={invalidFields.has("model.model")}>
             {filteredModels.length > 0 ? (
@@ -209,6 +245,11 @@ export function AgentManifestForm({
                 className={inputClass}
               >
                 <option value="">{t("agents.form.select_model")}</option>
+                <option value={INHERIT_SENTINEL}>
+                  {t("agents.form.inherit_model", {
+                    defaultValue: "Inherit system default",
+                  })}
+                </option>
                 {filteredModels.map((m) => (
                   <option key={`${m.provider}/${m.id}`} value={m.id}>
                     {m.id}
@@ -223,6 +264,14 @@ export function AgentManifestForm({
                 placeholder={t("agents.form.model_id_placeholder")}
                 className={inputClass}
               />
+            )}
+            {modelInherits && systemDefaultModel?.model && (
+              <p className="text-[11px] text-text-dim mt-1">
+                {t("agents.form.inherited_value", {
+                  defaultValue: "Currently: {{value}}",
+                  value: systemDefaultModel.model,
+                })}
+              </p>
             )}
           </Field>
         </div>

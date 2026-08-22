@@ -36,6 +36,7 @@ import type {
   EphemeralResult,
 } from "../api";
 import { useAgentTypes, useAgentType } from "../lib/queries/agentTypes";
+import { useSystemStatus } from "../lib/queries/runtime";
 import {
   useCreateAgentType,
   useUpdateAgentType,
@@ -69,6 +70,8 @@ const withChannelsExtra = (topLevel: TomlTable, channels: string[]): TomlTable =
 
 export function AgentTypesPage() {
   const { t } = useTranslation();
+  // Same as the running-agent editor: name what `"default"` resolves to.
+  const systemStatusQuery = useSystemStatus();
   const { data: types, isLoading, isFetching, refetch } = useAgentTypes();
   const skillsQuery = useSkills();
   const toolsQuery = useTools();
@@ -352,6 +355,10 @@ export function AgentTypesPage() {
           <div className="space-y-4">
             <div className="max-h-[65vh] overflow-y-auto pr-1 space-y-4">
               <AgentManifestForm
+                  systemDefaultModel={{
+                    provider: systemStatusQuery.data?.default_provider,
+                    model: systemStatusQuery.data?.default_model,
+                  }}
                 value={formState}
                 onChange={setFormState}
                 providers={providerOptions}

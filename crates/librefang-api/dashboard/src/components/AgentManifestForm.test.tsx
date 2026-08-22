@@ -13,7 +13,14 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (_key: string, opts?: { defaultValue?: string } | Record<string, unknown>) => {
       if (opts && typeof opts === "object" && "defaultValue" in opts) {
-        return (opts as { defaultValue?: string }).defaultValue ?? _key;
+        const template = (opts as { defaultValue?: string }).defaultValue ?? _key;
+        // Interpolate `{{name}}` from the same options bag, as i18next does.
+        // Returning the raw template would let a test assert on placeholder
+        // text and pass while the real UI renders a different string.
+        return template.replace(/\{\{(\w+)\}\}/g, (whole, name: string) => {
+          const v = (opts as Record<string, unknown>)[name];
+          return v === undefined ? whole : String(v);
+        });
       }
       return _key;
     },
@@ -26,12 +33,14 @@ function Harness({
   mcpCatalog,
   initialState,
   invalidFields = new Set(),
+  systemDefaultModel,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
   mcpCatalog?: ManifestCatalogEntry[];
   initialState?: ManifestFormState;
   invalidFields?: Set<string>;
+  systemDefaultModel?: { provider?: string; model?: string };
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
@@ -45,6 +54,7 @@ function Harness({
       skillCatalog={skillCatalog}
       toolCatalog={toolCatalog}
       mcpCatalog={mcpCatalog}
+      systemDefaultModel={systemDefaultModel}
     />
   );
 }
@@ -237,5 +247,78 @@ describe("AgentManifestForm — compact controls", () => {
     expect(
       screen.getByRole("checkbox", { name: "agents.form.stream_thinking" }),
     ).toBeInTheDocument();
+  });
+});
+
+/**
+ * A manifest may carry the literal string `"default"` for provider and model,
+ * meaning "inherit the kernel's `[default_model]`". The form used to have no
+ * matching `<option>`, so the select rendered an unmatched value: the editor
+ * showed `default` — a word naming neither a provider nor a model — while
+ * every other screen showed the real one. Two screens disagreeing about the
+ * same agent reads as a bug even when the manifest is correct.
+ *
+ * This is the exact confusion a user hit on a live deployment: "cuando edito
+ * el agente de profesor me aparece que el modelo es default. Cuando en todo lo
+ * demás aparece que el modelo es el litellm blablabla-high".
+ */
+describe("AgentManifestForm — inherited model", () => {
+  const inheriting = (): ManifestFormState => {
+    const state = emptyManifestForm();
+    state.model = { ...state.model, provider: "default", model: "default" };
+    return state;
+  };
+
+  // `Field` wraps its label in a <span>, not a <label>, so these selects carry
+  // no accessible name. Reach them through the option instead — which is also
+  // what the assertion is really about.
+  const selectOffering = (optionName: string): HTMLSelectElement => {
+    const option = screen.getByRole("option", { name: optionName });
+    const select = option.closest("select");
+    if (!select) throw new Error(`option "${optionName}" is not inside a select`);
+    return select as HTMLSelectElement;
+  };
+
+  it("offers the inherit sentinel as a real option instead of an unmatched value", () => {
+    render(<Harness initialState={inheriting()} />);
+
+    // Without a matching <option> a select shows its first entry, so the
+    // stored sentinel silently became "select a provider".
+    expect(selectOffering("Inherit system default").value).toBe("default");
+  });
+
+  it("names the provider and model the agent will actually run", () => {
+    render(
+      <Harness
+        initialState={inheriting()}
+        systemDefaultModel={{ provider: "litellm", model: "sensor-model-generic-high" }}
+      />,
+    );
+
+    expect(screen.getByText("Currently: litellm")).toBeInTheDocument();
+    expect(screen.getByText("Currently: sensor-model-generic-high")).toBeInTheDocument();
+  });
+
+  it("says nothing extra when the agent pins its own model", () => {
+    const state = emptyManifestForm();
+    state.model = { ...state.model, provider: "openai", model: "gpt-4o" };
+
+    render(
+      <Harness
+        initialState={state}
+        systemDefaultModel={{ provider: "litellm", model: "sensor-model-generic-high" }}
+      />,
+    );
+
+    // Showing the system default beside an explicit choice would imply the
+    // choice is being ignored.
+    expect(screen.queryByText(/^Currently: /)).toBeNull();
+  });
+
+  it("labels the sentinel but invents no value when the default is unknown", () => {
+    render(<Harness initialState={inheriting()} />);
+
+    expect(selectOffering("Inherit system default").value).toBe("default");
+    expect(screen.queryByText(/^Currently: /)).toBeNull();
   });
 });

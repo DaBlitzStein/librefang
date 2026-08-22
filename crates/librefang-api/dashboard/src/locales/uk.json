@@ -517,7 +517,10 @@
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "видалити fallback",
       "remove_context_injection": "видалити інʼєкцію контексту",
-      "name_locked_hint": "Перейменуйте через заголовок агента — це поле тут заблоковане."
+      "name_locked_hint": "Перейменуйте через заголовок агента — це поле тут заблоковане.",
+      "inherit_provider": "Успадкувати типове значення системи",
+      "inherit_model": "Успадкувати типове значення системи",
+      "inherited_value": "Зараз: {{value}}"
     },
     "delete_confirm": "Ви впевнені, що хочете видалити агента \"{{name}}\"?",
     "prompts": "Промпти",

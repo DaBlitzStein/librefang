@@ -517,7 +517,10 @@
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "移除 fallback",
       "remove_context_injection": "移除上下文注入",
-      "name_locked_hint": "请在智能体标题处重命名——此字段在此处已锁定。"
+      "name_locked_hint": "请在智能体标题处重命名——此字段在此处已锁定。",
+      "inherit_provider": "继承系统默认值",
+      "inherit_model": "继承系统默认值",
+      "inherited_value": "当前：{{value}}"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",

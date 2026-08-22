@@ -51,6 +51,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useSystemStatus } from "../lib/queries/runtime";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { AgentSkillItem } from "../components/AgentSkillItem";
@@ -485,6 +486,10 @@ export function ChannelsSection({ agentId }: { agentId: string }) {
 
 export function AgentsPage() {
   const { t } = useTranslation();
+  // Resolves the `"default"` sentinel a manifest may carry for provider
+  // and model, so the editor names the model the agent will actually run
+  // instead of echoing a word that names nothing.
+  const systemStatusQuery = useSystemStatus();
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
@@ -3404,6 +3409,10 @@ export function AgentsPage() {
             ) : (
               <div className="max-h-[65vh] overflow-y-auto pr-1">
                 <AgentManifestForm
+                  systemDefaultModel={{
+                    provider: systemStatusQuery.data?.default_provider,
+                    model: systemStatusQuery.data?.default_model,
+                  }}
                   value={manifestEditorFormState}
                   onChange={setManifestEditorFormState}
                   providers={formProviderOptions}
@@ -3644,6 +3653,10 @@ export function AgentsPage() {
           {createMode === "form" ? (
             <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4 max-h-[60vh] overflow-y-auto pr-1">
               <AgentManifestForm
+                  systemDefaultModel={{
+                    provider: systemStatusQuery.data?.default_provider,
+                    model: systemStatusQuery.data?.default_model,
+                  }}
                 value={formState}
                 onChange={setFormState}
                 providers={formProviderOptions}
