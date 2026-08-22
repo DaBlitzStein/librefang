@@ -113,6 +113,14 @@ pub struct Session {
     pub context_window_tokens: u64,
     /// Optional human-readable session label.
     pub label: Option<String>,
+    /// The session this one was spawned from, when it was (#7752).
+    ///
+    /// A sub-agent run hangs off the session that asked for it: the parent can
+    /// enumerate what it delegated, and deleting the parent takes its children
+    /// with it, so a disposable run can leave an audit trail without leaving
+    /// an orphan. `None` for every ordinary session, which is almost all of
+    /// them.
+    pub parent_session_id: Option<SessionId>,
     /// Per-session model override (issue #4898).
     ///
     /// When `Some`, `run_agent_loop` / `run_agent_loop_streaming` shadow
@@ -352,6 +360,12 @@ impl SessionStore {
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
+                    // Not round-tripped through `Session`: parentage is written
+                    // once on insert and never included in the DO UPDATE clause,
+                    // so a load-then-save cannot clobber it. Readers that need
+                    // the relation query the column directly, which is what
+                    // enumerating a parent's children does anyway.
+                    parent_session_id: None,
                     messages,
                     context_window_tokens: tokens as u64,
                     label,
@@ -417,6 +431,12 @@ impl SessionStore {
                     Session {
                         id: session_id,
                         agent_id,
+                        // Not round-tripped through `Session`: parentage is written
+                        // once on insert and never included in the DO UPDATE clause,
+                        // so a load-then-save cannot clobber it. Readers that need
+                        // the relation query the column directly, which is what
+                        // enumerating a parent's children does anyway.
+                        parent_session_id: None,
                         messages,
                         context_window_tokens: tokens as u64,
                         label,
@@ -525,9 +545,15 @@ impl SessionStore {
         // construction time, so the `idx_sessions_peer(agent_id, peer_id)`
         // index actually carries something.
         tx.execute(
-            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, peer_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
-             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, messages_generation = ?7, peer_id = ?8, updated_at = ?9",
+            // `parent_session_id` is written on insert but deliberately NOT
+            // in the DO UPDATE clause: a session's parentage is decided when
+            // it is created and never changes. Re-writing it on every save
+            // would let a later save with a stale value silently reparent a
+            // run, which is exactly the kind of quiet corruption an audit
+            // trail must not have.
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, peer_id, parent_session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, messages_generation = ?7, peer_id = ?8, updated_at = ?10",
             rusqlite::params![
                 session_id_str,
                 session.agent_id.0.to_string(),
@@ -537,6 +563,7 @@ impl SessionStore {
                 message_count,
                 session.messages_generation as i64,
                 session.peer_id.as_deref(),
+                session.parent_session_id.as_ref().map(|p| p.0.to_string()),
                 now,
             ],
         )
@@ -1134,6 +1161,9 @@ impl SessionStore {
         let session = Session {
             id: SessionId::new(),
             agent_id,
+            // A freshly created session has no parent. The ephemeral-spawn
+            // path sets it explicitly on the session it builds.
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
@@ -1236,6 +1266,12 @@ impl SessionStore {
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
+                    // Not round-tripped through `Session`: parentage is written
+                    // once on insert and never included in the DO UPDATE clause,
+                    // so a load-then-save cannot clobber it. Readers that need
+                    // the relation query the column directly, which is what
+                    // enumerating a parent's children does anyway.
+                    parent_session_id: None,
                     messages,
                     context_window_tokens: tokens as u64,
                     label: lbl,
@@ -1312,6 +1348,9 @@ impl SessionStore {
         let session = Session {
             id: SessionId::new(),
             agent_id,
+            // A freshly created session has no parent. The ephemeral-spawn
+            // path sets it explicitly on the session it builds.
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: label.map(|s| s.to_string()),
@@ -3086,6 +3125,9 @@ mod tests {
         let recreated = Session {
             id,
             agent_id,
+            // A freshly created session has no parent. The ephemeral-spawn
+            // path sets it explicitly on the session it builds.
+            parent_session_id: None,
             messages: vec![Message::user("second incarnation phrase")],
             context_window_tokens: 0,
             label: None,
@@ -3989,6 +4031,9 @@ mod tests {
         let session = Session {
             id: session_id,
             agent_id,
+            // A freshly created session has no parent. The ephemeral-spawn
+            // path sets it explicitly on the session it builds.
+            parent_session_id: None,
             messages: vec![Message::user("ciao Ambrogio")],
             context_window_tokens: 0,
             label: Some("whatsapp:+393760105565".to_string()),
@@ -4046,6 +4091,9 @@ mod tests {
         let canonical = Session {
             id: canonical_sid,
             agent_id,
+            // A freshly created session has no parent. The ephemeral-spawn
+            // path sets it explicitly on the session it builds.
+            parent_session_id: None,
             messages: vec![Message::user("canonical")],
             context_window_tokens: 0,
             label: None,

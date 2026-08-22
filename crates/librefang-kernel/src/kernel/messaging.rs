@@ -508,13 +508,19 @@ fn tightest_cost_quota(
 /// `LoopOptions` for an ephemeral worker turn.
 ///
 /// Factored out as a free function so the persistence contract is testable
-/// without an LLM driver: `incognito` MUST stay `true` here (#6930 review).
-/// The ephemeral worker's `agent_id` is a throwaway UUID with no registry
-/// entry, and the agent-loop persistence guards are
-/// `if !ctx.opts.is_fork && !ctx.opts.incognito`, so with `incognito: false`
-/// every run wrote a `sessions` row and an episodic-memory row under that
-/// orphan id — permanently, on a path advertised as leaving no trace and
-/// designed to be called cheaply in a loop.
+/// without an LLM driver.
+///
+/// `incognito` was forced to `true` here (#6930 review) for a good reason: the
+/// worker's `agent_id` is a throwaway UUID with no registry entry, so with
+/// `incognito: false` every run wrote a `sessions` row and an episodic-memory
+/// row under an orphan id — permanently, on a path designed to be called
+/// cheaply in a loop. Unreachable rows nobody could read or clean.
+///
+/// That reason is now gone (#7752). The run's session carries
+/// `parent_session_id`, so the row hangs off the conversation that asked for
+/// it: the parent can enumerate what it delegated, and deleting the parent
+/// takes its children with it. Persisting is what makes a delegated run
+/// auditable after the fact; the orphan was the problem, not the write.
 fn ephemeral_loop_options(
     cfg: &librefang_types::config::KernelConfig,
     max_iterations: Option<u32>,
@@ -522,7 +528,7 @@ fn ephemeral_loop_options(
 ) -> librefang_runtime::agent_loop::LoopOptions {
     librefang_runtime::agent_loop::LoopOptions {
         is_fork: false,
-        incognito: true,
+        incognito: false,
         allowed_tools: None,
         interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
         max_iterations,
@@ -764,6 +770,8 @@ impl LibreFangKernel {
         let mut ephemeral_session = librefang_memory::session::Session {
             id: ephemeral_session_id,
             agent_id,
+            // Ordinary session, not a delegated sub-agent run.
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
@@ -1084,10 +1092,23 @@ impl LibreFangKernel {
             );
         }
 
+        // The run hangs off whichever session the parent had when it asked
+        // (#7752). Reading the registry here is a snapshot, and deliberately
+        // so: if the parent switches session mid-flight, the delegated work
+        // still belongs to the conversation that requested it, not to whatever
+        // the parent happens to be doing when the worker finishes.
+        //
+        // `None` when the caller has no registered parent — an operator-driven
+        // spawn over HTTP has no conversation to attach to, and inventing one
+        // would file the run under a session that never asked for it.
+        let parent_session_id =
+            parent.and_then(|p| self.agents.registry.get(p).map(|e| e.session_id));
+
         // Empty in-memory session
         let mut session = librefang_memory::session::Session {
             id: SessionId::new(),
             agent_id,
+            parent_session_id,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: Some(format!("ephemeral:{agent_name}")),
@@ -2970,6 +2991,8 @@ impl LibreFangKernel {
         let mut session = existing_session.unwrap_or_else(|| librefang_memory::session::Session {
             id: effective_session_id,
             agent_id,
+            // Ordinary session, not a delegated sub-agent run.
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
@@ -4638,15 +4661,25 @@ mod tests {
         assert_eq!(merged.max_cost_per_month_usd, 20.0);
     }
 
-    /// #6930 — the ephemeral worker's turn must not persist anything.
+    /// #7752 — the ephemeral worker's turn IS recorded, under its parent.
     ///
-    /// The agent-loop persistence guards are
-    /// `if !opts.is_fork && !opts.incognito`, so `incognito: false` made
-    /// `end_turn` write a `sessions` row and an episodic-memory row under the
-    /// worker's throwaway `agent_id`, which has no registry entry — orphan
-    /// rows, forever, on a path advertised as leaving no DB trace.
+    /// #6930 forced `incognito: true` here, and was right to at the time: the
+    /// worker's `agent_id` is a throwaway with no registry entry, so a write
+    /// left a `sessions` row nothing could look up and nothing could clean —
+    /// orphans, forever, on a path designed to be called cheaply in a loop.
+    ///
+    /// That reason is gone. The worker's session now carries
+    /// `parent_session_id`, so the row hangs off the conversation that asked
+    /// for the work: the parent can enumerate what it delegated, and deleting
+    /// the parent takes its children with it. The orphan was the problem, not
+    /// the write, and a delegated run that leaves no record cannot be audited
+    /// afterwards.
+    ///
+    /// Both guards are asserted, not just the one that changed: the agent loop
+    /// skips persistence when `is_fork || incognito`, so leaving either set
+    /// would silently undo this.
     #[tokio::test(flavor = "multi_thread")]
-    async fn ephemeral_loop_options_suppress_persistence() {
+    async fn ephemeral_loop_options_record_the_run() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().to_path_buf();
         let kernel = boot_kernel_at(&home);
@@ -4655,11 +4688,14 @@ mod tests {
         let cfg = kernel.config.load();
         let opts = super::ephemeral_loop_options(&cfg, Some(1), kernel.llm.aux_client.load_full());
         assert!(
-            opts.incognito,
-            "ephemeral turns must run incognito so end_turn skips save_session_async \
-             and remember_interaction_best_effort"
+            !opts.incognito,
+            "a delegated run that leaves no record cannot be audited afterwards"
         );
-        assert!(!opts.is_fork, "an ephemeral worker is not a fork");
+        assert!(
+            !opts.is_fork,
+            "an ephemeral worker is not a fork: it has its own manifest, so it \
+             must not inherit the parent's prompt prefix or tool allowlist"
+        );
         assert_eq!(opts.max_iterations, Some(1));
     }
 

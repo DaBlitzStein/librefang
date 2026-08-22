@@ -413,6 +413,8 @@ impl ContextCompressor {
         let temp_session = Session {
             id: SessionId::new(),
             agent_id: AgentId::new(),
+            // A synthesised session for compression work, not a delegated run.
+            parent_session_id: None,
             messages: middle.to_vec(),
             context_window_tokens: 0,
             label: None,
