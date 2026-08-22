@@ -125,6 +125,9 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "hostname": hostname,
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
+        // The WebUI reads this on its status poll to set its client-side
+        // timeout for long-running calls (agent messages, workflow runs).
+        "webui_request_timeout_secs": cfg.webui_request_timeout_secs,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "agents": agents,
     }))

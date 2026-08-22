@@ -4060,6 +4060,17 @@ pub struct KernelConfig {
     /// Terminal / CLI access control configuration.
     #[serde(default)]
     pub terminal: TerminalConfig,
+    /// How long the WebUI's own HTTP client waits on long-running requests
+    /// (agent messages, workflow runs, plugin installs) before aborting and
+    /// showing "Request timeout after Ns — operation may still be running".
+    ///
+    /// Client-side by design: the daemon keeps running the turn after the
+    /// abort, and the operator can raise this for slow models (e.g. a
+    /// reasoning model that legitimately needs minutes per turn).
+    /// Restart-required (the value is served over /api/status from the
+    /// config snapshot).
+    #[serde(default = "default_webui_request_timeout_secs")]
+    pub webui_request_timeout_secs: u64,
     /// Direct tool-invocation endpoint allowlist. Fail-closed: the
     /// `POST /api/tools/{name}/invoke` route rejects every request unless
     /// `tool_invoke.enabled` is `true` and the tool name matches a pattern
@@ -6682,6 +6693,8 @@ impl Default for KernelConfig {
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
             terminal: TerminalConfig::default(),
+            webui_request_timeout_secs: 300,
+
             tool_invoke: ToolInvokeConfig::default(),
             parallel_tools: ParallelToolsConfig::default(),
             tool_results: ToolResultsConfig::default(),
@@ -7485,6 +7498,10 @@ pub struct TerminalConfig {
     /// Optional explicit path to the `tmux` binary. If None, resolve via PATH.
     #[serde(default)]
     pub tmux_binary_path: Option<String>,
+}
+
+fn default_webui_request_timeout_secs() -> u64 {
+    300
 }
 
 fn default_terminal_enabled() -> bool {
@@ -8846,5 +8863,28 @@ mod group_config_tests {
             !out.contains("[[groups]]"),
             "an empty list must not emit an array-of-tables header"
         );
+    }
+}
+
+#[cfg(test)]
+mod webui_timeout_tests {
+    use super::*;
+
+    /// The WebUI's own request timeout is client-side, so the daemon only
+    /// serves the value. A config without the key must keep working — every
+    /// existing deployment is one.
+    #[test]
+    fn webui_request_timeout_defaults_to_300() {
+        let cfg: KernelConfig = toml::from_str("").expect("an empty config must parse");
+        assert_eq!(cfg.webui_request_timeout_secs, 300);
+    }
+
+    /// An operator with a slow reasoning model raises it; the value must
+    /// survive the parse and be what /api/status serves.
+    #[test]
+    fn webui_request_timeout_is_configurable() {
+        let cfg: KernelConfig = toml::from_str("webui_request_timeout_secs = 600")
+            .expect("a hand-written knob must parse");
+        assert_eq!(cfg.webui_request_timeout_secs, 600);
     }
 }

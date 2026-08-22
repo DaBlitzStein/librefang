@@ -817,6 +817,17 @@ pub fn build_reload_plan_with_caps(
         // wiring (`tmux_enabled` / `tmux_binary_path`) is captured once at
         // server construction (server.rs). Conservative: restart-required.
         restart_if_changed(field_changed(&old.terminal, &new.terminal), "terminal");
+        // Served over /api/status from the config snapshot; a reload does not
+        // push it into the live snapshot, so restart-required like terminal.
+        restart_if_changed(
+            field_changed(
+                &old.webui_request_timeout_secs,
+                &new.webui_request_timeout_secs,
+            ),
+            "webui_request_timeout_secs",
+        ); // The identity model (membership) is not re-telegraphed in place:
+           // restart-required, like users.
+        restart_if_changed(field_changed(&old.groups, &new.groups), "groups");
     }
 
     // -- NOOP: read live from `config_ref()` / `self.config.load()` per
@@ -1006,6 +1017,8 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "provider_regions",
         "tool_policy",
         "users",
+        "groups",
+        "webui_request_timeout_secs",
         "proactive_memory",
         "queue",
         "budget",

@@ -33,6 +33,12 @@ export interface StatusResponse {
   hostname?: string;
   network_enabled?: boolean;
   terminal_enabled?: boolean;
+  /**
+   * The daemon's configured client-side timeout for long-running WebUI
+   * calls, in seconds. Absent on older daemons — the 300 s constant is the
+   * fallback.
+   */
+  webui_request_timeout_secs?: number;
   session_count?: number;
   config_exists?: boolean;
 }
@@ -1085,6 +1091,20 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_POST_TIMEOUT_MS = 60_000;
 const LONG_RUNNING_TIMEOUT_MS = 300_000;
 
+// The daemon may serve a configured value over /api/status; until it does,
+// the constant above is the fallback. A module-level override keeps every
+// existing call site untouched — they go through the getter.
+let configuredLongRunningTimeoutMs: number | null = null;
+
+export function setWebUiRequestTimeoutSecs(secs: number | undefined) {
+  configuredLongRunningTimeoutMs =
+    secs && Number.isFinite(secs) && secs > 0 ? secs * 1000 : null;
+}
+
+export function getLongRunningTimeoutMs() {
+  return configuredLongRunningTimeoutMs ?? LONG_RUNNING_TIMEOUT_MS;
+}
+
 // Global 401 handler — set by App.tsx to trigger login screen
 let _onUnauthorized: (() => void) | null = null;
 let _unauthorizedFired = false;
@@ -1798,7 +1818,7 @@ export async function sendAgentMessage(
   return post<AgentMessageResponse>(
     `/api/agents/${encodeURIComponent(agentId)}/message`,
     body,
-    LONG_RUNNING_TIMEOUT_MS,
+    getLongRunningTimeoutMs(),
   );
 }
 
@@ -2001,7 +2021,7 @@ export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; 
     method: "POST",
     headers: buildHeaders({ "Content-Type": audioBlob.type || "audio/webm" }),
     body: audioBlob,
-  }, LONG_RUNNING_TIMEOUT_MS);
+  }, getLongRunningTimeoutMs());
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -2033,7 +2053,7 @@ export async function uploadAgentFile(agentId: string, file: File): Promise<Agen
       }),
       body: file,
     },
-    LONG_RUNNING_TIMEOUT_MS,
+    getLongRunningTimeoutMs(),
   );
   if (!response.ok) {
     throw await parseError(response);
@@ -2184,7 +2204,7 @@ export async function listTools(): Promise<ToolDefinition[]> {
 }
 
 export async function installSkill(name: string, hand?: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/skills/install", { name, hand }, LONG_RUNNING_TIMEOUT_MS);
+  return post<ApiActionResponse>("/api/skills/install", { name, hand }, getLongRunningTimeoutMs());
 }
 
 export async function uninstallSkill(name: string): Promise<ApiActionResponse> {
@@ -2436,7 +2456,7 @@ export async function clawhubInstall(slug: string, version?: string, hand?: stri
   return post<ApiActionResponse>(
     "/api/clawhub/install",
     { slug, version: version || "latest", hand },
-    LONG_RUNNING_TIMEOUT_MS
+    getLongRunningTimeoutMs()
   );
 }
 
@@ -2462,7 +2482,7 @@ export async function clawhubCnInstall(slug: string, version?: string, hand?: st
   return post<ApiActionResponse>(
     "/api/clawhub-cn/install",
     { slug, version: version || "latest", hand },
-    LONG_RUNNING_TIMEOUT_MS
+    getLongRunningTimeoutMs()
   );
 }
 
@@ -2480,7 +2500,7 @@ export async function skillhubBrowse(sort?: string): Promise<ClawHubBrowseRespon
 }
 
 export async function skillhubInstall(slug: string, hand?: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/skillhub/install", { slug, hand }, LONG_RUNNING_TIMEOUT_MS);
+  return post<ApiActionResponse>("/api/skillhub/install", { slug, hand }, getLongRunningTimeoutMs());
 }
 
 export async function skillhubGetSkill(slug: string): Promise<ClawHubSkillDetail> {
@@ -2589,7 +2609,7 @@ export async function runWorkflow(
 ): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/run`, {
     input
-  }, LONG_RUNNING_TIMEOUT_MS); // 5 min timeout — workflows run multiple LLM steps
+  }, getLongRunningTimeoutMs()); // 5 min timeout — workflows run multiple LLM steps
 }
 
 /** Re-run a previous workflow run with the same input parameters. */
@@ -3931,7 +3951,7 @@ export async function spawnEphemeral(
   return post<EphemeralResult>(
     "/api/agents/spawn-ephemeral",
     body,
-    LONG_RUNNING_TIMEOUT_MS,
+    getLongRunningTimeoutMs(),
   );
 }
 
@@ -4119,7 +4139,7 @@ export async function sendHandMessage(instanceId: string, message: string): Prom
   return post<HandMessageResponse>(
     `/api/hands/instances/${encodeURIComponent(instanceId)}/message`,
     { message },
-    LONG_RUNNING_TIMEOUT_MS
+    getLongRunningTimeoutMs()
   );
 }
 
@@ -4521,7 +4541,7 @@ export async function getPlugin(name: string): Promise<PluginItem> {
 }
 
 export async function installPlugin(source: { source: string; name?: string; path?: string; url?: string; branch?: string; github_repo?: string }): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/plugins/install", source, LONG_RUNNING_TIMEOUT_MS);
+  return post<ApiActionResponse>("/api/plugins/install", source, getLongRunningTimeoutMs());
 }
 
 export async function uninstallPlugin(name: string): Promise<ApiActionResponse> {
@@ -4540,7 +4560,7 @@ export async function installPluginDeps(name: string): Promise<ApiActionResponse
   return post<ApiActionResponse>(
     `/api/plugins/${encodeURIComponent(name)}/install-deps`,
     {},
-    LONG_RUNNING_TIMEOUT_MS
+    getLongRunningTimeoutMs()
   );
 }
 

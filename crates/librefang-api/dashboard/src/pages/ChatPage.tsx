@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
 import { messageIn, fadeInUp } from "../lib/motion";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocket } from "../api";
+import { buildAuthenticatedWebSocket, getLongRunningTimeoutMs } from "../api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { ApiError, clearAgentHistory } from "../lib/http/client";
@@ -771,7 +771,7 @@ function useChatMessages(
                     { id: makeMessageId("sys"), role: "system" as const, content: data.message || "Compaction started…", timestamp: new Date() },
                   ]);
                   // Compaction can take longer than 30s — give it 5 minutes.
-                  timer = setTimeout(() => { ctrl.abort(); }, 5 * 60_000);
+                  timer = setTimeout(() => { ctrl.abort(); }, getLongRunningTimeoutMs());
                   return;
                 }
                 if (data.type === "compaction:complete" || data.type === "compaction:error") {

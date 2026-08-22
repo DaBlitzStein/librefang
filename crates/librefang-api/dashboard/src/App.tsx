@@ -1,5 +1,7 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSystemStatus } from "./lib/queries/runtime";
+import { setWebUiRequestTimeoutSecs } from "./api";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { fadeInScale, pageTransition } from "./lib/motion";
@@ -1426,6 +1428,14 @@ function DashboardApp() {
 }
 
 export function App() {
+  // The daemon serves its configured WebUI request timeout over /api/status;
+  // push it into the shared HTTP client so long-running calls (agent
+  // messages, workflow runs) abort at the operator's value rather than the
+  // hardcoded 300 s. Absent on older daemons — the client keeps its default.
+  const { data: status } = useSystemStatus();
+  useEffect(() => {
+    setWebUiRequestTimeoutSecs(status?.webui_request_timeout_secs);
+  }, [status?.webui_request_timeout_secs]);
   return (
     <MotionConfig reducedMotion="user">
       <DashboardApp />
