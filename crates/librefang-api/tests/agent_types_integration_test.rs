@@ -512,33 +512,75 @@ async fn prod_request(
         .status()
 }
 
-/// The five CRUD routes are reachable through the router the daemon builds.
+/// Both agent-type paths are reachable through the router the daemon builds.
 ///
-/// This asserts registration, not behaviour: anything other than 404 means
-/// `server.rs` mounted the route. The handler-level contracts are covered by
-/// the direct-router tests above.
+/// The probe is a method the path deliberately does *not* serve. axum answers
+/// 405 when it knows the path but not the method, and 404 when it does not
+/// know the path at all — so the two cases separate cleanly.
+///
+/// Asking a served method instead cannot tell them apart: `GET
+/// /api/templates/does-not-exist` answers 404 whether the route is missing or
+/// merely the agent type is, which is what an earlier version of this test got
+/// wrong. It asserted "anything but 404 means mounted" and would have passed a
+/// deleted merge.
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_type_routes_are_registered_in_the_production_router() {
     let h = boot_production_router("admin-key", vec![("admin", "admin", "admin-key")]).await;
 
-    for (method, path) in [
-        (Method::GET, "/api/templates"),
-        (Method::GET, "/api/templates/does-not-exist"),
-        (Method::POST, "/api/templates"),
-        (Method::PUT, "/api/templates/does-not-exist"),
-        (Method::DELETE, "/api/templates/does-not-exist"),
+    for (unserved_method, path, served) in [
+        // `/api/templates` serves GET and POST.
+        (Method::DELETE, "/api/templates", "GET, POST"),
+        // `/api/templates/{name}` serves GET, PUT and DELETE.
+        (
+            Method::POST,
+            "/api/templates/does-not-exist",
+            "GET, PUT, DELETE",
+        ),
     ] {
-        let body = matches!(method, Method::POST | Method::PUT)
-            .then(|| serde_json::json!({"name": "does-not-exist"}));
-        let status = prod_request(&h, method.clone(), path, Some("admin-key"), body).await;
-        assert_ne!(
+        let status = prod_request(&h, unserved_method.clone(), path, Some("admin-key"), None).await;
+        assert_eq!(
             status,
-            StatusCode::NOT_FOUND,
-            "{method} {path} is not mounted by server::build_router — \
-             a missing merge in api_v1_routes() would 404 in the daemon \
-             while every direct-router test still passes"
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{unserved_method} {path} should be 405 because the path is mounted \
+             and serves {served}; a 404 means server::build_router never merged \
+             it and the daemon would 404 while every direct-router test above \
+             still passes"
         );
     }
+}
+
+/// The served methods reach their handlers rather than a router miss.
+///
+/// Registration alone is not enough: a path can be mounted with the wrong
+/// method set and still 405 the one the dashboard actually calls. This pins
+/// the list and create verbs, which is what the editor needs on load and save.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_type_list_and_create_verbs_reach_their_handlers() {
+    let h = boot_production_router("admin-key", vec![("admin", "admin", "admin-key")]).await;
+
+    let listed = prod_request(&h, Method::GET, "/api/templates", Some("admin-key"), None).await;
+    assert_eq!(listed, StatusCode::OK, "GET /api/templates must list");
+
+    // A create with a body the handler rejects still proves POST is routed:
+    // the handler answered, so the verb is not 405 and not a router miss.
+    let created = prod_request(
+        &h,
+        Method::POST,
+        "/api/templates",
+        Some("admin-key"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_ne!(
+        created,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "POST /api/templates reached the router but not the create handler"
+    );
+    assert_ne!(
+        created,
+        StatusCode::NOT_FOUND,
+        "POST /api/templates is not mounted at all"
+    );
 }
 
 /// An unauthenticated caller cannot write agent types.
