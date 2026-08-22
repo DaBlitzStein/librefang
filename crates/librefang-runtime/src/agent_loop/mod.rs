@@ -776,6 +776,18 @@ async fn run_agent_loop_inner(
         combined_prefix.as_deref(),
     );
 
+    // Persist the inbound message before the first LLM call. The turn can
+    // die long before the first interim save (daemon restart, a provider
+    // that hangs, a circuit breaker that opens) and a session that loses the
+    // operator's message is the worst failure mode of all: the conversation
+    // forgets what was asked, silently. Same guards as the interim save —
+    // fork and incognito turns stay ephemeral even on mid-turn crashes.
+    if !opts.is_fork && !opts.incognito {
+        if let Err(e) = memory.save_session_async(session).await {
+            warn!("Failed to save inbound message: {e}");
+        }
+    }
+
     let max_history = resolve_max_history(manifest, opts);
     let PreparedMessages {
         mut messages,

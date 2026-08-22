@@ -2301,3 +2301,116 @@ fn redact_images_for_text_only_is_noop_without_images() {
         "messages without image blocks must pass through unchanged"
     );
 }
+
+/// A driver that checks, on its very first LLM call, whether the session
+/// row — including the inbound message — is already in the DB.
+///
+/// The inbound save is the guarantee that a turn killed before its first
+/// tool (daemon restart, provider hang) still leaves the operator's message
+/// behind. Asserting "the row exists after the loop" cannot prove that: the
+/// failure path saves too, so such a test passes even with the fix removed.
+/// The only observable property is timing — the row must exist BEFORE the
+/// first LLM call, and this driver is the witness.
+struct SnitchDriver {
+    memory: Arc<librefang_memory::MemorySubstrate>,
+    session_id: librefang_types::agent::SessionId,
+    persisted_before_first_call: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl LlmDriver for SnitchDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        if let Ok(Some(_)) = self.memory.get_session(self.session_id) {
+            self.persisted_before_first_call
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(CompletionResponse {
+            content: vec![ContentBlock::Text {
+                text: "Hello from the agent!".to_string(),
+                provider_metadata: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            tool_calls: vec![],
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 8,
+                ..Default::default()
+            },
+            actual_provider: None,
+            actual_model: None,
+        })
+    }
+}
+
+/// The inbound message must be in the DB before the first LLM call.
+///
+/// The session save used to happen only after a tool execution (interim save)
+/// or at a successful end-turn, so a turn that died before either — provider
+/// error, daemon restart, circuit breaker opening — lost the operator's
+/// message entirely: the conversation silently forgot what was asked.
+#[tokio::test]
+async fn test_inbound_message_is_persisted_before_the_first_llm_call() {
+    let memory = Arc::new(librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap());
+    let agent_id = librefang_types::agent::AgentId::new();
+    let session_id = librefang_types::agent::SessionId::new();
+    let mut session = librefang_memory::session::Session {
+        id: session_id,
+        agent_id,
+        parent_session_id: None,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let manifest = test_manifest();
+    let snitch = Arc::new(SnitchDriver {
+        memory: memory.clone(),
+        session_id,
+        persisted_before_first_call: std::sync::atomic::AtomicBool::new(false),
+    });
+    let driver: Arc<dyn LlmDriver> = snitch.clone();
+
+    let _ = run_agent_loop(
+        &manifest,
+        "Say hello",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &LoopOptions::default(),
+    )
+    .await;
+
+    assert!(
+        snitch
+            .persisted_before_first_call
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the session row must already be in the DB when the first LLM call \
+         happens — a turn killed before that point would lose the operator's \
+         message"
+    );
+}
