@@ -112,6 +112,7 @@ memory_write = ["self.*"]
     // Create a 2-step workflow referencing agents by name
     let workflow = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "alpha-beta-pipeline".to_string(),
         description: "Tests agent resolution by name".to_string(),
         steps: vec![
@@ -215,6 +216,7 @@ memory_write = ["self.*"]
 
     let workflow = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "by-id-test".to_string(),
         description: "".to_string(),
         steps: vec![WorkflowStep {
@@ -358,6 +360,7 @@ async fn test_workflow_e2e_with_groq() {
     // Create a 2-step pipeline: analyst → writer
     let workflow = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "analyst-writer-pipeline".to_string(),
         description: "E2E integration test workflow".to_string(),
         steps: vec![
@@ -465,6 +468,7 @@ async fn workflow_describe_returns_explicit_input_schema() {
 
     let workflow = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "publish-article".to_string(),
         description: "Draft + cover image + post".to_string(),
         steps: vec![WorkflowStep {
@@ -540,6 +544,7 @@ async fn workflow_describe_auto_detects_from_template_placeholders() {
 
     let workflow = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "legacy-flow".to_string(),
         description: "Old-style flow with no input_schema block".to_string(),
         steps: vec![
@@ -621,6 +626,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
     // (a) Workflow with explicit schema.
     let explicit = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "explicit".to_string(),
         description: "".to_string(),
         steps: vec![WorkflowStep {
@@ -653,6 +659,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
     // (b) Workflow without schema, but step prompt has {{var}}.
     let implicit = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "implicit".to_string(),
         description: "".to_string(),
         steps: vec![WorkflowStep {
@@ -680,6 +687,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
     // (c) Workflow with no parametric input at all.
     let none = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "none".to_string(),
         description: "".to_string(),
         steps: vec![WorkflowStep {
@@ -755,6 +763,7 @@ async fn workflow_engine_substitutes_input_schema_vars_into_step_prompt() {
 
     let workflow = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "publish-with-cover".to_string(),
         description: "Rich-input workflow for #4982 regression".to_string(),
         steps: vec![WorkflowStep {

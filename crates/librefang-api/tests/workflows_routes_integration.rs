@@ -2173,3 +2173,86 @@ async fn schedule_update_accepts_unchanged_peer_id_and_session_mode() {
     assert_eq!(detail["peer_id"], before["peer_id"]);
     assert_eq!(detail["session_mode"], before["session_mode"]);
 }
+
+/// An update must not silently reassign ownership (#7744).
+///
+/// `PUT` rebuilds the whole `Workflow`, so a field the client cannot send is
+/// reset unless the handler carries it over. Ownership reset on edit would
+/// hand a team's workflow to whoever touched it last — the exact failure the
+/// field exists to prevent, arriving through the door meant to be harmless.
+///
+/// The workflow is seeded through the kernel with an owner already on it,
+/// rather than created over HTTP. An earlier version of this test used the
+/// route, which left `owner` unset because the harness has no authenticated
+/// caller — so it compared null to null and passed even with the preservation
+/// deleted. A guard that cannot fail is worse than no guard: it reads as
+/// coverage.
+#[tokio::test(flavor = "multi_thread")]
+async fn editing_a_workflow_does_not_change_who_owns_it() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let wf_id = h
+        ._state
+        .kernel
+        .register_workflow(librefang_kernel::workflow::Workflow {
+            id: librefang_kernel::workflow::WorkflowId::new(),
+            name: "owned".to_string(),
+            description: "before".to_string(),
+            steps: vec![librefang_kernel::workflow::WorkflowStep {
+                name: "one".to_string(),
+                agent: librefang_kernel::workflow::StepAgent::ById {
+                    id: agent_id.clone(),
+                },
+                prompt_template: "go".to_string(),
+                mode: Default::default(),
+                timeout_secs: 120,
+                error_mode: Default::default(),
+                output_var: None,
+                inherit_context: None,
+                depends_on: Vec::new(),
+                session_mode: None,
+                required_skills: Vec::new(),
+            }],
+            owner: Some(librefang_types::principal::Principal::Group(
+                "support".into(),
+            )),
+            created_at: chrono::Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        })
+        .await;
+
+    let (_, before) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(
+        before["owner"]["id"], "support",
+        "the fixture must actually be owned, or this test proves nothing: {before:?}"
+    );
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/workflows/{wf_id}"),
+        // A full replacement body, which is the point: `owner` is absent from
+        // it, so nothing the client sends can carry ownership through. If the
+        // handler did not preserve it, it would be gone below.
+        Some(serde_json::json!({
+            "name": "owned",
+            "description": "after",
+            "steps": [{"name": "one", "agent_id": agent_id, "prompt": "go"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (_, after) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(
+        after["description"], "after",
+        "the edit must actually apply, or this test proves nothing"
+    );
+    assert_eq!(
+        after["owner"], before["owner"],
+        "an edit must leave ownership exactly as it was"
+    );
+}

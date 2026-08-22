@@ -16,6 +16,7 @@ use super::*;
 )]
 pub async fn create_workflow(
     State(state): State<Arc<AppState>>,
+    caller: Option<axum::extract::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let name = req["name"].as_str().unwrap_or("unnamed").to_string();
@@ -88,11 +89,25 @@ pub async fn create_workflow(
     let total_timeout_secs = req["total_timeout_secs"].as_u64();
     let input_schema = parse_input_schema(req.get("input_schema"));
 
+    // The authenticated caller owns what they asked to be built (#7744).
+    //
+    // A user principal, not a group: this route only knows who authenticated,
+    // and inferring a group from membership would pick wrong the moment the
+    // caller belongs to two. Attribution to a group is an explicit choice the
+    // caller can make later; the default is the person.
+    //
+    // Unauthenticated (loopback, no API key) leaves it unowned: attributing it
+    // to a placeholder would be a claim the system cannot support.
+    let owner = caller
+        .as_ref()
+        .map(|c| librefang_types::principal::Principal::User(c.name.clone()));
+
     let workflow = Workflow {
         id: WorkflowId::new(),
         name,
         description,
         steps,
+        owner,
         created_at: chrono::Utc::now(),
         layout,
         total_timeout_secs,
@@ -416,11 +431,14 @@ pub async fn update_workflow(
         existing.input_schema.clone()
     };
 
+    // Ownership is not part of the edit surface: an update that silently
+    // reset it would hand the workflow to whoever edited it last.
     let updated = Workflow {
         id: workflow_id,
         name,
         description,
         steps,
+        owner: existing.owner.clone(),
         created_at: existing.created_at,
         layout,
         total_timeout_secs,

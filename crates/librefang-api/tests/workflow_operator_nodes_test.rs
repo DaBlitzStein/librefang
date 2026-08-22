@@ -74,6 +74,7 @@ fn boot() -> TestAppState {
 fn workflow_with_op_step(name: &str, mode: StepMode) -> Workflow {
     Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: name.to_string(),
         description: "operator-node integration test".to_string(),
         steps: vec![WorkflowStep {
@@ -727,6 +728,7 @@ fn branch_skip_workflow(literal: &str, target_name: &str, target_template: &str)
     };
     Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: format!("branch-skip-{literal}"),
         description: "branch executor integration test".to_string(),
         steps: vec![
@@ -1022,6 +1024,7 @@ async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
     };
     let workflow = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "branch-ambiguous".to_string(),
         description: "duplicate target name guard".to_string(),
         steps: vec![
@@ -1172,6 +1175,7 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
     };
     let wf = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "dag-plus-operator".to_string(),
         description: "must be rejected at validate time".to_string(),
         steps: vec![producer, op],
@@ -1226,6 +1230,7 @@ async fn dry_run_reports_operator_nodes_as_found_with_synthetic_agent_names() {
     };
     let wf = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "dry-run-operators".to_string(),
         description: "dry_run operator-node preview test".to_string(),
         steps: vec![
@@ -1325,6 +1330,7 @@ async fn dry_run_marks_unparseable_transform_template_as_skipped() {
 
     let wf = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "dry-run-bad-transform".to_string(),
         description: "dry_run surfaces template syntax errors".to_string(),
         steps: vec![WorkflowStep {
@@ -1397,6 +1403,7 @@ async fn dry_run_transform_advances_current_input_for_downstream_previews() {
     // pre-fix this would have echoed the seed verbatim.
     let wf = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "dry-run-transform-feeds-wait".to_string(),
         description: "Transform output must flow into downstream {{input}}".to_string(),
         steps: vec![

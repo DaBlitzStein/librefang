@@ -208,6 +208,9 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
             })
         }).collect::<Vec<_>>(),
         "created_at": w.created_at.to_rfc3339(),
+        // Who the workflow belongs to (#7744). Emitted even when absent so
+        // clients can distinguish "unowned" from "the field is not modelled".
+        "owner": w.owner.as_ref().map(|o| serde_json::to_value(o).unwrap_or(serde_json::Value::Null)),
         "layout": w.layout,
         "total_timeout_secs": w.total_timeout_secs,
         "input_schema": w.input_schema.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)),

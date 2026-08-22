@@ -90,6 +90,7 @@ async fn json_request(
 fn produce_then_operator(actions: Vec<OperatorAction>) -> Workflow {
     Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "op-action-it".to_string(),
         description: "hitl http test".to_string(),
         steps: vec![
@@ -374,6 +375,7 @@ async fn operator_http_non_operator_pause_is_409() {
     // is Paused but NOT at an operator step.
     let wf = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "plain".to_string(),
         description: String::new(),
         steps: vec![WorkflowStep {
@@ -512,6 +514,7 @@ async fn operator_http_inspect_non_operator_pause_is_409() {
     // but not at an operator step.
     let wf = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "plain".to_string(),
         description: String::new(),
         steps: vec![WorkflowStep {

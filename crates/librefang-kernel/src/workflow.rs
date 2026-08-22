@@ -182,6 +182,19 @@ pub struct Workflow {
     /// Created at.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
+    /// Who this workflow belongs to (#7744).
+    ///
+    /// The agent that ran `workflow_create` is the executor, not the owner:
+    /// an agent acts on behalf of someone, and what it creates belongs to that
+    /// someone. The call was already logged, but a log line is not ownership —
+    /// logs rotate and the workflow outlives them.
+    ///
+    /// `None` for everything created before this existed, and for anything
+    /// created without a caller to attribute it to. Absent means unowned, not
+    /// owned-by-nobody-in-particular: guessing an owner is worse than
+    /// admitting there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<librefang_types::principal::Principal>,
     /// Optional canvas layout data (nodes, edges, positions) for the visual editor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<serde_json::Value>,
@@ -6163,6 +6176,10 @@ struct WorkflowFile {
     steps: Vec<WorkflowStep>,
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
+    /// Who the workflow belongs to (#7744), so ownership survives the trip to
+    /// disk and back. Absent on every file written before this existed.
+    #[serde(default)]
+    owner: Option<librefang_types::principal::Principal>,
     /// Optional declared parameter list parsed from TOML / YAML
     /// `[[input_schema]]` blocks (#4982 — gap 2). When absent, the
     /// `workflow_describe` tool falls back to auto-detecting from
@@ -6179,6 +6196,7 @@ impl From<WorkflowFile> for Workflow {
             description: f.description,
             steps: f.steps,
             created_at: f.created_at.unwrap_or_else(Utc::now),
+            owner: f.owner,
             layout: None,
             total_timeout_secs: None,
             input_schema: f.input_schema,
@@ -6795,6 +6813,7 @@ impl WorkflowTemplateRegistry {
             description: template.description.clone(),
             steps,
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7063,6 +7082,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7117,6 +7137,7 @@ mod tests {
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7298,6 +7319,7 @@ mod tests {
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7400,6 +7422,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7466,6 +7489,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7514,6 +7538,7 @@ mod tests {
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7569,6 +7594,7 @@ mod tests {
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7629,6 +7655,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7688,6 +7715,7 @@ mod tests {
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7773,6 +7801,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -7859,6 +7888,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -8017,6 +8047,7 @@ mod tests {
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: Some(vec![
@@ -8129,6 +8160,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -8476,6 +8508,7 @@ mod tests {
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -9278,6 +9311,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -9427,6 +9461,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -9730,6 +9765,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -9786,6 +9822,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -10591,6 +10628,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -11048,6 +11086,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -11161,6 +11200,7 @@ prompt_template = "do {{x}}"
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: Some(1), // 1 second total timeout
             input_schema: None,
@@ -11320,6 +11360,7 @@ prompt_template = "do {{x}}"
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -11409,6 +11450,7 @@ prompt_template = "do {{x}}"
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -11463,6 +11505,7 @@ prompt_template = "do {{x}}"
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -12097,6 +12140,7 @@ name = "topic"
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -12590,6 +12634,7 @@ name = "topic"
                 session_mode: None,
             }],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
@@ -13083,6 +13128,7 @@ name = "topic"
                 },
             ],
             created_at: Utc::now(),
+            owner: None,
             layout: None,
             total_timeout_secs: None,
             input_schema: None,

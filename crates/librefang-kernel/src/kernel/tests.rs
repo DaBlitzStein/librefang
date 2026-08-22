@@ -7354,6 +7354,7 @@ fn depth_probe_workflow() -> crate::workflow::Workflow {
     use crate::workflow::{ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep};
     Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "depth-probe".to_string(),
         description: "one step targeting an unregistered agent".to_string(),
         steps: vec![WorkflowStep {
@@ -7480,6 +7481,7 @@ fn by_type_probe_workflow(template: &str) -> crate::workflow::Workflow {
     use crate::workflow::{ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep};
     Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "by-type-probe".to_string(),
         description: "one step referencing an agent type".to_string(),
         steps: vec![WorkflowStep {

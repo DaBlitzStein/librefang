@@ -748,6 +748,7 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
     // call, recording a failed StepResult with a populated `error`.
     let wf = Workflow {
         id: WorkflowId::new(),
+        owner: None,
         name: "transform-fail".to_string(),
         description: String::new(),
         steps: vec![WorkflowStep {
