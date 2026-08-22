@@ -392,6 +392,44 @@ impl std::str::FromStr for UpdateChannel {
     }
 }
 
+/// A named set of users that can own things (#7745).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupConfig {
+    /// Stable identifier used wherever a group is referenced.
+    ///
+    /// Referenced by ownership records rather than the display name, because a
+    /// group gets renamed ("Support" becomes "Customer Success") far more
+    /// often than it gets dissolved, and a rename must not orphan everything
+    /// the group owns.
+    pub id: String,
+    /// Human-readable name, safe to change.
+    pub name: String,
+    /// What the group is for. Empty is allowed; a group nobody can explain is
+    /// a group nobody will maintain, but that is a review problem, not a
+    /// validation one.
+    #[serde(default)]
+    pub description: String,
+    /// Member user names, matching `UserConfig::name`.
+    ///
+    /// Names rather than a second id space: users are already addressed by
+    /// name everywhere else in this file, and two identifier schemes for the
+    /// same entity is how membership drifts out of sync with the user list.
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for GroupConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            description: String::new(),
+            members: Vec::new(),
+        }
+    }
+}
+
 /// User configuration for RBAC multi-user support.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UserConfig {
@@ -3535,6 +3573,15 @@ pub struct KernelConfig {
     /// User configurations for RBAC multi-user support.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<UserConfig>,
+    /// Groups of users (#7745).
+    ///
+    /// A group is an owner in its own right: work done during a support shift
+    /// belongs to the support team, not to whoever happened to be on it that
+    /// day. Kept beside `users` in `config.toml` rather than in the database
+    /// because that is where users already live, and splitting one identity
+    /// model across two stores is how the two stop agreeing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupConfig>,
     /// Maps platform-native channel roles (Telegram admin, Discord guild
     /// roles, Slack workspace roles) to LibreFang `UserRole`. Used by
     /// `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role`
@@ -6537,6 +6584,7 @@ impl Default for KernelConfig {
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),
+            groups: Vec::new(),
             channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
             mcp_runtime_store: McpRuntimeStore::default(),
@@ -8715,5 +8763,88 @@ rule_sets = ["browser_handles", "pii_baseline"]
         assert!(!rule.matches("matrix", Some("acct"), "!other:server", None, &[]));
         // account_id mismatch alone fails.
         assert!(!rule.matches("matrix", Some("other"), "!room:server", None, &[]));
+    }
+}
+
+#[cfg(test)]
+mod group_config_tests {
+    use super::*;
+
+    /// Groups live beside users in `config.toml` (#7745), so the first thing
+    /// that has to hold is that an operator can write the block by hand and
+    /// have it survive a parse.
+    #[test]
+    fn a_group_block_parses_from_config_toml() {
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [[users]]
+            name = "paco"
+            role = "owner"
+
+            [[groups]]
+            id = "support"
+            name = "Support"
+            description = "First-line support rota"
+            members = ["paco"]
+            "#,
+        )
+        .expect("a hand-written groups block must parse");
+
+        assert_eq!(cfg.groups.len(), 1);
+        assert_eq!(cfg.groups[0].id, "support");
+        assert_eq!(cfg.groups[0].members, vec!["paco".to_string()]);
+    }
+
+    /// A config with no groups is every existing deployment, so the field must
+    /// be optional rather than required.
+    #[test]
+    fn groups_are_absent_by_default() {
+        let cfg: KernelConfig = toml::from_str("").expect("an empty config must parse");
+        assert!(cfg.groups.is_empty());
+    }
+
+    /// The id is what ownership records point at, and it has to be separable
+    /// from the display name: a group gets renamed far more often than it gets
+    /// dissolved, and a rename must not orphan everything the group owns.
+    #[test]
+    fn renaming_a_group_leaves_its_id_alone() {
+        let mut group = GroupConfig {
+            id: "support".to_string(),
+            name: "Support".to_string(),
+            ..Default::default()
+        };
+        group.name = "Customer Success".to_string();
+
+        assert_eq!(
+            group.id, "support",
+            "the id must survive a rename or every reference to it breaks"
+        );
+    }
+
+    /// Serialising must not leave a stranded `[[groups]]` in an operator's
+    /// file when there are no groups.
+    ///
+    /// Scoped to the root section on purpose: `[tool_policy]` has its own
+    /// unrelated `groups` key, and a substring match against the whole
+    /// document reports that one and fails for the wrong reason.
+    #[test]
+    fn an_empty_group_list_writes_nothing() {
+        let cfg = KernelConfig::default();
+        let out = toml::to_string(&cfg).expect("default config serialises");
+
+        let root: String = out
+            .lines()
+            .take_while(|l| !l.starts_with('['))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            !root.contains("groups"),
+            "an empty list must leave no stranded key behind, got: {root}"
+        );
+        assert!(
+            !out.contains("[[groups]]"),
+            "an empty list must not emit an array-of-tables header"
+        );
     }
 }
