@@ -179,7 +179,9 @@
     "select_options": "Wybierz opcje",
     "error_loading_data": "Nie udało się załadować pamięci",
     "reload": "Przeładuj",
-    "save_changes": "Zapisz zmiany"
+    "save_changes": "Zapisz zmiany",
+    "custom": "Własna",
+    "slider_custom_hint": "Wpisz dokładną wartość w polu powyżej."
   },
   "status": {
     "active": "Aktywny",

@@ -179,7 +179,9 @@
     "select_options": "选择选项",
     "error_loading_data": "加载记忆失败",
     "reload": "重新加载",
-    "save_changes": "保存更改"
+    "save_changes": "保存更改",
+    "custom": "自定义",
+    "slider_custom_hint": "在上方输入框中填写精确数值。"
   },
   "status": {
     "active": "活跃",

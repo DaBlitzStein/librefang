@@ -179,7 +179,9 @@
     "select_options": "옵션 선택",
     "error_loading_data": "메모리를 불러오지 못했습니다.",
     "reload": "새로고침",
-    "save_changes": "변경사항 저장"
+    "save_changes": "변경사항 저장",
+    "custom": "사용자 지정",
+    "slider_custom_hint": "위 입력란에 정확한 값을 입력하세요."
   },
   "status": {
     "active": "활성",

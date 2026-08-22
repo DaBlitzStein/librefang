@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { useTranslation } from "react-i18next";
 
 interface SliderInputProps {
   label: string;
@@ -13,6 +14,20 @@ interface SliderInputProps {
   formatTick?: (v: number) => string;
   /** Tick positions to display below the slider */
   ticks?: number[];
+  /**
+   * Fixed values the control snaps to, in ascending order.
+   *
+   * A context window is not a continuous quantity you dial in: it is one of a
+   * handful of sizes a model actually comes in. A free slider over a
+   * 1K–2M range invites 1,234,567, which no model has, and makes the sizes
+   * that do exist nearly impossible to land on — 128K sits at 6% of the
+   * track's width.
+   *
+   * With `steps`, the slider travels by index: every position is a real size,
+   * and one extra position past the end is Custom, which reveals the number
+   * field for the case the list does not cover.
+   */
+  steps?: number[];
 }
 
 export function SliderInput({
@@ -26,9 +41,34 @@ export function SliderInput({
   onToggle,
   formatTick,
   ticks,
+  steps,
 }: SliderInputProps) {
+  const { t } = useTranslation();
   const id = useId();
-  const pct = max === min ? 0 : ((value - min) / (max - min)) * 100;
+
+  // Index-addressed when `steps` is given: the last position is Custom, so the
+  // track runs 0..steps.length inclusive.
+  const customIndex = steps ? steps.length : -1;
+  const stepIndex = steps
+    ? (() => {
+        const exact = steps.indexOf(value);
+        // A value that is not one of the fixed sizes is Custom by definition —
+        // including one typed into the number field, so the control never
+        // silently rounds an operator's deliberate number to the nearest step.
+        return exact >= 0 ? exact : customIndex;
+      })()
+    : 0;
+  const isCustom = steps ? stepIndex === customIndex : false;
+
+  const sliderMin = steps ? 0 : min;
+  const sliderMax = steps ? customIndex : max;
+  const sliderStep = steps ? 1 : step;
+  const sliderValue = steps ? stepIndex : value;
+
+  const pct =
+    sliderMax === sliderMin
+      ? 0
+      : ((sliderValue - sliderMin) / (sliderMax - sliderMin)) * 100;
 
   // Dim the *values* of an inactive row, never the switch that reactivates it.
   //
@@ -93,11 +133,21 @@ export function SliderInput({
       <input
         id={id}
         type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
+        min={sliderMin}
+        max={sliderMax}
+        step={sliderStep}
+        value={sliderValue}
+        onChange={(e) => {
+          const raw = parseFloat(e.target.value);
+          if (!steps) {
+            onChange(raw);
+            return;
+          }
+          // Landing on Custom keeps whatever value is already there rather
+          // than snapping: Custom means "I will type it", not a value.
+          if (raw >= customIndex) return;
+          onChange(steps[raw]);
+        }}
         disabled={!enabled}
         className={`w-full h-1.5 rounded-full appearance-none cursor-pointer disabled:cursor-not-allowed accent-brand ${dim}`}
         style={{
@@ -106,7 +156,37 @@ export function SliderInput({
             : undefined,
         }}
       />
-      {ticks ? (
+      {isCustom && (
+        // Custom is the only position where the number field is the control
+        // rather than a readout, so say so instead of leaving the slider
+        // parked at the end with no explanation.
+        <p className="text-[10px] text-text-dim">
+          {t("common.slider_custom_hint", {
+            defaultValue: "Type an exact value in the field above.",
+          })}
+        </p>
+      )}
+      {steps ? (
+        <div className="relative h-3 text-[9px] text-text-dim/50 font-mono">
+          {[...steps.map((v, i) => ({ i, text: formatTick ? formatTick(v) : String(v) })),
+            { i: customIndex, text: t("common.custom", { defaultValue: "Custom" }) }].map(({ i, text }) => {
+            const p = (i / customIndex) * 100;
+            const align =
+              p <= 0 ? "translate-x-0" : p >= 100 ? "-translate-x-full" : "-translate-x-1/2";
+            return (
+              <span
+                key={i}
+                className={`absolute whitespace-nowrap ${align} ${
+                  i === stepIndex ? "text-brand font-bold" : ""
+                }`}
+                style={{ left: `${p}%` }}
+              >
+                {text}
+              </span>
+            );
+          })}
+        </div>
+      ) : ticks ? (
         // Each tick sits at the position its own value maps to, using the same
         // formula as the filled track above — so the legend and the thumb agree.
         //

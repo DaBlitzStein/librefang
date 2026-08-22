@@ -179,7 +179,9 @@
     "select_options": "Select options",
     "error_loading_data": "Failed to load memories",
     "reload": "Reload",
-    "save_changes": "Save changes"
+    "save_changes": "Save changes",
+    "custom": "Custom",
+    "slider_custom_hint": "Type an exact value in the field above."
   },
   "status": {
     "active": "Active",

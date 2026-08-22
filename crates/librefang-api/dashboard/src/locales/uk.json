@@ -179,7 +179,9 @@
     "error_loading_data": "Не вдалося завантажити пам'ять",
     "select_options": "Виберіть опції",
     "reload": "Перезавантажити",
-    "save_changes": "Зберегти зміни"
+    "save_changes": "Зберегти зміни",
+    "custom": "Власне",
+    "slider_custom_hint": "Введіть точне значення в поле вище."
   },
   "status": {
     "active": "Активний",

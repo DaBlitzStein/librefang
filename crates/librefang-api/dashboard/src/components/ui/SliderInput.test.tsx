@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SliderInput } from "./SliderInput";
 
@@ -185,5 +185,98 @@ describe("SliderInput", () => {
       expect(screen.getByText("1024").className).toMatch(/translate-x-0/);
       expect(screen.getByText("2097152").className).toMatch(/-translate-x-full/);
     });
+  });
+});
+
+/**
+ * A context window is not a continuous quantity you dial in: it is one of a
+ * handful of sizes models actually come in. The free slider it used to be
+ * ranged 1K–2M in 1K increments, which invites 1,234,567 (no model has that)
+ * and makes the real sizes nearly impossible to land on — 128K sits at 6% of
+ * the track. `steps` snaps travel to the listed sizes, with one position past
+ * the end for Custom.
+ */
+describe("SliderInput — fixed steps", () => {
+  const K = 1024;
+  const sizes = [8 * K, 32 * K, 64 * K, 96 * K, 128 * K, 192 * K, 256 * K, 1024 * K, 2048 * K];
+  const stepped = {
+    label: "Context window",
+    min: 1024,
+    max: 2097152,
+    steps: sizes,
+    formatTick: (v: number) =>
+      v >= 1048576 ? `${Math.round(v / 1048576)}M` : `${Math.round(v / 1024)}K`,
+  };
+
+  const track = () => screen.getByRole("slider") as HTMLInputElement;
+
+  it("travels by position, not by token", () => {
+    render(<SliderInput {...stepped} value={128 * K} enabled onChange={() => {}} />);
+
+    // 9 sizes plus Custom => positions 0..9, one step apart.
+    expect(track().min).toBe("0");
+    expect(track().max).toBe("9");
+    expect(track().step).toBe("1");
+    // 128K is the 5th size.
+    expect(track().value).toBe("4");
+  });
+
+  it("reports the size, never the position", () => {
+    const onChange = vi.fn();
+    render(<SliderInput {...stepped} value={8 * K} enabled onChange={onChange} />);
+
+    fireEvent.change(track(), { target: { value: "6" } });
+    expect(onChange).toHaveBeenCalledWith(256 * K);
+  });
+
+  it("cannot land on a size that is not in the list", () => {
+    const onChange = vi.fn();
+    render(<SliderInput {...stepped} value={8 * K} enabled onChange={onChange} />);
+
+    for (let i = 0; i < sizes.length; i++) {
+      fireEvent.change(track(), { target: { value: String(i) } });
+    }
+    for (const [v] of onChange.mock.calls) {
+      expect(sizes).toContain(v);
+    }
+  });
+
+  it("labels every size and the custom position", () => {
+    render(<SliderInput {...stepped} value={128 * K} enabled onChange={() => {}} />);
+
+    for (const label of ["8K", "32K", "64K", "96K", "128K", "192K", "256K", "1M", "2M"]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    expect(screen.getByText("Custom")).toBeInTheDocument();
+  });
+
+  it("treats a value outside the list as custom rather than rounding it", () => {
+    // An operator who types 123904 means 123904. Snapping it to 128K would
+    // silently change a deliberate number.
+    render(<SliderInput {...stepped} value={123904} enabled onChange={() => {}} />);
+
+    expect(track().value).toBe("9");
+    expect(screen.getByRole("spinbutton")).toHaveValue(123904);
+    expect(screen.getByText(/Type an exact value/)).toBeInTheDocument();
+  });
+
+  it("does not snap when the slider is dragged onto Custom", () => {
+    const onChange = vi.fn();
+    render(<SliderInput {...stepped} value={128 * K} enabled onChange={onChange} />);
+
+    fireEvent.change(track(), { target: { value: "9" } });
+    // Custom is not a value — it is an invitation to type one.
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("stays continuous when no steps are given", () => {
+    render(
+      <SliderInput label="Temperature" value={0.7} min={0} max={2} step={0.1} enabled onChange={() => {}} />,
+    );
+
+    expect(track().min).toBe("0");
+    expect(track().max).toBe("2");
+    expect(track().value).toBe("0.7");
+    expect(screen.queryByText("Custom")).toBeNull();
   });
 });

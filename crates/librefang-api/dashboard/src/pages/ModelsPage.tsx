@@ -1002,7 +1002,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
             value={state.contextWindow} onChange={(v) => dispatch({ type: "SET_FIELD", field: "contextWindow", value: Math.round(v) })}
             min={1024} max={2097152} step={1024}
             enabled={state.contextWindowEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "contextWindowEnabled", value: v })}
-            ticks={[32768, 131072, 524288, 1048576]}
+            steps={[8192, 32768, 65536, 98304, 131072, 196608, 262144, 1048576, 2097152]}
             formatTick={(v) => v >= 1048576 ? `${Math.round(v/1048576)}M` : `${Math.round(v/1024)}K`}
           />
           {model.context_window_is_estimated && !state.contextWindowEnabled && (
@@ -1017,7 +1017,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
             value={state.maxOutputTokens} onChange={(v) => dispatch({ type: "SET_FIELD", field: "maxOutputTokens", value: Math.round(v) })}
             min={256} max={1048576} step={256}
             enabled={state.maxOutputTokensEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "maxOutputTokensEnabled", value: v })}
-            ticks={[256, 8192, 65536, 1048576]}
+            steps={[1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 1048576]}
             formatTick={(v) => v >= 1048576 ? "1M" : v >= 1024 ? `${Math.round(v/1024)}K` : String(v)}
           />
 
