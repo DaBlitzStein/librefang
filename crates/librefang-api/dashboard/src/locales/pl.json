@@ -532,7 +532,8 @@
       "memory_extraction_model": "Model zapisujący wspomnienia",
       "memory_extraction_model_hint": "Uruchamia się po każdej odpowiedzi, więc wolny model opóźnia każdą odpowiedź. Zostaw puste, aby dziedziczyć ustawienie systemu.",
       "memory_on": "Wł.",
-      "memory_off": "Wył."
+      "memory_off": "Wył.",
+      "max_tokens_hint": "Limit ukończenia. Stałe rozmiary jak w edytorze modelu; wybierz Własna, aby wpisać dowolną wartość. Zostaw puste, aby odziedziczyć domyślną wartość modelu."
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",

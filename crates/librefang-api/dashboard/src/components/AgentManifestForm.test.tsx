@@ -322,3 +322,66 @@ describe("AgentManifestForm — inherited model", () => {
     expect(screen.queryByText(/^Currently: /)).toBeNull();
   });
 });
+
+/**
+ * The agent editor's max_tokens used to be a free number field, while the
+ * model editor offers a fixed ladder with a Custom entry. The user asked for
+ * the same control in both, so a cap cannot drift into values nobody means.
+ */
+describe("AgentManifestForm — max_tokens ladder", () => {
+  const withTokens = (tokens: string): ManifestFormState => {
+    const state = emptyManifestForm();
+    state.model = { ...state.model, provider: "openai", model: "gpt-4o", max_tokens: tokens };
+    return state;
+  };
+
+  it("shows a ladder value as selected and hides the free field", () => {
+    render(<Harness initialState={withTokens("32768")} />);
+
+    const select = screen
+      .getAllByRole("combobox")
+      .find((c) => (c as HTMLSelectElement).value === "32768") as HTMLSelectElement | undefined;
+    expect(select).toBeDefined();
+    // The free input only appears for off-ladder or explicit-Custom values.
+    // (The form has other number fields, so assert on this value, not on a
+    // global spinbutton count.)
+    expect(screen.queryByDisplayValue("32768")).toBeNull();
+  });
+
+  it("picks a ladder value and the field keeps it", async () => {
+    render(<Harness initialState={withTokens("1024")} />);
+
+    const select = screen
+      .getAllByRole("combobox")
+      .find((c) => (c as HTMLSelectElement).value === "1024") as HTMLSelectElement;
+    await userEvent.selectOptions(select, "65536");
+
+    // The Harness owns the state, so the selection must round-trip through
+    // onChange and back into the controlled select.
+    expect(select.value).toBe("65536");
+    expect(screen.queryByDisplayValue("65536")).toBeNull();
+  });
+
+  it("keeps an off-ladder value visible as Custom instead of hiding it", () => {
+    render(<Harness initialState={withTokens("123904")} />);
+
+    // The select must not claim any ladder size for it…
+    const select = screen.getAllByRole("combobox")[0] as HTMLSelectElement;
+    expect(select.value).not.toBe("123904");
+    // …and the free field must show the stored number, never a rounded one.
+    const input = screen.getByDisplayValue("123904") as HTMLInputElement;
+    expect(input.value).toBe("123904");
+  });
+
+  it("choosing Custom reveals the free field without discarding the value", async () => {
+    render(<Harness initialState={withTokens("32768")} />);
+
+    const select = screen
+      .getAllByRole("combobox")
+      .find((c) => (c as HTMLSelectElement).value === "32768") as HTMLSelectElement;
+    await userEvent.selectOptions(select, "__custom__");
+
+    const input = screen.getByDisplayValue("32768") as HTMLInputElement;
+    expect(input.value).toBe("32768");
+  });
+});

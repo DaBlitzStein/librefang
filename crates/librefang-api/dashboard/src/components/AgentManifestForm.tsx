@@ -79,6 +79,13 @@ const INHERIT_SENTINEL = "default";
 /** Select value that reveals the free-text field for a model the catalog does not list. */
 const CUSTOM_EXTRACTION = "__custom__";
 
+/// The token caps a completion is actually set to, matching the model editor's
+/// ladder. A cap is a power of two in practice — nobody means 123,904 — so the
+/// field offers the sizes people pick and a Custom entry for anything else.
+const MAX_TOKENS_LADDER = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 1048576];
+
+const fmtTokenCap = (v: number) => (v >= 1048576 ? `${v / 1048576}M` : `${v / 1024}K`);
+
 export function AgentManifestForm({
   value,
   onChange,
@@ -96,6 +103,14 @@ export function AgentManifestForm({
 
   const providerInherits = value.model.provider === INHERIT_SENTINEL;
   const modelInherits = value.model.model === INHERIT_SENTINEL;
+  // Tracks an explicit Custom pick separately from the stored value: an
+  // off-ladder stored value renders as Custom by itself, but an empty value
+  // needs the flag to know the operator asked for the free field rather than
+  // left it blank.
+  const [maxTokensCustom, setMaxTokensCustom] = useState(false);
+  const maxTokensOnLadder = MAX_TOKENS_LADDER.some((s) => String(s) === value.model.max_tokens);
+  const maxTokensShowInput =
+    maxTokensCustom || (value.model.max_tokens !== "" && !maxTokensOnLadder);
 
   // Curried setters for the nested-state update boilerplate.
   const update = (patch: Partial<ManifestFormState>): void => onChange({ ...value, ...patch });
@@ -307,15 +322,52 @@ export function AgentManifestForm({
               className={inputClass}
             />
           </Field>
-          <Field label={t("agents.form.max_tokens")}>
-            <input
-              type="number"
-              min="1"
-              value={value.model.max_tokens}
-              onChange={(e) => updateModel({ max_tokens: e.target.value })}
-              placeholder={t("agents.form.max_tokens_placeholder")}
+          <Field
+            label={t("agents.form.max_tokens")}
+            hint={t("agents.form.max_tokens_hint", {
+              defaultValue:
+                "The completion cap. Fixed sizes like the model editor; pick Custom to type any value. Leave empty to inherit the model's own default.",
+            })}
+          >
+            <select
+              value={
+                maxTokensCustom
+                  ? CUSTOM_EXTRACTION
+                  : maxTokensOnLadder
+                    ? value.model.max_tokens
+                    : ""
+              }
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === CUSTOM_EXTRACTION) {
+                  setMaxTokensCustom(true);
+                } else {
+                  setMaxTokensCustom(false);
+                  updateModel({ max_tokens: v });
+                }
+              }}
               className={inputClass}
-            />
+            >
+              <option value="">—</option>
+              {MAX_TOKENS_LADDER.map((s) => (
+                <option key={s} value={String(s)}>
+                  {fmtTokenCap(s)}
+                </option>
+              ))}
+              <option value={CUSTOM_EXTRACTION}>
+                {t("common.custom", { defaultValue: "Custom" })}
+              </option>
+            </select>
+            {maxTokensShowInput && (
+              <input
+                type="number"
+                min="1"
+                value={value.model.max_tokens}
+                onChange={(e) => updateModel({ max_tokens: e.target.value })}
+                placeholder={t("agents.form.max_tokens_placeholder")}
+                className={`${inputClass} mt-2`}
+              />
+            )}
           </Field>
         </div>
         <div className="grid grid-cols-2 gap-3">

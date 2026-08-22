@@ -532,7 +532,8 @@
       "memory_extraction_model": "撰写记忆的模型",
       "memory_extraction_model_hint": "在每次回复后运行，因此此处使用较慢的模型会拖慢每一次回答。留空则继承系统设置。",
       "memory_on": "开",
-      "memory_off": "关"
+      "memory_off": "关",
+      "max_tokens_hint": "完成上限。与模型编辑器相同的固定尺寸；选择“自定义”可输入任意值。留空则继承模型自身的默认值。"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",
