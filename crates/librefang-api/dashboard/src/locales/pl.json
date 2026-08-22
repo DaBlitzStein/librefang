@@ -3105,7 +3105,8 @@
     "overrides_saved": "Zapisano ustawienia modelu",
     "overrides_reset": "Zresetowano ustawienia modelu do wartości domyślnych",
     "overrides_error": "Nie udało się zapisać ustawień modelu",
-    "reset_defaults": "Resetuj"
+    "reset_defaults": "Resetuj",
+    "reasoning_effort_unsupported": "Ten model nie deklaruje obsługi rozumowania, więc dostawca może odrzucać to ustawienie przy każdym żądaniu."
   },
   "media": {
     "section": "Multimedia",

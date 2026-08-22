@@ -3103,7 +3103,8 @@
     "overrides_saved": "Model settings saved",
     "overrides_reset": "Model settings reset to defaults",
     "overrides_error": "Failed to save model settings",
-    "reset_defaults": "Reset"
+    "reset_defaults": "Reset",
+    "reasoning_effort_unsupported": "This model does not advertise reasoning support, so the provider may reject this on every request."
   },
   "media": {
     "section": "Media",

@@ -1070,6 +1070,25 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
               <option value="medium">{t("models.effort_medium")}</option>
               <option value="high">{t("models.effort_high")}</option>
             </select>
+            {/* Setting this on a model that does not advertise reasoning is
+                not a preference the provider can decline politely — it is a
+                hard 400 on every single request. A live deployment carried
+                `reasoning_effort: "high"` against a gateway that answered
+                `does not support parameters: ['reasoning_effort']` in 60 ms,
+                and every turn paid that round-trip before the retry stripped
+                it. The catalog already knows; say so at the point of choice
+                rather than letting the field look free.
+                Not disabled: the catalog can be wrong or stale, and an
+                operator who knows better should still be able to set it. */}
+            {state.reasoningEffort && model.supports_thinking === false && (
+              <p className="text-[11px] text-warning flex items-center gap-1">
+                <AlertCircle className="w-3 h-3 shrink-0" />
+                {t("models.reasoning_effort_unsupported", {
+                  defaultValue:
+                    "This model does not advertise reasoning support, so the provider may reject this on every request.",
+                })}
+              </p>
+            )}
           </div>
         </div>
 

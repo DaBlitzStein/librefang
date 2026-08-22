@@ -3069,7 +3069,8 @@
     "overrides_saved": "模型设置已保存",
     "overrides_reset": "模型设置已重置为默认值",
     "overrides_error": "保存模型设置失败",
-    "reset_defaults": "重置"
+    "reset_defaults": "重置",
+    "reasoning_effort_unsupported": "该模型未声明支持推理，提供方可能在每次请求时拒绝此设置。"
   },
   "media": {
     "section": "媒体",
