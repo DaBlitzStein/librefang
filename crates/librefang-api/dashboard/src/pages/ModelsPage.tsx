@@ -1040,7 +1040,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
             value={state.maxTokens} onChange={(v) => dispatch({ type: "SET_FIELD", field: "maxTokens", value: Math.round(v) })}
             min={256} max={1048576} step={256}
             enabled={state.maxTokensEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "maxTokensEnabled", value: v })}
-            ticks={[256, 32768, 131072, 1048576]}
+            steps={[1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 1048576]}
             formatTick={(v) => v >= 1048576 ? "1M" : v >= 1024 ? `${Math.round(v/1024)}K` : String(v)}
           />
 
