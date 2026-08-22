@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 49;
+const SCHEMA_VERSION: u32 = 50;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -230,6 +230,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // recovered after a daemon restart reports real progress instead of
     // "step X of 0".
     run_step!(49, migrate_v49);
+    run_step!(50, migrate_v50);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -918,6 +919,41 @@ fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// recovered after a daemon restart reported "step X of 0" in the API and
 /// dashboard (#6504). Store the actual value so progress survives a
 /// restart. `try_column_exists` keeps the ADD COLUMN idempotent.
+/// Give a session a parent, so a sub-agent run can hang off the session that
+/// asked for it instead of floating free (#7752).
+///
+/// Ephemeral worker runs used to write a `sessions` row under a throwaway
+/// agent id with no registry entry: unreachable, uncleanable, and produced on
+/// a path designed to be called cheaply and often. The stopgap was to write
+/// nothing at all, which loses the audit trail with it.
+///
+/// A nullable self-reference is the smallest thing that makes the third option
+/// possible: the parent can enumerate what it delegated, and retention can
+/// cascade instead of leaving orphans. `NULL` is every existing row and every
+/// ordinary session, so the column changes nothing until something sets it.
+///
+/// `ON DELETE CASCADE` is deliberately NOT declared: SQLite only honours it
+/// with `PRAGMA foreign_keys = ON`, which is per-connection, so relying on it
+/// would make orphan-cleanup depend on which connection did the delete. The
+/// cascade is done explicitly at the delete site instead, where it is visible.
+fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "sessions", "parent_session_id")? {
+        conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", [])?;
+    }
+    // Without this the cascade at delete time is a full scan of `sessions`
+    // on every parent deletion.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (50, datetime('now'), 'Sub-agent sessions hang off the session that spawned them (#7752)')",
+        [],
+    )?;
+    Ok(())
+}
+
 fn migrate_v49(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !try_column_exists(conn, "workflow_runs", "total_steps")? {
         conn.execute(
@@ -3352,6 +3388,114 @@ mod tests {
         assert_eq!(
             n, 1,
             "v41 sessions index must exist exactly once after repeated boots"
+        );
+    }
+}
+
+#[cfg(test)]
+mod parent_session_tests {
+    use super::*;
+
+    /// The column has to arrive on a database that already has sessions in it,
+    /// which is every real deployment — a migration that only works on a fresh
+    /// file is a migration that has never run where it matters.
+    #[test]
+    fn migrate_v50_adds_the_parent_column_to_an_existing_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                messages BLOB NOT NULL,
+                context_window_tokens INTEGER DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL,
+                description TEXT NOT NULL
+             );
+             INSERT INTO sessions VALUES
+                ('existing', 'agent-1', x'00', 0, 0, '2026-01-01', '2026-01-01');",
+        )
+        .unwrap();
+
+        migrate_v50(&conn).expect("v50 must apply to a populated database");
+
+        // Every pre-existing row stays, with no parent — which is what an
+        // ordinary session is.
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_session_id FROM sessions WHERE id = 'existing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            parent.is_none(),
+            "an existing session must not acquire a parent"
+        );
+    }
+
+    #[test]
+    fn migrate_v50_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                messages BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL,
+                description TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+
+        migrate_v50(&conn).unwrap();
+        // A rerun must not fail on the duplicate column: the runner can
+        // legitimately replay a step after an interrupted upgrade.
+        migrate_v50(&conn).expect("v50 must survive a rerun");
+    }
+
+    /// The index is the difference between cascading a delete and scanning the
+    /// whole table for every parent removed.
+    #[test]
+    fn migrate_v50_indexes_the_parent_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                messages BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL,
+                description TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        migrate_v50(&conn).unwrap();
+
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM sessions WHERE parent_session_id = 'p'",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("idx_sessions_parent"),
+            "the parent lookup must use the index, got: {plan}"
         );
     }
 }
