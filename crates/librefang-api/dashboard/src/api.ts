@@ -1725,13 +1725,24 @@ export async function getAgentTypeToml(name: string): Promise<string> {
   return getText(`/api/agent-types/${encodeURIComponent(name)}/toml`);
 }
 
-export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
+/** POST /api/agents/purge — remove every trace of an agent BY NAME.
+ *
+ * The counterpart to `deleteAgent` for agents that are already deleted: with
+ * no roster entry there is no id to address them by, but the workspace
+ * directory and agent-type template are still on disk. Idempotent. */
+export async function purgeAgentData(
+  name: string,
+): Promise<{ agent?: string; purged?: Record<string, boolean> }> {
+  return post<{ agent?: string; purged?: Record<string, boolean> }>("/api/agents/purge", { name });
+}
+
+export async function deleteAgent(agentId: string, purgeData = false): Promise<ApiActionResponse> {
   // Refs #4614 — DELETE requires explicit confirmation. The dashboard
   // already wraps this call in a confirmation modal, so we send the
   // confirm flag here. Without it the API returns 409 with the
   // canonical-UUID data-loss warning.
   return del<ApiActionResponse>(
-    `/api/agents/${encodeURIComponent(agentId)}?confirm=true`,
+    `/api/agents/${encodeURIComponent(agentId)}?confirm=true${purgeData ? "&purge_data=true" : ""}`,
   );
 }
 

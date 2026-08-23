@@ -210,6 +210,7 @@ export {
   suspendAgent,
   resumeAgent,
   deleteAgent,
+  purgeAgentData,
   clearAgentHistory,
   patchAgent,
   patchAgentConfig,

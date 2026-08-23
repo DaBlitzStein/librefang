@@ -912,7 +912,9 @@
     "tools_declared_desc": "Narzędzia, których ten agent może używać. Pozostaw puste, aby uzyskać nieograniczony dostęp do wszystkich narzędzi.",
     "providers_error_loading": "Błąd ładowania",
     "no_providers": "Brak dostawców",
-    "select_provider_first": "Najpierw wybierz dostawcę"
+    "select_provider_first": "Najpierw wybierz dostawcę",
+    "delete_purge_data": "Usuń także jego dane (obszar roboczy i typ agenta)",
+    "delete_confirm_with_purge": "Usuń {{name}} ORAZ jego dane: katalog obszaru roboczego i szablon typu agenta. Tej operacji nie można cofnąć."
   },
   "providers": {
     "title": "Dostawcy",

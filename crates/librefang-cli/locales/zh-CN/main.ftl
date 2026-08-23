@@ -1084,6 +1084,7 @@ tui-agents-title-custom-prompt = 自定义 — 系统提示词
 tui-agents-title-custom-tools = 自定义 — 工具
 tui-agents-title-custom-skills = 自定义 — Skill
 tui-agents-title-custom-workspaces = 共享文件夹
+tui-agents-purged = 已清除 { $name }：所有痕迹已删除
 tui-agents-workspaces-help = a 添加 · d 删除 · Enter 编辑 · s 保存 · Esc 返回
 tui-agents-workspaces-empty = 还没有共享文件夹。按 a 添加一个。
 tui-event-workspaces-update-failed = 更新共享文件夹失败

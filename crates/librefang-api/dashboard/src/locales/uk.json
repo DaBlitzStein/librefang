@@ -912,7 +912,9 @@
     "tools_declared_title": "Оголошені інструменти",
     "providers_error_loading": "Помилка завантаження",
     "no_providers": "Немає провайдерів",
-    "select_provider_first": "Спочатку оберіть провайдера"
+    "select_provider_first": "Спочатку оберіть провайдера",
+    "delete_purge_data": "Також стерти його дані (робочу теку та тип агента)",
+    "delete_confirm_with_purge": "Видалити {{name}} ТА стерти його дані: робочу теку і шаблон типу агента. Це незворотно."
   },
   "providers": {
     "title": "Провайдери",

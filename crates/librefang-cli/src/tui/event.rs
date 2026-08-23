@@ -129,6 +129,7 @@ pub enum AppEvent {
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
     BackupsLoaded(Vec<crate::tui::screens::settings::BackupEntry>),
+    AgentPurged(String),
     AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
     AgentWorkspacesUpdated(String),
     BackupCreated(String),
@@ -1342,6 +1343,30 @@ pub fn spawn_fetch_agent_mcp_servers(
 }
 
 /// Update an agent's skills.
+pub fn spawn_purge_agent_data(backend: BackendRef, agent_name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/agents/purge"))
+                .json(&serde_json::json!({ "name": agent_name }))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::AgentPurged(agent_name));
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let _ = tx.send(AppEvent::FetchError(format!("Purge: {status}")));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(format!("Purge: {e}")));
+                }
+            }
+        }
+    });
+}
+
 pub fn spawn_fetch_agent_workspaces(
     backend: BackendRef,
     agent_id: String,

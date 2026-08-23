@@ -620,6 +620,11 @@ export function AgentsPage() {
   const qc = useQueryClient();
 
   const rawDeleteMutation = useDeleteAgent();
+  // "Also erase its data": the plain delete kills the agent and drops its
+  // identity, but leaves the workspace directory and any agent-type template
+  // of the same name on disk. Off by default — deleting and purging are
+  // different intents.
+  const [purgeDataOnDelete, setPurgeDataOnDelete] = useState(false);
   const handleDeleteSuccess = (agentId: string) => {
     if (detailAgent?.id === agentId) {
       setDetailAgent(null);
@@ -640,9 +645,10 @@ export function AgentsPage() {
         onSuccess: () => handleDeleteSuccess(agentId),
         onError: handleDeleteError,
       }),
-    mutateAsync: (agentId: string) =>
-      rawDeleteMutation.mutateAsync(agentId, {
-        onSuccess: () => handleDeleteSuccess(agentId),
+    mutateAsync: (vars: string | { agentId: string; purgeData?: boolean }) =>
+      rawDeleteMutation.mutateAsync(vars, {
+        onSuccess: () =>
+          handleDeleteSuccess(typeof vars === "string" ? vars : vars.agentId),
         onError: handleDeleteError,
       }),
   };
@@ -3351,10 +3357,20 @@ export function AgentsPage() {
                     onClick={() =>
                       setConfirmDialog({
                         title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
-                        message: t("agents.delete_confirm", { name: detailAgent.name }),
+                        message: purgeDataOnDelete
+                          ? t("agents.delete_confirm_with_purge", {
+                              defaultValue:
+                                "Delete {{name}} AND erase its data: workspace directory and agent-type template. This cannot be undone.",
+                              name: detailAgent.name,
+                            })
+                          : t("agents.delete_confirm", { name: detailAgent.name }),
                         tone: "destructive",
                         onConfirm: async () => {
-                          await deleteMutation.mutateAsync(detailAgent.id);
+                          await deleteMutation.mutateAsync({
+                            agentId: detailAgent.id,
+                            purgeData: purgeDataOnDelete,
+                          });
+                          setPurgeDataOnDelete(false);
                         },
                       })
                     }
@@ -3364,6 +3380,19 @@ export function AgentsPage() {
                   </Button>
                 )}
               </div>
+
+              {!detailAgent.is_hand && (
+                <label className="flex items-center gap-2 text-[11px] text-text-dim">
+                  <input
+                    type="checkbox"
+                    checked={purgeDataOnDelete}
+                    onChange={(e) => setPurgeDataOnDelete(e.target.checked)}
+                  />
+                  {t("agents.delete_purge_data", {
+                    defaultValue: "Also erase its data (workspace and agent-type)",
+                  })}
+                </label>
+              )}
 
               <Button
                 variant="secondary"

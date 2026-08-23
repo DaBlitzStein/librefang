@@ -912,7 +912,9 @@
     "tools_declared_desc": "이 에이전트가 사용할 수 있는 도구입니다. 모든 도구에 제한 없이 액세스하려면 비워 두세요.",
     "providers_error_loading": "로드 중 오류 발생",
     "no_providers": "제공업체 없음",
-    "select_provider_first": "먼저 제공업체를 선택하세요."
+    "select_provider_first": "먼저 제공업체를 선택하세요.",
+    "delete_purge_data": "데이터도 삭제 (작업공간 및 에이전트 유형)",
+    "delete_confirm_with_purge": "{{name}}을(를) 삭제하고 데이터도 지웁니다: 작업공간 디렉터리와 에이전트 유형 템플릿. 되돌릴 수 없습니다."
   },
   "providers": {
     "title": "공급자",

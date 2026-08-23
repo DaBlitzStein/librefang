@@ -912,7 +912,9 @@
     "tools_declared_desc": "Tools this agent can use. Leave empty for unrestricted access to all tools.",
     "providers_error_loading": "Error loading",
     "no_providers": "No providers",
-    "select_provider_first": "Select provider first"
+    "select_provider_first": "Select provider first",
+    "delete_purge_data": "Also erase its data (workspace and agent-type)",
+    "delete_confirm_with_purge": "Delete {{name}} AND erase its data: workspace directory and agent-type template. This cannot be undone."
   },
   "providers": {
     "title": "Providers",

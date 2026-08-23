@@ -841,6 +841,11 @@ pub async fn list_agents(
 pub struct DeleteAgentQuery {
     #[serde(default)]
     pub confirm: bool,
+    /// Also remove what the kill alone leaves behind: the workspace
+    /// directory and any agent-type template of the same name. Off by
+    /// default so the historical delete semantics are unchanged.
+    #[serde(default)]
+    pub purge_data: bool,
 }
 
 /// Warning text shown when a DELETE arrives without confirmation. Mirrors
@@ -899,7 +904,9 @@ pub async fn kill_agent(
     // a no-op per RFC 9110 §9.2.2, so we don't gate it on `?confirm=true` —
     // there's nothing to confirm destroying. Hand-owned and confirmation
     // checks only apply when the agent actually exists.
-    match state.kernel.agent_registry().get(agent_id) {
+    // Captured before the kill because `purge_data` needs the name and the
+    // registry entry is gone by the time the kill returns.
+    let agent_name: Option<String> = match state.kernel.agent_registry().get(agent_id) {
         Some(entry) if entry.is_hand => {
             return ApiErrorResponse::conflict(
                 "Cannot delete a hand-spawned agent directly; deactivate or uninstall the owning hand instead.",
@@ -907,7 +914,8 @@ pub async fn kill_agent(
             .with_code("hand_agent_delete_denied")
             .into_response();
         }
-        Some(_) => {
+        Some(entry) => {
+            let name = entry.name.clone();
             // Refs #4614: destructive delete of an existing agent requires
             // explicit confirmation via `?confirm=true`. Without it the
             // request is rejected with 409 Conflict + the data-loss warning
@@ -918,6 +926,7 @@ pub async fn kill_agent(
                     .with_code("delete_confirmation_required")
                     .into_response();
             }
+            Some(name)
         }
         None => {
             // Idempotent DELETE: the agent is already gone (replayed request,
@@ -931,19 +940,43 @@ pub async fn kill_agent(
                 ),
             );
         }
-    }
+    };
 
     // Confirmed delete: kill + purge canonical UUID binding (refs #4614).
     let body = match state.kernel.kill_agent_with_purge(agent_id, true) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "killed",
-                "agent_id": id,
-                "identity_purged": true,
-            })),
-        )
-            .into_response(),
+        Ok(()) => {
+            // `?purge_data=true` also clears what the kill leaves on disk:
+            // the workspace directory and any agent-type of the same name.
+            // Best-effort — the agent IS deleted either way, so a failure
+            // here is reported alongside the success rather than turning a
+            // completed delete into an error.
+            let data_purged = match (q.purge_data, agent_name.as_deref()) {
+                (true, Some(name)) => {
+                    match librefang_kernel::agent_purge::purge_agent(
+                        state.kernel.memory_substrate(),
+                        state.kernel.home_dir(),
+                        name,
+                    ) {
+                        Ok(report) => serde_json::json!(report),
+                        Err(error) => {
+                            tracing::warn!(%error, agent = %name, "agent deleted but data purge failed");
+                            serde_json::json!({ "error": error })
+                        }
+                    }
+                }
+                _ => serde_json::Value::Null,
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "killed",
+                    "agent_id": id,
+                    "identity_purged": true,
+                    "data_purged": data_purged,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             // The agent existed when we checked above but vanished mid-flight
             // (concurrent delete). Still treat as idempotent success — the
@@ -1801,5 +1834,61 @@ mod spawn_body_log_scrub_tests {
         let logged = scrub_spawn_body_for_log(&req);
         assert_eq!(logged["template"], "researcher");
         assert_eq!(logged["name"], "my-agent");
+    }
+}
+
+/// Body for `POST /api/agents/purge`.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct PurgeAgentRequest {
+    /// Name of the agent whose leftovers should be removed.
+    pub name: String,
+}
+
+/// POST /api/agents/purge — remove every trace of an agent by name.
+///
+/// The counterpart to `DELETE /api/agents/{id}?purge_data=true` for agents
+/// that are ALREADY deleted: the roster entry is gone, so there is no id to
+/// address them by, but their workspace directory, agent-type template and
+/// (when the roster entry survived a partial delete) sessions and memories
+/// are still on disk. Idempotent — purging something already clean reports
+/// an empty result rather than failing.
+#[utoipa::path(
+    post,
+    path = "/api/agents/purge",
+    tag = "agents",
+    responses(
+        (status = 200, description = "Purge completed; body reports what was removed"),
+        (status = 400, description = "Invalid or path-shaped agent name")
+    )
+)]
+pub async fn purge_agent_data(
+    State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<PurgeAgentRequest>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        let msg = t.t("api-error-agent-invalid-id");
+        drop(t);
+        return ApiErrorResponse::bad_request(msg)
+            .with_code("invalid_agent_name")
+            .into_response();
+    }
+    drop(t);
+
+    match librefang_kernel::agent_purge::purge_agent(
+        state.kernel.memory_substrate(),
+        state.kernel.home_dir(),
+        &name,
+    ) {
+        Ok(report) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "agent": name, "purged": report })),
+        )
+            .into_response(),
+        Err(error) => ApiErrorResponse::bad_request(error)
+            .with_code("purge_failed")
+            .into_response(),
     }
 }

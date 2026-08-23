@@ -2009,6 +2009,7 @@ tui-agents-title-custom-prompt = 사용자 지정 — 시스템 프롬프트
 tui-agents-title-custom-tools = 사용자 지정 — 도구
 tui-agents-title-custom-skills = 사용자 지정 — 스킬
 tui-agents-title-custom-workspaces = 공유 폴더
+tui-agents-purged = { $name } 완전 삭제됨: 모든 흔적 제거
 tui-agents-workspaces-help = a 추가 · d 삭제 · Enter 편집 · s 저장 · Esc 뒤로
 tui-agents-workspaces-empty = 아직 공유 폴더가 없습니다. a를 눌러 추가하세요.
 tui-event-workspaces-update-failed = 공유 폴더 업데이트 실패

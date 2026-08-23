@@ -497,6 +497,11 @@ impl App {
                 self.memory.config = Some(config);
                 self.memory.loading = false;
             }
+            AppEvent::AgentPurged(name) => {
+                self.agents.status_msg =
+                    crate::i18n::t_args("tui-agents-purged", &[("name", name.as_str())]);
+                self.refresh_agents();
+            }
             AppEvent::AgentWorkspacesLoaded(id, entries) => {
                 if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id) {
                     self.agents.workspaces = entries;
@@ -1559,6 +1564,11 @@ impl App {
 
     fn handle_agent_action(&mut self, action: agents::AgentAction) {
         match action {
+            agents::AgentAction::PurgeAgentData(name) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_purge_agent_data(backend, name, self.event_tx.clone());
+                }
+            }
             agents::AgentAction::FetchAgentWorkspaces(id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_workspaces(backend, id, self.event_tx.clone());

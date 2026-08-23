@@ -176,6 +176,9 @@ pub struct PromptEntry {
 #[derive(Debug)]
 pub enum AgentAction {
     FetchAgentWorkspaces(String),
+    /// Remove every trace of an agent by name: roster entry, sessions,
+    /// memories, workspace directory and agent-type template.
+    PurgeAgentData(String),
     UpdateWorkspaces {
         id: String,
         workspaces: Vec<(String, String, String)>,
@@ -564,6 +567,14 @@ impl AgentSelectState {
                         id: detail.id.clone(),
                         name: detail.name.clone(),
                     };
+                }
+            }
+            KeyCode::Char('P') => {
+                // Purge every trace of this agent. Distinct from `k` (kill),
+                // which stops it and drops the identity but leaves the
+                // workspace directory and agent-type on disk.
+                if let Some(ref detail) = self.detail {
+                    return AgentAction::PurgeAgentData(detail.name.clone());
                 }
             }
             KeyCode::Char('k') => {

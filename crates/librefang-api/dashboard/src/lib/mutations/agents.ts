@@ -7,6 +7,7 @@ import {
   suspendAgent,
   resumeAgent,
   deleteAgent,
+  purgeAgentData,
   patchAgent,
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
@@ -143,10 +144,26 @@ export function useSuspendAgent() {
 export function useDeleteAgent() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: deleteAgent,
+    mutationFn: (vars: string | { agentId: string; purgeData?: boolean }) =>
+      typeof vars === "string"
+        ? deleteAgent(vars)
+        : deleteAgent(vars.agentId, vars.purgeData),
     onSuccess: (_data, variables) => {
+      const agentId = typeof variables === "string" ? variables : variables.agentId;
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
-      qc.removeQueries({ queryKey: agentKeys.detail(variables) });
+      qc.removeQueries({ queryKey: agentKeys.detail(agentId) });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+/** Remove the leftovers of an already-deleted agent, by name. */
+export function usePurgeAgentData() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: purgeAgentData,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: agentKeys.all });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
