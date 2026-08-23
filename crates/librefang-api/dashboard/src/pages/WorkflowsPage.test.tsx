@@ -436,6 +436,33 @@ describe("WorkflowsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("prefers the workflow's declared input_schema over scanning the prompts", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    useWorkflowDetailMock.mockReturnValue(
+      makeQuery({
+        ...sampleWorkflow,
+        // The schema declares one parameter; the prompt mentions another.
+        // Scanning would surface `audience`; the authored schema must win,
+        // because only it carries the type, default and description.
+        input_schema: [
+          {
+            name: "topic",
+            param_type: "string",
+            required: true,
+            description: "What to summarize",
+          },
+        ],
+        steps: [
+          { name: "step1", prompt_template: "Summarize {{topic}} for {{audience}}" },
+        ],
+      }),
+    );
+    renderPage();
+
+    expect(screen.getByText("topic")).toBeInTheDocument();
+    expect(screen.queryByText("audience")).not.toBeInTheDocument();
+  });
+
   it("does not render parameter fields when workflow has no template placeholders", () => {
     useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
     useWorkflowDetailMock.mockReturnValue(

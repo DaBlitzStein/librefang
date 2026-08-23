@@ -450,9 +450,24 @@ export function WorkflowsPage() {
   // Uses the detail query (which includes full step objects with
   // prompt_template strings) rather than the list query (which may
   // only carry a step count).
+  // The workflow's own `input_schema` wins when it declares one: it carries
+  // the authored type, default and description, none of which scanning the
+  // prompts for `{{var}}` can recover. Scanning stays as the fallback for
+  // workflows that declare nothing.
   const detectedParams = useMemo(() => {
     const detail = workflowDetailQuery.data;
-    if (!detail || !Array.isArray(detail.steps)) return [];
+    if (!detail) return [];
+    const declared = detail.input_schema;
+    if (Array.isArray(declared) && declared.length > 0) {
+      return declared.map((p) => ({
+        name: p.name,
+        description: p.description ?? "",
+        param_type: p.param_type ?? "string",
+        required: p.required ?? true,
+        default: p.default,
+      })) as TemplateParameter[];
+    }
+    if (!Array.isArray(detail.steps)) return [];
     return extractWorkflowParams(detail.steps as WorkflowStep[], t);
   }, [workflowDetailQuery.data, t]);
 

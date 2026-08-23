@@ -609,10 +609,26 @@ export interface WorkflowLastRunSummary {
   completed_at: string | null;
 }
 
+/** A declared workflow input parameter, as the server stores it.
+ *
+ * The dashboard used to re-detect parameters by scanning the step prompts
+ * for `{{var}}`, which could only ever produce "string / required / no
+ * description" — the authored type, default and description were invisible
+ * even though the server had them all along. */
+export interface WorkflowInputParam {
+  name: string;
+  param_type?: string;
+  required?: boolean;
+  description?: string;
+  default?: unknown;
+}
+
 export interface WorkflowItem {
   id: string;
   name: string;
   description?: string;
+  /** Declared parameters. Absent when the workflow declares none. */
+  input_schema?: WorkflowInputParam[];
   steps?: number | WorkflowStep[];
   created_at?: string;
   layout?: unknown;
@@ -2586,6 +2602,7 @@ export async function createWorkflow(payload: {
     timeout_secs?: number;
   }>;
   layout?: unknown;
+  input_schema?: WorkflowInputParam[];
 }): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/workflows", payload).then((r) => ({
     ...r,
@@ -2632,6 +2649,7 @@ export async function updateWorkflow(workflowId: string, payload: {
     timeout_secs?: number;
   }>;
   layout?: unknown;
+  input_schema?: WorkflowInputParam[];
 }): Promise<WorkflowItem> {
   return put<WorkflowItem>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
 }
