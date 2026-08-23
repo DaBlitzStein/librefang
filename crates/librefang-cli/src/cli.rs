@@ -297,22 +297,6 @@ pub(crate) enum Commands {
         long_about = "Low-level daemon control commands.\n\nExamples:\n  librefang gateway start          # Start the daemon\n  librefang gateway stop           # Stop the daemon\n  librefang gateway restart        # Restart the daemon\n  librefang gateway status         # Show daemon status"
     )]
     Gateway(GatewayCommands),
-    /// Create and run an autonomous goal.
-    #[command(
-        long_about = "Create an autonomous goal and optionally watch its execution.\n\nCreates a goal via POST /api/goals, starts the run via POST /api/goals/{id}/start,\nand with --watch polls every 2 seconds until completion.\n\nExamples:\n  librefang goal \"Fix the login bug\"\n  librefang goal \"Refactor auth module\" --agent my-agent\n  librefang goal \"Write tests\" --max-iterations 10 --watch\n  librefang goal \"Research topic\" --loop-engineering"
-    )]
-    /// Back up the installation into a portable tarball, transportable to
-    /// another host (`librefang restore`). Global by default; `--agent` limits
-    /// the workspace files to one agent while still carrying the shared data
-    /// dir (memories live in one database) plus config, skills and agent types.
-    Backup {
-        /// Output tarball (default: ~/librefang-backup-<timestamp>.tar.gz).
-        #[arg(long)]
-        output: Option<PathBuf>,
-        /// Include only this agent's workspace (shared data dir still travels).
-        #[arg(long)]
-        agent: Option<String>,
-    },
     /// Purge every trace of an agent: roster entry, sessions, memories,
     /// workspace directory and any agent-type with the same name. For agents
     /// the operator already deleted but whose data lingers.
@@ -321,16 +305,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         agent: String,
     },
-    /// Restore a tarball produced by `librefang backup` into the LibreFang home.
-    Restore {
-        /// Tarball produced by `librefang backup`.
-        input: PathBuf,
-        /// Keep this host's own config.toml (API key, listen address) while
-        /// restoring everything else — the mode for cloning another host's
-        /// agents and data onto this one.
-        #[arg(long)]
-        keep_config: bool,
-    },
+    /// Create and run an autonomous goal.
+    #[command(
+        long_about = "Create an autonomous goal and optionally watch its execution.\n\nCreates a goal via POST /api/goals, starts the run via POST /api/goals/{id}/start,\nand with --watch polls every 2 seconds until completion.\n\nExamples:\n  librefang goal \"Fix the login bug\"\n  librefang goal \"Refactor auth module\" --agent my-agent\n  librefang goal \"Write tests\" --max-iterations 10 --watch\n  librefang goal \"Research topic\" --loop-engineering"
+    )]
     Goal {
         /// Goal description — serves as both title and prompt.
         description: String,

@@ -983,9 +983,12 @@ describe("agentManifest shared folders", () => {
   });
 
   it("reads existing shares back", () => {
-    const { form, extras } = parseManifestToml(
+    const parsed = parseManifestToml(
       ['name = "deannatroi"', "", "[workspaces]", 'library = { path = "shared/library", mode = "r" }'].join("\n"),
     );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const { form, extras } = parsed;
 
     expect(form.workspaces).toHaveLength(1);
     expect(form.workspaces[0]).toMatchObject({ name: "library", path: "shared/library", mode: "r" });

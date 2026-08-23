@@ -13,7 +13,6 @@ pub mod auth;
 pub mod auto_dream;
 pub mod auto_reply;
 pub mod background;
-pub mod backup;
 pub mod capabilities;
 pub mod config;
 pub mod config_reload;

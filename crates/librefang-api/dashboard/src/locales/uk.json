@@ -2015,7 +2015,8 @@
     "main_lane_help": "Повідомлення користувача, передані з каналів",
     "queue_concurrency": "Ліміти черг і типовий ліміт агента",
     "subagent_lane_help": "Породжені дочірні агенти (agent_send)",
-    "trigger_lane_help": "Dispatch тригерів подій (TaskPosted, MessageReceived, …)"
+    "trigger_lane_help": "Dispatch тригерів подій (TaskPosted, MessageReceived, …)",
+    "restore_keep_config": "Зберегти мою конфігурацію (режим клону)"
   },
   "telemetry": {
     "badge": "Спостережуваність",

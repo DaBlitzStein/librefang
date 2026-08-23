@@ -2013,7 +2013,8 @@
     "subagent_lane_help": "생성된 하위 에이전트(agent_send)",
     "trigger_lane_help": "이벤트 트리거 전달(TaskPosted, MessageReceived, …)",
     "default_per_agent_help": "매니페스트가 max_concurrent_invocations를 생략하는 경우 에이전트별 대체",
-    "audit_anchor": "기준점"
+    "audit_anchor": "기준점",
+    "restore_keep_config": "내 구성 유지 (복제 모드)"
   },
   "telemetry": {
     "badge": "관찰 가능성",

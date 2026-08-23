@@ -2015,7 +2015,8 @@
     "subagent_lane_help": "Uruchomione agenty potomne (agent_send)",
     "trigger_lane_help": "Wysyłanie wyzwalaczy zdarzeń (TaskPosted, MessageReceived, …)",
     "default_per_agent_help": "Domyślna wartość dla agenta, gdy manifest pomija max_concurrent_invocations",
-    "audit_anchor": "kotwica"
+    "audit_anchor": "kotwica",
+    "restore_keep_config": "Zachowaj moją konfigurację (tryb klonowania)"
   },
   "telemetry": {
     "badge": "Obserwowalność",

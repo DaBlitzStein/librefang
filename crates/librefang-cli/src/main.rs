@@ -398,22 +398,8 @@ fn main() {
             spawned,
         }) => cmd_start(cli.config, tail, spawned, foreground),
         Some(Commands::Restart { tail, foreground }) => cmd_restart(cli.config, tail, foreground),
-        Some(Commands::Backup { output, agent }) => {
-            std::process::exit(commands::backup::cmd_backup(
-                cli.config.clone(),
-                output,
-                agent.as_deref(),
-            ));
-        }
         Some(Commands::Purge { agent }) => {
             std::process::exit(commands::purge::cmd_purge(&agent));
-        }
-        Some(Commands::Restore { input, keep_config }) => {
-            std::process::exit(commands::backup::cmd_restore(
-                cli.config.clone(),
-                &input,
-                keep_config,
-            ));
         }
         Some(Commands::Spawn(args)) => cmd_spawn_alias(
             cli.config,
