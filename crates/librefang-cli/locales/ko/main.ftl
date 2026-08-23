@@ -1387,6 +1387,7 @@ chat-runner-press-esc-to-exit =   Esc를 눌러 종료하십시오.
 
 # tui/event.rs
 tui-event-workflow-completed = 워크플로가 완료되었습니다
+tui-event-workflow-steps-invalid = 단계는 JSON 배열이어야 합니다
 tui-event-workflow-exec-not-available-in-process = 인프로세스 모드에서는 워크플로 실행을 사용할 수 없습니다
 tui-event-workflow-create-not-available-in-process = 인프로세스 모드에서는 워크플로 생성을 사용할 수 없습니다
 tui-event-trigger-create-not-available-in-process = 인프로세스 모드에서는 트리거 생성을 사용할 수 없습니다

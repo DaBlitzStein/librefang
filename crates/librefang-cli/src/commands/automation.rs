@@ -111,23 +111,34 @@ pub(crate) fn cmd_workflow_create(file: PathBuf) {
 pub(crate) fn cmd_workflow_run(workflow_id: &str, input: &str) {
     let base = require_daemon("workflow run");
     let client = daemon_client();
+    // `?wait=true` — without it the API answers 202 with just a `run_id` and
+    // no `output`, which this command used to read as a failure: every
+    // successful launch printed "Unknown error" and exited 1.
     let body = daemon_json(
         client
-            .post(format!("{base}/api/workflows/{workflow_id}/run"))
+            .post(format!("{base}/api/workflows/{workflow_id}/run?wait=true"))
             .json(&serde_json::json!({"input": input}))
             .send(),
     );
+
+    let run_id = body["run_id"].as_str().unwrap_or("?");
 
     if let Some(output) = body["output"].as_str() {
         println!("{}", i18n::t("automation-workflow-completed"));
         println!(
             "{}",
-            i18n::t_args(
-                "automation-workflow-run-id",
-                &[("id", body["run_id"].as_str().unwrap_or("?"))]
-            )
+            i18n::t_args("automation-workflow-run-id", &[("id", run_id)])
         );
         println!("  Output:\n{output}");
+    } else if body["error"].is_null() && body["run_id"].is_string() {
+        // Accepted but still running (the wait timed out, or the run is
+        // async): a launch is not a failure. Report the id so the run stays
+        // traceable, and exit 0.
+        println!("{}", i18n::t("automation-workflow-completed"));
+        println!(
+            "{}",
+            i18n::t_args("automation-workflow-run-id", &[("id", run_id)])
+        );
     } else {
         let err_msg = body["error"].as_str().unwrap_or("Unknown error");
         let err_localized = if err_msg == "Unknown error" {

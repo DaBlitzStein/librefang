@@ -6324,10 +6324,36 @@ impl Workflow {
             .trim_matches('-')
             .to_string();
 
-        // Collect all {{var}} placeholders across all steps
+        // Collect all {{var}} placeholders across all steps.
+        //
+        // An authored `input_schema` wins over the scan: it carries the
+        // types, descriptions and `required: false` the author set by hand,
+        // none of which a regex over the prompts can recover. Before this,
+        // saving a workflow as a template silently flattened every parameter
+        // back to "string / required / auto-generated description".
+        // Placeholders the schema does not mention are still appended, so a
+        // partial schema never loses a variable the steps actually use.
         let re = Regex::new(r"\{\{(\w+)\}\}").expect("valid regex");
         let mut seen_params = HashSet::new();
         let mut parameters = Vec::new();
+
+        for declared in workflow.input_schema.iter().flatten() {
+            if !seen_params.insert(declared.name.clone()) {
+                continue;
+            }
+            parameters.push(TemplateParameter {
+                name: declared.name.clone(),
+                description: declared.description.clone(),
+                param_type: match declared.param_type.as_str() {
+                    "number" => ParameterType::Number,
+                    "boolean" => ParameterType::Boolean,
+                    "agent_id" => ParameterType::AgentId,
+                    _ => ParameterType::String,
+                },
+                default: None,
+                required: declared.required,
+            });
+        }
 
         let steps: Vec<WorkflowTemplateStep> = workflow
             .steps
@@ -9709,6 +9735,41 @@ prompt_template = "do {{x}}"
         let result = WorkflowEngine::topological_sort(&steps);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Cycle detected"));
+    }
+
+    #[test]
+    fn to_template_keeps_the_authored_input_schema() {
+        let mut workflow = test_workflow();
+        workflow.steps[0].prompt_template = "hola {{ciudad}} y {{extra}}".to_string();
+        workflow.input_schema = Some(vec![WorkflowInputParam {
+            name: "ciudad".to_string(),
+            param_type: "number".to_string(),
+            required: false,
+            description: Some("La ciudad objetivo".to_string()),
+        }]);
+
+        let template = workflow.to_template();
+
+        let ciudad = template
+            .parameters
+            .iter()
+            .find(|p| p.name == "ciudad")
+            .expect("the authored parameter must survive");
+        assert!(
+            matches!(ciudad.param_type, ParameterType::Number),
+            "the authored type must not be flattened back to String"
+        );
+        assert!(
+            !ciudad.required,
+            "the authored `required: false` must survive"
+        );
+        assert_eq!(ciudad.description.as_deref(), Some("La ciudad objetivo"));
+
+        // A placeholder the schema does not declare is still picked up.
+        assert!(
+            template.parameters.iter().any(|p| p.name == "extra"),
+            "placeholders missing from the schema must still be collected"
+        );
     }
 
     #[test]

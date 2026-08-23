@@ -118,17 +118,27 @@ pub(crate) async fn refresh_if_stale(
 // Gateway response parsing
 // ---------------------------------------------------------------------------
 
-/// Per-model figures recovered from the litellm-only `GET {base}/model/info`
-/// extension. Every field is optional because the endpoint may be entirely
-/// absent (any non-litellm OpenAI-compatible server) or present but
-/// null-valued (litellm itself, when the operator never registered a limit
-/// for the model — the case that motivated this module, refs #7775).
+/// Per-model figures and capabilities recovered from the litellm-only
+/// `GET {base}/model/info` extension. Every field is optional because the
+/// endpoint may be entirely absent (any non-litellm OpenAI-compatible server)
+/// or present but null-valued (litellm itself, when the operator never
+/// registered a limit for the model — the case that motivated this module,
+/// refs #7775).
+///
+/// The capability flags matter as much as the limits: the gateway is the
+/// authority on what the model behind it can actually do. Without them a
+/// freshly discovered gateway model is born with every capability `false`,
+/// so the agent loop strips attached images before the call and hands the
+/// model a bare file path instead — which it then tries to open with the
+/// browser or the shell, and "describes" from the filename alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct LiveLimits {
     context_window: Option<u64>,
     max_output_tokens: Option<u64>,
     input_cost_per_m: Option<f64>,
     output_cost_per_m: Option<f64>,
+    supports_vision: Option<bool>,
+    supports_tools: Option<bool>,
 }
 
 /// Parse `GET {base}/models` into the bare id list. Rows without a usable
@@ -195,6 +205,16 @@ fn parse_model_info(body: &serde_json::Value) -> HashMap<String, LiveLimits> {
             .and_then(serde_json::Value::as_f64)
             .filter(|v| v.is_finite() && *v >= 0.0)
             .map(|v| v * 1_000_000.0);
+        // Capabilities: `null` means "the gateway did not say", which is
+        // distinct from "no" — only an explicit `false` denies. Same
+        // unknown-vs-zero discipline the limits above use.
+        let supports_vision = info
+            .and_then(|i| i.get("supports_vision"))
+            .and_then(serde_json::Value::as_bool);
+        let supports_tools = info
+            .and_then(|i| i.get("supports_function_calling"))
+            .and_then(serde_json::Value::as_bool);
+
         out.insert(
             name.to_lowercase(),
             LiveLimits {
@@ -202,6 +222,8 @@ fn parse_model_info(body: &serde_json::Value) -> HashMap<String, LiveLimits> {
                 max_output_tokens,
                 input_cost_per_m,
                 output_cost_per_m,
+                supports_vision,
+                supports_tools,
             },
         );
     }
@@ -289,8 +311,15 @@ fn build_catalog_entries(
                 input_cost_per_m,
                 output_cost_per_m,
                 pricing_known,
-                supports_tools: prior.is_some_and(|p| p.supports_tools),
-                supports_vision: prior.is_some_and(|p| p.supports_vision),
+                // The gateway is the authority on its own models: an explicit
+                // flag from `/model/info` wins over the carried-forward value.
+                // Absent (`null`) falls back to what we already knew.
+                supports_tools: limit
+                    .supports_tools
+                    .unwrap_or_else(|| prior.is_some_and(|p| p.supports_tools)),
+                supports_vision: limit
+                    .supports_vision
+                    .unwrap_or_else(|| prior.is_some_and(|p| p.supports_vision)),
                 // Every OpenAI-shaped chat-completions endpoint streams.
                 supports_streaming: true,
                 supports_thinking: prior.is_some_and(|p| p.supports_thinking),
@@ -475,6 +504,73 @@ mod tests {
             supports_streaming: true,
             ..Default::default()
         }
+    }
+
+    // -- Capabilities from the gateway -------------------------------------
+
+    /// The gateway publishes `supports_vision`; a freshly discovered model
+    /// (no prior entry) must inherit it. Before this was wired, capabilities
+    /// were carried forward from a prior entry only, so a first discovery
+    /// was born blind — the agent loop then stripped attached images and
+    /// handed the model a file path instead.
+    #[test]
+    fn a_vision_flag_from_the_gateway_reaches_a_freshly_discovered_model() {
+        let body = serde_json::json!({"data": [{
+            "model_name": "sensor-model-generic-high",
+            "model_info": {"supports_vision": true, "supports_function_calling": true},
+        }]});
+        let limits = parse_model_info(&body);
+
+        let entries = build_catalog_entries(
+            "litellm",
+            &["sensor-model-generic-high".to_string()],
+            &limits,
+            &[],
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].supports_vision,
+            "a gateway that says supports_vision=true must produce a seeing model"
+        );
+        assert!(entries[0].supports_tools);
+    }
+
+    /// A `null` flag means "the gateway did not say", never "no": whatever we
+    /// already knew survives the refresh.
+    #[test]
+    fn a_null_capability_keeps_what_was_already_known() {
+        let body = serde_json::json!({"data": [{
+            "model_name": "m",
+            "model_info": {"max_input_tokens": 131_072},
+        }]});
+        let limits = parse_model_info(&body);
+
+        let mut prior = text_entry("m", "litellm");
+        prior.supports_vision = true;
+        let entries = build_catalog_entries("litellm", &["m".to_string()], &limits, &[prior]);
+
+        assert!(
+            entries[0].supports_vision,
+            "a silent gateway must not erase a capability we already had"
+        );
+    }
+
+    /// An explicit `false` is an answer, and the gateway is the authority on
+    /// its own models — it overrides the carried-forward value.
+    #[test]
+    fn an_explicit_denial_from_the_gateway_wins_over_the_old_value() {
+        let body = serde_json::json!({"data": [{
+            "model_name": "m",
+            "model_info": {"supports_vision": false},
+        }]});
+        let limits = parse_model_info(&body);
+
+        let mut prior = text_entry("m", "litellm");
+        prior.supports_vision = true;
+        let entries = build_catalog_entries("litellm", &["m".to_string()], &limits, &[prior]);
+
+        assert!(!entries[0].supports_vision);
     }
 
     // -- Scope -------------------------------------------------------------
@@ -662,6 +758,7 @@ mod tests {
                 max_output_tokens: Some(8_192),
                 input_cost_per_m: Some(3.0),
                 output_cost_per_m: Some(15.0),
+                ..Default::default()
             },
         );
         let entries = build_catalog_entries("litellm", &live_ids, &limits, &[]);

@@ -1402,6 +1402,7 @@ chat-runner-press-esc-to-exit =   Press Esc to exit.
 
 # tui/event.rs
 tui-event-workflow-completed = Workflow completed
+tui-event-workflow-steps-invalid = Steps must be a JSON array
 tui-event-workflow-exec-not-available-in-process = Workflow execution not available in in-process mode
 tui-event-workflow-create-not-available-in-process = Workflow creation not available in in-process mode
 tui-event-trigger-create-not-available-in-process = Trigger creation not available in in-process mode
