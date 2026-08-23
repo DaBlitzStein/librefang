@@ -60,6 +60,7 @@ pub enum SettingsSub {
     Providers,
     Models,
     Tools,
+    Backups,
 }
 
 pub struct SettingsState {
@@ -95,11 +96,36 @@ pub struct SettingsState {
     /// The overrides entity as fetched, so saving preserves every field the
     /// editor doesn't touch (temperature, capability overrides, …).
     pub model_edit_base: librefang_types::model_catalog::ModelOverrides,
+    // ── Backups ────────────────────────────────────────────────────────
+    pub backups: Vec<BackupEntry>,
+    pub backup_list: ListState,
+    /// Clone mode: restore everything except config.toml.
+    pub backup_keep_config: bool,
+    /// Components selected for the restore; empty = restore all.
+    pub backup_components: Vec<String>,
+    pub backup_msg: String,
 }
 
+/// One backup file, mirrored from `GET /api/backups`.
+#[derive(Clone)]
+pub struct BackupEntry {
+    pub filename: String,
+    pub size_bytes: u64,
+    pub created_at: String,
+}
+
+#[derive(Debug)]
 pub enum SettingsAction {
     Continue,
     RefreshProviders,
+    RefreshBackups,
+    CreateBackup,
+    RestoreBackup {
+        filename: String,
+        keep_config: bool,
+        components: Vec<String>,
+    },
+    DeleteBackup(String),
     RefreshModels,
     RefreshTools,
     SaveProviderKey {
@@ -144,6 +170,11 @@ impl SettingsState {
             model_edit_ctx: String::new(),
             model_edit_max_out: String::new(),
             model_edit_base: librefang_types::model_catalog::ModelOverrides::default(),
+            backup_keep_config: false,
+            backup_components: Vec::new(),
+            backups: Vec::new(),
+            backup_list: ListState::default(),
+            backup_msg: String::new(),
         }
     }
 
@@ -164,8 +195,9 @@ impl SettingsState {
             return self.handle_input(key);
         }
 
-        // Sub-tab switching
-        if !self.input_mode {
+        // Sub-tab switching. Skips while the Backups tab is active: the
+        // number keys 1-8 toggle restore components there.
+        if !self.input_mode && self.sub != SettingsSub::Backups {
             match key.code {
                 KeyCode::Char('1') => {
                     self.sub = SettingsSub::Providers;
@@ -179,6 +211,10 @@ impl SettingsState {
                     self.sub = SettingsSub::Tools;
                     return SettingsAction::RefreshTools;
                 }
+                KeyCode::Char('4') => {
+                    self.sub = SettingsSub::Backups;
+                    return SettingsAction::RefreshBackups;
+                }
                 _ => {}
             }
         }
@@ -187,7 +223,71 @@ impl SettingsState {
             SettingsSub::Providers => self.handle_providers(key),
             SettingsSub::Models => self.handle_models(key),
             SettingsSub::Tools => self.handle_tools(key),
+            SettingsSub::Backups => self.handle_backups(key),
         }
+    }
+
+    fn handle_backups(&mut self, key: KeyEvent) -> SettingsAction {
+        const BACKUP_COMPONENTS: [&str; 8] = [
+            "config",
+            "cron_jobs",
+            "hand_state",
+            "custom_models",
+            "agents",
+            "skills",
+            "workflows",
+            "data",
+        ];
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                let total = self.backups.len();
+                if total > 0 {
+                    let i = self.backup_list.selected().unwrap_or(0);
+                    self.backup_list
+                        .select(Some(if i == 0 { total - 1 } else { i - 1 }));
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let total = self.backups.len();
+                if total > 0 {
+                    let i = self.backup_list.selected().unwrap_or(0);
+                    self.backup_list.select(Some((i + 1) % total));
+                }
+            }
+            KeyCode::Char('c') => return SettingsAction::CreateBackup,
+            KeyCode::Char('r') => {
+                if let Some(i) = self.backup_list.selected() {
+                    if let Some(b) = self.backups.get(i) {
+                        return SettingsAction::RestoreBackup {
+                            filename: b.filename.clone(),
+                            keep_config: self.backup_keep_config,
+                            components: self.backup_components.clone(),
+                        };
+                    }
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(i) = self.backup_list.selected() {
+                    if let Some(b) = self.backups.get(i) {
+                        return SettingsAction::DeleteBackup(b.filename.clone());
+                    }
+                }
+            }
+            KeyCode::Char(' ') => {
+                self.backup_keep_config = !self.backup_keep_config;
+            }
+            KeyCode::Char(c) if ('1'..='8').contains(&c) => {
+                let idx = (c as u8 - b'1') as usize;
+                let comp = BACKUP_COMPONENTS[idx];
+                if self.backup_components.iter().any(|x| x == comp) {
+                    self.backup_components.retain(|x| x != comp);
+                } else {
+                    self.backup_components.push(comp.to_string());
+                }
+            }
+            _ => {}
+        }
+        SettingsAction::Continue
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> SettingsAction {
@@ -402,6 +502,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         SettingsSub::Providers => draw_providers(f, chunks[2], state),
         SettingsSub::Models => draw_models(f, chunks[2], state),
         SettingsSub::Tools => draw_tools(f, chunks[2], state),
+        SettingsSub::Backups => draw_backups(f, chunks[2], state),
     }
 
     // Hints
@@ -413,6 +514,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         }
         SettingsSub::Models => crate::i18n::t("tui-settings-hints-models"),
         SettingsSub::Tools => crate::i18n::t("tui-settings-hints-tools"),
+        SettingsSub::Backups => crate::i18n::t("tui-settings-hints-backups"),
     };
     f.render_widget(widgets::hint_bar(&hint_text), chunks[3]);
 }
@@ -428,6 +530,10 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
             crate::i18n::t("tui-settings-tab-models"),
         ),
         (SettingsSub::Tools, crate::i18n::t("tui-settings-tab-tools")),
+        (
+            SettingsSub::Backups,
+            crate::i18n::t("tui-settings-tab-backups"),
+        ),
     ];
     let mut spans = vec![Span::raw("  ")];
     for (i, (sub, label)) in tabs.iter().enumerate() {
@@ -830,6 +936,84 @@ fn draw_model_edit_field(
     );
 }
 
+fn draw_backups(f: &mut Frame, area: Rect, state: &mut SettingsState) {
+    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
+
+    let mut hints = vec![Span::styled(
+        format!(
+            "  {}: {}",
+            crate::i18n::t("tui-settings-backup-keep-config"),
+            if state.backup_keep_config {
+                "on"
+            } else {
+                "off"
+            },
+        ),
+        if state.backup_keep_config {
+            theme::tab_active()
+        } else {
+            theme::tab_inactive()
+        },
+    )];
+    let comps = [
+        "config",
+        "cron_jobs",
+        "hand_state",
+        "custom_models",
+        "agents",
+        "skills",
+        "workflows",
+        "data",
+    ];
+    for (idx, c) in comps.iter().enumerate() {
+        let on = state.backup_components.iter().any(|x| x == c);
+        hints.push(Span::styled(
+            format!("  {}{}{}", idx + 1, c, if on { "+" } else { "-" }),
+            if on {
+                theme::tab_active()
+            } else {
+                theme::tab_inactive()
+            },
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(hints)), chunks[0]);
+
+    if state.backups.is_empty() {
+        let msg = if state.backup_msg.is_empty() {
+            crate::i18n::t("tui-settings-backup-empty")
+        } else {
+            state.backup_msg.clone()
+        };
+        f.render_widget(Paragraph::new(msg), chunks[1]);
+    } else {
+        let items: Vec<ListItem> = state
+            .backups
+            .iter()
+            .map(|b| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {}", b.filename),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  ({} bytes)", b.size_bytes),
+                        Style::default().fg(theme::TEXT_SECONDARY),
+                    ),
+                    Span::styled(
+                        format!("  {}", b.created_at),
+                        Style::default().fg(theme::TEXT_TERTIARY),
+                    ),
+                ]))
+            })
+            .collect();
+        f.render_stateful_widget(
+            ratatui::widgets::List::new(items),
+            chunks[1],
+            &mut state.backup_list,
+        );
+    }
+}
+
 fn draw_tools(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
@@ -882,5 +1066,81 @@ fn format_context(n: u64) -> String {
         format!("{}K", n / 1_000)
     } else {
         format!("{n}")
+    }
+}
+
+#[cfg(test)]
+mod backups_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn tab_4_opens_backups_and_requests_a_refresh() {
+        let mut state = SettingsState::new();
+        let action = state.handle_key(key(KeyCode::Char('4')));
+        assert!(matches!(state.sub, SettingsSub::Backups));
+        assert!(matches!(action, SettingsAction::RefreshBackups));
+    }
+
+    #[test]
+    fn space_toggles_clone_mode() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Backups;
+        state.handle_key(key(KeyCode::Char(' ')));
+        assert!(state.backup_keep_config);
+        state.handle_key(key(KeyCode::Char(' ')));
+        assert!(!state.backup_keep_config);
+    }
+
+    #[test]
+    fn number_keys_toggle_components() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Backups;
+        state.handle_key(key(KeyCode::Char('1')));
+        assert!(state.backup_components.iter().any(|c| c == "config"));
+        state.handle_key(key(KeyCode::Char('1')));
+        assert!(!state.backup_components.iter().any(|c| c == "config"));
+    }
+
+    #[test]
+    fn restore_sends_the_selection_with_the_filename() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Backups;
+        state.backups.push(BackupEntry {
+            filename: "b.zip".to_string(),
+            size_bytes: 10,
+            created_at: String::new(),
+        });
+        state.backup_list.select(Some(0));
+        state.handle_key(key(KeyCode::Char(' ')));
+        state.handle_key(key(KeyCode::Char('5')));
+
+        let action = state.handle_key(key(KeyCode::Char('r')));
+        match action {
+            SettingsAction::RestoreBackup {
+                filename,
+                keep_config,
+                components,
+            } => {
+                assert_eq!(filename, "b.zip");
+                assert!(keep_config);
+                assert!(components.iter().any(|c| c == "agents"));
+            }
+            other => panic!("expected restore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_is_one_keypress() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Backups;
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('c'))),
+            SettingsAction::CreateBackup
+        ));
     }
 }

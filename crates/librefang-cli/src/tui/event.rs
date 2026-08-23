@@ -128,6 +128,10 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
+    BackupsLoaded(Vec<crate::tui::screens::settings::BackupEntry>),
+    BackupCreated(String),
+    BackupRestored(String),
+    BackupDeleted(String),
     MemoryConfigSaved(bool),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
@@ -1759,6 +1763,99 @@ pub fn spawn_save_memory_config(
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
             let _ = tx.send(AppEvent::MemoryConfigSaved(ok));
+        }
+    });
+}
+
+pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/backups")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let mut items: Vec<crate::tui::screens::settings::BackupEntry> = body
+                        ["backups"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .map(|b| crate::tui::screens::settings::BackupEntry {
+                                    filename: b["filename"].as_str().unwrap_or("").to_string(),
+                                    size_bytes: b["size_bytes"].as_u64().unwrap_or(0),
+                                    created_at: b["created_at"].as_str().unwrap_or("").to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    items.sort_by(|a, b| b.filename.cmp(&a.filename));
+                    let _ = tx.send(AppEvent::BackupsLoaded(items));
+                }
+            }
+        }
+    });
+}
+
+pub fn spawn_create_backup(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let ok = client
+                .post(format!("{base_url}/api/backup"))
+                .json(&serde_json::json!({}))
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            let _ = tx.send(AppEvent::BackupCreated(if ok {
+                "created".to_string()
+            } else {
+                "failed".to_string()
+            }));
+        }
+    });
+}
+
+pub fn spawn_restore_backup(
+    backend: BackendRef,
+    filename: String,
+    keep_config: bool,
+    components: Vec<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let ok = client
+                .post(format!("{base_url}/api/restore"))
+                .json(&serde_json::json!({
+                    "filename": filename,
+                    "keep_config": keep_config,
+                    "components": components,
+                }))
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            let _ = tx.send(AppEvent::BackupRestored(if ok {
+                "restored".to_string()
+            } else {
+                "restore failed".to_string()
+            }));
+        }
+    });
+}
+
+pub fn spawn_delete_backup(backend: BackendRef, filename: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let ok = client
+                .delete(format!("{base_url}/api/backups/{}", filename))
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            let _ = tx.send(AppEvent::BackupDeleted(if ok {
+                "deleted".to_string()
+            } else {
+                "delete failed".to_string()
+            }));
         }
     });
 }
