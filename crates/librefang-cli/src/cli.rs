@@ -317,6 +317,11 @@ pub(crate) enum Commands {
     Restore {
         /// Tarball produced by `librefang backup`.
         input: PathBuf,
+        /// Keep this host's own config.toml (API key, listen address) while
+        /// restoring everything else — the mode for cloning another host's
+        /// agents and data onto this one.
+        #[arg(long)]
+        keep_config: bool,
     },
     Goal {
         /// Goal description — serves as both title and prompt.

@@ -405,8 +405,12 @@ fn main() {
                 agent.as_deref(),
             ));
         }
-        Some(Commands::Restore { input }) => {
-            std::process::exit(commands::backup::cmd_restore(cli.config.clone(), &input));
+        Some(Commands::Restore { input, keep_config }) => {
+            std::process::exit(commands::backup::cmd_restore(
+                cli.config.clone(),
+                &input,
+                keep_config,
+            ));
         }
         Some(Commands::Spawn(args)) => cmd_spawn_alias(
             cli.config,
