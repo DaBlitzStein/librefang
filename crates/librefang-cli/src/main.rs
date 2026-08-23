@@ -405,6 +405,9 @@ fn main() {
                 agent.as_deref(),
             ));
         }
+        Some(Commands::Purge { agent }) => {
+            std::process::exit(commands::purge::cmd_purge(&agent));
+        }
         Some(Commands::Restore { input, keep_config }) => {
             std::process::exit(commands::backup::cmd_restore(
                 cli.config.clone(),
