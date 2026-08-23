@@ -1892,3 +1892,99 @@ pub async fn purge_agent_data(
             .into_response(),
     }
 }
+
+/// GET /api/agents/{id}/token-usage — what this agent costs, in two views.
+///
+/// `injected` is the static footprint every request carries before a single
+/// message: the system prompt plus the assembled tool definitions (skills,
+/// MCP servers and built-ins all land in the same list, which is exactly
+/// what `available_tools` builds for the prompt). `recent` is the last calls
+/// it actually made, so an expensive turn is attributable instead of hidden
+/// inside a daily total.
+///
+/// Counts are estimates from the same CJK-aware heuristic the compactor uses
+/// to decide when to fold history, so the number here and the number that
+/// drives trimming cannot drift apart.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/token-usage",
+    tag = "agents",
+    responses(
+        (status = 200, description = "Injected footprint and recent calls"),
+        (status = 400, description = "Invalid agent id"),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn agent_token_usage(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            let msg = t.t("api-error-agent-invalid-id");
+            drop(t);
+            return ApiErrorResponse::bad_request(msg)
+                .with_code("invalid_agent_id")
+                .into_response();
+        }
+    };
+    let Some(entry) = state.kernel.agent_registry().get(agent_id) else {
+        let msg = t.t("api-error-agent-not-found");
+        drop(t);
+        return ApiErrorResponse::not_found(msg)
+            .with_code("agent_not_found")
+            .into_response();
+    };
+    drop(t);
+
+    let system_prompt = entry.manifest.model.system_prompt.clone();
+    let tools = state.kernel.available_tools(agent_id);
+
+    let system_tokens = librefang_kernel::estimate_token_count(&[], Some(&system_prompt), None);
+    let tools_tokens = librefang_kernel::estimate_token_count(&[], None, Some(tools.as_slice()));
+
+    // Per-tool so the operator can see WHICH one is expensive, not just that
+    // the total is large — the whole point of the breakdown.
+    let mut per_tool: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|tool| {
+            let one = std::slice::from_ref(tool);
+            serde_json::json!({
+                "name": tool.name,
+                "tokens": librefang_kernel::estimate_token_count(&[], None, Some(one)),
+            })
+        })
+        .collect();
+    per_tool.sort_by(|a, b| {
+        b["tokens"]
+            .as_u64()
+            .cmp(&a["tokens"].as_u64())
+            .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
+    });
+
+    let recent = state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .recent_events(agent_id, 25)
+        .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "agent_id": id,
+            "injected": {
+                "system_prompt_tokens": system_tokens,
+                "tools_tokens": tools_tokens,
+                "total_tokens": system_tokens + tools_tokens,
+                "tool_count": tools.len(),
+                "per_tool": per_tool,
+            },
+            "recent": recent,
+        })),
+    )
+        .into_response()
+}

@@ -9,6 +9,10 @@
 
 pub mod agent_identity_registry;
 pub mod agent_purge;
+
+/// Re-exported so surfaces can show the same token estimate the compactor
+/// uses to decide when to fold history — one heuristic, no drift.
+pub use librefang_runtime::compactor::estimate_token_count;
 pub mod approval;
 pub mod auth;
 pub mod auto_dream;

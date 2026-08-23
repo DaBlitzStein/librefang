@@ -417,6 +417,7 @@ use crate::types;
         routes::webhook_agent,
 
         // ── Backup / Restore ──
+        routes::agent_token_usage,
         routes::purge_agent_data,
         routes::create_backup,
         routes::list_backups,

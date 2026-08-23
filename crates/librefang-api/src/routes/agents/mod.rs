@@ -78,6 +78,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(bulk_stop_agents),
         )
         .route(
+            "/agents/{id}/token-usage",
+            axum::routing::get(agent_token_usage),
+        )
+        .route(
             "/agents/purge",
             axum::routing::post(purge_agent_data),
         )

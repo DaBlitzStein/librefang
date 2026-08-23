@@ -8,6 +8,17 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
+/// One recorded LLM call, as the per-agent history surfaces it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsageEventRow {
+    pub timestamp: String,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+    pub tool_calls: u32,
+}
+
 /// A single usage event recording an LLM call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageRecord {
@@ -767,6 +778,46 @@ impl UsageStore {
     }
 
     /// Query total cost in the last hour for an agent.
+    /// The agent's most recent calls, newest first.
+    ///
+    /// The store only ever exposed aggregates (`query_daily` and friends),
+    /// which answer "how much has this cost" but never "which call was
+    /// expensive". Backed by the existing `idx_usage_agent_time` index, so
+    /// this is an index scan bounded by `limit`, not a table walk.
+    pub fn recent_events(
+        &self,
+        agent_id: AgentId,
+        limit: u32,
+    ) -> LibreFangResult<Vec<UsageEventRow>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls
+                 FROM usage_events
+                 WHERE agent_id = ?1
+                 ORDER BY timestamp DESC
+                 LIMIT ?2",
+            )
+            .map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map(rusqlite::params![agent_id.0.to_string(), limit], |row| {
+                Ok(UsageEventRow {
+                    timestamp: row.get(0)?,
+                    model: row.get(1)?,
+                    // SQLite integers come back signed; the column is a
+                    // non-negative token count, so clamp rather than widen.
+                    input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
+                    output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
+                    cost_usd: row.get(4)?,
+                    tool_calls: row.get(5)?,
+                })
+            })
+            .map_err(LibreFangError::memory)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(LibreFangError::memory)?;
+        Ok(rows)
+    }
+
     pub fn query_hourly(&self, agent_id: AgentId) -> LibreFangResult<f64> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let cost: f64 = conn
