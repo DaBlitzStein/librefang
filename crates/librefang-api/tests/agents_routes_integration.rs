@@ -2738,20 +2738,25 @@ async fn promoting_an_agent_creates_an_agent_type_with_its_manifest() {
     let h = boot(TEST_TOKEN).await;
     let agent_id = spawn_named(&h.state, "promote-source");
 
+    let promoted_name = format!("promoted-{}", uuid::Uuid::new_v4().simple());
     let (status, body) = send(
         h.app.clone(),
         post_json(
             &format!("/api/agents/{agent_id}/promote-to-type"),
-            serde_json::json!({"name": "promoted-from-test"}),
+            serde_json::json!({"name": promoted_name}),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body:?}");
-    assert_eq!(body["name"], "promoted-from-test", "{body:?}");
+    assert_eq!(body["name"], promoted_name, "{body:?}");
 
-    let (status, body) = send(h.app.clone(), get("/api/templates/promoted-from-test")).await;
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/templates/{promoted_name}")),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert_eq!(body["name"], "promoted-from-test", "{body:?}");
+    assert_eq!(body["name"], promoted_name, "{body:?}");
 }
 
 /// Promoting onto the name of a live agent would shadow it in dual-source
@@ -2759,30 +2764,32 @@ async fn promoting_an_agent_creates_an_agent_type_with_its_manifest() {
 #[tokio::test(flavor = "multi_thread")]
 async fn promoting_onto_a_live_agents_name_is_rejected() {
     let h = boot(TEST_TOKEN).await;
-    let first = spawn_named(&h.state, "promote-target");
+    let live_name = format!("live-{}", uuid::Uuid::new_v4().simple());
+    let first = spawn_named(&h.state, &live_name);
 
+    // Self-promotion under a DIFFERENT type name is a rename in place.
+    let type_name = format!("type-{}", uuid::Uuid::new_v4().simple());
     let (status, _body) = send(
         h.app.clone(),
         post_json(
             &format!("/api/agents/{first}/promote-to-type"),
-            serde_json::json!({"name": "promote-target"}),
+            serde_json::json!({"name": type_name}),
         ),
     )
     .await;
-    // Promote under the SAME agent's name is allowed (renaming in place),
-    // so use a SECOND agent promoting onto the first one's name.
     assert_eq!(
         status,
         StatusCode::CREATED,
         "self-promotion must succeed: {_body:?}"
     );
 
+    // A second agent promoting onto the LIVE agent's name must be rejected.
     let second = spawn_named(&h.state, "promote-source-2");
     let (status, _body) = send(
         h.app.clone(),
         post_json(
             &format!("/api/agents/{second}/promote-to-type"),
-            serde_json::json!({"name": "promote-target"}),
+            serde_json::json!({"name": live_name}),
         ),
     )
     .await;

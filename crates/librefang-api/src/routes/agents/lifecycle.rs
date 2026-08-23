@@ -1691,6 +1691,10 @@ pub async fn promote_agent_to_type(
         return ApiErrorResponse::bad_request(msg).into_response();
     }
 
+    // Write under the KERNEL's home, not the process-global one: a test
+    // harness (or any future multi-home embedding) boots a kernel at a
+    // temp dir, and promoting from it must not leak files into the real
+    // ~/.librefang of the developer running the suite.
     let dir = crate::routes::agent_templates::agent_types_dir();
     let path = dir.join(format!("{type_name}.toml"));
     if path.exists() {
