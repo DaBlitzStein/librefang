@@ -2029,6 +2029,7 @@ tui-agents-title-custom-tools = Власний — Інструменти
 tui-agents-title-custom-skills = Власний — Скіли
 tui-agents-title-custom-workspaces = Спільні папки
 tui-agents-purged = { $name } вичищено: усі сліди видалено
+tui-workflows-param-required = { $name } — обов'язковий
 tui-agents-workspaces-help = a додати · d видалити · Enter редагувати · s зберегти · Esc назад
 tui-agents-workspaces-empty = Спільних папок ще немає. Натисніть a, щоб додати.
 tui-event-workspaces-update-failed = Не вдалося оновити спільні папки

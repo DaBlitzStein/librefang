@@ -497,6 +497,10 @@ impl App {
                 self.memory.config = Some(config);
                 self.memory.loading = false;
             }
+            AppEvent::WorkflowParamsLoaded(params) => {
+                self.workflows.run_params = params;
+                self.workflows.param_cursor = 0;
+            }
             AppEvent::AgentPurged(name) => {
                 self.agents.status_msg =
                     crate::i18n::t_args("tui-agents-purged", &[("name", name.as_str())]);
@@ -1700,6 +1704,11 @@ impl App {
         match action {
             workflows::WorkflowAction::Continue => {}
             workflows::WorkflowAction::Refresh => self.refresh_workflows(),
+            workflows::WorkflowAction::FetchWorkflowParams(wf_id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_workflow_params(backend, wf_id, self.event_tx.clone());
+                }
+            }
             workflows::WorkflowAction::LoadRuns(wf_id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     self.workflows.loading = true;
