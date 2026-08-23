@@ -4,7 +4,7 @@
 //! per-domain routers (`agent_templates`, `tools_sessions`, `approvals`,
 //! `pairing`, `registry`, `backup`, `commands`, `bindings`, `logs`) and
 //! exposes only the workspace-level `/api/versions` metadata endpoint plus
-//! the cross-crate path helper (`librefang_home`) that
+//! two cross-crate path helpers (`librefang_home`, `hostname_string`) that
 //! sibling routers still call into.
 //!
 //! Per-handler history (where each was extracted to):
@@ -60,6 +60,19 @@ pub(super) fn librefang_home() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(".librefang")
+}
+
+/// Get the machine hostname (best-effort).
+pub(crate) fn hostname_string() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| {
+            std::process::Command::new("hostname")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .map_err(|_| std::env::VarError::NotPresent)
+        })
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 // ---------------------------------------------------------------------------

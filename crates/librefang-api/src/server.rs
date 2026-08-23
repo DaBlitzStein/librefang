@@ -50,7 +50,6 @@ fn api_v1_routes(webhook_body_limit: usize) -> Router<Arc<AppState>> {
     Router::new()
         .merge(routes::config::router())
         .merge(routes::agents::router())
-        .merge(routes::backup::router())
         .merge(routes::audit::router())
         .merge(routes::authz::router())
         .merge(routes::channels::router())
