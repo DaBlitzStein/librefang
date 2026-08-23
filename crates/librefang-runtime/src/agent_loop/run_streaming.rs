@@ -902,6 +902,33 @@ async fn run_agent_loop_streaming_inner(
                             );
                         }
                     }
+                } else {
+                    // Non-timeout provider failure: the turn is about to end
+                    // with an error, and unless a visible note is saved the
+                    // session shows NOTHING — the operator's message appears
+                    // to vanish from the chat, and there is no trace of why.
+                    // This is the failure mode observed live: the circuit
+                    // breaker opened after a stream error, the turn ended,
+                    // and neither the chat nor the history explained it.
+                    let note = format!(
+                        "[System: the model provider failed and the task could not \
+                         be completed ({}). No response was produced.]",
+                        err_str
+                    );
+                    session.push_message(Message::assistant(note));
+                    repair_session_before_save(
+                        session,
+                        agent_id_str.as_str(),
+                        "streaming_provider_error",
+                    );
+                    if !opts.is_fork && !opts.incognito {
+                        if let Err(save_err) = memory.save_session_async(session).await {
+                            warn!(
+                                "Failed to persist provider-error note to session: {save_err}. \
+                                 The error will not appear on next session load."
+                            );
+                        }
+                    }
                 }
                 return Err(e);
             }
