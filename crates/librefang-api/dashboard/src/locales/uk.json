@@ -914,7 +914,12 @@
     "no_providers": "Немає провайдерів",
     "select_provider_first": "Спочатку оберіть провайдера",
     "delete_purge_data": "Також стерти його дані (робочу теку та тип агента)",
-    "delete_confirm_with_purge": "Видалити {{name}} ТА стерти його дані: робочу теку і шаблон типу агента. Це незворотно."
+    "delete_confirm_with_purge": "Видалити {{name}} ТА стерти його дані: робочу теку і шаблон типу агента. Це незворотно.",
+    "token_usage_title": "Обсяг токенів",
+    "token_system_prompt": "Системний промпт",
+    "token_tools": "Інструменти",
+    "token_injected_total": "Додається до запиту",
+    "token_recent": "Останні виклики"
   },
   "providers": {
     "title": "Провайдери",

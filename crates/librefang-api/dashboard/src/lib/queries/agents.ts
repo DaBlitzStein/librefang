@@ -16,6 +16,7 @@ import {
   listTools,
   getAgentTools,
   getAgentSkills,
+  getAgentTokenUsage,
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -210,4 +211,18 @@ export function useAgentManifest(agentId: string, options: QueryOverrides = {}) 
 
 export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.channels(agentId), options));
+}
+
+/** What this agent costs: injected footprint plus its recent calls.
+ *
+ * Not polled — the injected footprint only moves when the agent's
+ * configuration changes, and the recent calls are a history, not a live
+ * meter. Refetched on demand by the caller opening the section. */
+export function useAgentTokenUsage(agentId: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: agentKeys.tokenUsage(agentId ?? ""),
+    queryFn: () => getAgentTokenUsage(agentId!),
+    enabled: enabled && !!agentId,
+    staleTime: 30_000,
+  });
 }

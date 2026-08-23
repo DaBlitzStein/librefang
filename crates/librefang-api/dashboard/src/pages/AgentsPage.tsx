@@ -77,6 +77,7 @@ import {
   useAgentChannels,
   usePromptVersions,
   useTools,
+  useAgentTokenUsage,
 } from "../lib/queries/agents";
 import {
   useAgentTypeToml,
@@ -625,6 +626,7 @@ export function AgentsPage() {
   // of the same name on disk. Off by default — deleting and purging are
   // different intents.
   const [purgeDataOnDelete, setPurgeDataOnDelete] = useState(false);
+  const tokenUsageQuery = useAgentTokenUsage(detailAgent?.id, detailDrawerOpen);
   const handleDeleteSuccess = (agentId: string) => {
     if (detailAgent?.id === agentId) {
       setDetailAgent(null);
@@ -3380,6 +3382,63 @@ export function AgentsPage() {
                   </Button>
                 )}
               </div>
+
+              {/* What this agent costs: the footprint every request carries
+                  before a single message, and the calls it actually made. */}
+              {tokenUsageQuery.data?.injected && (
+                <div className="rounded-lg bg-main/30 p-3 space-y-1.5">
+                  <p className="text-[11px] font-bold text-text-dim">
+                    {t("agents.token_usage_title", { defaultValue: "Token footprint" })}
+                  </p>
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-text-dim">
+                      {t("agents.token_system_prompt", { defaultValue: "System prompt" })}
+                    </span>
+                    <span className="font-mono">
+                      {tokenUsageQuery.data.injected.system_prompt_tokens ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-text-dim">
+                      {t("agents.token_tools", { defaultValue: "Tools" })} (
+                      {tokenUsageQuery.data.injected.tool_count ?? 0})
+                    </span>
+                    <span className="font-mono">
+                      {tokenUsageQuery.data.injected.tools_tokens ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-[11px] border-t border-border/40 pt-1.5">
+                    <span className="font-bold">
+                      {t("agents.token_injected_total", { defaultValue: "Injected per request" })}
+                    </span>
+                    <span className="font-mono font-bold">
+                      {tokenUsageQuery.data.injected.total_tokens ?? 0}
+                    </span>
+                  </div>
+                  {/* Sorted by cost server-side: the expensive tool first. */}
+                  {(tokenUsageQuery.data.injected.per_tool ?? []).slice(0, 5).map((tool: { name: string; tokens: number }) => (
+                    <div key={tool.name} className="flex justify-between text-[10px] text-text-dim">
+                      <span className="truncate">{tool.name}</span>
+                      <span className="font-mono">{tool.tokens}</span>
+                    </div>
+                  ))}
+                  {(tokenUsageQuery.data.recent ?? []).length > 0 && (
+                    <div className="border-t border-border/40 pt-1.5 space-y-1">
+                      <p className="text-[10px] text-text-dim">
+                        {t("agents.token_recent", { defaultValue: "Recent calls" })}
+                      </p>
+                      {(tokenUsageQuery.data.recent ?? []).slice(0, 5).map((call: { timestamp: string; model: string; input_tokens: number; output_tokens: number; cost_usd: number }, i: number) => (
+                        <div key={`${call.timestamp}-${i}`} className="flex justify-between text-[10px]">
+                          <span className="text-text-dim truncate">{call.model}</span>
+                          <span className="font-mono">
+                            {call.input_tokens}/{call.output_tokens} · ${call.cost_usd.toFixed(4)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {!detailAgent.is_hand && (
                 <label className="flex items-center gap-2 text-[11px] text-text-dim">

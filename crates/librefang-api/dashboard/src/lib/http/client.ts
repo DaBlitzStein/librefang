@@ -211,6 +211,7 @@ export {
   resumeAgent,
   deleteAgent,
   purgeAgentData,
+  getAgentTokenUsage,
   clearAgentHistory,
   patchAgent,
   patchAgentConfig,

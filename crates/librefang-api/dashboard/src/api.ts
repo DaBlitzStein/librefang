@@ -1730,6 +1730,32 @@ export async function getAgentTypeToml(name: string): Promise<string> {
  * The counterpart to `deleteAgent` for agents that are already deleted: with
  * no roster entry there is no id to address them by, but the workspace
  * directory and agent-type template are still on disk. Idempotent. */
+/** What an agent costs: the static footprint every request carries, and the
+ * calls it actually made. Token counts are estimates from the same heuristic
+ * the compactor uses to decide when to fold history. */
+export interface AgentTokenUsage {
+  agent_id?: string;
+  injected?: {
+    system_prompt_tokens?: number;
+    tools_tokens?: number;
+    total_tokens?: number;
+    tool_count?: number;
+    per_tool?: Array<{ name: string; tokens: number }>;
+  };
+  recent?: Array<{
+    timestamp: string;
+    model: string;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+    tool_calls: number;
+  }>;
+}
+
+export async function getAgentTokenUsage(agentId: string): Promise<AgentTokenUsage> {
+  return get<AgentTokenUsage>(`/api/agents/${encodeURIComponent(agentId)}/token-usage`);
+}
+
 export async function purgeAgentData(
   name: string,
 ): Promise<{ agent?: string; purged?: Record<string, boolean> }> {

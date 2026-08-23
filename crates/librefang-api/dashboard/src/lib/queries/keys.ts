@@ -74,6 +74,7 @@ export const agentKeys = {
   // configured on this instance".
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
+  tokenUsage: (id: string) => [...agentKeys.detail(id), "token-usage"] as const,
 };
 
 export const agentTypeKeys = {

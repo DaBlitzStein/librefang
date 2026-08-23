@@ -914,7 +914,12 @@
     "no_providers": "没有供应商",
     "select_provider_first": "请先选择供应商",
     "delete_purge_data": "同时清除其数据（工作区和智能体类型）",
-    "delete_confirm_with_purge": "删除 {{name}} 并清除其数据：工作区目录和智能体类型模板。此操作不可撤销。"
+    "delete_confirm_with_purge": "删除 {{name}} 并清除其数据：工作区目录和智能体类型模板。此操作不可撤销。",
+    "token_usage_title": "令牌占用",
+    "token_system_prompt": "系统提示词",
+    "token_tools": "工具",
+    "token_injected_total": "每次请求注入",
+    "token_recent": "最近调用"
   },
   "providers": {
     "title": "供应商",

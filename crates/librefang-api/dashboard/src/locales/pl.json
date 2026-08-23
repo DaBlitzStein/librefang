@@ -914,7 +914,12 @@
     "no_providers": "Brak dostawców",
     "select_provider_first": "Najpierw wybierz dostawcę",
     "delete_purge_data": "Usuń także jego dane (obszar roboczy i typ agenta)",
-    "delete_confirm_with_purge": "Usuń {{name}} ORAZ jego dane: katalog obszaru roboczego i szablon typu agenta. Tej operacji nie można cofnąć."
+    "delete_confirm_with_purge": "Usuń {{name}} ORAZ jego dane: katalog obszaru roboczego i szablon typu agenta. Tej operacji nie można cofnąć.",
+    "token_usage_title": "Zużycie tokenów",
+    "token_system_prompt": "Prompt systemowy",
+    "token_tools": "Narzędzia",
+    "token_injected_total": "Wstrzykiwane na żądanie",
+    "token_recent": "Ostatnie wywołania"
   },
   "providers": {
     "title": "Dostawcy",

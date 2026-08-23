@@ -914,7 +914,12 @@
     "no_providers": "No providers",
     "select_provider_first": "Select provider first",
     "delete_purge_data": "Also erase its data (workspace and agent-type)",
-    "delete_confirm_with_purge": "Delete {{name}} AND erase its data: workspace directory and agent-type template. This cannot be undone."
+    "delete_confirm_with_purge": "Delete {{name}} AND erase its data: workspace directory and agent-type template. This cannot be undone.",
+    "token_usage_title": "Token footprint",
+    "token_system_prompt": "System prompt",
+    "token_tools": "Tools",
+    "token_injected_total": "Injected per request",
+    "token_recent": "Recent calls"
   },
   "providers": {
     "title": "Providers",
