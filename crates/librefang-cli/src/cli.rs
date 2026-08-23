@@ -301,6 +301,23 @@ pub(crate) enum Commands {
     #[command(
         long_about = "Create an autonomous goal and optionally watch its execution.\n\nCreates a goal via POST /api/goals, starts the run via POST /api/goals/{id}/start,\nand with --watch polls every 2 seconds until completion.\n\nExamples:\n  librefang goal \"Fix the login bug\"\n  librefang goal \"Refactor auth module\" --agent my-agent\n  librefang goal \"Write tests\" --max-iterations 10 --watch\n  librefang goal \"Research topic\" --loop-engineering"
     )]
+    /// Back up the installation into a portable tarball, transportable to
+    /// another host (`librefang restore`). Global by default; `--agent` limits
+    /// the workspace files to one agent while still carrying the shared data
+    /// dir (memories live in one database) plus config, skills and agent types.
+    Backup {
+        /// Output tarball (default: ~/librefang-backup-<timestamp>.tar.gz).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Include only this agent's workspace (shared data dir still travels).
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Restore a tarball produced by `librefang backup` into the LibreFang home.
+    Restore {
+        /// Tarball produced by `librefang backup`.
+        input: PathBuf,
+    },
     Goal {
         /// Goal description — serves as both title and prompt.
         description: String,

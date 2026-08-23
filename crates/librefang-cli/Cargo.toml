@@ -62,6 +62,8 @@ dirs = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 chrono = { workspace = true }
 walkdir = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
 base64 = { workspace = true }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
