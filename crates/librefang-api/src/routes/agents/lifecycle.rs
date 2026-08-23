@@ -1643,6 +1643,104 @@ pub async fn get_agent_manifest_toml(
     }
 }
 
+/// POST /api/agents/{id}/promote-to-type — turn a live agent into a reusable
+/// agent type, so what an operator tuned by hand can be instantiated again.
+///
+/// The promotion takes the agent's full manifest (identity files excluded —
+/// they are private to the instance), pins the name to the requested type
+/// name, and writes it into the templates dir with the same collision checks
+/// as `POST /api/templates`. Optional body: `{ "name": "<type-name>" }`;
+/// without it the type keeps the agent's name.
+pub async fn promote_agent_to_type(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
+        }
+    };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
+
+    let type_name = body["name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| entry.manifest.name.clone());
+    if let Err(_e) = crate::routes::agent_templates::validate_agent_type_name(&type_name) {
+        let msg = t.t("api-error-invalid-agent-type-name");
+        drop(t);
+        return ApiErrorResponse::bad_request(msg).into_response();
+    }
+
+    let dir = crate::routes::agent_templates::agent_types_dir();
+    let path = dir.join(format!("{type_name}.toml"));
+    if path.exists() {
+        let msg = format!("Agent type '{type_name}' already exists");
+        drop(t);
+        return ApiErrorResponse::conflict(msg).into_response();
+    }
+    // Promoting onto another live agent's name would shadow it in dual-source
+    // resolution — the same guard the create route applies. Self-promotion
+    // under the agent's own name is a rename in place and stays allowed.
+    let workspace_agent_path = state
+        .kernel
+        .home_dir()
+        .join("workspaces")
+        .join("agents")
+        .join(&type_name);
+    if workspace_agent_path.exists() && type_name != entry.manifest.name {
+        let msg = format!(
+            "A workspace agent named '{type_name}' already exists — promoting under that name would shadow it"
+        );
+        drop(t);
+        return ApiErrorResponse::conflict(msg).into_response();
+    }
+
+    let mut manifest = entry.manifest.clone();
+    manifest.name = type_name.clone();
+    let toml_content = match toml::to_string_pretty(&manifest) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize manifest for promotion");
+            let msg = t.t("api-error-internal");
+            drop(t);
+            return ApiErrorResponse::internal(msg).into_response();
+        }
+    };
+    drop(t);
+
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("Failed to create templates dir: {e}");
+        return ApiErrorResponse::internal("failed to create templates dir").into_response();
+    }
+    if let Err(e) = std::fs::write(&path, &toml_content) {
+        tracing::warn!("Failed to write promoted agent-type '{type_name}': {e}");
+        return ApiErrorResponse::internal("failed to write agent type").into_response();
+    }
+
+    let created = crate::routes::agent_templates::manifest_to_agent_type(&type_name, &manifest);
+    (StatusCode::CREATED, Json(created)).into_response()
+}
+
 #[cfg(test)]
 mod spawn_body_log_scrub_tests {
     use super::scrub_spawn_body_for_log;
@@ -1700,101 +1798,4 @@ mod spawn_body_log_scrub_tests {
         assert_eq!(logged["template"], "researcher");
         assert_eq!(logged["name"], "my-agent");
     }
-}
-
-/// POST /api/agents/{id}/promote-to-type — turn a live agent into a reusable
-/// agent type, so what an operator tuned by hand can be instantiated again.
-///
-/// The promotion takes the agent's full manifest (identity files excluded —
-/// they are private to the instance), pins the name to the requested type
-/// name, and writes it into the templates dir with the same collision checks
-/// as `POST /api/templates`. Optional body: `{ "name": "<type-name>" }`;
-/// without it the type keeps the agent's name.
-pub async fn promote_agent_to_type(
-    State(state): State<Arc<AppState>>,
-    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
-    Path(id): Path<String>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .with_code("invalid_agent_id")
-                .into_response();
-        }
-    };
-    let entry = match state.kernel.agent_registry().get(agent_id) {
-        Some(e) => e,
-        None => {
-            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
-                .with_code("agent_not_found")
-                .into_response();
-        }
-    };
-    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
-        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
-            .with_code("agent_not_found")
-            .into_response();
-    }
-
-    let type_name = body["name"]
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| entry.manifest.name.clone());
-    if let Err(_e) = crate::routes::agent_templates::validate_agent_type_name(&type_name) {
-        let msg = t.t("api-error-invalid-agent-type-name");
-        drop(t);
-        return ApiErrorResponse::bad_request(msg).into_response();
-    }
-
-    let dir = crate::routes::agent_templates::agent_types_dir();
-    let path = dir.join(format!("{type_name}.toml"));
-    if path.exists() {
-        let msg = format!("Agent type '{type_name}' already exists");
-        drop(t);
-        return ApiErrorResponse::conflict(msg).into_response();
-    }
-    // Promoting onto your own name would shadow the live agent in dual-source
-    // resolution — the same guard the create route applies.
-    let workspace_agent_path = state
-        .kernel
-        .home_dir()
-        .join("workspaces")
-        .join("agents")
-        .join(&type_name);
-    if workspace_agent_path.exists() && type_name != entry.manifest.name {
-        let msg = format!(
-            "A workspace agent named '{type_name}' already exists — promoting under that name would shadow it"
-        );
-        drop(t);
-        return ApiErrorResponse::conflict(msg).into_response();
-    }
-
-    let mut manifest = entry.manifest.clone();
-    manifest.name = type_name.clone();
-    let toml_content = match toml::to_string_pretty(&manifest) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to serialize manifest for promotion");
-            let msg = t.t("api-error-internal");
-            drop(t);
-            return ApiErrorResponse::internal(msg).into_response();
-        }
-    };
-    drop(t);
-
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("Failed to create templates dir: {e}");
-        return ApiErrorResponse::internal("failed to create templates dir").into_response();
-    }
-    if let Err(e) = std::fs::write(&path, &toml_content) {
-        tracing::warn!("Failed to write promoted agent-type '{type_name}': {e}");
-        return ApiErrorResponse::internal("failed to write agent type").into_response();
-    }
-
-    let created = crate::routes::agent_templates::manifest_to_agent_type(&type_name, &manifest);
-    (StatusCode::CREATED, Json(created)).into_response()
 }
