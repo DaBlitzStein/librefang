@@ -2025,6 +2025,7 @@ tui-agents-title-custom-tools = Custom — Tools
 tui-agents-title-custom-skills = Custom — Skills
 tui-agents-title-custom-workspaces = Shared folders
 tui-agents-purged = Purged { $name }: every trace removed
+tui-agents-detail-tokens = Token footprint  ($ to refresh)
 tui-workflows-param-required = { $name } is required
 tui-agents-workspaces-help = a add · d delete · Enter edit · s save · Esc back
 tui-agents-workspaces-empty = No shared folders yet. Press a to add one.

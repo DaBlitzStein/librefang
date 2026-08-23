@@ -104,6 +104,9 @@ pub struct AgentSelectState {
     pub available_skills: Vec<(String, bool)>,
     pub skill_cursor: usize,
     // Shared folders editor: (name, path, mode).
+    /// What the selected agent costs: injected footprint and recent calls,
+    /// as `GET /api/agents/{id}/token-usage` reports them.
+    pub token_usage: Option<AgentTokenUsage>,
     pub workspaces: Vec<(String, String, String)>,
     pub ws_cursor: usize,
     pub ws_editing: Option<(usize, u8)>,
@@ -165,6 +168,19 @@ pub struct AgentDetail {
     pub mcp_servers_mode: String,
 }
 
+/// Token cost of an agent, for the detail screen.
+#[derive(Clone, Debug, Default)]
+pub struct AgentTokenUsage {
+    pub system_prompt_tokens: u64,
+    pub tools_tokens: u64,
+    pub total_tokens: u64,
+    pub tool_count: u64,
+    /// (tool name, tokens), costliest first — sorted by the server.
+    pub per_tool: Vec<(String, u64)>,
+    /// (model, input, output, cost) newest first.
+    pub recent: Vec<(String, u64, u64, f64)>,
+}
+
 /// A prompt entry from the fleet-wide prompts library.
 #[derive(Clone, Debug)]
 pub struct PromptEntry {
@@ -176,6 +192,7 @@ pub struct PromptEntry {
 #[derive(Debug)]
 pub enum AgentAction {
     FetchAgentWorkspaces(String),
+    FetchAgentTokenUsage(String),
     /// Remove every trace of an agent by name: roster entry, sessions,
     /// memories, workspace directory and agent-type template.
     PurgeAgentData(String),
@@ -262,6 +279,7 @@ impl AgentSelectState {
             available_router_profiles: Vec::new(),
             spawned_toml: None,
             status_msg: String::new(),
+            token_usage: None,
             workspaces: Vec::new(),
             ws_cursor: 0,
             ws_editing: None,
@@ -567,6 +585,13 @@ impl AgentSelectState {
                         id: detail.id.clone(),
                         name: detail.name.clone(),
                     };
+                }
+            }
+            KeyCode::Char('$') => {
+                // Token cost of this agent: what every request carries, and
+                // what its recent calls actually spent.
+                if let Some(ref detail) = self.detail {
+                    return AgentAction::FetchAgentTokenUsage(detail.id.clone());
                 }
             }
             KeyCode::Char('P') => {
@@ -1719,6 +1744,41 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                     ),
                     Span::styled("Fixed", Style::default().fg(theme::YELLOW)),
                 ]));
+            }
+
+            // Token cost, once fetched with `$`: what every request carries
+            // before a single message, then the costliest tools and the
+            // most recent calls. Absent until asked for — it is a round trip.
+            if let Some(usage) = &state.token_usage {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    crate::i18n::t("tui-agents-detail-tokens"),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  system {}  ·  tools {} ({})  ·  total {}",
+                        usage.system_prompt_tokens,
+                        usage.tools_tokens,
+                        usage.tool_count,
+                        usage.total_tokens
+                    ),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                )));
+                for (name, tokens) in usage.per_tool.iter().take(5) {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {name:<28} {tokens}"),
+                        Style::default().fg(theme::TEXT_TERTIARY),
+                    )));
+                }
+                for (model, input, output, cost) in usage.recent.iter().take(5) {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {model:<20} {input}/{output}  ${cost:.4}"),
+                        Style::default().fg(theme::TEXT_TERTIARY),
+                    )));
+                }
             }
 
             f.render_widget(Paragraph::new(lines), chunks[0]);

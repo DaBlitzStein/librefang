@@ -130,6 +130,7 @@ pub enum AppEvent {
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
     BackupsLoaded(Vec<crate::tui::screens::settings::BackupEntry>),
     AgentPurged(String),
+    AgentTokenUsageLoaded(crate::tui::screens::agents::AgentTokenUsage),
     WorkflowParamsLoaded(Vec<crate::tui::screens::workflows::WorkflowParamField>),
     AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
     AgentWorkspacesUpdated(String),
@@ -1394,6 +1395,60 @@ pub fn spawn_fetch_workflow_params(
                 })
                 .unwrap_or_default();
             let _ = tx.send(AppEvent::WorkflowParamsLoaded(params));
+        }
+    });
+}
+
+pub fn spawn_fetch_agent_token_usage(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(body) = client
+                .get(format!("{base_url}/api/agents/{agent_id}/token-usage"))
+                .send()
+                .and_then(|r| r.json::<serde_json::Value>())
+            {
+                let inj = &body["injected"];
+                let usage = crate::tui::screens::agents::AgentTokenUsage {
+                    system_prompt_tokens: inj["system_prompt_tokens"].as_u64().unwrap_or(0),
+                    tools_tokens: inj["tools_tokens"].as_u64().unwrap_or(0),
+                    total_tokens: inj["total_tokens"].as_u64().unwrap_or(0),
+                    tool_count: inj["tool_count"].as_u64().unwrap_or(0),
+                    per_tool: inj["per_tool"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|t| {
+                                    Some((
+                                        t["name"].as_str()?.to_string(),
+                                        t["tokens"].as_u64().unwrap_or(0),
+                                    ))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    recent: body["recent"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|c| {
+                                    Some((
+                                        c["model"].as_str()?.to_string(),
+                                        c["input_tokens"].as_u64().unwrap_or(0),
+                                        c["output_tokens"].as_u64().unwrap_or(0),
+                                        c["cost_usd"].as_f64().unwrap_or(0.0),
+                                    ))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                };
+                let _ = tx.send(AppEvent::AgentTokenUsageLoaded(usage));
+            }
         }
     });
 }

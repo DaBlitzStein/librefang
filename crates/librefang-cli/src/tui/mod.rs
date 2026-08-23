@@ -501,6 +501,9 @@ impl App {
                 self.workflows.run_params = params;
                 self.workflows.param_cursor = 0;
             }
+            AppEvent::AgentTokenUsageLoaded(usage) => {
+                self.agents.token_usage = Some(usage);
+            }
             AppEvent::AgentPurged(name) => {
                 self.agents.status_msg =
                     crate::i18n::t_args("tui-agents-purged", &[("name", name.as_str())]);
@@ -1568,6 +1571,11 @@ impl App {
 
     fn handle_agent_action(&mut self, action: agents::AgentAction) {
         match action {
+            agents::AgentAction::FetchAgentTokenUsage(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_token_usage(backend, id, self.event_tx.clone());
+                }
+            }
             agents::AgentAction::PurgeAgentData(name) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_purge_agent_data(backend, name, self.event_tx.clone());
