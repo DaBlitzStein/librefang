@@ -1262,6 +1262,40 @@ impl LibreFangKernel {
             )));
         }
 
+        // Check the payload against the declared `input_schema` and fill in
+        // declared defaults BEFORE creating the run. Every surface — HTTP,
+        // the agent's `workflow_run` tool, the CLI and the TUI — funnels
+        // through here, so validating once covers all four.
+        //
+        // Without this an omitted parameter reached the step prompt as the
+        // literal `{{name}}`: the run burned tokens and returned nonsense
+        // with nothing anywhere explaining why. Refusing up front leaves no
+        // orphan run behind, matching the depth check above.
+        let input = match self.workflows.engine.get_workflow(workflow_id).await {
+            Some(wf) => {
+                let parsed: serde_json::Value = serde_json::from_str(&input)
+                    .unwrap_or_else(|_| serde_json::Value::String(input.clone()));
+                match crate::workflow::validate_and_apply_defaults(
+                    wf.input_schema.as_deref(),
+                    &parsed,
+                ) {
+                    Ok(filled) => {
+                        if filled == parsed {
+                            input
+                        } else {
+                            serde_json::to_string(&filled).unwrap_or(input)
+                        }
+                    }
+                    Err(e) => {
+                        return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                            e.to_string(),
+                        )));
+                    }
+                }
+            }
+            None => input,
+        };
+
         let run_id = self
             .workflows
             .engine

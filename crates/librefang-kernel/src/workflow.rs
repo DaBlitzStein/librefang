@@ -242,6 +242,12 @@ pub struct WorkflowInputParam {
     /// Optional human-readable description shown in the discovery surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Value substituted when the caller omits this parameter. A parameter
+    /// with a default is satisfiable without the caller supplying anything,
+    /// so `required: true` plus a default is not a contradiction — the
+    /// default *is* the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
 }
 
 fn default_input_param_type() -> String {
@@ -250,6 +256,74 @@ fn default_input_param_type() -> String {
 
 fn default_required() -> bool {
     true
+}
+
+/// Why a workflow launch was rejected before any token was spent.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowInputError {
+    /// A `required` parameter with no default was not supplied.
+    MissingRequired(Vec<String>),
+}
+
+impl std::fmt::Display for WorkflowInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingRequired(names) => {
+                write!(f, "Missing required parameter(s): {}", names.join(", "))
+            }
+        }
+    }
+}
+
+/// Check a launch payload against a workflow's declared `input_schema` and
+/// fill in the declared defaults.
+///
+/// Returns the input to actually run with. Without this an omitted parameter
+/// reached the prompt as the literal `{{name}}`: the run burned tokens and
+/// returned nonsense, with nothing anywhere saying why. A `None` schema means
+/// the workflow declares nothing, so anything is accepted (the historical
+/// behaviour every existing caller relies on).
+pub fn validate_and_apply_defaults(
+    schema: Option<&[WorkflowInputParam]>,
+    input: &serde_json::Value,
+) -> Result<serde_json::Value, WorkflowInputError> {
+    let Some(params) = schema else {
+        return Ok(input.clone());
+    };
+    if params.is_empty() {
+        return Ok(input.clone());
+    }
+
+    // Only an object binds by key; a bare string is the `{{input}}` blob and
+    // cannot satisfy named parameters.
+    let supplied = input.as_object();
+    let mut filled = supplied.cloned().unwrap_or_default();
+    let mut missing = Vec::new();
+
+    for param in params {
+        let present = supplied
+            .and_then(|o| o.get(&param.name))
+            .is_some_and(|v| !v.is_null());
+        if present {
+            continue;
+        }
+        if let Some(default) = &param.default {
+            filled.insert(param.name.clone(), default.clone());
+        } else if param.required {
+            missing.push(param.name.clone());
+        }
+    }
+
+    if !missing.is_empty() {
+        return Err(WorkflowInputError::MissingRequired(missing));
+    }
+
+    // A non-object input with nothing to fill in is passed through untouched
+    // so `{{input}}` keeps working for schema-less-style callers.
+    if supplied.is_none() && filled.is_empty() {
+        return Ok(input.clone());
+    }
+    Ok(serde_json::Value::Object(filled))
 }
 
 /// A single step in a workflow.
@@ -8082,12 +8156,14 @@ mod tests {
                     param_type: "string".to_string(),
                     required: true,
                     description: None,
+                    default: None,
                 },
                 WorkflowInputParam {
                     name: "cover".to_string(),
                     param_type: "file".to_string(),
                     required: true,
                     description: None,
+                    default: None,
                 },
             ]),
         };
@@ -9737,6 +9813,67 @@ prompt_template = "do {{x}}"
         assert!(result.unwrap_err().contains("Cycle detected"));
     }
 
+    fn param(name: &str, required: bool, default: Option<serde_json::Value>) -> WorkflowInputParam {
+        WorkflowInputParam {
+            name: name.to_string(),
+            param_type: "string".to_string(),
+            required,
+            description: None,
+            default,
+        }
+    }
+
+    #[test]
+    fn a_missing_required_parameter_is_refused_by_name() {
+        let schema = vec![param("ciudad", true, None), param("dias", true, None)];
+        let err =
+            validate_and_apply_defaults(Some(&schema), &serde_json::json!({"ciudad": "Vigo"}))
+                .unwrap_err();
+
+        // Naming the offender is the point: the old behaviour sent the
+        // literal `{{dias}}` to the model and charged for the turn.
+        assert_eq!(
+            err,
+            WorkflowInputError::MissingRequired(vec!["dias".to_string()])
+        );
+        assert!(err.to_string().contains("dias"));
+    }
+
+    #[test]
+    fn a_declared_default_satisfies_an_omitted_parameter() {
+        let schema = vec![param("dias", true, Some(serde_json::json!(7)))];
+        let filled =
+            validate_and_apply_defaults(Some(&schema), &serde_json::json!({})).expect("accepted");
+
+        assert_eq!(filled["dias"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn a_supplied_value_wins_over_the_default() {
+        let schema = vec![param("dias", true, Some(serde_json::json!(7)))];
+        let filled = validate_and_apply_defaults(Some(&schema), &serde_json::json!({"dias": 3}))
+            .expect("accepted");
+
+        assert_eq!(filled["dias"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn an_optional_parameter_with_no_default_is_simply_absent() {
+        let schema = vec![param("nota", false, None)];
+        let filled =
+            validate_and_apply_defaults(Some(&schema), &serde_json::json!({})).expect("accepted");
+
+        assert!(filled.get("nota").is_none());
+    }
+
+    #[test]
+    fn a_workflow_declaring_nothing_accepts_anything() {
+        // Every pre-schema caller must keep working untouched.
+        let raw = serde_json::json!("texto libre");
+        assert_eq!(validate_and_apply_defaults(None, &raw).unwrap(), raw);
+        assert_eq!(validate_and_apply_defaults(Some(&[]), &raw).unwrap(), raw);
+    }
+
     #[test]
     fn to_template_keeps_the_authored_input_schema() {
         let mut workflow = test_workflow();
@@ -9746,6 +9883,7 @@ prompt_template = "do {{x}}"
             param_type: "number".to_string(),
             required: false,
             description: Some("La ciudad objetivo".to_string()),
+            default: None,
         }]);
 
         let template = workflow.to_template();
