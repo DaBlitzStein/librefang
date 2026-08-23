@@ -24,6 +24,21 @@ export interface ManifestFormState {
   pinned_model: string;
   workspace: string;
 
+  /**
+   * Named shared directories (`[workspaces]` table).
+   *
+   * Each entry grants the agent reach beyond its own workspace: a `path`
+   * relative to the daemon's workspaces_dir, in read-write or read-only
+   * mode. The kernel resolves and validates them at spawn; the form only
+   * edits the declaration.
+   */
+  workspaces: Array<{
+    _uid: string;
+    name: string;
+    path: string;
+    mode: "rw" | "r";
+  }>;
+
   schedule:
     | { mode: "reactive" }
     | { mode: "periodic"; cron: string }
@@ -175,6 +190,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
   web_search_augmentation: "auto",
   pinned_model: "",
   workspace: "",
+  workspaces: [],
   schedule: { mode: "reactive" },
   model: {
     provider: "",
@@ -262,6 +278,7 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "web_search_augmentation",
   "pinned_model",
   "workspace",
+  "workspaces",
   "skills_disabled",
   "tools_disabled",
   "inherit_parent_context",
@@ -566,6 +583,20 @@ export const serializeManifestForm = (
   const capabilityExtras = renderExtraScalars(safeCapabilityExtras);
   if (capabilityBody.length || capabilityExtras.length) {
     lines.push("", "[capabilities]", ...capabilityBody, ...capabilityExtras);
+  }
+
+  // [workspaces] — named shared directories. Only emitted when at least one
+  // entry has a name AND a path; a half-filled row is discarded rather than
+  // written as a dangling table that the kernel would reject at boot.
+  const namedWorkspaces = form.workspaces.filter((w) => w.name.trim() && w.path.trim());
+  if (namedWorkspaces.length > 0) {
+    const body: string[] = [];
+    for (const w of namedWorkspaces) {
+      body.push(
+        `${w.name.trim()} = { path = ${JSON.stringify(w.path.trim())}, mode = "${w.mode}" }`,
+      );
+    }
+    lines.push("", "[workspaces]", ...body);
   }
 
   // [thinking]
@@ -967,6 +998,19 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   );
   form.pinned_model = asString(parsed.pinned_model);
   form.workspace = asString(parsed.workspace);
+
+  // [workspaces] — named shared directories, name -> { path, mode }.
+  if (isTomlTable(parsed.workspaces)) {
+    for (const [name, decl] of Object.entries(parsed.workspaces)) {
+      if (!isTomlTable(decl)) continue;
+      form.workspaces.push({
+        _uid: generateUid(),
+        name,
+        path: typeof decl.path === "string" ? decl.path : "",
+        mode: decl.mode === "r" ? "r" : "rw",
+      });
+    }
+  }
   form.skills_disabled = asBoolean(parsed.skills_disabled, false);
   form.tools_disabled = asBoolean(parsed.tools_disabled, false);
   form.inherit_parent_context = asBoolean(parsed.inherit_parent_context, true);

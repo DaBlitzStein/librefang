@@ -122,6 +122,9 @@ export function AgentManifestForm({
     onChange({ ...value, capabilities: { ...value.capabilities, ...patch } });
   const updateThinking = (patch: Partial<ManifestFormState["thinking"]>): void =>
     onChange({ ...value, thinking: { ...value.thinking, ...patch } });
+  const updateWorkspaces = (patch: ManifestFormState["workspaces"]): void =>
+    onChange({ ...value, workspaces: patch });
+
   const updateProactiveMemory = (
     patch: Partial<ManifestFormState["proactive_memory"]>,
   ): void =>
@@ -783,6 +786,92 @@ export function AgentManifestForm({
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_fallback")}
         </button>
+      </CollapsibleSection>
+
+      <CollapsibleSection title={t("agents.form.shared_folders")} defaultOpen={false}>
+        <p className="text-[11px] text-text-dim">
+          {t("agents.form.shared_folders_hint", {
+            defaultValue:
+              "Folders this agent can reach beyond its own workspace. Paths are relative to the shared workspaces directory; each can be read-write or read-only. Leave the list empty for workspace-only access.",
+          })}
+        </p>
+        <div className="space-y-2 mt-2">
+          {value.workspaces.map((w) => (
+            <div key={w._uid} className="flex items-center gap-2">
+              <input
+                type="text"
+                value={w.name}
+                onChange={(e) =>
+                  updateWorkspaces(
+                    value.workspaces.map((x) =>
+                      x._uid === w._uid ? { ...x, name: e.target.value } : x,
+                    ),
+                  )
+                }
+                placeholder={t("agents.form.shared_folder_name", {
+                  defaultValue: "Name",
+                })}
+                className={`${inputClass} w-32`}
+              />
+              <input
+                type="text"
+                value={w.path}
+                onChange={(e) =>
+                  updateWorkspaces(
+                    value.workspaces.map((x) =>
+                      x._uid === w._uid ? { ...x, path: e.target.value } : x,
+                    ),
+                  )
+                }
+                placeholder={t("agents.form.shared_folder_path", {
+                  defaultValue: "shared/library",
+                })}
+                className={`${inputClass} flex-1`}
+              />
+              <select
+                value={w.mode}
+                onChange={(e) =>
+                  updateWorkspaces(
+                    value.workspaces.map((x) =>
+                      x._uid === w._uid
+                        ? { ...x, mode: e.target.value as "rw" | "r" }
+                        : x,
+                    ),
+                  )
+                }
+                className={`${inputClass} w-16`}
+              >
+                <option value="rw">rw</option>
+                <option value="r">r</option>
+              </select>
+              <button
+                type="button"
+                onClick={() =>
+                  updateWorkspaces(value.workspaces.filter((x) => x._uid !== w._uid))
+                }
+                className="text-text-dim hover:text-error"
+                aria-label={t("agents.form.shared_folder_remove", {
+                  defaultValue: "Remove folder",
+                })}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() =>
+              updateWorkspaces([
+                ...value.workspaces,
+                { _uid: generateUid(), name: "", path: "", mode: "rw" },
+              ])
+            }
+            className="flex items-center gap-1 text-xs text-brand"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            {t("agents.form.shared_folder_add", { defaultValue: "Add folder" })}
+          </button>
+        </div>
       </CollapsibleSection>
 
       <CollapsibleSection title={t("agents.form.memory")} defaultOpen={false}>

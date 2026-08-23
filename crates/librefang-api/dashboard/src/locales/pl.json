@@ -533,7 +533,13 @@
       "memory_extraction_model_hint": "Uruchamia się po każdej odpowiedzi, więc wolny model opóźnia każdą odpowiedź. Zostaw puste, aby dziedziczyć ustawienie systemu.",
       "memory_on": "Wł.",
       "memory_off": "Wył.",
-      "max_tokens_hint": "Limit ukończenia. Stałe rozmiary jak w edytorze modelu; wybierz Własna, aby wpisać dowolną wartość. Zostaw puste, aby odziedziczyć domyślną wartość modelu."
+      "max_tokens_hint": "Limit ukończenia. Stałe rozmiary jak w edytorze modelu; wybierz Własna, aby wpisać dowolną wartość. Zostaw puste, aby odziedziczyć domyślną wartość modelu.",
+      "shared_folders": "Foldery współdzielone",
+      "shared_folders_hint": "Foldery, do których ten agent ma dostęp poza swoim własnym obszarem roboczym. Ścieżki są względne względem katalogu współdzielonych obszarów roboczych; każdy folder może być do odczytu i zapisu lub tylko do odczytu. Pusta lista oznacza dostęp wyłącznie do własnego obszaru roboczego.",
+      "shared_folder_name": "Nazwa",
+      "shared_folder_path": "shared/library",
+      "shared_folder_remove": "Usuń folder",
+      "shared_folder_add": "Dodaj folder"
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",

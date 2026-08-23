@@ -943,3 +943,52 @@ describe("agentManifest per-agent memory", () => {
     expect(extras.topLevel).not.toHaveProperty("proactive_memory");
   });
 });
+
+/**
+ * Named shared directories (`[workspaces]`) let an operator grant an agent
+ * reach beyond its own workspace. The form round-trips them as first-class
+ * state — if they fell into `extras` they would render as opaque text and
+ * the editor would silently stop owning them.
+ */
+describe("agentManifest shared folders", () => {
+  it("writes nothing when the list is empty", () => {
+    const form = emptyManifestForm();
+    form.name = "deannatroi";
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+    expect(toml).not.toContain("[workspaces]");
+  });
+
+  it("writes named shares with their mode", () => {
+    const form = emptyManifestForm();
+    form.name = "deannatroi";
+    form.workspaces = [
+      { _uid: "1", name: "library", path: "shared/library", mode: "rw" },
+      { _uid: "2", name: "archive", path: "shared/archive", mode: "r" },
+    ];
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+    expect(toml).toContain("[workspaces]");
+    expect(toml).toContain('library = { path = "shared/library", mode = "rw" }');
+    expect(toml).toContain('archive = { path = "shared/archive", mode = "r" }');
+  });
+
+  it("drops half-filled rows instead of writing dangling entries", () => {
+    const form = emptyManifestForm();
+    form.name = "deannatroi";
+    form.workspaces = [{ _uid: "1", name: "library", path: "", mode: "rw" }];
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+    expect(toml).not.toContain("[workspaces]");
+  });
+
+  it("reads existing shares back", () => {
+    const { form, extras } = parseManifestToml(
+      ['name = "deannatroi"', "", "[workspaces]", 'library = { path = "shared/library", mode = "r" }'].join("\n"),
+    );
+
+    expect(form.workspaces).toHaveLength(1);
+    expect(form.workspaces[0]).toMatchObject({ name: "library", path: "shared/library", mode: "r" });
+    expect(extras.topLevel).not.toHaveProperty("workspaces");
+  });
+});

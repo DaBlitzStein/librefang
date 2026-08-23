@@ -533,7 +533,13 @@
       "memory_extraction_model_hint": "在每次回复后运行，因此此处使用较慢的模型会拖慢每一次回答。留空则继承系统设置。",
       "memory_on": "开",
       "memory_off": "关",
-      "max_tokens_hint": "完成上限。与模型编辑器相同的固定尺寸；选择“自定义”可输入任意值。留空则继承模型自身的默认值。"
+      "max_tokens_hint": "完成上限。与模型编辑器相同的固定尺寸；选择“自定义”可输入任意值。留空则继承模型自身的默认值。",
+      "shared_folders": "共享文件夹",
+      "shared_folders_hint": "该智能体在自己的工作区之外可以访问的文件夹。路径相对于共享工作区目录；每个文件夹可以是读写或只读。留空表示仅限工作区访问。",
+      "shared_folder_name": "名称",
+      "shared_folder_path": "shared/library",
+      "shared_folder_remove": "移除文件夹",
+      "shared_folder_add": "添加文件夹"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",

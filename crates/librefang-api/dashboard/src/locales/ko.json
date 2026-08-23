@@ -533,7 +533,13 @@
       "memory_extraction_model_hint": "모든 응답 후에 실행되므로 느린 모델은 모든 답변을 지연시킵니다. 비워 두면 시스템 설정을 상속합니다.",
       "memory_on": "켬",
       "memory_off": "끔",
-      "max_tokens_hint": "완성 한도입니다. 모델 편집기와 동일한 고정 크기이며, 원하는 값을 입력하려면 사용자 지정을 선택하세요. 비워 두면 모델 자체 기본값을 상속합니다."
+      "max_tokens_hint": "완성 한도입니다. 모델 편집기와 동일한 고정 크기이며, 원하는 값을 입력하려면 사용자 지정을 선택하세요. 비워 두면 모델 자체 기본값을 상속합니다.",
+      "shared_folders": "공유 폴더",
+      "shared_folders_hint": "이 에이전트가 자체 워크스페이스 밖에서 접근할 수 있는 폴더입니다. 경로는 공유 워크스페이스 디렉터리를 기준으로 하며, 각 폴더는 읽기-쓰기 또는 읽기 전용입니다. 목록을 비워 두면 워크스페이스 전용 접근입니다.",
+      "shared_folder_name": "이름",
+      "shared_folder_path": "shared/library",
+      "shared_folder_remove": "폴더 제거",
+      "shared_folder_add": "폴더 추가"
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
     "prompts": "프롬프트",

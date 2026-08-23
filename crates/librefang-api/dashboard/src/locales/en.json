@@ -533,7 +533,13 @@
       "memory_extraction_model_hint": "Runs after every reply, so a slow model here delays every answer. Leave empty to inherit the system setting.",
       "memory_on": "On",
       "memory_off": "Off",
-      "max_tokens_hint": "The completion cap. Fixed sizes like the model editor; pick Custom to type any value. Leave empty to inherit the model's own default."
+      "max_tokens_hint": "The completion cap. Fixed sizes like the model editor; pick Custom to type any value. Leave empty to inherit the model's own default.",
+      "shared_folders": "Shared folders",
+      "shared_folders_hint": "Folders this agent can reach beyond its own workspace. Paths are relative to the shared workspaces directory; each can be read-write or read-only. Leave the list empty for workspace-only access.",
+      "shared_folder_name": "Name",
+      "shared_folder_path": "shared/library",
+      "shared_folder_remove": "Remove folder",
+      "shared_folder_add": "Add folder"
     },
     "delete_confirm": "Are you sure you want to delete agent \"{{name}}\"?",
     "prompts": "Prompts",
