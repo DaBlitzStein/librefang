@@ -227,6 +227,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_manifest_toml),
         )
         .route(
+            "/agents/{id}/promote-to-type",
+            axum::routing::post(promote_agent_to_type),
+        )
+        .route(
             "/agents/{id}/files",
             axum::routing::get(list_agent_files),
         )

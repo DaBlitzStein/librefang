@@ -2729,3 +2729,66 @@ async fn test_put_skills_rejects_unknown_name_with_400_not_internal_error() {
         "message must name the rejected skill, got: {msg}"
     );
 }
+
+/// An operator-tuned agent can be promoted into a reusable agent type, and
+/// the promotion keeps the agent's own manifest fields rather than collapsing
+/// to the flat quick-create shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn promoting_an_agent_creates_an_agent_type_with_its_manifest() {
+    let h = boot(TEST_TOKEN).await;
+    let agent_id = spawn_named(&h.state, "promote-source");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{agent_id}/promote-to-type"),
+            serde_json::json!({"name": "promoted-from-test"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    assert_eq!(body["name"], "promoted-from-test", "{body:?}");
+
+    let (status, body) = send(h.app.clone(), get("/api/templates/promoted-from-test")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["name"], "promoted-from-test", "{body:?}");
+}
+
+/// Promoting onto the name of a live agent would shadow it in dual-source
+/// resolution — the same collision the create route rejects.
+#[tokio::test(flavor = "multi_thread")]
+async fn promoting_onto_a_live_agents_name_is_rejected() {
+    let h = boot(TEST_TOKEN).await;
+    let first = spawn_named(&h.state, "promote-target");
+
+    let (status, _body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{first}/promote-to-type"),
+            serde_json::json!({"name": "promote-target"}),
+        ),
+    )
+    .await;
+    // Promote under the SAME agent's name is allowed (renaming in place),
+    // so use a SECOND agent promoting onto the first one's name.
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "self-promotion must succeed: {_body:?}"
+    );
+
+    let second = spawn_named(&h.state, "promote-source-2");
+    let (status, _body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{second}/promote-to-type"),
+            serde_json::json!({"name": "promote-target"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "promoting onto a live agent's name must be rejected: {_body:?}"
+    );
+}
