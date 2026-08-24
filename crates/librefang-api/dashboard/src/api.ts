@@ -2994,7 +2994,16 @@ export interface MemoryConfigResponse {
     enabled?: boolean;
     auto_memorize?: boolean;
     auto_retrieve?: boolean;
+    /** The raw setting. Empty or absent means "inherit the kernel default",
+     *  which is why it cannot be shown on its own — see the two fields
+     *  below. */
     extraction_model?: string;
+    /** The model extraction actually runs on, whether or not anyone chose
+     *  it. Always populated. */
+    effective_extraction_model?: string;
+    /** `"configured"` when `extraction_model` is set, `"inherited_default"`
+     *  when it fell through to `[default_model]`. */
+    extraction_model_source?: "configured" | "inherited_default";
     max_retrieve?: number;
   };
   /**

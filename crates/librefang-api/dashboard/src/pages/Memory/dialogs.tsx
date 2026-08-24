@@ -522,6 +522,24 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                       autoFocus
                     />
                   )}
+                  {/* "Use kernel default" names no model, which is exactly the
+                      state that is hard to debug: extraction runs after every
+                      reply, so a slow model inherited here delays every answer
+                      — and until now nothing on this screen said which model
+                      that was. Name it. */}
+                  {configQuery.data?.proactive_memory
+                    ?.extraction_model_source === "inherited_default" &&
+                    !form.pm_extraction_model && (
+                      <p className="text-[11px] text-text-dim mt-1.5">
+                        {t("memory.extraction_model_inherited", {
+                          defaultValue:
+                            "Inherited from the system default model: {{model}}. Extraction runs after every reply, so a slow model here delays every answer.",
+                          model:
+                            configQuery.data.proactive_memory
+                              .effective_extraction_model,
+                        })}
+                      </p>
+                    )}
                 </div>
                 <div>
                   <span className={labelCls}>
