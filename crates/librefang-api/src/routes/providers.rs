@@ -265,6 +265,13 @@ fn synthesized_cli_model_row(
             "supports_streaming": true,
             "supports_thinking": false,
         },
+        // Emit the key so this row's shape matches every catalog row in the
+        // same response (#7774). Both sides are the "unknown" sentinel: there
+        // is no catalog entry behind a synthesized CLI row to revert to.
+        "limits_catalog": {
+            "context_window": 0,
+            "max_output_tokens": 0,
+        },
         "aliases": [],
         "available": available,
         // Marks this row as derived from the live CLI config rather than the
@@ -276,6 +283,15 @@ fn synthesized_cli_model_row(
 /// Context-window / max-output-tokens facts for a catalog entry, resolved
 /// the same way the agent loop resolves them at request time (#7774):
 /// per-model `ModelOverrides` win over the catalog's own value.
+///
+/// The effective half is delegated to
+/// [`ModelCatalog::effective_limits`](librefang_kernel::model_catalog::ModelCatalog::effective_limits)
+/// so this handler and the agent loop cannot disagree about which limit is in
+/// force. What this struct adds on top is the *reporting* shape the WebUI and
+/// TUI need: the unmerged catalog values as a revert target
+/// (`context_window_catalog` / `max_output_tokens_catalog`, kept alongside the
+/// equivalent `limits_catalog` object for clients that read either) and the
+/// `is_estimated` flag.
 ///
 /// `is_estimated` flags a text model whose effective context window is
 /// unknown from either source — the case the runtime's
@@ -297,12 +313,12 @@ fn model_context_window_facts(
     catalog: &librefang_kernel::model_catalog::ModelCatalog,
     m: &librefang_types::model_catalog::ModelCatalogEntry,
 ) -> ContextWindowFacts {
-    let context_window = catalog.effective_context_window(m);
-    let is_estimated =
-        m.modality == librefang_types::model_catalog::Modality::Text && context_window.is_none();
+    let limits = catalog.effective_limits(m);
+    let is_estimated = m.modality == librefang_types::model_catalog::Modality::Text
+        && limits.context_window.is_none();
     ContextWindowFacts {
-        context_window,
-        max_output_tokens: catalog.effective_max_output_tokens(m),
+        context_window: limits.context_window,
+        max_output_tokens: limits.max_output_tokens,
         context_window_catalog: m.context_window,
         max_output_tokens_catalog: m.max_output_tokens,
         is_estimated,
@@ -346,34 +362,9 @@ pub async fn list_models(
             tracing::warn!(%error, "EveryAPI live catalog unavailable; using registered snapshot");
         }
     }
-    // Live discovery for operator-defined OpenAI-compatible gateways
-    // (litellm, a self-hosted vLLM/llama.cpp proxy under its own provider
-    // id, …) — refs #7775. Without this the models list is the one surface
-    // that never triggers discovery: `GET /api/providers/{name}` probes and
-    // merges, so a gateway's models appear only after someone opens the
-    // provider page, and the model picker they are actually needed in stays
-    // empty. `custom_gateway_catalog::refresh_if_stale` is a cheap no-op for
-    // any provider outside its scope (registry-known ids, `everyapi`, a
-    // provider with no base URL / no usable auth), so it is safe to call
-    // over every candidate id without a pre-check here.
-    let custom_gateway_targets: Vec<String> = match provider_filter.as_deref() {
-        Some(provider) => vec![provider.to_string()],
-        None => state
-            .kernel
-            .model_catalog_ref()
-            .load()
-            .list_providers()
-            .iter()
-            .map(|p| p.id.clone())
-            .collect(),
-    };
-    for provider_id in &custom_gateway_targets {
-        if let Err(error) =
-            crate::custom_gateway_catalog::refresh_if_stale(&state.kernel, provider_id).await
-        {
-            tracing::warn!(%error, provider = %provider_id, "custom gateway live catalog unavailable; using checked-in snapshot");
-        }
-    }
+    // Every other provider used to be served from the checked-in catalogue alone, which has nothing to show for a self-hosted OpenAI-compatible gateway: the model ids there are the operator's own, so no snapshot can ship them (#7775).
+    // The probe below is the same `/models` listing the periodic loop and `GET /api/providers` already query — this handler previously only *read* `provider_probe_cache` for the #3191 filter and never filled it, so a `/api/models` call that arrived before either of those had run reported the gateway as having no models at all.
+    refresh_discovered_models(&state, provider_filter.as_deref()).await;
     let cli_tier_ok = tier_filter
         .as_deref()
         .map(|t| t == "custom")
@@ -501,6 +492,10 @@ pub async fn list_models(
                     "supports_vision": m.supports_vision,
                     "supports_streaming": m.supports_streaming,
                     "supports_thinking": m.supports_thinking,
+                },
+                "limits_catalog": {
+                    "context_window": m.context_window,
+                    "max_output_tokens": m.max_output_tokens,
                 },
                 "aliases": m.aliases,
                 "available": available,
@@ -739,6 +734,10 @@ pub async fn get_model(
                         "supports_streaming": m.supports_streaming,
                         "supports_thinking": m.supports_thinking,
                     },
+                    "limits_catalog": {
+                        "context_window": m.context_window,
+                        "max_output_tokens": m.max_output_tokens,
+                    },
                     "aliases": m.aliases,
                     "available": available,
                     "overrides": overrides,
@@ -787,7 +786,7 @@ pub async fn get_model(
     path = "/api/models/overrides/{id}",
     tag = "models",
     params(("id" = String, Path, description = "Override key, `provider:model_id`")),
-    responses((status = 200, description = "Inference parameter overrides for the model (empty object if none set)", body = crate::types::JsonObject))
+    responses((status = 200, description = "The model's stored overrides, or `{}` when none are set", body = crate::types::JsonObject))
 )]
 pub async fn get_model_overrides(
     State(state): State<Arc<AppState>>,
@@ -802,17 +801,22 @@ pub async fn get_model_overrides(
 
 /// PUT /api/models/overrides/{id} — Set inference parameter overrides for a model.
 ///
-/// The body **replaces** the whole `ModelOverrides` entity for this model
-/// (not a partial patch) — round-trip a `GET` first when changing a single
-/// field so unrelated overrides (e.g. a capability override set from a
-/// different surface) are not dropped.
+/// The body is a whole `ModelOverrides` document, not a patch: a field omitted
+/// from the body is cleared. Alongside the inference parameters it carries the
+/// operator's capacity-limit corrections, `context_window` and
+/// `max_output_tokens` (#7774) — both editable at any time, and both surviving a
+/// registry sync because they live in `model_overrides.json` rather than on the
+/// catalog entry the sync rewrites.
 #[utoipa::path(
     put,
     path = "/api/models/overrides/{id}",
     tag = "models",
     params(("id" = String, Path, description = "Override key, `provider:model_id`")),
     request_body = crate::types::JsonObject,
-    responses((status = 200, description = "Persisted inference parameter overrides for the model", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "The persisted overrides", body = crate::types::JsonObject),
+        (status = 500, description = "Overrides could not be persisted")
+    )
 )]
 pub async fn set_model_overrides(
     State(state): State<Arc<AppState>>,
@@ -906,6 +910,82 @@ fn probe_failure_downgrades_auth(provider_id: &str) -> bool {
     librefang_kernel::provider_health::is_local_provider(provider_id)
 }
 
+/// Merge a probe's live `/models` listing into the catalog so the discovered ids become selectable models rather than a count in a probe response.
+///
+/// Does nothing when the probe found no models, so an unreachable gateway or one that does not serve a listing leaves the checked-in catalogue alone.
+fn merge_probe_into_catalog(
+    probe: &librefang_kernel::provider_health::ProbeResult,
+    provider_id: &str,
+    kernel: &dyn librefang_kernel::KernelApi,
+) {
+    if probe.discovered_models.is_empty() {
+        return;
+    }
+    // Pre-compute the merged info outside the RCU closure: the closure
+    // may re-run on CAS retry (#3384) so all allocation happens here once.
+    let info: Vec<librefang_kernel::provider_health::DiscoveredModelInfo> =
+        if probe.discovered_model_info.is_empty() {
+            probe
+                .discovered_models
+                .iter()
+                .map(librefang_kernel::provider_health::DiscoveredModelInfo::bare)
+                .collect()
+        } else {
+            probe.discovered_model_info.clone()
+        };
+    kernel.model_catalog_update(&mut |cat| {
+        cat.merge_discovered_models(provider_id, &info);
+    });
+}
+
+/// Query the live `/models` listing of every provider that participates in model discovery and merge what it serves into the catalog, so `/api/models` reflects a self-hosted gateway's own model ids instead of only the checked-in snapshot (#7775).
+///
+/// `provider_filter` is the already-lowercased `?provider=` query value; only that provider is probed when one is given, matching how the OpenRouter and EveryAPI refreshers scope themselves.
+///
+/// Failures are non-fatal by construction: `probe_provider_cached` reports an unreachable result instead of erroring, the merge is skipped, and the response falls back to the checked-in catalogue.
+/// The 60-second [`ProbeCache`](librefang_kernel::provider_health::ProbeCache) TTL is what keeps a dashboard that polls the Models page from turning every poll into a round-trip to the operator's own infrastructure, and it is the same cache `GET /api/providers` already fills on every dashboard load.
+async fn refresh_discovered_models(state: &AppState, provider_filter: Option<&str>) {
+    // `local_provider_probe_targets` is the single definition of "participates in discovery" — built-in local ids plus `discover_models` opt-ins, with an empty base URL and user-suppressed providers excluded.
+    // Going through it keeps this handler from drifting away from the periodic probe loop.
+    let targets: Vec<(String, String, Option<String>)> = {
+        let catalog = state.kernel.model_catalog_ref().load();
+        catalog
+            .local_provider_probe_targets()
+            .into_iter()
+            .filter(|(id, _)| provider_filter.is_none_or(|f| f == id.to_lowercase()))
+            .map(|(id, base_url)| {
+                let api_key = catalog.get_provider(&id).and_then(provider_api_key);
+                (id, base_url, api_key)
+            })
+            .collect()
+    };
+    if targets.is_empty() {
+        return;
+    }
+    let probes = futures::future::join_all(targets.iter().map(|(id, base_url, api_key)| {
+        librefang_kernel::provider_health::probe_provider_cached(
+            id,
+            base_url,
+            api_key.as_deref(),
+            &state.provider_probe_cache,
+        )
+    }))
+    .await;
+    for ((id, _, _), probe) in targets.iter().zip(probes) {
+        if probe.discovered_models.is_empty() {
+            // `debug!`, not `warn!`: a built-in local id that is simply not running is the expected steady state and this handler can be called on every dashboard poll, so warning here would be a line per request forever.
+            // The operator-facing report lives on `GET /api/providers` (`reachable` / `error_message`) and the periodic probe loop already warns for the providers the default/fallback chain actually depends on.
+            tracing::debug!(
+                provider = %id,
+                error = probe.error.as_deref().unwrap_or("no models listed"),
+                "live model discovery returned nothing; using checked-in catalog"
+            );
+            continue;
+        }
+        merge_probe_into_catalog(&probe, id, &*state.kernel);
+    }
+}
+
 fn attach_probe_result(
     entry: &mut serde_json::Value,
     probe: &librefang_kernel::provider_health::ProbeResult,
@@ -924,21 +1004,7 @@ fn attach_probe_result(
     entry["latency_ms"] = serde_json::json!(probe.latency_ms);
     if !probe.discovered_models.is_empty() {
         entry["discovered_models"] = serde_json::json!(&probe.discovered_models);
-        // Pre-compute the merged info outside the RCU closure: the closure
-        // may re-run on CAS retry (#3384) so all allocation happens here once.
-        let info: Vec<librefang_kernel::provider_health::DiscoveredModelInfo> =
-            if probe.discovered_model_info.is_empty() {
-                probe
-                    .discovered_models
-                    .iter()
-                    .map(librefang_kernel::provider_health::DiscoveredModelInfo::bare)
-                    .collect()
-            } else {
-                probe.discovered_model_info.clone()
-            };
-        kernel.model_catalog_update(&mut |cat| {
-            cat.merge_discovered_models(provider_id, &info);
-        });
+        merge_probe_into_catalog(probe, provider_id, kernel);
     }
     if !probe.discovered_model_info.is_empty() {
         entry["discovered_model_info"] = serde_json::json!(&probe.discovered_model_info);
@@ -984,7 +1050,13 @@ fn provider_key_present(provider: &librefang_types::model_catalog::ProviderInfo)
 /// Resolve the effective max-output-token limit shown for a provider on the
 /// dashboard (issue #6209). The headline value is the provider's
 /// representative model's per-request output cap: the user's `max_tokens`
-/// override when set, otherwise the model's catalog `max_output_tokens`.
+/// override when set, then the operator's `max_output_tokens` override
+/// (#7774), otherwise the model's catalog `max_output_tokens`.
+///
+/// `max_tokens` stays ahead of `max_output_tokens` because it is the cap the
+/// operator asked to be *sent on the wire*; `max_output_tokens` corrects what
+/// the model is *capable* of, which is the better fallback than the catalog but
+/// not a substitute for an explicit per-request choice.
 ///
 /// "Representative model" is the provider's default model
 /// (`default_model_for_provider`) when one exists, falling back to the first
@@ -1009,8 +1081,9 @@ fn provider_max_output_tokens(
         .get_overrides(&key)
         .and_then(|o| o.max_tokens)
         .map(u64::from);
-    let catalog_max = (model.max_output_tokens > 0).then_some(model.max_output_tokens);
-    override_max.or(catalog_max)
+    // `effective_limits` already ranks the `max_output_tokens` override above
+    // the catalog entry and filters both sides' zeros.
+    override_max.or(catalog.effective_limits(model).max_output_tokens)
 }
 
 /// GET /api/providers — List all providers with auth status.
@@ -1301,13 +1374,15 @@ pub async fn get_provider(
                     .map(|m| {
                         // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
                         let eff = catalog.effective_capabilities(m);
+                        // Effective capacity limits, raw values under `limits_catalog`. Refs #7774.
+                        let lim = catalog.effective_limits(m);
                         serde_json::json!({
                             "id": m.id,
                             "display_name": m.display_name,
                             "tier": m.tier,
                             "modality": m.modality,
-                            "context_window": m.context_window,
-                            "max_output_tokens": m.max_output_tokens,
+                            "context_window": lim.context_window.unwrap_or(0),
+                            "max_output_tokens": lim.max_output_tokens.unwrap_or(0),
                             "input_cost_per_m": m.input_cost_per_m,
                             "output_cost_per_m": m.output_cost_per_m,
                             "pricing_known": m.pricing_known,
@@ -1323,6 +1398,10 @@ pub async fn get_provider(
                                 "supports_vision": m.supports_vision,
                                 "supports_streaming": m.supports_streaming,
                                 "supports_thinking": m.supports_thinking,
+                            },
+                            "limits_catalog": {
+                                "context_window": m.context_window,
+                                "max_output_tokens": m.max_output_tokens,
                             },
                         })
                     })

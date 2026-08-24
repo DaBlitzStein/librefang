@@ -9530,7 +9530,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Inference parameter overrides for the model (empty object if none set)",
+            "description": "The model's stored overrides, or `{}` when none are set",
             "content": {
               "application/json": {
                 "schema": {
@@ -9546,7 +9546,7 @@
           "models"
         ],
         "summary": "PUT /api/models/overrides/{id} — Set inference parameter overrides for a model.",
-        "description": "The body **replaces** the whole `ModelOverrides` entity for this model\n(not a partial patch) — round-trip a `GET` first when changing a single\nfield so unrelated overrides (e.g. a capability override set from a\ndifferent surface) are not dropped.",
+        "description": "The body is a whole `ModelOverrides` document, not a patch: a field omitted\nfrom the body is cleared. Alongside the inference parameters it carries the\noperator's capacity-limit corrections, `context_window` and\n`max_output_tokens` (#7774) — both editable at any time, and both surviving a\nregistry sync because they live in `model_overrides.json` rather than on the\ncatalog entry the sync rewrites.",
         "operationId": "set_model_overrides",
         "parameters": [
           {
@@ -9571,7 +9571,7 @@
         },
         "responses": {
           "200": {
-            "description": "Persisted inference parameter overrides for the model",
+            "description": "The persisted overrides",
             "content": {
               "application/json": {
                 "schema": {
@@ -9579,6 +9579,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Overrides could not be persisted"
           }
         }
       },
@@ -11018,7 +11021,7 @@
           "system"
         ],
         "summary": "POST /api/restore — Restore kernel state from a backup archive.",
-        "description": "Accepts a JSON body with `{\"filename\": \"librefang_backup_20260315_120000.zip\"}`.\nThe file must exist in `<home_dir>/backups/`.\n\n**Warning**: This overwrites existing state files. The daemon should be\nrestarted after a restore for all changes to take effect.",
+        "description": "Accepts a JSON body with `{\"filename\": \"librefang_backup_20260315_120000.zip\"}`.\nThe file must exist in `<home_dir>/backups/`.\n\nTwo optional fields narrow what gets written:\n\n- `keep_config` (bool, default `false`) skips `config.toml`, so the target\n  keeps its own API key, bind port and paths (clone mode).\n- `components` (array of strings) limits the restore to the named\n  components — `config`, `cron_jobs`, `hand_state`, `custom_models`,\n  `agents`, `skills`, `workflows`, `data`. **Omit the field** to restore\n  everything; `[]` and any unrecognised name are rejected with `400` rather\n  than quietly restoring nothing. Archive entries no component owns are\n  restored regardless of the selection.\n\n**Warning**: This overwrites existing state files. The daemon should be\nrestarted after a restore for all changes to take effect.",
         "operationId": "restore_backup",
         "requestBody": {
           "content": {
@@ -15519,6 +15522,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "sdk_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `librefang-sdk` version the adapter reported on `--describe`."
           }
         }
       },

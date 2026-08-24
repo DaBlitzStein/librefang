@@ -102,33 +102,30 @@ pub(super) fn global_thinking_backfill_allowed(
 /// Resolve the context window (in tokens) for one turn, honouring the
 /// documented precedence chain (#6568, extended by #7774).
 ///
-/// 1. `agent.toml: [model] context_window` — an explicit operator override. The
+/// 1. `agent.toml: [model] context_window` — an explicit *per-agent* override. The
 ///    warning the agent loop emits for an unknown model literally tells the
 ///    operator to set this field, so it has to win; before this helper the three
 ///    execution paths never read it and the field was inert.
-/// 2. `ModelCatalog::effective_context_window` — provider-aware and
-///    prefix-reconciling (#6423) catalog lookup, with the per-model
-///    `ModelOverrides::context_window` override (#7774) preferred over the
-///    catalog's own value when both are set. `0` is filtered out on both
-///    sources so image / audio entries (which carry no context window) fall
-///    through instead of poisoning the budget math.
-///
-///    When the catalog has **no entry at all** (a model the registry has
-///    never heard of — e.g. a self-hosted LiteLLM gateway model), the
-///    entry-scoped lookup above can't run, but a `ModelOverrides` entry can
-///    still exist under the raw `provider:model` key (the API's `PUT
-///    /api/models/overrides/{id}` never required catalog membership). This
-///    is the exact scenario #7774 was filed for, so it's checked directly
-///    against the catalog's override side-table rather than being left to
-///    fall through to the session hint / fallback.
-/// 3. `session_hint` — the value persisted on the session, authoritative only
-///    when the catalog has no entry. Callers with no session in hand pass `None`.
+/// 2. `model_overrides.json: context_window` — the *per-model* operator override
+///    (#7774), reached from the API and the dashboard and keyed by
+///    `provider:model_id`. It sits above the catalog because it exists precisely
+///    to correct the catalog: a window the registry never carried, or one a
+///    `/models` discovery pass assumed. Being keyed rather than attached to an
+///    entry, it also applies to a model the catalog does not know at all —
+///    the reported case, a gateway-served model whose window is configured in
+///    the runtime behind it and surfaced by nothing.
+/// 3. `ModelCatalog` lookup — provider-aware and prefix-reconciling (#6423), with
+///    `0` filtered out so image / audio entries (which carry no context window)
+///    fall through instead of poisoning the budget math.
+/// 4. `session_hint` — the value persisted on the session, authoritative only
+///    when neither an override nor the catalog resolves. Callers with no session
+///    in hand pass `None`.
 ///
 /// Returns `None` when nothing resolves, leaving the fallback (currently
 /// `UNKNOWN_MODEL_CONTEXT_WINDOW`, 8192) to the agent loop, which also logs it.
 /// A per-model `ModelOverrides::context_window` set via `PUT
 /// /api/models/overrides/{id}` closes that gap without an agent.toml edit —
-/// see [`librefang_runtime::model_catalog::ModelCatalog::effective_context_window`].
+/// see [`librefang_runtime::model_catalog::ModelCatalog::effective_limits_for_manifest`].
 pub(super) fn resolve_context_window(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
     model: &librefang_types::agent::ModelConfig,
@@ -139,14 +136,13 @@ pub(super) fn resolve_context_window(
         .filter(|v| *v > 0)
         .map(|v| v as usize)
         .or_else(|| {
-            match catalog.find_model_for_manifest(&model.provider, &model.model) {
-                Some(entry) => catalog.effective_context_window(entry),
-                None => catalog
-                    .get_overrides(&format!("{}:{}", model.provider, model.model))
-                    .and_then(|o| o.context_window)
-                    .filter(|v| *v > 0),
-            }
-            .map(|v| v as usize)
+            // Layers 2 and 3 in one call: `effective_limits_for_manifest`
+            // already ranks the operator override above the catalog entry and
+            // filters both sides' zeros, so the two cannot drift apart here.
+            catalog
+                .effective_limits_for_manifest(&model.provider, &model.model)
+                .context_window
+                .map(|w| w as usize)
         })
         .or_else(|| session_hint.filter(|v| *v > 0).map(|v| v as usize))
 }
@@ -662,7 +658,7 @@ mod context_window_tests {
     use super::resolve_context_window;
     use librefang_runtime::model_catalog::ModelCatalog;
     use librefang_types::agent::ModelConfig;
-    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier};
+    use librefang_types::model_catalog::{ModelCatalogEntry, ModelOverrides, ModelTier};
 
     fn catalog() -> ModelCatalog {
         ModelCatalog::from_entries(
@@ -791,108 +787,141 @@ mod context_window_tests {
         assert_eq!(resolved, None);
     }
 
-    /// #7774: a per-model `ModelOverrides::context_window` (set via `PUT
-    /// /api/models/overrides/{id}`) fixes the exact case the issue was filed
-    /// for — a model the catalog has no reliable window for (e.g. a
-    /// self-hosted gateway reporting `max_tokens: null`) — without an
-    /// agent.toml edit.
+    /// Refs #7774. The per-model operator override beats the catalog entry —
+    /// including one whose window came from a discovery probe rather than the
+    /// registry. This is the precedence contract the dashboard, the API and the
+    /// agent loop all rely on: operator override > discovered value > fallback.
     #[test]
-    fn model_override_context_window_wins_for_an_unknown_model() {
-        let mut cat = catalog();
-        cat.set_overrides(
-            "litellm:gateway-model".to_string(),
-            librefang_types::model_catalog::ModelOverrides {
-                context_window: Some(32_768),
-                ..Default::default()
-            },
-        );
-        let resolved = resolve_context_window(&cat, &model("litellm", "gateway-model", None), None);
-        assert_eq!(resolved, Some(32_768));
-    }
-
-    /// The per-model override beats the catalog's own (possibly stale)
-    /// value, but still loses to an explicit agent.toml override — the
-    /// per-agent field stays the top-precedence, deliberate escape hatch
-    /// (#7774 out-of-scope note).
-    #[test]
-    fn model_override_context_window_wins_over_the_catalog_but_not_the_agent_override() {
+    fn a_model_level_override_beats_the_catalog_value() {
         let mut cat = catalog();
         cat.set_overrides(
             "anthropic:claude-sonnet-4-6".to_string(),
-            librefang_types::model_catalog::ModelOverrides {
-                context_window: Some(64_000),
+            ModelOverrides {
+                context_window: Some(48_000),
                 ..Default::default()
             },
         );
         let resolved =
             resolve_context_window(&cat, &model("anthropic", "claude-sonnet-4-6", None), None);
-        assert_eq!(
-            resolved,
-            Some(64_000),
-            "model override must beat the catalog's own 200_000"
-        );
-
-        let resolved_with_agent_override = resolve_context_window(
-            &cat,
-            &model("anthropic", "claude-sonnet-4-6", Some(999_000)),
-            None,
-        );
-        assert_eq!(
-            resolved_with_agent_override,
-            Some(999_000),
-            "an explicit agent.toml override still wins over the model-level override"
-        );
+        assert_eq!(resolved, Some(48_000));
     }
 
-    /// The whole point of #7774: the override lives in a side-table that a
-    /// registry sync never touches, so it must still apply after the catalog
-    /// entry itself is reloaded (simulating `load_cached_catalog_for`
-    /// replacing `self.models` with fresh registry data).
+    /// Refs #7774. The reported case: a gateway-served model the catalog has
+    /// never heard of. Before this the chain fell straight through to the agent
+    /// loop's 8192 and the agent hit an overflow that did not exist.
     #[test]
-    fn model_override_context_window_survives_a_simulated_registry_sync() {
+    fn a_model_level_override_resolves_a_model_the_catalog_does_not_know() {
         let mut cat = catalog();
         cat.set_overrides(
-            "anthropic:claude-sonnet-4-6".to_string(),
-            librefang_types::model_catalog::ModelOverrides {
-                context_window: Some(64_000),
+            "litellm:sensor-model-generic-high".to_string(),
+            ModelOverrides {
+                context_window: Some(16_384),
                 ..Default::default()
             },
         );
-
-        // Simulate a registry sync re-loading catalog entries: replace the
-        // entries wholesale (as `load_catalog_file` does to `self.models`)
-        // with a snapshot that reports a different (stale-relative) window.
-        let mut resynced = ModelCatalog::from_entries(
-            vec![ModelCatalogEntry {
-                id: "claude-sonnet-4-6".to_string(),
-                display_name: "Claude Sonnet 4.6".to_string(),
-                provider: "anthropic".to_string(),
-                tier: ModelTier::Smart,
-                context_window: 200_000,
-                ..Default::default()
-            }],
-            vec![],
-        );
-        // `overrides` lives on the same `ModelCatalog` instance across a
-        // real sync (RCU-cloned, then only `self.models` is mutated) — model
-        // this by carrying the override map over by hand.
-        resynced.set_overrides(
-            "anthropic:claude-sonnet-4-6".to_string(),
-            cat.get_overrides("anthropic:claude-sonnet-4-6")
-                .cloned()
-                .unwrap(),
-        );
-
         let resolved = resolve_context_window(
-            &resynced,
-            &model("anthropic", "claude-sonnet-4-6", None),
+            &cat,
+            &model("litellm", "sensor-model-generic-high", None),
             None,
         );
-        assert_eq!(
-            resolved,
-            Some(64_000),
-            "the override must still win after a registry sync reloaded the catalog entry"
+        assert_eq!(resolved, Some(16_384));
+    }
+
+    /// Refs #7774 / #6568. The per-agent `agent.toml` value stays the most
+    /// specific layer — a model-level correction is inherited by every agent,
+    /// so an agent that states its own window must still win.
+    #[test]
+    fn the_agent_toml_value_still_wins_over_a_model_level_override() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                context_window: Some(48_000),
+                ..Default::default()
+            },
         );
+        let resolved = resolve_context_window(
+            &cat,
+            &model("anthropic", "claude-sonnet-4-6", Some(96_000)),
+            None,
+        );
+        assert_eq!(resolved, Some(96_000));
+    }
+
+    /// Refs #7774. An override on some *other* model, and an override that
+    /// carries only inference parameters, both leave the chain exactly where it
+    /// was. This is the backward-compatibility guard: adding the field must not
+    /// move a single existing install's resolved window.
+    #[test]
+    fn an_absent_limit_override_leaves_the_chain_unchanged() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                temperature: Some(0.3),
+                max_tokens: Some(4_096),
+                ..Default::default()
+            },
+        );
+        cat.set_overrides(
+            "openai:some-other-model".to_string(),
+            ModelOverrides {
+                context_window: Some(1_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            resolve_context_window(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
+            Some(200_000),
+            "the catalog value must still be what resolves"
+        );
+        assert_eq!(
+            resolve_context_window(
+                &cat,
+                &model("deepseek", "deepseek-v4-flash", None),
+                Some(48_000)
+            ),
+            Some(48_000),
+            "the session hint must still be the last resort"
+        );
+        assert_eq!(
+            resolve_context_window(&cat, &model("deepseek", "deepseek-v4-flash", None), None),
+            None,
+            "nothing resolved — the caller's fallback still applies"
+        );
+    }
+
+    /// Refs #7774. An override of `0` — what a cleared dashboard field could
+    /// submit — must not pin the window to zero and poison the budget math.
+    #[test]
+    fn a_zero_model_level_override_falls_through_to_the_catalog() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                context_window: Some(0),
+                ..Default::default()
+            },
+        );
+        let resolved =
+            resolve_context_window(&cat, &model("anthropic", "claude-sonnet-4-6", None), None);
+        assert_eq!(resolved, Some(200_000));
+    }
+
+    /// Refs #7774. An image model carries no window, and an override must be
+    /// able to supply one without the catalog's `0` shadowing it.
+    #[test]
+    fn an_override_supplies_a_window_the_catalog_stores_as_zero() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "openai:dall-e-3".to_string(),
+            ModelOverrides {
+                context_window: Some(4_096),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve_context_window(&cat, &model("openai", "dall-e-3", None), None);
+        assert_eq!(resolved, Some(4_096));
     }
 
     /// Guards the `session_hint: None` choice at the compaction gate.

@@ -184,6 +184,9 @@ export interface ChannelItem {
   /** Set on an unconfigured sidecar row when `--describe` failed at daemon boot and there is no static fallback — i.e. `fields` is empty and the configure form would otherwise be a blank drawer.
    *  Carries the actionable reason (typically: the Python sidecar SDK is not installed), surfaced in the configure form so the operator knows why the form is empty and how to fix it. */
   schema_error?: string;
+  /** `librefang-sdk` version the sidecar adapter reported on `--describe`, absent when it reported none (an SDK too old to carry the field, or a failed describe).
+   *  `--describe` resolves the same interpreter and PYTHONPATH as the eventual spawn, so this is the SDK that will actually serve traffic — the thing #7140 had no way to see short of shelling into the host. */
+  sdk_version?: string;
   /** Read-only TOML snippet the operator can copy into config.toml
    *  if they prefer hand-editing over the configure drawer. Emitted
    *  by the backend on every row. */
@@ -1933,8 +1936,8 @@ export interface ModelItem {
   display_name?: string;
   provider: string;
   tier?: string;
-  // Effective (override ?? catalog) — use for "what the model actually
-  // does". Refs #7774, mirrors the supports_* convention below.
+  // Effective (catalog ∘ operator override). `0` is the catalog's "unknown"
+  // sentinel — never a limit. Refs #7774.
   context_window?: number;
   max_output_tokens?: number;
   // Raw catalog defaults — use for "Auto = revert target" in the override
@@ -1960,6 +1963,12 @@ export interface ModelItem {
     supports_vision?: boolean;
     supports_streaming?: boolean;
     supports_thinking?: boolean;
+  };
+  // Raw catalog capacity limits — the same "Auto = revert target" role for the
+  // limit editors. Refs #7774.
+  limits_catalog?: {
+    context_window?: number;
+    max_output_tokens?: number;
   };
   aliases?: string[];
   available?: boolean;
@@ -2014,10 +2023,11 @@ export interface ModelOverrides {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
-  // Refs #7774: corrects a wrong or missing catalog context window / max
-  // output tokens (e.g. a self-hosted gateway that never reports them) —
-  // persisted here instead of on the catalog entry so it survives a
-  // registry sync. undefined = use the catalog value.
+  // Refs #7774: operator corrections to the model's capacity limits —
+  // undefined = use the catalog value, a positive number = force it. These are
+  // facts about the model, not per-request parameters: `max_tokens` above is the
+  // output cap sent on the wire, `max_output_tokens` here is what the model can
+  // produce at most.
   context_window?: number;
   max_output_tokens?: number;
 }
@@ -3178,11 +3188,36 @@ export interface MemoryConfigResponse {
      *  below. */
     extraction_model?: string;
     /** The model extraction actually runs on, whether or not anyone chose
-     *  it. Always populated. */
-    effective_extraction_model?: string;
+     *  it — split out of any `provider/model` spec and with the prefix
+     *  stripped, as the daemon resolved it at boot.
+     *
+     *  `null` whenever no model runs at all: extraction switched off, an
+     *  `extractor_sidecar` doing the work, or the driver having failed to
+     *  build so extraction fell back to substring matching. Check
+     *  `extraction_llm_active` before presenting this as what is running. */
+    effective_extraction_model?: string | null;
+    /** Provider the model above is called on. `null` under the same
+     *  conditions. */
+    effective_extraction_provider?: string | null;
     /** `"configured"` when `extraction_model` is set, `"inherited_default"`
      *  when it fell through to `[default_model]`. */
-    extraction_model_source?: "configured" | "inherited_default";
+    extraction_model_source?: "configured" | "inherited_default" | null;
+    /** What actually extracts memories, as resolved at boot. */
+    extraction_status?:
+      | "llm"
+      | "sidecar"
+      | "degraded_substring"
+      | "inactive"
+      | "unknown";
+    /** Whether an LLM performs extraction at all. `false` for the substring
+     *  fallback after a failed driver build — memory quality is degraded and
+     *  no model is involved. */
+    extraction_llm_active?: boolean | null;
+    /** Why extraction has no LLM, naming the provider and model that failed
+     *  to build. */
+    extraction_degraded_reason?: string | null;
+    /** The out-of-process extractor command, when one is what runs. */
+    extraction_sidecar_command?: string | null;
     max_retrieve?: number;
   };
   /**
@@ -3345,6 +3380,10 @@ export async function createBackup(): Promise<{ filename?: string; path?: string
   return post<{ filename?: string; path?: string; size_bytes?: number; components?: string[]; created_at?: string }>("/api/backup", {});
 }
 
+// An empty component checklist means "restore everything", which the API spells
+// as an absent `components` field — it rejects `[]` rather than guess between
+// "everything" and "nothing". Dropping the field here is what keeps the
+// checklist's default state a full restore instead of a 400.
 export async function restoreBackup(
   filename: string,
   options?: { keepConfig?: boolean; components?: string[] },
@@ -3352,7 +3391,7 @@ export async function restoreBackup(
   return post<{ restored_files?: number; errors?: string[]; message?: string }>("/api/restore", {
     filename,
     keep_config: options?.keepConfig,
-    components: options?.components,
+    components: options?.components?.length ? options.components : undefined,
   });
 }
 

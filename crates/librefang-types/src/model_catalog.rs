@@ -432,32 +432,21 @@ pub struct ModelOverrides {
     /// User override for `supports_thinking`. See [`Self::supports_tools`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_thinking: Option<bool>,
-    /// User override for the model's context window (in tokens).
+    /// Operator override for the model's context window, in tokens (refs #7774).
     ///
-    /// Unlike the other fields above, this has no catalog-editable
-    /// counterpart: the catalog's own `context_window` comes from the
-    /// registry sync and is silently replaced on every sync, so a value
-    /// written directly onto a `ModelCatalogEntry` would not survive
-    /// (librefang/librefang#7774). Persisting the correction here — in the
-    /// `overrides` side-table, keyed by `provider:model_id` and untouched by
-    /// `load_cached_catalog_for` / `load_catalog_file` — is what lets an
-    /// operator fix a wrong or missing catalog value (e.g. a self-hosted
-    /// LiteLLM gateway that reports `max_tokens: null` and forces the
-    /// runtime's conservative 8192-token fallback) permanently, the same way
-    /// [`Self::max_tokens`] already does for the completion cap.
+    /// Corrects a *capacity fact* about the model rather than an inference parameter: a gateway that proxies a self-hosted runtime routinely reports `max_input_tokens: null`, and a model discovered from a `/models` listing gets whatever window the discovery path assumed.
+    /// `None` defers to the catalog entry (probed or registry-declared); `Some(n)` with `n > 0` wins over it.
+    /// A `Some(0)` is treated as absent everywhere the field is read, matching how `ModelCatalogEntry::context_window` already treats `0` as "unknown".
     ///
-    /// Distinct from `agent.toml: model.context_window`
-    /// ([`crate::agent::ModelConfig::context_window`]), which is a
-    /// per-agent, higher-precedence override — see
-    /// `manifest_helpers::resolve_context_window` in `librefang-kernel` for
-    /// the full precedence chain.
+    /// Deliberately distinct from [`Self::max_tokens`], which is the per-request *output* cap sent on the wire. Setting the output cap to the model's window asks the model to reserve its whole context for the reply, which is the confusion this field exists to end.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
-    /// User override for the model's maximum output tokens.
+    /// Operator override for the model's declared maximum output tokens (refs #7774).
     ///
-    /// Same rationale and persistence path as [`Self::context_window`]: the
-    /// catalog's `max_output_tokens` (see [`ModelCatalogEntry::max_output_tokens`])
-    /// is registry-sync-owned, so an operator correction belongs here instead.
+    /// The sibling capacity limit to [`Self::context_window`], and unknown from
+    /// the same sources for the same reason — a gateway reporting
+    /// `max_input_tokens: null` reports `max_output_tokens: null` alongside it.
+    /// `None` defers to the catalog entry; `Some(n)` with `n > 0` wins over it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
 }
@@ -495,6 +484,23 @@ pub struct EffectiveCapabilities {
     pub supports_vision: bool,
     pub supports_streaming: bool,
     pub supports_thinking: bool,
+}
+
+/// Effective capacity limits for a model after applying operator overrides on
+/// top of the catalog entry's declared values (refs #7774). Returned by
+/// `ModelCatalog::effective_limits` / `effective_limits_for_manifest`.
+///
+/// Both fields are `Option` because "unknown" is a real answer here and must
+/// not be flattened to `0`: a `0` propagated into compaction thresholds or
+/// budget math is the bug `ModelCatalogEntry::context_window` documents.
+/// `None` means neither the operator nor the catalog knows, and the caller
+/// applies its own fallback (and, for the context window, logs that it did).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct EffectiveLimits {
+    /// Context window in tokens, or `None` when unknown.
+    pub context_window: Option<u64>,
+    /// Maximum output tokens, or `None` when unknown.
+    pub max_output_tokens: Option<u64>,
 }
 
 /// Per-region endpoint configuration.
@@ -1453,5 +1459,52 @@ aliases = []
         "#;
         let entry: ModelCatalogEntry = toml::from_str(toml_str).expect("valid toml");
         assert_eq!(entry.reasoning_echo_policy, ReasoningEchoPolicy::None);
+    }
+
+    /// Refs #7774. A `model_overrides.json` written before the capacity-limit
+    /// fields existed must keep parsing, and must not acquire a limit override
+    /// it never asked for — the whole backward-compatibility contract of this
+    /// change rests on `None` here.
+    #[test]
+    fn overrides_file_without_capacity_limits_still_parses_as_absent() {
+        let json = r#"{"temperature": 0.7, "max_tokens": 4096}"#;
+        let o: ModelOverrides = serde_json::from_str(json).expect("legacy overrides parse");
+        assert_eq!(o.max_tokens, Some(4096));
+        assert_eq!(o.context_window, None);
+        assert_eq!(o.max_output_tokens, None);
+        assert!(!o.is_empty(), "temperature/max_tokens are still overrides");
+    }
+
+    /// Refs #7774. The capacity limits are part of `is_empty`, or an overrides
+    /// document carrying nothing but a corrected context window would be
+    /// dropped by `ModelCatalog::set_overrides` the moment it was saved.
+    #[test]
+    fn a_context_window_override_alone_is_not_an_empty_override_set() {
+        let o = ModelOverrides {
+            context_window: Some(16_384),
+            ..Default::default()
+        };
+        assert!(!o.is_empty());
+        let max_out_only = ModelOverrides {
+            max_output_tokens: Some(8_192),
+            ..Default::default()
+        };
+        assert!(!max_out_only.is_empty());
+        assert!(ModelOverrides::default().is_empty());
+    }
+
+    /// Refs #7774. Absent limits stay absent on the wire: the dashboard reads
+    /// `overrides.context_window == undefined` as "no override, show the
+    /// catalog value", so serializing an explicit `null` would be a lie the UI
+    /// cannot distinguish from a real zero.
+    #[test]
+    fn absent_capacity_limits_are_omitted_from_serialized_overrides() {
+        let json = serde_json::to_string(&ModelOverrides {
+            temperature: Some(0.5),
+            ..Default::default()
+        })
+        .expect("serialize");
+        assert!(!json.contains("context_window"), "{json}");
+        assert!(!json.contains("max_output_tokens"), "{json}");
     }
 }
