@@ -541,6 +541,12 @@ fn ephemeral_loop_options(
         parallel_tools_config: Some(cfg.parallel_tools.clone()),
         canvas_config: Some(cfg.canvas.clone()),
         system_call: false,
+        // #7744: an ephemeral worker is spawned by another agent
+        // (`agent_spawn(ephemeral: true)`), never by an authenticated human
+        // directly, so there is no owner to carry. Attributing the parent's
+        // owner here would credit a person with tool calls they did not ask
+        // for.
+        owner: None,
     }
 }
 
@@ -846,6 +852,16 @@ impl LibreFangKernel {
                 canvas_config: Some(self.config.load().canvas.clone()),
                 // Ephemeral /btw is a user-initiated turn, not a system fork.
                 system_call: false,
+                // #7744: same resolution as `execute_llm_agent` — the bearer
+                // credential wins, and a channel-initiated /btw falls back to
+                // the configured channel-identity map. This path runs
+                // tool-less today, so nothing consumes it yet; carrying it
+                // anyway keeps the field's meaning uniform across entry points
+                // instead of leaving one that silently reports "no owner".
+                owner: owner.or_else(|| {
+                    sender_context
+                        .and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id))
+                }),
             },
         )
         .await
@@ -2380,6 +2396,10 @@ impl LibreFangKernel {
             canvas_config: Some(self.config.load().canvas.clone()),
             // User-initiated main turn, not a system-internal fork.
             system_call: false,
+            // #7744: resolved inside the `_with_opts` callee, which is the one
+            // place that sees both the bearer-derived owner and the sender
+            // context every streaming entry point funnels through.
+            owner: None,
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -2588,6 +2608,12 @@ impl LibreFangKernel {
             // cron / autonomous channel carve-out for a path that has no
             // synthetic channel to match on.
             system_call: true,
+            // #7744: a fork must never inherit the parent turn's owner, or the
+            // sub-agent's tool calls would be attributed to a human who never
+            // requested them. The fork caller passes `owner: None` and a `None`
+            // sender context, so the `_with_opts` resolution below also yields
+            // `None` — this literal and that resolution agree by construction.
+            owner: None,
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -2671,6 +2697,9 @@ impl LibreFangKernel {
             canvas_config: Some(self.config.load().canvas.clone()),
             // User-initiated main turn, not a system-internal fork.
             system_call: false,
+            // #7744: resolved inside the `_with_opts` callee — see the sibling
+            // entry point above.
+            owner: None,
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -2727,6 +2756,27 @@ impl LibreFangKernel {
             };
             loop_opts.compaction_config = Some(merged);
         }
+
+        // #7744: resolve the authenticated identity for this turn and thread it
+        // down to tool dispatch. Every streaming entry point funnels through
+        // here, so this is the one place that sees both inputs.
+        //
+        // Precedence matches `execute_llm_agent`:
+        //   1. `owner` — the API caller's validated bearer credential.
+        //   2. Channel bridges carry no bearer (they pass `owner: None`), so
+        //      the platform sender is mapped through the operator-configured
+        //      `[[users]]` channel-identity index. This is the channel half of
+        //      the fix: a Telegram/Discord user reaches dispatch as a typed
+        //      `UserId` only if an operator actually bound that platform id to
+        //      a configured user. An unbound id stays `None` rather than being
+        //      promoted to a principal on the strength of a self-declared
+        //      `sender_id`.
+        //
+        // Forks pass `owner: None` *and* a `None` sender context, so they
+        // resolve to `None` here — a fork must not inherit its parent's owner.
+        loop_opts.owner = owner.or_else(|| {
+            sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id))
+        });
 
         // #4807: the pre-dispatch provider-budget gate was removed
         // from this path. Budget exhaustion is signalled through the

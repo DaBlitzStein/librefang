@@ -534,6 +534,12 @@ pub(super) struct ToolExecutionContext<'a> {
     pub(super) process_manager: Option<&'a crate::process_manager::ProcessManager>,
     pub(super) process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub(super) sender_user_id: Option<&'a str>,
+    /// The authenticated human owner of this turn (#7744), carried alongside
+    /// the caller-supplied `sender_user_id` and forwarded to
+    /// `ToolExecContext::owner`. Sourced from `LoopOptions::owner`, never from
+    /// `manifest.metadata` — see that field's docs for why the distinction
+    /// is load-bearing.
+    pub(super) owner: Option<librefang_types::agent::UserId>,
     pub(super) sender_channel: Option<&'a str>,
     /// Platform conversation id (chat_id / channel_id / JID). Distinct
     /// from `sender_user_id` in group chats; coincides in DMs.
@@ -1108,6 +1114,9 @@ pub(super) async fn execute_single_tool_call_core(
             // their `memory_*` tool calls bypass the RBAC guest gate instead
             // of hitting NeedsApproval every cycle.
             ctx.opts.system_call,
+            // #7744: the credential-derived identity for this turn, so dispatch
+            // can distinguish it from the body-supplied `sender_user_id` above.
+            ctx.owner,
         ),
     )
     .await

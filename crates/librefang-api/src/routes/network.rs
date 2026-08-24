@@ -1610,6 +1610,13 @@ pub async fn mcp_http(
             cfg.tool_results.max_artifact_bytes,
             current_account_id.as_deref(), // sender_account_id (X-LibreFang-Current-Account-Id, #6443)
             false, // system_call: MCP HTTP bridge is an external call path, not a system-internal fork (#6463)
+            // #7744: the bridge's `sender_id` comes from an
+            // `X-LibreFang-Current-Peer-Jid` *request header*, so like the HTTP
+            // message body it is caller-supplied. The authenticated owner comes
+            // from the bearer credential this handler already extracts for its
+            // own authorization check, so dispatch can tell the two apart here
+            // too. `None` when the deployment runs without auth.
+            api_user.as_ref().map(|u| u.0.user_id),
         )
         .await;
 

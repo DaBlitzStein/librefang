@@ -209,6 +209,25 @@ pub struct LoopOptions {
     /// Defaults to `false`; only the fork path in `run_forked_agent_streaming`
     /// sets it.
     pub system_call: bool,
+    /// The authenticated human owner of this turn (#7744).
+    ///
+    /// The typed counterpart to the platform `sender_id` that reaches the loop
+    /// through `manifest.metadata["sender_user_id"]`. That metadata bag is
+    /// untyped and, over HTTP, is populated from the request *body*, so it is
+    /// caller-controlled; this field is not — the kernel fills it from the
+    /// credential the API auth middleware validated, or from the configured
+    /// `[[users]]` channel-identity map for a channel turn.
+    ///
+    /// Threaded down to `ToolExecContext::owner` so tool dispatch can tell an
+    /// authenticated identity from a claimed one. Deliberately kept *beside*
+    /// the sender signal rather than replacing it: `sender_id` is still the
+    /// right answer to "which platform account spoke".
+    ///
+    /// `None` wherever no single authenticated initiator exists — cron fires,
+    /// agent-to-agent sends, and forks (a fork must never inherit its parent's
+    /// owner, or the sub-agent's actions would be attributed to a human who
+    /// did not request them).
+    pub owner: Option<librefang_types::agent::UserId>,
 }
 
 /// Result of an agent loop execution.

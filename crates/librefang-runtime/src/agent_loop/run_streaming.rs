@@ -1343,6 +1343,9 @@ async fn run_agent_loop_streaming_inner(
                             process_manager,
                             process_registry,
                             sender_user_id: sender_user_id.as_deref(),
+                            // #7744: typed, credential-derived — comes off
+                            // `LoopOptions`, not the metadata bag above.
+                            owner: opts.owner,
                             sender_channel: sender_channel.as_deref(),
                             sender_chat_id: sender_chat_id.as_deref(),
                             sender_account_id: sender_account_id.as_deref(),

@@ -63,6 +63,15 @@ pub struct ToolExecContext<'a> {
     /// `shell_exec` with a rolling 200 KB output buffer.
     pub process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub sender_id: Option<&'a str>,
+    /// The **authenticated** human owner of the turn this tool call belongs to (#7744).
+    ///
+    /// Distinct from [`Self::sender_id`] in kind, not just in value.
+    /// `sender_id` is a free-form platform handle: over HTTP it is read straight out of `MessageRequest.sender_id` in the request *body*, so any bearer holding the `User` role can set it to an arbitrary string.
+    /// `owner` is a typed [`UserId`] that the API auth middleware derived from the caller's credential, or that the kernel resolved for a channel turn through the configured `[[users]]` channel-identity map — the caller cannot choose it.
+    ///
+    /// Both are carried, deliberately: `sender_id` remains the correct signal for *platform* trust (which Telegram account spoke), while `owner` is the correct signal for anything that must not be forgeable.
+    /// `None` on paths with no single authenticated initiator — cron fires, agent-to-agent sends, forks, and the deferred approval-resume path — which keep the historical unattributed behaviour.
+    pub owner: Option<librefang_types::agent::UserId>,
     pub channel: Option<&'a str>,
     /// Platform conversation id (Telegram chat_id, Discord channel_id,
     /// WhatsApp JID) the originating user message arrived on. Distinct
@@ -205,6 +214,15 @@ pub async fn execute_tool_raw(
         process_manager,
         process_registry,
         sender_id,
+        // #7744: bound to `_` deliberately. This increment carries the
+        // authenticated owner *to* the dispatcher and stops there — no builtin
+        // arm reads it yet, and nothing durable is stamped with it. The gates
+        // that should eventually consult it (per-sender tool authorization,
+        // approval routing, the `peer:{user_id}:KEY` memory namespace) still
+        // key off `sender_id` exactly as before, so this change moves no
+        // decision. The value is reachable through `ToolExecContext::owner`
+        // for whoever wires the first of those gates.
+        owner: _,
         channel,
         // Previously bound to `_` (only consumed by `execute_tool` upstream
         // to thread into `DeferredToolExecution.chat_id`). Now also consumed
@@ -1557,6 +1575,10 @@ pub async fn execute_tool(
         // Out-of-band callers of the positional shim are user-facing / MCP
         // bridge calls, never system-internal forks (#6463).
         false,
+        // #7744: the positional shim has no authenticated owner on hand.
+        // Callers that do (the in-process agent loop) use
+        // `execute_tool_with_sender_account` directly and pass it there.
+        None,
     )
     .await
 }
@@ -1607,10 +1629,31 @@ pub async fn execute_tool_with_sender_account(
     // guest gate once `[[users]]` is configured (#6463). Every user-facing
     // caller passes `false`.
     system_call: bool,
+    // The authenticated human owner of this turn (#7744) — see
+    // `ToolExecContext::owner` for why this travels alongside `sender_id`
+    // rather than replacing it.
+    owner: Option<librefang_types::agent::UserId>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
     let tool_name = normalize_tool_name(tool_name);
+
+    // #7744: record which identities this dispatch is carrying, before any gate
+    // below can short-circuit the call. Emitted on a dedicated target so an
+    // operator can turn on the authenticated-identity trail for tool calls
+    // without enabling debug logging across the whole runtime.
+    //
+    // `owner` is the credential-derived identity; `sender_id` is the
+    // caller-supplied platform handle. Recording both together is what makes a
+    // spoofed `sender_id` distinguishable after the fact from a genuine one.
+    debug!(
+        target: "librefang::tool_identity",
+        tool = %tool_name,
+        owner = ?owner.map(|u| u.0),
+        sender_id = ?sender_id,
+        channel = ?channel,
+        "tool dispatch identity",
+    );
 
     // Capability enforcement: reject tools not in the allowed list.
     // Entries support wildcard patterns (e.g. "file_*" matches "file_read").
@@ -1849,6 +1892,7 @@ pub async fn execute_tool_with_sender_account(
         process_manager,
         process_registry,
         sender_id,
+        owner,
         channel,
         chat_id,
         sender_account_id,

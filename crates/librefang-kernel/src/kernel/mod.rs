@@ -1914,6 +1914,14 @@ impl LibreFangKernel {
             docker_config: None,
             process_manager: Some(&self.processes.manager),
             sender_id: deferred.sender_id.as_deref(),
+            // #7744: `None` on purpose. Restoring the owner here would mean
+            // persisting it on `DeferredToolExecution`, and stamping identity
+            // into a durable artefact is deliberately out of scope for this
+            // increment — the payload survives restarts, so the stamped value
+            // would outlive the credential that produced it. The resume path
+            // keeps the historical unattributed behaviour; nothing in the
+            // dispatch table reads `owner` yet, so this loses no decision.
+            owner: None,
             channel: deferred.channel.as_deref(),
             chat_id: deferred.chat_id.as_deref(),
             // #6443: restore the originating account so an approved, deferred

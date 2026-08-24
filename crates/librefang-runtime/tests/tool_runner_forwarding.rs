@@ -115,6 +115,7 @@ impl TaskQueue for CapturingKernel {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
+        _: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
@@ -251,6 +252,10 @@ fn make_ctx<'a>(
         process_manager: None,
         process_registry: None,
         sender_id,
+        // #7744: these fixtures exercise the dispatch table itself, which
+        // does not read the authenticated owner. `None` keeps them on the
+        // unattributed path they already tested.
+        owner: None,
         channel: None,
         chat_id: None,
         sender_account_id: None,

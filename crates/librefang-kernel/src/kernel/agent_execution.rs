@@ -1203,6 +1203,28 @@ impl LibreFangKernel {
             Some(o) if !o.is_empty() => o.resolve(&cfg.compaction),
             _ => cfg.compaction.clone(),
         };
+        // #7744: resolve the authenticated identity for this turn ONCE, here,
+        // and reuse it for both the tool-dispatch thread below and the billing
+        // attribution further down. Two consumers reading one resolution is
+        // what keeps "who ran this tool" and "who pays for it" from drifting
+        // apart.
+        //
+        // Precedence mirrors the pre-existing `billed_user_id` rule:
+        //   1. `owner` — the API caller's bearer credential, validated by the
+        //      auth middleware. Unforgeable by the request body.
+        //   2. Channel turns carry no bearer, so the platform sender is mapped
+        //      through the operator-configured `[[users]]` channel-identity
+        //      index (`AuthManager::identify`). A platform id that is not bound
+        //      to a configured user resolves to `None` — an unrecognised
+        //      Telegram account does not become an authenticated principal just
+        //      by sending a message.
+        //
+        // Note this is NOT `sender_context.user_id` taken at face value: that
+        // string is exactly the untrusted value #7744 is about. It only yields
+        // an identity after surviving the channel-identity lookup.
+        let resolved_owner: Option<UserId> = owner.or_else(|| {
+            sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id))
+        });
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
             incognito,
@@ -1220,6 +1242,8 @@ impl LibreFangKernel {
             // `execute_llm_agent` never runs a fork (see the peer_id
             // invariant test) — always a user-facing / trigger turn.
             system_call: false,
+            // #7744: carry the authenticated identity down to tool dispatch.
+            owner: resolved_owner,
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as
@@ -1435,16 +1459,19 @@ impl LibreFangKernel {
             result.total_usage.cache_read_input_tokens,
             result.total_usage.cache_creation_input_tokens,
         );
-        // RBAC M5: derive user/channel attribution from the inbound sender
-        // so per-user budgets and audit events can roll up per call.
-        let attribution_user_id: Option<UserId> =
-            sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
+        // RBAC M5: derive channel attribution from the inbound sender so audit
+        // events can roll up per call.
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
         // #6460: when an authenticated API caller owns this turn, their vault key is what gets billed upstream (see `resolve_driver_for_owner` above), so usage attribution and per-user budget enforcement must key on that owner.
-        // A plain authenticated POST carries no `sender_id`, so `attribution_user_id` is `None` and the owner's spend would otherwise be recorded unattributed and never gated against their budget.
+        // A plain authenticated POST carries no `sender_id`, so the channel-identity lookup yields `None` and the owner's spend would otherwise be recorded unattributed and never gated against their budget.
         // The owner wins when present; sender-derived attribution stays the fallback for owner-less paths (channel / cron / agent_send).
         // Forks never reach `execute_llm_agent` (see the fork short-circuit at the top of this method), so the raw owner needs no fork-nulling here.
-        let billed_user_id: Option<UserId> = owner.or(attribution_user_id);
+        //
+        // #7744: this is the same `resolved_owner` computed before the loop
+        // options above, not a second independent lookup — the identity that
+        // reached tool dispatch and the identity that gets billed are the same
+        // value by construction.
+        let billed_user_id: Option<UserId> = resolved_owner;
         // #4807 review nit 10: when the LLM fallback chain redirected
         // the request to an alternative slot, bill the *actual* serving
         // provider rather than the manifest-nominated one. The agent
