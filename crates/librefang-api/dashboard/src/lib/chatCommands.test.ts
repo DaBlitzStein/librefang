@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TFunction } from "i18next";
 import type { ChatCommand } from "../api";
-import { backendCommandNames, commandLabel, menuCommands } from "./chatCommands";
+import { backendCommandNames, commandLabel, menuCommands, shouldHoldSlashSend } from "./chatCommands";
 
 // Shape of a real `GET /api/commands` payload, trimmed to the cases that
 // matter: a client-resolved builtin, a WS-dispatched builtin, `/goal` (the
@@ -45,6 +45,34 @@ describe("backendCommandNames", () => {
 
   it("strips the leading slash", () => {
     expect(backendCommandNames(CATALOG).every(name => !name.startsWith("/"))).toBe(true);
+  });
+});
+
+describe("shouldHoldSlashSend", () => {
+  // The regression this guards: moving the catalog to the server introduced a
+  // window between mount and the first response in which nothing knew `/goal`
+  // was a command, so it would have gone to the agent as a prompt.
+  it("holds a slash command typed before the catalog lands", () => {
+    expect(shouldHoldSlashSend("/goal ship the release", true)).toBe(true);
+  });
+
+  it("holds regardless of leading whitespace", () => {
+    expect(shouldHoldSlashSend("   /reset", true)).toBe(true);
+  });
+
+  it("never holds ordinary chat, even while loading", () => {
+    expect(shouldHoldSlashSend("what is the status?", true)).toBe(false);
+    expect(shouldHoldSlashSend("", true)).toBe(false);
+  });
+
+  it("releases the send once the catalog has landed", () => {
+    expect(shouldHoldSlashSend("/goal ship the release", false)).toBe(false);
+  });
+
+  // A failed fetch also reports `commandsPending: false`. Holding forever
+  // would break skill commands, which are supposed to reach the agent.
+  it("does not hold when the catalog is unavailable", () => {
+    expect(shouldHoldSlashSend("/weather", false)).toBe(false);
   });
 });
 
