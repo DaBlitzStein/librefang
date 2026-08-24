@@ -60,7 +60,13 @@ async fn test_task_claim_returns_assigned_task() {
         .expect("spawn_agent failed");
 
     let task_id = kh
-        .task_post("title", "desc", Some(&agent_id), None)
+        .task_post(
+            "title",
+            "desc",
+            Some(&agent_id),
+            None,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("task_post failed");
 
@@ -82,7 +88,13 @@ async fn test_task_complete_updates_status() {
         .expect("spawn_agent failed");
 
     let task_id = kh
-        .task_post("title", "desc", Some(&agent_id), None)
+        .task_post(
+            "title",
+            "desc",
+            Some(&agent_id),
+            None,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("task_post failed");
 
@@ -108,7 +120,13 @@ async fn test_task_post_with_no_assignment() {
     let kh: &dyn KernelHandle = &kernel;
 
     let task_id = kh
-        .task_post("title", "desc", None, None)
+        .task_post(
+            "title",
+            "desc",
+            None,
+            None,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("task_post failed");
 
