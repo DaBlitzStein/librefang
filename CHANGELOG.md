@@ -20,6 +20,23 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- `/goal` now works in the dashboard chat and in the TUI chat, not only in channels (#3355).
+  The command was registered with `Scope::CHANNEL` alone, so the TUI's registry pre-flight rejected it and the dashboard never listed it — while Telegram, which is the surface the command shipped against, worked fine.
+  Behind that was a split-brain catalog: four hand-written command lists that did not reference each other — `COMMAND_REGISTRY` in `librefang-channels`, a `BUILTIN_COMMANDS` const behind `GET /api/commands`, a `SLASH_COMMANDS` array in `ChatPage.tsx`, and the execution `match` in `ws.rs` — plus a `Scope::DASHBOARD` flag that was declared, documented, and used by nobody.
+  `GET /api/commands` now derives from `COMMAND_REGISTRY` filtered by `Scope::DASHBOARD`, and the dashboard chat consumes that endpoint instead of its own copy, so a command registered once appears on every surface that scopes it.
+  The catalog carries the metadata the SPA used to hold privately (`desc_key`, `args_hint`, `no_args`, and an `exec` field distinguishing client-resolved commands from ones dispatched over the chat WebSocket); an entry with no `exec` is catalogued but stays out of the slash menu, which is exactly the pre-existing treatment of `/think`, `/status` and `/exit`.
+  Every command the old const served is still served, verified by a golden test on both sides of the boundary.
+  Goal creation itself is now one function in `goal_runner`, shared by the channel bridge, the WebSocket handler and the TUI, so the three cannot drift in what a chat-created goal looks like; argument parsing for `--loop-engineering` moved to `librefang_types::goal` for the same reason.
+  Fixing only the scope would have swapped an invisible command for a crashing one — the TUI dispatcher ends in `unreachable!()` — so the TUI gained a `goal` arm and a test asserting that every `Scope::CLI` command has one (@DaBlitzStein)
+- The authenticated owner of a turn now reaches the tool dispatcher, so a tool call carries the identity the daemon verified rather than only the one the caller claimed (#7744).
+  Two identities travel with every turn and, until now, only the weaker one survived that far.
+  `owner` is a typed `UserId` the API auth middleware derives from the caller's bearer credential; `sender_id` is a free-form platform handle that, over HTTP, is read straight out of `MessageRequest.sender_id` in the request body.
+  Any bearer holding the `User` role may POST to `/api/agents/{id}/message`, so `sender_id` is chosen by the caller — yet it alone reached `tool_runner::dispatch`, where it feeds per-sender tool authorization, approval routing, and the `peer:{user_id}:KEY` memory namespace.
+  `owner` is now threaded down the existing typed path — `LoopOptions` to the agent loop's tool-execution context to `ToolExecContext::owner` — deliberately *beside* `sender_id` rather than replacing it, because `sender_id` remains the right signal for platform-level trust ("which Telegram account spoke").
+  Channel turns carry no bearer, so their owner is resolved through the operator-configured `[[users]]` channel-identity map; a platform id nobody bound to a configured user stays unattributed instead of being promoted to a principal on the strength of a self-declared id.
+  Forks and ephemeral workers resolve to no owner by construction, so a sub-agent's tool calls are never attributed to a human who did not request them.
+  This is the smallest useful increment and it changes no decision on its own: nothing in the dispatch table reads `owner` yet, and no durable artefact is stamped with it.
+  What it does is make the gates that should consult an authenticated identity able to, and it records both identities on a dedicated `librefang::tool_identity` log target so a spoofed `sender_id` is distinguishable after the fact from a genuine one (@DaBlitzStein)
 - An image sent to an agent whose model has no vision support is now described by the provider nominated for `image_understanding`, instead of being replaced by a note about a file path.
   The agent was left holding a filename and a browser and would describe the picture anyway — a hallucination shaped exactly like a correct answer, because nothing in the transcript said the description was invented.
   The channel bridge had already solved this for inbound Telegram photos; the API and dashboard entry paths had not, so the same agent behaved differently depending on which door the image came through.

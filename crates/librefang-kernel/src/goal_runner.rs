@@ -37,10 +37,12 @@ use tracing::{debug, info, warn};
 use librefang_memory::{GoalRunRow, GoalRunStore, MemorySubstrate};
 use librefang_types::agent::AgentId;
 use librefang_types::goal::{
-    goals_storage_agent_id, Goal, GoalId, GoalRunPhase, GoalRunState, GoalStatus, GOALS_STORAGE_KEY,
+    goals_storage_agent_id, Goal, GoalId, GoalRunPhase, GoalRunState, GoalStatus,
+    GOALS_STORAGE_KEY, MAX_DESCRIPTION_LEN, MAX_TITLE_LEN,
 };
 
 use crate::background::{classify_tick_error, TickOutcome};
+use crate::kernel_api::KernelApi;
 
 /// Pause between iterations. Short — the agent turn itself dominates wall-clock;
 /// this just yields and lets shutdown / stop signals be observed promptly.
@@ -121,6 +123,100 @@ fn marker_present(line: &str, marker: &str) -> bool {
             .is_none_or(|c| !c.is_alphanumeric() && c != '_'),
         None => false,
     }
+}
+
+/// Outcome of a `/goal` launch.
+///
+/// The goal document is durable in both cases; `started` only reports whether
+/// a run was also scheduled. Surfaces with their own message catalog (the TUI)
+/// render from the fields; the rest use [`GoalLaunch::message`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoalLaunch {
+    /// Id of the goal that was persisted.
+    pub goal_id: GoalId,
+    /// Whether a run was scheduled for it.
+    pub started: bool,
+}
+
+impl GoalLaunch {
+    /// Confirmation text for surfaces without a localized message catalog
+    /// (channel adapters, dashboard chat WebSocket).
+    pub fn message(&self, description: &str) -> String {
+        let goal_id = self.goal_id;
+        if self.started {
+            format!("Goal created and started: {description} (ID: {goal_id})")
+        } else {
+            format!(
+                "Goal created (ID: {goal_id}) but the run could not start — \
+                 kernel self-handle unset. Restart the daemon and resume the goal."
+            )
+        }
+    }
+}
+
+/// Persist a goal for `agent_id` and immediately start a run for it.
+///
+/// Every chat surface that exposes `/goal` — the channel bridge, the dashboard
+/// chat WebSocket and the TUI chat runner — goes through this one function, so
+/// a goal created from Telegram is identical in shape to one created from the
+/// dashboard (upstream #3355).
+///
+/// A failure to schedule the run is deliberately **not** an error: the goal
+/// document is already durable at that point, so the operator has not lost the
+/// request and the message says so instead of implying nothing was saved.
+pub fn create_and_start_goal(
+    kernel: &dyn KernelApi,
+    agent_id: AgentId,
+    description: &str,
+    loop_engineering: bool,
+) -> Result<GoalLaunch, String> {
+    // Reject over-long input rather than persisting a document that
+    // `Goal::validate` would refuse — a goal no later PUT can update is worse
+    // than a rejected `/goal`.
+    if description.chars().count() > MAX_DESCRIPTION_LEN {
+        return Err(format!(
+            "Goal description too long ({} chars, max {MAX_DESCRIPTION_LEN})",
+            description.chars().count()
+        ));
+    }
+
+    let goal_id = GoalId::new();
+    let now = Utc::now().to_rfc3339();
+    let title: String = description.chars().take(MAX_TITLE_LEN).collect();
+    let entry = serde_json::json!({
+        "id": goal_id.to_string(),
+        "title": title,
+        "description": description,
+        "status": GoalStatus::Pending.to_string(),
+        "progress": 0,
+        "agent_id": agent_id.to_string(),
+        "loop_engineering": loop_engineering,
+        "created_at": now,
+        "updated_at": now,
+    });
+
+    kernel
+        .memory_substrate()
+        .structured_modify(goals_storage_agent_id(), GOALS_STORAGE_KEY, |current| {
+            let mut goals: Vec<serde_json::Value> = match current {
+                Some(serde_json::Value::Array(arr)) => arr,
+                _ => Vec::new(),
+            };
+            goals.push(entry.clone());
+            Ok((serde_json::Value::Array(goals), ()))
+        })
+        .map_err(|e| format!("Failed to create goal: {e}"))?;
+
+    let started = kernel.start_goal_run(
+        goal_id,
+        agent_id,
+        None, // max_iterations — use default
+        loop_engineering,
+        None, // verify_agent_id — the goals route auto-spawns one when needed
+        None, // verify_max_retries — runner clamps None up to its minimum
+        None, // evaluator_model — use agent default
+    );
+    Ok(GoalLaunch { goal_id, started })
 }
 
 /// Build the per-iteration prompt that frames the goal for the agent.

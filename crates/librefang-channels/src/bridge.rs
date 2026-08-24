@@ -7262,27 +7262,22 @@ async fn handle_command(
             }
         }
         "goal" => {
-            if args.is_empty() {
-                return "Usage: /goal <description> [--loop-engineering]".to_string();
-            }
-            let mut full_text = args.join(" ");
-            let has_loop_engineering = full_text.contains("--loop-engineering");
-            if has_loop_engineering {
-                full_text = full_text
-                    .replace("--loop-engineering", "")
-                    .trim()
-                    .to_string();
-            }
-            let description = full_text;
-            if description.is_empty() {
-                return "Usage: /goal <description> [--loop-engineering]".to_string();
-            }
-            match resolve_for_command().await {
-                Some(aid) => handle
-                    .create_and_start_goal(aid, &description, has_loop_engineering)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}")),
-                None => "No agent selected. Use /agent <name> first.".to_string(),
+            // Parsing is shared with the dashboard WebSocket and the TUI chat
+            // runner so the flag is spelled and stripped identically (#3355).
+            let usage = || {
+                crate::commands::lookup("goal")
+                    .map(|def| def.usage())
+                    .unwrap_or_default()
+            };
+            match librefang_types::goal::parse_goal_args(&args.join(" ")) {
+                None => usage(),
+                Some((description, loop_engineering)) => match resolve_for_command().await {
+                    Some(aid) => handle
+                        .create_and_start_goal(aid, &description, loop_engineering)
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {e}")),
+                    None => "No agent selected. Use /agent <name> first.".to_string(),
+                },
             }
         }
         "triggers" => handle.list_triggers_text().await,

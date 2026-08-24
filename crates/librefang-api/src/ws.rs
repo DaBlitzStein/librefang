@@ -24,9 +24,11 @@ use dashmap::DashMap;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use librefang_channels::types::SenderContext;
+use librefang_kernel::goal_runner::create_and_start_goal;
 use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
 use librefang_kernel::llm_errors;
+use librefang_kernel::KernelApi;
 use librefang_types::agent::{AgentId, ResetScope, SessionId};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -1883,7 +1885,40 @@ async fn handle_command(
             };
             serde_json::json!({"type": "command_result", "command": cmd, "message": msg})
         }
+        "goal" => goal_command_response(state.kernel.as_ref(), agent_id, args),
         _ => serde_json::json!({"type": "error", "content": format!("Unknown command: {cmd}")}),
+    }
+}
+
+/// `/goal <description> [--loop-engineering]` — create an autonomous goal and
+/// start driving it.
+///
+/// Split out of [`handle_command`] so it can be exercised without a live
+/// socket. Both the parsing and the launch are shared with the channel bridge
+/// and the TUI chat runner, so a goal started from the dashboard is
+/// indistinguishable from one started in Telegram (upstream #3355).
+fn goal_command_response(
+    kernel: &dyn KernelApi,
+    agent_id: AgentId,
+    args: &str,
+) -> serde_json::Value {
+    let Some((description, loop_engineering)) = librefang_types::goal::parse_goal_args(args) else {
+        return serde_json::json!({
+            "type": "error",
+            "content": librefang_channels::commands::lookup("goal")
+                .map(|def| def.usage())
+                .unwrap_or_default(),
+        });
+    };
+    match create_and_start_goal(kernel, agent_id, &description, loop_engineering) {
+        Ok(launch) => serde_json::json!({
+            "type": "command_result",
+            "command": "goal",
+            "message": launch.message(&description),
+            "goal_id": launch.goal_id.to_string(),
+            "started": launch.started,
+        }),
+        Err(e) => serde_json::json!({"type": "error", "content": e}),
     }
 }
 
@@ -2313,6 +2348,94 @@ mod tests {
     fn test_ws_module_loads() {
         // Verify module compiles and loads correctly
         let _ = VerboseLevel::Off;
+    }
+
+    /// `/goal` reaches an execution arm from the dashboard chat instead of
+    /// falling through to `Unknown command` (upstream #3355). The goal is
+    /// persisted even when the run cannot be scheduled, so the assertion is on
+    /// the stored document, not on `started`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goal_command_creates_and_reports_the_goal() {
+        let app = librefang_testing::TestAppState::with_builder(
+            librefang_testing::MockKernelBuilder::new(),
+        );
+        let kernel = app.state.kernel.clone();
+        let agent_id = AgentId::new();
+
+        let response = goal_command_response(kernel.as_ref(), agent_id, "ship the release");
+        assert_eq!(
+            response["type"], "command_result",
+            "unexpected response: {response}"
+        );
+        assert_eq!(response["command"], "goal");
+        let goal_id = response["goal_id"].as_str().expect("goal_id missing");
+
+        let stored = kernel
+            .memory_substrate()
+            .structured_get(
+                librefang_types::goal::goals_storage_agent_id(),
+                librefang_types::goal::GOALS_STORAGE_KEY,
+            )
+            .expect("goal store unreadable")
+            .expect("no goals persisted");
+        let goals = stored.as_array().expect("goals is not an array");
+        let goal = goals
+            .iter()
+            .find(|g| g["id"].as_str() == Some(goal_id))
+            .expect("created goal not found in the store");
+        assert_eq!(goal["description"], "ship the release");
+        assert_eq!(goal["agent_id"], agent_id.to_string());
+        assert_eq!(goal["loop_engineering"], false);
+        assert_eq!(goal["status"], "pending");
+    }
+
+    /// The `--loop-engineering` flag is stripped from the stored description
+    /// rather than becoming part of the goal text.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goal_command_strips_the_loop_engineering_flag() {
+        let app = librefang_testing::TestAppState::with_builder(
+            librefang_testing::MockKernelBuilder::new(),
+        );
+        let kernel = app.state.kernel.clone();
+
+        let response = goal_command_response(
+            kernel.as_ref(),
+            AgentId::new(),
+            "ship the release --loop-engineering",
+        );
+        let goal_id = response["goal_id"].as_str().expect("goal_id missing");
+
+        let stored = kernel
+            .memory_substrate()
+            .structured_get(
+                librefang_types::goal::goals_storage_agent_id(),
+                librefang_types::goal::GOALS_STORAGE_KEY,
+            )
+            .unwrap()
+            .unwrap();
+        let goal = stored
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"].as_str() == Some(goal_id))
+            .expect("created goal not found in the store");
+        assert_eq!(goal["description"], "ship the release");
+        assert_eq!(goal["loop_engineering"], true);
+    }
+
+    /// An empty `/goal` answers with the registry-derived usage line instead of
+    /// creating an untitled goal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goal_command_without_a_description_returns_usage() {
+        let app = librefang_testing::TestAppState::with_builder(
+            librefang_testing::MockKernelBuilder::new(),
+        );
+        let response = goal_command_response(app.state.kernel.as_ref(), AgentId::new(), "   ");
+        assert_eq!(response["type"], "error");
+        assert_eq!(
+            response["content"],
+            "Usage: /goal <description> [--loop-engineering]"
+        );
     }
 
     /// #6390: terminal frames echo the client's `message_id` so the dashboard can bind a late frame to the turn that owns it.

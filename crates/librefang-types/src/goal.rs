@@ -78,10 +78,14 @@ impl std::fmt::Display for GoalStatus {
 // ---------------------------------------------------------------------------
 
 /// Maximum title length in characters.
-const MAX_TITLE_LEN: usize = 256;
+///
+/// Public so that the surfaces which mint goals without going through
+/// [`Goal::validate`] (the `/goal` chat command) truncate at the same bound
+/// the validator enforces, instead of hard-coding a second copy of it.
+pub const MAX_TITLE_LEN: usize = 256;
 
 /// Maximum description length in characters.
-const MAX_DESCRIPTION_LEN: usize = 4096;
+pub const MAX_DESCRIPTION_LEN: usize = 4096;
 
 /// A hierarchical goal that agents work toward.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +175,34 @@ pub fn goals_storage_agent_id() -> AgentId {
     ]))
 }
 
+/// The `/goal` flag that switches the run into loop-engineering mode.
+pub const GOAL_LOOP_ENGINEERING_FLAG: &str = "--loop-engineering";
+
+/// Split a raw `/goal` argument string into `(description, loop_engineering)`.
+///
+/// Lives here rather than on any one surface because all three chat surfaces —
+/// the channel bridge, the dashboard WebSocket and the TUI chat runner — must
+/// spell and strip the flag identically; a per-surface copy is how `/goal`
+/// drifted apart in the first place (upstream #3355).
+///
+/// Whitespace is collapsed, so `--loop-engineering` removed from the middle of
+/// a sentence does not leave a double space behind. Returns `None` when the
+/// flag was the only thing supplied, which callers surface as a usage hint.
+pub fn parse_goal_args(args: &str) -> Option<(String, bool)> {
+    let loop_engineering = args.contains(GOAL_LOOP_ENGINEERING_FLAG);
+    let description = if loop_engineering {
+        args.replace(GOAL_LOOP_ENGINEERING_FLAG, " ")
+    } else {
+        args.to_string()
+    };
+    let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if description.is_empty() {
+        None
+    } else {
+        Some((description, loop_engineering))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GoalRunState — long-horizon autonomous execution (#5744)
 // ---------------------------------------------------------------------------
@@ -252,6 +284,35 @@ pub struct GoalRunState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_goal_args_extracts_description_and_flag() {
+        assert_eq!(
+            parse_goal_args("ship the release"),
+            Some(("ship the release".to_string(), false))
+        );
+        assert_eq!(
+            parse_goal_args("ship the release --loop-engineering"),
+            Some(("ship the release".to_string(), true))
+        );
+    }
+
+    /// The flag is stripped wherever it sits, and the gap it leaves is
+    /// collapsed rather than baked into the stored description.
+    #[test]
+    fn parse_goal_args_collapses_whitespace_around_the_flag() {
+        assert_eq!(
+            parse_goal_args("ship   --loop-engineering   the release"),
+            Some(("ship the release".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn parse_goal_args_rejects_empty_and_flag_only_input() {
+        assert_eq!(parse_goal_args(""), None);
+        assert_eq!(parse_goal_args("   "), None);
+        assert_eq!(parse_goal_args("--loop-engineering"), None);
+    }
 
     fn valid_goal() -> Goal {
         Goal {

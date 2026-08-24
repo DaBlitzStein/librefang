@@ -283,6 +283,18 @@ impl StandaloneChat {
 
     // ── Slash commands (subset — no tab navigation) ──────────────────────────
 
+    /// Every command [`Self::handle_slash_command`] has a dispatch arm for.
+    ///
+    /// The dispatcher ends in `unreachable!()`, trusting the registry
+    /// pre-flight to guarantee the resolved name is one of these. That makes
+    /// the two lists a contract: tagging a command `Scope::CLI` in
+    /// `librefang-channels` without adding an arm here turns the TUI's `/cmd`
+    /// into a panic, not a no-op. `cli_dispatch_covers_every_cli_scoped_command`
+    /// enforces it.
+    const CLI_DISPATCH: &'static [&'static str] = &[
+        "exit", "help", "status", "model", "clear", "new", "goal", "kill",
+    ];
+
     fn handle_slash_command(&mut self, cmd: &str) {
         use librefang_channels::commands::{self, Scope};
 
@@ -401,6 +413,10 @@ impl StandaloneChat {
                     );
                 }
             }
+            "goal" => {
+                let args = parts.get(1).map(|s| s.trim()).unwrap_or("");
+                self.start_goal(args);
+            }
             "kill" => {
                 let name = self.agent_name.clone();
                 match &self.backend {
@@ -465,9 +481,116 @@ impl StandaloneChat {
                 }
             }
             // The pre-flight `commands::lookup` guarantees `canonical` is one
-            // of the names matched above.
-            other => unreachable!("unhandled CLI command `{other}`"),
+            // of the names matched above. The assertion separates the two ways
+            // that can stop being true: a name listed in `CLI_DISPATCH` whose
+            // arm was deleted, versus a registry entry that gained
+            // `Scope::CLI` without either.
+            other => {
+                debug_assert!(
+                    !Self::CLI_DISPATCH.contains(&other),
+                    "`{other}` is listed in CLI_DISPATCH but has no match arm"
+                );
+                unreachable!("unhandled CLI command `{other}`")
+            }
         }
+    }
+
+    // ── /goal ────────────────────────────────────────────────────────────────
+
+    /// Create an autonomous goal for the current agent and start its run.
+    ///
+    /// Both backends land on the same two steps — persist the goal, then
+    /// schedule a run — so a `/goal` typed against a daemon behaves like one
+    /// typed in-process. Argument parsing is shared with the channel bridge and
+    /// the dashboard chat via `librefang_types::goal::parse_goal_args`, which
+    /// is what keeps the `--loop-engineering` flag from drifting per surface
+    /// (upstream #3355).
+    fn start_goal(&mut self, args: &str) {
+        let Some((description, loop_engineering)) = librefang_types::goal::parse_goal_args(args)
+        else {
+            let usage = librefang_channels::commands::lookup("goal")
+                .map(|def| def.usage())
+                .unwrap_or_default();
+            self.chat.push_message(Role::System, usage);
+            return;
+        };
+
+        let outcome: Result<(String, bool), String> = match &self.backend {
+            Backend::Daemon { base_url } => match self.agent_id_daemon.as_ref() {
+                Some(agent_id) => {
+                    self.create_goal_via_daemon(base_url, agent_id, &description, loop_engineering)
+                }
+                None => Err(crate::i18n::t("chat-runner-goal-no-agent")),
+            },
+            Backend::InProcess { kernel } => match self.agent_id_inprocess {
+                Some(agent_id) => librefang_kernel::goal_runner::create_and_start_goal(
+                    kernel.as_ref(),
+                    agent_id,
+                    &description,
+                    loop_engineering,
+                )
+                .map(|launch| (launch.goal_id.to_string(), launch.started)),
+                None => Err(crate::i18n::t("chat-runner-goal-no-agent")),
+            },
+            Backend::None => Err(crate::i18n::t("chat-runner-no-backend-connected")),
+        };
+
+        let msg = match outcome {
+            Ok((goal_id, true)) => crate::i18n::t_args(
+                "chat-runner-goal-started",
+                &[("description", &description), ("id", &goal_id)],
+            ),
+            Ok((goal_id, false)) => {
+                crate::i18n::t_args("chat-runner-goal-not-started", &[("id", &goal_id)])
+            }
+            Err(error) => crate::i18n::t_args("chat-runner-goal-failed", &[("error", &error)]),
+        };
+        self.chat.push_message(Role::System, msg);
+    }
+
+    /// `POST /api/goals` then `POST /api/goals/{id}/start`, mirroring
+    /// `commands::goal::cmd_goal`. Returns `(goal_id, started)`.
+    fn create_goal_via_daemon(
+        &self,
+        base_url: &str,
+        agent_id: &str,
+        description: &str,
+        loop_engineering: bool,
+    ) -> Result<(String, bool), String> {
+        let client = crate::daemon_client();
+        let payload = serde_json::json!({
+            "title": description.chars().take(librefang_types::goal::MAX_TITLE_LEN).collect::<String>(),
+            "description": description,
+            "status": "pending",
+            "progress": 0,
+            "agent_id": agent_id,
+            "loop_engineering": loop_engineering,
+        });
+        let created: serde_json::Value = client
+            .post(format!("{base_url}/api/goals"))
+            .json(&payload)
+            .send()
+            .and_then(|r| r.json())
+            .map_err(|e| e.to_string())?;
+        let goal_id = created["id"]
+            .as_str()
+            .ok_or_else(|| {
+                created["error"]
+                    .as_str()
+                    .unwrap_or("goal create returned no id")
+                    .to_string()
+            })?
+            .to_string();
+
+        // A failed start is not a failed `/goal`: the goal is already durable,
+        // so report it as created-but-not-started rather than as an error that
+        // implies nothing was saved.
+        let started = client
+            .post(format!("{base_url}/api/goals/{goal_id}/start"))
+            .json(&serde_json::json!({}))
+            .send()
+            .is_ok_and(|r| r.status().is_success());
+        Ok((goal_id, started))
     }
 
     // ── Model picker helpers ──────────────────────────────────────────────────
@@ -983,6 +1106,41 @@ mod tests {
         ];
         let preferred = preferred_daemon_agent(&agents).unwrap();
         assert_eq!(preferred["name"].as_str(), Some("assistant"));
+    }
+
+    /// A command tagged `Scope::CLI` passes the dispatcher's registry
+    /// pre-flight, so it MUST have a match arm — otherwise the TUI panics on
+    /// `unreachable!` the first time a user types it. `/goal` was the case that
+    /// exposed this: fixing only its scope would have swapped "invisible" for
+    /// "crashes the TUI" (upstream #3355).
+    #[test]
+    fn cli_dispatch_covers_every_cli_scoped_command() {
+        use librefang_channels::commands::{iter_for, Scope};
+
+        let scoped: std::collections::BTreeSet<&str> =
+            iter_for(Scope::CLI).map(|c| c.name).collect();
+        let dispatched: std::collections::BTreeSet<&str> =
+            StandaloneChat::CLI_DISPATCH.iter().copied().collect();
+        assert_eq!(
+            scoped, dispatched,
+            "CLI-scoped commands and TUI dispatch arms drifted apart"
+        );
+    }
+
+    /// `/goal` specifically must be dispatchable from the TUI chat.
+    #[test]
+    fn goal_is_dispatchable_from_the_tui() {
+        use librefang_channels::commands::{lookup, Scope};
+
+        let def = lookup("goal").expect("/goal must be registered");
+        assert!(
+            def.scope.contains(Scope::CLI),
+            "/goal must resolve in the TUI"
+        );
+        assert!(
+            StandaloneChat::CLI_DISPATCH.contains(&"goal"),
+            "/goal resolves in the TUI but has no dispatch arm"
+        );
     }
 
     #[test]
