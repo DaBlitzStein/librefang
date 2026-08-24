@@ -899,17 +899,32 @@ pub fn spawn_run_workflow(
             let client =
                 make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
 
+            // `?wait=true` — without it the API answers 202 with only a
+            // `run_id`, so the screen fell back to the generic "completed"
+            // string every single time and never showed the real output or
+            // the error.
             match client
-                .post(format!("{base_url}/api/workflows/{workflow_id}/run"))
+                .post(format!(
+                    "{base_url}/api/workflows/{workflow_id}/run?wait=true"
+                ))
                 .json(&serde_json::json!({"input": input}))
                 .send()
             {
                 Ok(resp) => {
                     let body: serde_json::Value = resp.json().unwrap_or_default();
-                    let result = body["output"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| crate::i18n::t("tui-event-workflow-completed"));
+                    let result = if let Some(output) = body["output"].as_str() {
+                        output.to_string()
+                    } else if let Some(err) = body["error"].as_str() {
+                        format!("Error: {err}")
+                    } else if let Some(run_id) = body["run_id"].as_str() {
+                        // Accepted but still running: say so, with the id.
+                        format!(
+                            "{} ({run_id})",
+                            crate::i18n::t("tui-event-workflow-completed")
+                        )
+                    } else {
+                        crate::i18n::t("tui-event-workflow-completed")
+                    };
                     let _ = tx.send(AppEvent::WorkflowRunResult(result));
                 }
                 Err(e) => {
@@ -938,17 +953,43 @@ pub fn spawn_create_workflow(
             let client =
                 make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
+            // The API requires `steps` to be an ARRAY. Sending the raw string
+            // made every creation fail with 400 "Missing 'steps' array" while
+            // the arm below still reported success.
+            let steps: serde_json::Value = match serde_json::from_str(&steps_json) {
+                Ok(v @ serde_json::Value::Array(_)) => v,
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-workflow-steps-invalid",
+                    )));
+                    return;
+                }
+            };
+
             match client
                 .post(format!("{base_url}/api/workflows"))
                 .json(&serde_json::json!({
                     "name": name,
                     "description": description,
-                    "steps": steps_json,
+                    "steps": steps,
                 }))
                 .send()
             {
                 Ok(resp) => {
+                    // A non-2xx is a failure, not a creation: reporting
+                    // success on a 400 is how this stayed broken unnoticed.
+                    let status = resp.status();
                     let body: serde_json::Value = resp.json().unwrap_or_default();
+                    if !status.is_success() {
+                        let detail = body["error"]
+                            .as_str()
+                            .or_else(|| body["message"].as_str())
+                            .unwrap_or("");
+                        let _ = tx.send(AppEvent::FetchError(format!(
+                            "Create workflow: {status} {detail}"
+                        )));
+                        return;
+                    }
                     let id = body["id"].as_str().unwrap_or("created").to_string();
                     let _ = tx.send(AppEvent::WorkflowCreated(id));
                 }

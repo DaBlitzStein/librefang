@@ -1396,6 +1396,7 @@ chat-runner-press-esc-to-exit =   Натисніть Esc для виходу.
 
 # tui/event.rs
 tui-event-workflow-completed = Воркфлоу завершено
+tui-event-workflow-steps-invalid = Кроки мають бути масивом JSON
 tui-event-workflow-exec-not-available-in-process = Виконання воркфлоу недоступне в інпроцес-режимі
 tui-event-workflow-create-not-available-in-process = Створення воркфлоу недоступне в інпроцес-режимі
 tui-event-trigger-create-not-available-in-process = Створення тригерів недоступне в інпроцес-режимі

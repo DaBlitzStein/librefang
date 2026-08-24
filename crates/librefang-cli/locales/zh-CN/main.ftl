@@ -474,6 +474,7 @@ chat-runner-press-esc-to-exit =   按 Esc 键退出。
 
 # tui/event.rs
 tui-event-workflow-completed = 工作流已完成
+tui-event-workflow-steps-invalid = 步骤必须是 JSON 数组
 tui-event-workflow-exec-not-available-in-process = 进程内模式下工作流执行不可用
 tui-event-workflow-create-not-available-in-process = 进程内模式下工作流创建不可用
 tui-event-trigger-create-not-available-in-process = 进程内模式下触发器创建不可用

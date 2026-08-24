@@ -1,0 +1,4 @@
+Stop reporting a workflow run's outcome from a field the response does not carry.
+`librefang workflow run` posted without `?wait=true`, read the absent `output` of the resulting 202, printed "Unknown error" and exited 1 on every successful launch; the TUI had the same bug and so never showed a run's real output or its error.
+TUI workflow creation sent `steps` as a string where the API requires an array — a guaranteed 400 that the success arm reported as created, which is why creating a workflow from the terminal has never worked.
+`save-as-template` re-derived parameters by scanning the prompts for `{{var}}`, flattening an authored `input_schema` back to "string / required / generated description"; the authored schema now wins and undeclared placeholders are still appended (#7825) (@DaBlitzStein)
