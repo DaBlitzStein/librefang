@@ -228,6 +228,7 @@ classified differently — the row note spells out which is which.
 | `web` | H | Web tools config (search + fetch) — rebuilds web context. |
 | `browser` | R | Browser automation config — the `BrowserManager` captures it by value at boot with no rebuild path, so a change needs a restart. |
 | `media` | R | Media-understanding config — `MediaEngine` captures it by value at boot with no rebuild path, so a change needs a restart. |
+| `capabilities` | R | Kernel-global media capability routing (which provider/model services vision, transcription, image/speech/video/music generation). Folded into the boot-captured `MediaEngine` and into the media driver cache's preference table, so a change needs a restart — same contract as `media`. Per-agent `[capabilities]` in `agent.toml` is read live from the manifest on every turn and does *not* need one. |
 | `links` | N | Link-understanding config. |
 | `canvas` | R | Canvas (A2UI) config. |
 | `tts` | N | Text-to-speech config. |

@@ -697,6 +697,19 @@ impl App {
                     crate::i18n::t_args("tui-mod-model-overrides-reset", &[("model", &model_key)]);
                 self.refresh_settings_models();
             }
+            AppEvent::CapabilityRoutingLoaded(routing) => {
+                self.settings.capability_routing = routing;
+                if self.settings.capability_list.selected().is_none() {
+                    self.settings.capability_list.select(Some(0));
+                }
+            }
+            AppEvent::CapabilityRoutingSaved(capability) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    "tui-mod-capability-routing-saved",
+                    &[("capability", &capability)],
+                );
+                self.refresh_settings_capabilities();
+            }
             AppEvent::PeersLoaded(list) => {
                 self.peers.peers = list;
                 if !self.peers.peers.is_empty() && self.peers.list_state.selected().is_none() {
@@ -1387,6 +1400,12 @@ impl App {
     fn refresh_settings_tools(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
             event::spawn_fetch_tools(backend, self.event_tx.clone());
+        }
+    }
+
+    fn refresh_settings_capabilities(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            event::spawn_fetch_capability_routing(backend, self.event_tx.clone());
         }
     }
 
@@ -2111,6 +2130,17 @@ impl App {
             settings::SettingsAction::ResetModelOverrides(model_key) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_reset_model_overrides(backend, model_key, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::RefreshCapabilities => self.refresh_settings_capabilities(),
+            settings::SettingsAction::SaveCapabilityRouting { capability, spec } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_capability_routing(
+                        backend,
+                        capability,
+                        spec,
+                        self.event_tx.clone(),
+                    );
                 }
             }
         }

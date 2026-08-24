@@ -204,6 +204,12 @@ pub enum AppEvent {
     ModelOverridesSaved(String),
     /// Model overrides reset (all overrides removed for the model).
     ModelOverridesReset(String),
+    /// The kernel-global `[capabilities]` routing block, loaded from
+    /// `GET /api/config`.
+    CapabilityRoutingLoaded(librefang_types::media::CapabilityRouting),
+    /// One capability's routing was persisted; carries its label for the
+    /// status line.
+    CapabilityRoutingSaved(String),
     /// Peers loaded.
     PeersLoaded(Vec<PeerInfo>),
     /// Log entries loaded.
@@ -3101,6 +3107,92 @@ pub fn spawn_save_model_overrides(
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
                         "tui-event-model-overrides-save-failed",
                         &[("model", &model_key)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-provider-key-management-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Load the kernel-global `[capabilities]` block.
+///
+/// Read from `GET /api/config` rather than a dedicated endpoint because the
+/// block *is* config — a separate route would be a second source of truth for
+/// the same TOML table.
+pub fn spawn_fetch_capability_routing(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client.get(format!("{base_url}/api/config")).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    let routing = resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|v| v.get("capabilities").cloned())
+                        .and_then(|v| {
+                            serde_json::from_value::<librefang_types::media::CapabilityRouting>(v)
+                                .ok()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::CapabilityRoutingLoaded(routing));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-capabilities-fetch-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-provider-key-management-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Persist one capability's `provider/model` spec through
+/// `POST /api/config/set`.
+///
+/// An empty `spec` is sent as an explicit JSON `null`, which removes the key
+/// rather than storing an empty string — the capability then falls back to the
+/// `[media]` selectors and auto-detection, which is what an unset capability
+/// has always meant.
+pub fn spawn_save_capability_routing(
+    backend: BackendRef,
+    capability: librefang_types::media::MediaCapability,
+    spec: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let label = capability.to_string();
+            let value = if spec.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(spec.trim().to_string())
+            };
+            match client
+                .post(format!("{base_url}/api/config/set"))
+                .json(&serde_json::json!({
+                    "path": format!("capabilities.{label}"),
+                    "value": value,
+                }))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::CapabilityRoutingSaved(label));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-capabilities-save-failed",
+                        &[("capability", &label)],
                     )));
                 }
             }

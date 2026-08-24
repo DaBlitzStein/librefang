@@ -44,6 +44,7 @@ type Client struct {
 	Hands *HandsResource
 	Inbox *InboxResource
 	Mcp *McpResource
+	Media *MediaResource
 	Memory *MemoryResource
 	Models *ModelsResource
 	Network *NetworkResource
@@ -79,6 +80,7 @@ func New(baseURL string) *Client {
 		c.Hands = &HandsResource{client: c}
 		c.Inbox = &InboxResource{client: c}
 		c.Mcp = &McpResource{client: c}
+		c.Media = &MediaResource{client: c}
 		c.Memory = &MemoryResource{client: c}
 		c.Models = &ModelsResource{client: c}
 		c.Network = &NetworkResource{client: c}
@@ -320,6 +322,10 @@ func (r *AgentsResource) ResetAgentIdentity(name string, query map[string]string
 	return r.client.request("POST", fmt.Sprintf("/api/agents/identities/%s/reset", name), nil, query)
 }
 
+func (r *AgentsResource) PurgeAgentData(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/agents/purge", data, nil)
+}
+
 func (r *AgentsResource) SpawnEphemeralAgent(data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", "/api/agents/spawn-ephemeral", data, nil)
 }
@@ -400,6 +406,10 @@ func (r *AgentsResource) AgentLogs(id string, query map[string]string) (interfac
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/logs", id), nil, query)
 }
 
+func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", id), nil, nil)
+}
+
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil, nil)
 }
@@ -428,6 +438,14 @@ func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (inter
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
 }
 
+func (r *AgentsResource) GetAgentModelRouting(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/model_routing", id), nil, nil)
+}
+
+func (r *AgentsResource) SetAgentModelRouting(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model_routing", id), data, nil)
+}
+
 func (r *AgentsResource) PushMessage(id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/push", id), data, nil)
 }
@@ -442,6 +460,10 @@ func (r *AgentsResource) ResumeAgent(id string) (interface{}, error) {
 
 func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", id), nil, nil)
+}
+
+func (r *AgentsResource) SaveAgentAsAgentType(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/save-as-agent-type", id), data, nil)
 }
 
 func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
@@ -514,6 +536,10 @@ func (r *AgentsResource) StopAgent(id string) (interface{}, error) {
 
 func (r *AgentsResource) SuspendAgent(id string) (interface{}, error) {
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/suspend", id), nil, nil)
+}
+
+func (r *AgentsResource) AgentTokenUsage(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/token-usage", id), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentTools(id string) (interface{}, error) {
@@ -962,6 +988,38 @@ func (r *McpResource) PatchMcpServerTaint(name string, data map[string]interface
 
 func (r *McpResource) ListMcpTaintRules() (interface{}, error) {
 	return r.client.request("GET", "/api/mcp/taint-rules", nil, nil)
+}
+
+// ── Media Resource
+
+type MediaResource struct{ client *Client }
+
+func (r *MediaResource) GenerateImage(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/image", data, nil)
+}
+
+func (r *MediaResource) GenerateMusic(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/music", data, nil)
+}
+
+func (r *MediaResource) ListMediaProviders() (interface{}, error) {
+	return r.client.request("GET", "/api/media/providers", nil, nil)
+}
+
+func (r *MediaResource) SynthesizeSpeech(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/speech", data, nil)
+}
+
+func (r *MediaResource) TranscribeAudio(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/transcribe", data, nil)
+}
+
+func (r *MediaResource) SubmitVideo(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/video", data, nil)
+}
+
+func (r *MediaResource) PollVideoTask(task_id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/media/video/%s", task_id), nil, query)
 }
 
 // ── Memory Resource
@@ -1519,6 +1577,30 @@ func (r *SkillsResource) GetTool(name string) (interface{}, error) {
 // ── System Resource
 
 type SystemResource struct{ client *Client }
+
+func (r *SystemResource) ListAgentTypes() (interface{}, error) {
+	return r.client.request("GET", "/api/agent-types", nil, nil)
+}
+
+func (r *SystemResource) CreateAgentType(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/agent-types", data, nil)
+}
+
+func (r *SystemResource) GetAgentType(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agent-types/%s", name), nil, nil)
+}
+
+func (r *SystemResource) UpdateAgentType(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/agent-types/%s", name), data, nil)
+}
+
+func (r *SystemResource) DeleteAgentType(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/agent-types/%s", name), nil, nil)
+}
+
+func (r *SystemResource) GetAgentTypeToml(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agent-types/%s/toml", name), nil, nil)
+}
 
 func (r *SystemResource) AuditExport(query map[string]string) (interface{}, error) {
 	return r.client.request("GET", "/api/audit/export", nil, query)

@@ -228,6 +228,15 @@
         }
       ]
     },
+    "capabilities": {
+      "description": "Kernel-global media capability routing — which provider and model services each modality the agent's own model cannot handle.\n\n```toml [capabilities] image_understanding = \"openai/gpt-4o\" speech_to_text = { provider = \"groq\", model = \"whisper-large-v3\" } ```\n\nEvery agent inherits this block; `agent.toml`'s own `[capabilities]` overrides it key by key. Resolution is agent > global > the historical `[media] image_provider` / `audio_provider` selectors > env-var auto-detection.",
+      "default": {},
+      "allOf": [
+        {
+          "$ref": "#/definitions/CapabilityRouting"
+        }
+      ]
+    },
     "channel_role_mapping": {
       "description": "Maps platform-native channel roles (Telegram admin, Discord guild roles, Slack workspace roles) to LibreFang `UserRole`. Used by `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role` is consulted (explicit beats channel-derived; both beat default-deny).",
       "allOf": [
@@ -579,6 +588,13 @@
           "$ref": "#/definitions/GatewayCompressionConfig"
         }
       ]
+    },
+    "groups": {
+      "description": "Groups of users (#7745).\n\nA group is an owner in its own right: work done during a support shift belongs to the support team, not to whoever happened to be on it that day. Kept beside `users` in `config.toml` rather than in the database because that is where users already live, and splitting one identity model across two stores is how the two stop agreeing.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GroupConfig"
+      }
     },
     "hands": {
       "description": "Hands marketplace configuration (SSRF allowlist for a caller-supplied `registry_url` on the install endpoint).",
@@ -1594,6 +1610,13 @@
         }
       ]
     },
+    "webui_request_timeout_secs": {
+      "description": "How long the WebUI's own HTTP client waits on long-running requests (agent messages, workflow runs, plugin installs) before aborting and showing \"Request timeout after Ns — operation may still be running\".\n\nClient-side by design: the daemon keeps running the turn after the abort, and the operator can raise this for slow models (e.g. a reasoning model that legitimately needs minutes per turn). Restart-required (the value is served over /api/status from the config snapshot).",
+      "default": 300,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
     "workflow_default_total_timeout_secs": {
       "description": "Default wall-clock timeout (seconds) for an entire workflow run.\n\nIndividual workflows can override this via `Workflow::total_timeout_secs`. When both are `None` the workflow runs unbounded (no total timeout). Default: `None` (unbounded).",
       "type": [
@@ -2357,6 +2380,98 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        }
+      }
+    },
+    "CapabilityRouting": {
+      "description": "The `[capabilities]` block — one target per media capability.\n\nExists twice, with the *same* shape: kernel-global in `config.toml` and per-agent in `agent.toml`. Resolution is agent > global > the historical auto-detection, and inheriting is simply leaving the key out (see [`CapabilityRouting::merged_over`]).\n\nField names match [`MediaCapability`]'s serde spellings so the dashboard, the TUI, and the provider registry all label the same capability the same way. `vision` / `transcription` are accepted as aliases because those are the words operators actually use.",
+      "type": "object",
+      "properties": {
+        "image_generation": {
+          "description": "Generating an image.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image_understanding": {
+          "description": "Describing an image the agent's own model cannot see.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "music_generation": {
+          "description": "Generating music.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speech_to_text": {
+          "description": "Turning inbound speech into text.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text_to_speech": {
+          "description": "Generating speech from text.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "video_generation": {
+          "description": "Generating video.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CapabilityTarget": {
+      "description": "Which provider (and optionally which model) services one media capability.\n\nAccepts three TOML spellings so the same value can be typed into a single text input on the dashboard / TUI and still round-trip:\n\n```toml image_understanding = \"openai/gpt-4o\"                          # provider/model speech_to_text      = \"groq\"                                   # provider only image_generation    = { provider = \"openai\", model = \"gpt-image-1\" } ```\n\nBoth fields are independently optional so a per-agent override can change only the model and inherit the globally configured provider (see [`CapabilityTarget::merged_over`]).",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "Model id passed to that provider. `None` uses the provider default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "Provider id as registered in the provider registry (`openai`, `groq`, `anthropic`, `gemini`, …). `None` inherits the next level down.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -3804,6 +3919,37 @@
           "default": 0.8500000238418579,
           "type": "number",
           "format": "float"
+        }
+      }
+    },
+    "GroupConfig": {
+      "description": "A named set of users that can own things (#7745).",
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "description": {
+          "description": "What the group is for. Empty is allowed; a group nobody can explain is a group nobody will maintain, but that is a review problem, not a validation one.",
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "description": "Stable identifier used wherever a group is referenced.\n\nReferenced by ownership records rather than the display name, because a group gets renamed (\"Support\" becomes \"Customer Success\") far more often than it gets dissolved, and a rename must not orphan everything the group owns.",
+          "type": "string"
+        },
+        "members": {
+          "description": "Member user names, matching `UserConfig::name`.\n\nNames rather than a second id space: users are already addressed by name everywhere else in this file, and two identifier schemes for the same entity is how membership drifts out of sync with the user list.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "description": "Human-readable name, safe to change.",
+          "type": "string"
         }
       }
     },

@@ -7,6 +7,26 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Added
+
+- Capability routing — a `[capabilities]` block that names which provider and model service each modality, so an agent whose own model cannot see, hear, draw or speak can still handle a message that requires it.
+  The block exists twice with the same shape: kernel-global in `config.toml` and per-agent in `agent.toml`, where it sits inside the existing `[capabilities]` next to the tool and memory grants.
+  Resolution is agent > global > the historical `[media] image_provider` / `audio_provider` selectors > env-var auto-detection, merged field by field — so "inherit" is simply leaving the key out, and an agent that overrides only `model` keeps the globally configured `provider`.
+  Each value accepts `"openai/gpt-4o"`, `"groq"`, or `{ provider, model }`, splitting on the first `/` only so model ids that contain slashes survive.
+  Understanding capabilities (`image_understanding`, `speech_to_text`) route per agent; generation capabilities (`image_generation`, `text_to_speech`, `video_generation`, `music_generation`) nominate a provider kernel-wide, tried ahead of the registry preference order and degrading back to it — with a warning — when the nomination is not configured or does not advertise that capability.
+  Understanding previously picked its provider from a hardcoded env-var cascade inside the media engine, outside the provider registry entirely, with no way for an operator to say which one to use.
+  Two limits are deliberate rather than oversights: generation routing is kernel-wide only, because a per-agent override would have to be threaded through the five generation call sites in the tool runner, a different domain from the understanding path this touches; and there is no equivalent for inbound audio on the API and dashboard paths, where `speech_to_text` already routes the transcription call correctly but a user turn carries no audio content block for it to act on — only the channel path carries audio, and it already transcribes.
+  Closing that second gap is a change to the shape of a message, not to routing (@DaBlitzStein)
+
+### Fixed
+
+- An image sent to an agent whose model has no vision support is now described by the provider nominated for `image_understanding`, instead of being replaced by a note about a file path.
+  The agent was left holding a filename and a browser and would describe the picture anyway — a hallucination shaped exactly like a correct answer, because nothing in the transcript said the description was invented.
+  The channel bridge had already solved this for inbound Telegram photos; the API and dashboard entry paths had not, so the same agent behaved differently depending on which door the image came through.
+  The description is generated once per turn, before the turn enters history, rather than at the redaction gate inside the agent loop — that gate runs once per iteration, so a ten-step tool-use turn would have paid for ten descriptions of the same image.
+  It is also strictly conditional: a vision-capable model is never charged for a description, an image the channel bridge already described is not described again, and the operator's `[media] image_description` switch still governs the path.
+  A provider failure degrades to `[Image description unavailable]` — which at least tells the model it is not looking at the image — rather than dropping the turn (@DaBlitzStein)
+
 ## [2026.8.19] - 2026-08-19
 
 _474 PRs from 5 contributors since v2026.7.31._

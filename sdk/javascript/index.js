@@ -41,6 +41,7 @@ class LibreFang {
     this.hands = new HandsResource(this);
     this.inbox = new InboxResource(this);
     this.mcp = new McpResource(this);
+    this.media = new MediaResource(this);
     this.memory = new MemoryResource(this);
     this.models = new ModelsResource(this);
     this.network = new NetworkResource(this);
@@ -185,6 +186,10 @@ class AgentsResource {
     return this._c._request("POST", `/api/agents/identities/${name}/reset`, undefined, query);
   }
 
+  async purgeAgentData(data) {
+    return this._c._request("POST", "/api/agents/purge", data, undefined);
+  }
+
   async spawnEphemeralAgent(data) {
     return this._c._request("POST", "/api/agents/spawn-ephemeral", data, undefined);
   }
@@ -265,6 +270,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
   }
 
+  async getAgentManifestToml(id) {
+    return this._c._request("GET", `/api/agents/${id}/manifest`);
+  }
+
   async getAgentMcpServers(id) {
     return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
   }
@@ -293,6 +302,14 @@ class AgentsResource {
     return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
   }
 
+  async getAgentModelRouting(id) {
+    return this._c._request("GET", `/api/agents/${id}/model_routing`);
+  }
+
+  async setAgentModelRouting(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/model_routing`, data, undefined);
+  }
+
   async pushMessage(id, data) {
     return this._c._request("POST", `/api/agents/${id}/push`, data, undefined);
   }
@@ -307,6 +324,10 @@ class AgentsResource {
 
   async listAgentRuntime(id) {
     return this._c._request("GET", `/api/agents/${id}/runtime`);
+  }
+
+  async saveAgentAsAgentType(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/save-as-agent-type`, data, undefined);
   }
 
   async getAgentSession(id, query) {
@@ -379,6 +400,10 @@ class AgentsResource {
 
   async suspendAgent(id) {
     return this._c._request("PUT", `/api/agents/${id}/suspend`);
+  }
+
+  async agentTokenUsage(id) {
+    return this._c._request("GET", `/api/agents/${id}/token-usage`);
   }
 
   async getAgentTools(id) {
@@ -847,6 +872,40 @@ class McpResource {
 
   async listMcpTaintRules() {
     return this._c._request("GET", "/api/mcp/taint-rules");
+  }
+}
+
+// ── Media Resource
+
+class MediaResource {
+  constructor(client) { this._c = client; }
+
+  async generateImage(data) {
+    return this._c._request("POST", "/api/media/image", data, undefined);
+  }
+
+  async generateMusic(data) {
+    return this._c._request("POST", "/api/media/music", data, undefined);
+  }
+
+  async listMediaProviders() {
+    return this._c._request("GET", "/api/media/providers");
+  }
+
+  async synthesizeSpeech(data) {
+    return this._c._request("POST", "/api/media/speech", data, undefined);
+  }
+
+  async transcribeAudio(data) {
+    return this._c._request("POST", "/api/media/transcribe", data, undefined);
+  }
+
+  async submitVideo(data) {
+    return this._c._request("POST", "/api/media/video", data, undefined);
+  }
+
+  async pollVideoTask(task_id, query) {
+    return this._c._request("GET", `/api/media/video/${task_id}`, undefined, query);
   }
 }
 
@@ -1422,6 +1481,30 @@ class SkillsResource {
 
 class SystemResource {
   constructor(client) { this._c = client; }
+
+  async listAgentTypes() {
+    return this._c._request("GET", "/api/agent-types");
+  }
+
+  async createAgentType(data) {
+    return this._c._request("POST", "/api/agent-types", data, undefined);
+  }
+
+  async getAgentType(name) {
+    return this._c._request("GET", `/api/agent-types/${name}`);
+  }
+
+  async updateAgentType(name, data) {
+    return this._c._request("PUT", `/api/agent-types/${name}`, data, undefined);
+  }
+
+  async deleteAgentType(name) {
+    return this._c._request("DELETE", `/api/agent-types/${name}`);
+  }
+
+  async getAgentTypeToml(name) {
+    return this._c._request("GET", `/api/agent-types/${name}/toml`);
+  }
 
   async auditExport(query) {
     return this._c._request("GET", "/api/audit/export", undefined, query);

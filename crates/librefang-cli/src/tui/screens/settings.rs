@@ -60,6 +60,7 @@ pub enum SettingsSub {
     Providers,
     Models,
     Tools,
+    Capabilities,
     Backups,
 }
 
@@ -96,6 +97,16 @@ pub struct SettingsState {
     /// The overrides entity as fetched, so saving preserves every field the
     /// editor doesn't touch (temperature, capability overrides, …).
     pub model_edit_base: librefang_types::model_catalog::ModelOverrides,
+    // ── Capability routing (kernel-global `[capabilities]`) ────────────
+    /// The kernel-global routing block as last fetched from `GET /api/config`.
+    /// A capability with no entry here is inherited from the historical
+    /// `[media]` selectors and then from env-var auto-detection, which is what
+    /// the row renders as "auto".
+    pub capability_routing: librefang_types::media::CapabilityRouting,
+    pub capability_list: ListState,
+    /// True while a row's `provider/model` value is being typed.
+    pub capability_edit_mode: bool,
+    pub capability_edit_buf: String,
     // ── Backups ────────────────────────────────────────────────────────
     pub backups: Vec<BackupEntry>,
     pub backup_list: ListState,
@@ -144,6 +155,17 @@ pub enum SettingsAction {
     },
     /// Clear every override for a model (mirrors the dashboard's "Reset").
     ResetModelOverrides(String),
+    /// Load the kernel-global `[capabilities]` block from `GET /api/config`.
+    RefreshCapabilities,
+    /// Persist one capability's `provider/model` spec.
+    ///
+    /// `spec` empty means "clear the nomination" — the capability falls back
+    /// to the `[media]` selectors and then auto-detection, which is the same
+    /// thing as never having set it.
+    SaveCapabilityRouting {
+        capability: librefang_types::media::MediaCapability,
+        spec: String,
+    },
 }
 
 impl SettingsState {
@@ -170,6 +192,10 @@ impl SettingsState {
             model_edit_ctx: String::new(),
             model_edit_max_out: String::new(),
             model_edit_base: librefang_types::model_catalog::ModelOverrides::default(),
+            capability_routing: librefang_types::media::CapabilityRouting::default(),
+            capability_list: ListState::default(),
+            capability_edit_mode: false,
+            capability_edit_buf: String::new(),
             backup_keep_config: false,
             backup_components: Vec::new(),
             backups: Vec::new(),
@@ -189,6 +215,12 @@ impl SettingsState {
 
         if self.model_edit_mode {
             return self.handle_model_edit(key);
+        }
+
+        // Before sub-tab switching: while a capability value is being typed,
+        // digits are part of a model id (`gpt-4o`), not a tab shortcut.
+        if self.capability_edit_mode {
+            return self.handle_capability_edit(key);
         }
 
         if self.input_mode {
@@ -212,6 +244,10 @@ impl SettingsState {
                     return SettingsAction::RefreshTools;
                 }
                 KeyCode::Char('4') => {
+                    self.sub = SettingsSub::Capabilities;
+                    return SettingsAction::RefreshCapabilities;
+                }
+                KeyCode::Char('5') => {
                     self.sub = SettingsSub::Backups;
                     return SettingsAction::RefreshBackups;
                 }
@@ -223,8 +259,89 @@ impl SettingsState {
             SettingsSub::Providers => self.handle_providers(key),
             SettingsSub::Models => self.handle_models(key),
             SettingsSub::Tools => self.handle_tools(key),
+            SettingsSub::Capabilities => self.handle_capabilities(key),
             SettingsSub::Backups => self.handle_backups(key),
         }
+    }
+
+    /// The capabilities the tab lists, in the order they are rendered.
+    /// Understanding first — those are the two that change how an inbound
+    /// message is handled.
+    pub const CAPABILITY_ROWS: [librefang_types::media::MediaCapability; 6] =
+        librefang_types::media::CapabilityRouting::ALL;
+
+    /// The `provider/model` spec currently stored for `capability`, or an
+    /// empty string when nothing is nominated.
+    pub fn capability_spec(&self, capability: librefang_types::media::MediaCapability) -> String {
+        match self.capability_routing.get(capability) {
+            Some(target) => match (&target.provider, &target.model) {
+                (Some(p), Some(m)) => format!("{p}/{m}"),
+                (Some(p), None) => p.clone(),
+                // A model-only override inherits the provider; `/model` is how
+                // that round-trips through a single text field.
+                (None, Some(m)) => format!("/{m}"),
+                (None, None) => String::new(),
+            },
+            None => String::new(),
+        }
+    }
+
+    fn handle_capabilities(&mut self, key: KeyEvent) -> SettingsAction {
+        let total = Self::CAPABILITY_ROWS.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = self.capability_list.selected().unwrap_or(0);
+                let next = if i == 0 { total - 1 } else { i - 1 };
+                self.capability_list.select(Some(next));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let i = self.capability_list.selected().unwrap_or(0);
+                self.capability_list.select(Some((i + 1) % total));
+            }
+            KeyCode::Enter => {
+                let i = self.capability_list.selected().unwrap_or(0);
+                // Seed the buffer with the current value so editing is a tweak
+                // rather than a retype, and so pressing Enter twice is a no-op
+                // instead of a silent clear.
+                self.capability_edit_buf = self.capability_spec(Self::CAPABILITY_ROWS[i]);
+                self.capability_edit_mode = true;
+            }
+            KeyCode::Char('r') => return SettingsAction::RefreshCapabilities,
+            _ => {}
+        }
+        SettingsAction::Continue
+    }
+
+    fn handle_capability_edit(&mut self, key: KeyEvent) -> SettingsAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.capability_edit_mode = false;
+                self.capability_edit_buf.clear();
+            }
+            KeyCode::Enter => {
+                self.capability_edit_mode = false;
+                let i = self.capability_list.selected().unwrap_or(0);
+                let capability = Self::CAPABILITY_ROWS[i];
+                let spec = std::mem::take(&mut self.capability_edit_buf)
+                    .trim()
+                    .to_string();
+                // Reflect the change locally so the row updates on the next
+                // frame; the refresh that follows the save confirms it.
+                let target = if spec.is_empty() {
+                    None
+                } else {
+                    Some(librefang_types::media::CapabilityTarget::parse(&spec))
+                };
+                self.capability_routing.set(capability, target);
+                return SettingsAction::SaveCapabilityRouting { capability, spec };
+            }
+            KeyCode::Backspace => {
+                self.capability_edit_buf.pop();
+            }
+            KeyCode::Char(c) => self.capability_edit_buf.push(c),
+            _ => {}
+        }
+        SettingsAction::Continue
     }
 
     fn handle_backups(&mut self, key: KeyEvent) -> SettingsAction {
@@ -502,6 +619,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         SettingsSub::Providers => draw_providers(f, chunks[2], state),
         SettingsSub::Models => draw_models(f, chunks[2], state),
         SettingsSub::Tools => draw_tools(f, chunks[2], state),
+        SettingsSub::Capabilities => draw_capabilities(f, chunks[2], state),
         SettingsSub::Backups => draw_backups(f, chunks[2], state),
     }
 
@@ -514,6 +632,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         }
         SettingsSub::Models => crate::i18n::t("tui-settings-hints-models"),
         SettingsSub::Tools => crate::i18n::t("tui-settings-hints-tools"),
+        SettingsSub::Capabilities if state.capability_edit_mode => {
+            crate::i18n::t("tui-settings-hints-capabilities-edit")
+        }
+        SettingsSub::Capabilities => crate::i18n::t("tui-settings-hints-capabilities"),
         SettingsSub::Backups => crate::i18n::t("tui-settings-hints-backups"),
     };
     f.render_widget(widgets::hint_bar(&hint_text), chunks[3]);
@@ -530,6 +652,10 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
             crate::i18n::t("tui-settings-tab-models"),
         ),
         (SettingsSub::Tools, crate::i18n::t("tui-settings-tab-tools")),
+        (
+            SettingsSub::Capabilities,
+            crate::i18n::t("tui-settings-tab-capabilities"),
+        ),
         (
             SettingsSub::Backups,
             crate::i18n::t("tui-settings-tab-backups"),
@@ -1065,6 +1191,91 @@ fn draw_tools(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     }
 }
 
+/// Human-readable label for one media capability.
+///
+/// Localised rather than printed as the raw serde spelling, per the TUI
+/// convention that labels are human-friendly and the machine-readable name
+/// belongs in the hint.
+fn capability_label(capability: librefang_types::media::MediaCapability) -> String {
+    use librefang_types::media::MediaCapability as C;
+    let key = match capability {
+        C::ImageUnderstanding => "tui-settings-capability-image-understanding",
+        C::SpeechToText => "tui-settings-capability-speech-to-text",
+        C::ImageGeneration => "tui-settings-capability-image-generation",
+        C::TextToSpeech => "tui-settings-capability-text-to-speech",
+        C::VideoGeneration => "tui-settings-capability-video-generation",
+        C::MusicGeneration => "tui-settings-capability-music-generation",
+        // `MediaCapability` is `#[non_exhaustive]`, so a capability added
+        // upstream would not break this build. Fall back to its serde
+        // spelling — an unglamorous label beats an empty row, and the row is
+        // still editable.
+        _ => return capability.to_string(),
+    };
+    crate::i18n::t(key)
+}
+
+fn draw_capabilities(f: &mut Frame, area: Rect, state: &mut SettingsState) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // header
+        Constraint::Min(3),    // list
+        Constraint::Length(2), // edit line + explainer
+    ])
+    .split(area);
+
+    let cap_hdr = crate::i18n::t("tui-settings-capabilities-header-capability");
+    let target_hdr = crate::i18n::t("tui-settings-capabilities-header-target");
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!("  {:<22} {}", cap_hdr, target_hdr),
+            theme::table_header(),
+        )])),
+        chunks[0],
+    );
+
+    let auto = crate::i18n::t("tui-settings-capabilities-auto");
+    let items: Vec<ListItem> = SettingsState::CAPABILITY_ROWS
+        .iter()
+        .map(|cap| {
+            let spec = state.capability_spec(*cap);
+            // An unset capability is not blank — it is "auto", and saying so is
+            // the difference between "nothing is configured" and "nobody has
+            // looked at this yet".
+            let (text, style) = if spec.is_empty() {
+                (auto.clone(), theme::dim_style())
+            } else {
+                (spec, Style::default().fg(theme::CYAN))
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("  {:<22}", widgets::truncate(&capability_label(*cap), 21)),
+                    Style::default().fg(theme::TEXT),
+                ),
+                Span::styled(format!(" {}", widgets::truncate(&text, 48)), style),
+            ]))
+        })
+        .collect();
+
+    let list = widgets::themed_list(items);
+    f.render_stateful_widget(list, chunks[1], &mut state.capability_list);
+
+    let footer = if state.capability_edit_mode {
+        Line::from(vec![
+            Span::styled("  > ", Style::default().fg(theme::CYAN)),
+            Span::raw(state.capability_edit_buf.clone()),
+            Span::styled("_", Style::default().fg(theme::CYAN)),
+        ])
+    } else {
+        Line::from(vec![Span::styled(
+            format!(
+                "  {}",
+                crate::i18n::t("tui-settings-capabilities-explainer")
+            ),
+            theme::dim_style(),
+        )])
+    };
+    f.render_widget(Paragraph::new(footer), chunks[2]);
+}
+
 fn format_context(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -1085,9 +1296,9 @@ mod backups_tests {
     }
 
     #[test]
-    fn tab_4_opens_backups_and_requests_a_refresh() {
+    fn tab_5_opens_backups_and_requests_a_refresh() {
         let mut state = SettingsState::new();
-        let action = state.handle_key(key(KeyCode::Char('4')));
+        let action = state.handle_key(key(KeyCode::Char('5')));
         assert!(matches!(state.sub, SettingsSub::Backups));
         assert!(matches!(action, SettingsAction::RefreshBackups));
     }
@@ -1148,5 +1359,192 @@ mod backups_tests {
             state.handle_key(key(KeyCode::Char('c'))),
             SettingsAction::CreateBackup
         ));
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    use librefang_types::media::{CapabilityRouting, MediaCapability};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_str(state: &mut SettingsState, s: &str) {
+        for c in s.chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn tab_4_opens_capabilities_and_requests_a_refresh() {
+        let mut state = SettingsState::new();
+        let action = state.handle_key(key(KeyCode::Char('4')));
+        assert!(matches!(state.sub, SettingsSub::Capabilities));
+        assert!(matches!(action, SettingsAction::RefreshCapabilities));
+    }
+
+    #[test]
+    fn an_unset_capability_renders_its_spec_as_empty() {
+        let state = SettingsState::new();
+        assert_eq!(
+            state.capability_spec(MediaCapability::ImageUnderstanding),
+            ""
+        );
+    }
+
+    #[test]
+    fn capability_spec_renders_each_target_shape() {
+        let mut state = SettingsState::new();
+        state.capability_routing =
+            toml::from_str::<CapabilityRouting>("image_understanding = \"openai/gpt-4o\"\n")
+                .unwrap();
+        assert_eq!(
+            state.capability_spec(MediaCapability::ImageUnderstanding),
+            "openai/gpt-4o"
+        );
+
+        state.capability_routing =
+            toml::from_str::<CapabilityRouting>("image_understanding = \"openai\"\n").unwrap();
+        assert_eq!(
+            state.capability_spec(MediaCapability::ImageUnderstanding),
+            "openai"
+        );
+
+        // A model-only override inherits the provider; `/model` is how that
+        // survives a round-trip through the single text field.
+        state.capability_routing = toml::from_str::<CapabilityRouting>(
+            "image_understanding = { model = \"gpt-4o-mini\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            state.capability_spec(MediaCapability::ImageUnderstanding),
+            "/gpt-4o-mini"
+        );
+    }
+
+    #[test]
+    fn enter_seeds_the_editor_with_the_current_value() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Capabilities;
+        state.capability_routing =
+            toml::from_str::<CapabilityRouting>("image_understanding = \"openai/gpt-4o\"\n")
+                .unwrap();
+        state.capability_list.select(Some(0));
+
+        state.handle_key(key(KeyCode::Enter));
+        assert!(state.capability_edit_mode);
+        assert_eq!(state.capability_edit_buf, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn typing_a_spec_and_pressing_enter_saves_it() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Capabilities;
+        state.capability_list.select(Some(0));
+        state.handle_key(key(KeyCode::Enter));
+        type_str(&mut state, "groq/llama");
+
+        let action = state.handle_key(key(KeyCode::Enter));
+        assert!(!state.capability_edit_mode);
+        match action {
+            SettingsAction::SaveCapabilityRouting { capability, spec } => {
+                assert_eq!(capability, MediaCapability::ImageUnderstanding);
+                assert_eq!(spec, "groq/llama");
+            }
+            other => panic!("expected a save, got {other:?}"),
+        }
+        // Reflected locally so the row updates on the next frame.
+        assert_eq!(
+            state.capability_spec(MediaCapability::ImageUnderstanding),
+            "groq/llama"
+        );
+    }
+
+    /// Digits are part of a model id (`gpt-4o`) while the editor is open, so
+    /// they must not be swallowed as sub-tab shortcuts.
+    #[test]
+    fn digits_typed_into_the_editor_do_not_switch_tabs() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Capabilities;
+        state.capability_list.select(Some(0));
+        state.handle_key(key(KeyCode::Enter));
+        type_str(&mut state, "openai/gpt-4o");
+
+        assert!(matches!(state.sub, SettingsSub::Capabilities));
+        assert_eq!(state.capability_edit_buf, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn esc_discards_the_edit_and_leaves_the_value_alone() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Capabilities;
+        state.capability_routing =
+            toml::from_str::<CapabilityRouting>("image_understanding = \"openai\"\n").unwrap();
+        state.capability_list.select(Some(0));
+        state.handle_key(key(KeyCode::Enter));
+        type_str(&mut state, "-nonsense");
+
+        state.handle_key(key(KeyCode::Esc));
+        assert!(!state.capability_edit_mode);
+        assert_eq!(
+            state.capability_spec(MediaCapability::ImageUnderstanding),
+            "openai"
+        );
+    }
+
+    #[test]
+    fn clearing_the_field_clears_the_nomination() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Capabilities;
+        state.capability_routing =
+            toml::from_str::<CapabilityRouting>("image_understanding = \"openai\"\n").unwrap();
+        state.capability_list.select(Some(0));
+        state.handle_key(key(KeyCode::Enter));
+        for _ in 0.."openai".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+
+        let action = state.handle_key(key(KeyCode::Enter));
+        match action {
+            SettingsAction::SaveCapabilityRouting { spec, .. } => assert_eq!(spec, ""),
+            other => panic!("expected a save, got {other:?}"),
+        }
+        assert_eq!(
+            state.capability_spec(MediaCapability::ImageUnderstanding),
+            "",
+            "an emptied field must fall back to auto-detection, not pin an empty provider"
+        );
+    }
+
+    #[test]
+    fn navigation_wraps_around_every_capability_row() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Capabilities;
+        state.capability_list.select(Some(0));
+
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            state.capability_list.selected(),
+            Some(SettingsState::CAPABILITY_ROWS.len() - 1)
+        );
+        state.handle_key(key(KeyCode::Down));
+        assert_eq!(state.capability_list.selected(), Some(0));
+    }
+
+    #[test]
+    fn every_capability_row_has_a_localised_label() {
+        for cap in SettingsState::CAPABILITY_ROWS {
+            let label = capability_label(cap);
+            assert!(!label.is_empty(), "no label for {cap}");
+            // A missing Fluent key resolves to the key itself; that would ship
+            // `tui-settings-capability-…` as a visible label.
+            assert!(
+                !label.starts_with("tui-settings-capability-"),
+                "missing translation for {cap}: {label}"
+            );
+        }
     }
 }

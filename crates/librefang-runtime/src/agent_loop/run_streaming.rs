@@ -366,6 +366,17 @@ async fn run_agent_loop_streaming_inner(
             (user_message, user_content_blocks)
         };
 
+    // Mirror the non-streaming capability-routing hop: describe an inbound
+    // image once, before it enters history, when the agent's model cannot see
+    // it. See `agent_loop::media_routing` for the full contract.
+    let guarded_user_content_blocks = super::media_routing::describe_images_for_text_only_model(
+        guarded_user_content_blocks,
+        manifest,
+        kernel.as_ref(),
+        media_engine,
+    )
+    .await;
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.

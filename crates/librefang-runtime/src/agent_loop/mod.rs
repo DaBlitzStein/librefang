@@ -35,6 +35,13 @@ use tracing::{debug, info, instrument, warn};
 
 mod end_turn;
 mod history;
+// The orchestration half of this module is deliberately feature-agnostic so its
+// unit tests run in every configuration, but with `media` off nothing in the
+// crate calls it — the entry point compiles to a pass-through. Silence the
+// resulting dead-code wall there rather than splitting the file along a feature
+// seam that has no behavioural meaning.
+#[cfg_attr(not(feature = "media"), allow(dead_code))]
+mod media_routing;
 mod message;
 pub mod model;
 mod prompt;
@@ -763,6 +770,20 @@ async fn run_agent_loop_inner(
             // storage binding is left unused on this branch.
             (user_message, user_content_blocks)
         };
+
+    // Capability routing: an image bound for a model with no vision support is
+    // described by the provider the resolved `[capabilities]` block nominates,
+    // and the description is inserted next to the image. Done here — once, on
+    // the inbound turn, before it enters history — rather than at the redaction
+    // gate inside the loop, which would re-describe on every iteration.
+    // No-op for vision-capable models and for turns without images.
+    let guarded_user_content_blocks = media_routing::describe_images_for_text_only_model(
+        guarded_user_content_blocks,
+        manifest,
+        kernel.as_ref(),
+        media_engine,
+    )
+    .await;
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
