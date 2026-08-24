@@ -461,6 +461,19 @@ impl App {
                 self.goals.status_msg = crate::i18n::t_args("tui-goal-run-stopped", &[("id", &id)]);
                 self.refresh_goals();
             }
+            AppEvent::GoalRunPaused(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-paused", &[("id", &id)]);
+                self.refresh_goals();
+            }
+            AppEvent::GoalRunResumed(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-resumed", &[("id", &id)]);
+                self.refresh_goals();
+            }
+            AppEvent::GoalCadenceUpdated(id) => {
+                self.goals.status_msg =
+                    crate::i18n::t_args("tui-goal-cadence-updated", &[("id", &id)]);
+                self.refresh_goals();
+            }
             AppEvent::MemoryConfigSaved(ok) => {
                 self.memory.status_msg = crate::i18n::t(if ok {
                     "tui-memory-config-saved"
@@ -1844,6 +1857,7 @@ impl App {
                 loop_engineering,
                 verify_agent_id,
                 evaluator_model,
+                tick_interval_secs,
             } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_create_goal(
@@ -1854,6 +1868,7 @@ impl App {
                         loop_engineering,
                         verify_agent_id,
                         evaluator_model,
+                        tick_interval_secs,
                         self.event_tx.clone(),
                     );
                 }
@@ -1868,9 +1883,32 @@ impl App {
                     event::spawn_start_goal_run(backend, goal_id, self.event_tx.clone());
                 }
             }
+            goals::GoalsAction::PauseRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_pause_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::ResumeRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_resume_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
             goals::GoalsAction::StopRun { goal_id } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_stop_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::SetCadence {
+                goal_id,
+                tick_interval_secs,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_set_goal_cadence(
+                        backend,
+                        goal_id,
+                        tick_interval_secs,
+                        self.event_tx.clone(),
+                    );
                 }
             }
             goals::GoalsAction::ShowDetail { .. } => {

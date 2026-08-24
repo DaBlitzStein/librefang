@@ -224,6 +224,12 @@ pub enum AppEvent {
     GoalRunStarted(String),
     /// Goal run stopped.
     GoalRunStopped(String),
+    /// Goal run paused at a checkpoint it can resume from.
+    GoalRunPaused(String),
+    /// Goal run resumed from its checkpoint.
+    GoalRunResumed(String),
+    /// Goal loop cadence updated.
+    GoalCadenceUpdated(String),
     /// Hand definitions loaded (marketplace).
     HandsLoaded(Vec<HandInfo>),
     /// Active hand instances loaded.
@@ -3372,14 +3378,22 @@ pub fn spawn_fetch_logs(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 
 // ── Goals events ────────────────────────────────────────────────────────────
 
-/// Fetch goals list.
+/// Fetch goals list, with each goal's live run state.
+///
+/// `GET /api/goals` returns the stored goal documents only — the run phase,
+/// iteration and cap live in the runner, behind `GET /api/goals/{id}/run`.
+/// Reading `run_phase` off the list response (as this did) always yielded
+/// `None`, so the screen could never tell a running goal from a paused or a
+/// stopped one. The follow-up read is skipped for goals that cannot have a run
+/// — no agent assigned, or already completed — which is the same gate the
+/// dashboard's `GoalRunControl` applies.
 pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/goals")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let goals: Vec<GoalInfo> = body
+                    let mut goals: Vec<GoalInfo> = body
                         .as_array()
                         .map(|arr| {
                             arr.iter()
@@ -3402,15 +3416,34 @@ pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                                     evaluator_model: g["evaluator_model"]
                                         .as_str()
                                         .map(|s| s.to_string()),
-                                    run_phase: g["run_phase"].as_str().map(|s| s.to_string()),
-                                    run_iteration: g["run_iteration"].as_u64().map(|v| v as u32),
-                                    run_max_iterations: g["run_max_iterations"]
+                                    tick_interval_secs: g["tick_interval_secs"]
                                         .as_u64()
                                         .map(|v| v as u32),
+                                    run_phase: None,
+                                    run_iteration: None,
+                                    run_max_iterations: None,
                                 })
                                 .collect()
                         })
                         .unwrap_or_default();
+                    for goal in goals.iter_mut() {
+                        if goal.agent_id.is_none() || goal.status == "completed" {
+                            continue;
+                        }
+                        let Ok(resp) = client
+                            .get(format!("{base_url}/api/goals/{}/run", goal.id))
+                            .send()
+                        else {
+                            continue;
+                        };
+                        let Ok(body) = resp.json::<serde_json::Value>() else {
+                            continue;
+                        };
+                        let run = &body["run"];
+                        goal.run_phase = run["phase"].as_str().map(|s| s.to_string());
+                        goal.run_iteration = run["iteration"].as_u64().map(|v| v as u32);
+                        goal.run_max_iterations = run["max_iterations"].as_u64().map(|v| v as u32);
+                    }
                     let _ = tx.send(AppEvent::GoalsLoaded(goals));
                 }
             }
@@ -3431,6 +3464,7 @@ pub fn spawn_create_goal(
     loop_engineering: bool,
     verify_agent_id: String,
     evaluator_model: String,
+    tick_interval_secs: Option<u32>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
@@ -3447,6 +3481,12 @@ pub fn spawn_create_goal(
             }
             if !evaluator_model.is_empty() {
                 body["evaluator_model"] = serde_json::json!(evaluator_model);
+            }
+            // Omitted rather than sent as null when the operator left it blank:
+            // the goal document then carries no cadence override at all, which
+            // is what "use the daemon's default" means on the wire.
+            if let Some(secs) = tick_interval_secs {
+                body["tick_interval_secs"] = serde_json::json!(secs);
             }
             match client
                 .post(format!("{base_url}/api/goals"))
@@ -3559,6 +3599,129 @@ pub fn spawn_stop_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sende
                 }
                 _ => {
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-goal-stop-failed")));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Pause a goal run, keeping the checkpoint it can resume from.
+///
+/// Deliberately a different call from [`spawn_stop_goal_run`]: stop is
+/// terminal and drops the checkpoint, so routing both through one endpoint
+/// would make "pause" quietly destroy the progress it promises to keep.
+pub fn spawn_pause_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/pause"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunPaused(goal_id));
+                }
+                Ok(resp) => {
+                    let err_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let msg = err_body["error"]
+                        .as_str()
+                        .unwrap_or(&crate::i18n::t("tui-goal-pause-failed"))
+                        .to_string();
+                    let _ = tx.send(AppEvent::FetchError(msg));
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-pause-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Resume a paused goal run from its checkpoint.
+///
+/// Uses `/resume` rather than `/start`: `/start` would silently begin a new run
+/// from iteration 0 if the checkpoint had gone, while `/resume` answers 409 and
+/// the reason lands in the status line.
+pub fn spawn_resume_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/resume"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunResumed(goal_id));
+                }
+                Ok(resp) => {
+                    let err_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let msg = err_body["error"]
+                        .as_str()
+                        .unwrap_or(&crate::i18n::t("tui-goal-resume-failed"))
+                        .to_string();
+                    let _ = tx.send(AppEvent::FetchError(msg));
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-resume-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Persist a goal's loop cadence.
+///
+/// `None` sends an explicit JSON `null`, which the API reads as "clear the
+/// override" and the runner then answers with its default cadence.
+pub fn spawn_set_goal_cadence(
+    backend: BackendRef,
+    goal_id: String,
+    tick_interval_secs: Option<u32>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = serde_json::json!({ "tick_interval_secs": tick_interval_secs });
+            match client
+                .put(format!("{base_url}/api/goals/{goal_id}"))
+                .json(&body)
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalCadenceUpdated(goal_id));
+                }
+                Ok(resp) => {
+                    let err_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let msg = err_body["error"]
+                        .as_str()
+                        .unwrap_or(&crate::i18n::t("tui-goal-cadence-failed"))
+                        .to_string();
+                    let _ = tx.send(AppEvent::FetchError(msg));
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-cadence-failed",
+                    )));
                 }
             }
         }
