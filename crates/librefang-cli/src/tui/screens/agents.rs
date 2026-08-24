@@ -58,6 +58,8 @@ pub enum AgentSubScreen {
     EditChannels,
     /// Edit the inference parameters (temperature, ladders, limits) for an existing agent
     EditModelParams,
+    /// Shared folders editor (`[workspaces]`).
+    EditWorkspaces,
     /// Spawning agent (waiting for result)
     Spawning,
 }
@@ -97,6 +99,12 @@ pub struct AgentSelectState {
     // Skill/MCP editor (shared by creation wizard + detail editor)
     pub available_skills: Vec<(String, bool)>,
     pub skill_cursor: usize,
+    // Shared folders editor: (name, path, mode).
+    pub workspaces: Vec<(String, String, String)>,
+    pub ws_cursor: usize,
+    /// `(row, field)` while a cell is being typed into; 0 = name, 1 = path, 2 = mode.
+    pub ws_editing: Option<(usize, u8)>,
+    pub ws_buf: String,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
     // Channel allowlist editor. Detail-only: agent creation writes no `channels`
@@ -160,7 +168,15 @@ pub struct AgentTokenUsage {
 }
 
 /// What the agent screen decided.
+#[derive(Debug)]
 pub enum AgentAction {
+    /// Load the agent's `[workspaces]` table for the shared-folders editor.
+    FetchAgentWorkspaces(String),
+    /// Write the edited shared folders back to the agent's manifest.
+    UpdateWorkspaces {
+        id: String,
+        workspaces: Vec<(String, String, String)>,
+    },
     /// No action yet, keep rendering.
     Continue,
     /// User created a new agent manifest (TOML).
@@ -241,6 +257,10 @@ impl AgentSelectState {
             token_usage: None,
             spawned_toml: None,
             status_msg: String::new(),
+            workspaces: Vec::new(),
+            ws_cursor: 0,
+            ws_editing: None,
+            ws_buf: String::new(),
         }
     }
 
@@ -449,6 +469,7 @@ impl AgentSelectState {
             AgentSubScreen::EditSkills => self.handle_edit_skills(key),
             AgentSubScreen::EditMcpServers => self.handle_edit_mcp_servers(key),
             AgentSubScreen::EditChannels => self.handle_edit_channels(key),
+            AgentSubScreen::EditWorkspaces => self.handle_edit_workspaces(key),
             AgentSubScreen::Spawning => AgentAction::Continue,
         }
     }
@@ -569,6 +590,14 @@ impl AgentSelectState {
                     let id = detail.id.clone();
                     self.sub = AgentSubScreen::EditSkills;
                     return AgentAction::FetchAgentSkills(id);
+                }
+            }
+            KeyCode::Char('w') => {
+                // Edit shared folders for this agent
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.sub = AgentSubScreen::EditWorkspaces;
+                    return AgentAction::FetchAgentWorkspaces(id);
                 }
             }
             KeyCode::Char('m') => {
@@ -917,6 +946,85 @@ impl AgentSelectState {
         AgentAction::Continue
     }
 
+    fn handle_edit_workspaces(&mut self, key: KeyEvent) -> AgentAction {
+        if let Some((row, field)) = self.ws_editing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.ws_editing = None;
+                    self.ws_buf.clear();
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    // Commit the buffer to the field, then move on.
+                    let v = self.ws_buf.clone();
+                    if let Some(entry) = self.workspaces.get_mut(row) {
+                        match field {
+                            0 => entry.0 = v,
+                            1 => entry.1 = v,
+                            _ => entry.2 = if v == "r" { "r".into() } else { "rw".into() },
+                        }
+                    }
+                    self.ws_buf.clear();
+                    if field == 2 {
+                        self.ws_editing = None;
+                    } else {
+                        self.ws_editing = Some((row, field + 1));
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.ws_buf.pop();
+                }
+                KeyCode::Char(c) => self.ws_buf.push(c),
+                _ => {}
+            }
+            return AgentAction::Continue;
+        }
+
+        let len = self.workspaces.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.ws_cursor > 0 => self.ws_cursor -= 1,
+            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.ws_cursor < len - 1 => {
+                self.ws_cursor += 1;
+            }
+            KeyCode::Char('a') => {
+                self.workspaces.push(("".into(), "".into(), "rw".into()));
+                self.ws_cursor = self.workspaces.len() - 1;
+                self.ws_editing = Some((self.ws_cursor, 0));
+            }
+            KeyCode::Char('d') if len > 0 => {
+                self.workspaces.remove(self.ws_cursor);
+                if self.ws_cursor >= self.workspaces.len() && self.ws_cursor > 0 {
+                    self.ws_cursor -= 1;
+                }
+            }
+            KeyCode::Enter if len > 0 => {
+                self.ws_editing = Some((self.ws_cursor, 0));
+            }
+            KeyCode::Char('s') => {
+                if let Some(ref detail) = self.detail {
+                    // A row with an empty name or path is an abandoned edit,
+                    // not a declaration: sending it would write a broken
+                    // `[workspaces]` entry the kernel then fails to resolve.
+                    let entries: Vec<(String, String, String)> = self
+                        .workspaces
+                        .iter()
+                        .filter(|(n, p, _)| !n.trim().is_empty() && !p.trim().is_empty())
+                        .cloned()
+                        .collect();
+                    return AgentAction::UpdateWorkspaces {
+                        id: detail.id.clone(),
+                        workspaces: entries,
+                    };
+                }
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
     fn handle_edit_mcp_servers(&mut self, key: KeyEvent) -> AgentAction {
         let len = self.available_mcp.len();
         match key.code {
@@ -1079,6 +1187,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             draw_edit_model_params(f, area, state);
             return;
         }
+        AgentSubScreen::EditWorkspaces => {
+            draw_edit_workspaces(f, area, state);
+            return;
+        }
         _ => {}
     }
 
@@ -1088,7 +1200,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::EditSkills
         | AgentSubScreen::EditMcpServers
         | AgentSubScreen::EditChannels
-        | AgentSubScreen::EditModelParams => unreachable!(),
+        | AgentSubScreen::EditModelParams
+        | AgentSubScreen::EditWorkspaces => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
@@ -1690,6 +1803,41 @@ fn draw_mcp_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     );
 }
 
+fn draw_edit_workspaces(f: &mut Frame, area: Rect, state: &AgentSelectState) {
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        crate::i18n::t("tui-agents-workspaces-help"),
+        Style::default().fg(theme::TEXT_SECONDARY),
+    ))];
+    for (i, (name, path, mode)) in state.workspaces.iter().enumerate() {
+        let marker = if i == state.ws_cursor { ">" } else { " " };
+        let mut spans = vec![Span::styled(
+            format!("{marker} {name:<16} {path:<28} {mode}"),
+            if i == state.ws_cursor {
+                Style::default().fg(theme::ACCENT)
+            } else {
+                Style::default()
+            },
+        )];
+        if let Some((row, field)) = state.ws_editing {
+            if row == i {
+                spans.push(Span::styled(
+                    format!("  [{}]", ["name", "path", "mode"][field as usize]),
+                    Style::default().fg(theme::ACCENT),
+                ));
+                spans.push(Span::styled(
+                    format!(" {}", state.ws_buf),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    if state.workspaces.is_empty() {
+        lines.push(Line::from(crate::i18n::t("tui-agents-workspaces-empty")));
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
 fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     let (title, items, cursor) = match state.sub {
         AgentSubScreen::EditSkills => (
@@ -1981,5 +2129,91 @@ mod tests {
             state.token_usage.is_none(),
             "the panel must not show agent A's figures for agent B"
         );
+    }
+}
+
+#[cfg(test)]
+mod workspaces_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn editing_state() -> AgentSelectState {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::EditWorkspaces;
+        state.detail = Some(AgentDetail {
+            id: "agent-1".to_string(),
+            name: String::new(),
+            state: String::new(),
+            model: String::new(),
+            provider: String::new(),
+            created: String::new(),
+            last_active: String::new(),
+            tags: vec![],
+            capabilities: vec![],
+            parent: None,
+            children: vec![],
+            skills: vec![],
+            skills_mode: String::new(),
+            mcp_servers: vec![],
+            mcp_servers_mode: String::new(),
+        });
+        state
+    }
+
+    #[test]
+    fn adding_a_folder_focuses_the_name_field() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(state.workspaces.len(), 1);
+        assert!(matches!(state.ws_editing, Some((0, 0))));
+    }
+
+    #[test]
+    fn typing_then_tab_fills_name_and_path() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        for c in "library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(state.workspaces[0].0, "library");
+        assert!(matches!(state.ws_editing, Some((0, 1))));
+        for c in "shared/library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(state.workspaces[0].1, "shared/library");
+    }
+
+    #[test]
+    fn deleting_removes_the_selected_row() {
+        let mut state = editing_state();
+        state.workspaces.push(("a".into(), "p".into(), "rw".into()));
+        state.workspaces.push(("b".into(), "q".into(), "r".into()));
+        state.ws_cursor = 1;
+        state.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].0, "a");
+    }
+
+    #[test]
+    fn save_emits_only_complete_rows() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("library".into(), "shared/library".into(), "rw".into()));
+        state.workspaces.push(("".into(), "".into(), "rw".into()));
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { id, workspaces } => {
+                assert_eq!(id, "agent-1");
+                assert_eq!(workspaces.len(), 1);
+                assert_eq!(workspaces[0].0, "library");
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
     }
 }
