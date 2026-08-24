@@ -1,0 +1,3 @@
+Carry the capability flags a gateway reports for its own models into the discovered catalog entry, instead of harvesting only the numeric limits from litellm's `/model/info` and inferring capabilities from a prior entry alone.
+A freshly discovered model has no prior entry, so every gateway model was born with `supports_vision: false`; the agent loop then stripped the attached images before the call and handed the model a bare file path, which it opened with the browser and "described" from the filename — an answer that looks like vision and is not.
+An explicit flag from the gateway now wins, because the gateway is the authority on its own models, and `null` means "it did not say" and keeps what was already known (#7775, #7827) (@DaBlitzStein)
