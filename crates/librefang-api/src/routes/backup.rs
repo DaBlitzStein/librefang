@@ -528,6 +528,8 @@ struct RestoreOutcome {
 fn restore_backup_blocking(
     backup_path: std::path::PathBuf,
     home_dir: std::path::PathBuf,
+    keep_config: bool,
+    components: Option<Vec<String>>,
 ) -> Result<RestoreOutcome, RestoreError> {
     let file = std::fs::File::open(&backup_path).map_err(|e| RestoreError::Open(e.to_string()))?;
     let mut archive =
@@ -572,6 +574,40 @@ fn restore_backup_blocking(
 
         if entry_name.to_string_lossy() == "manifest.json" {
             continue;
+        }
+
+        // Component of this entry, or None when not classifiable.
+        let name_str = entry_name.to_string_lossy();
+        let component: Option<&str> = if name_str == "config.toml" {
+            Some("config")
+        } else if name_str == "data/cron_jobs.json" {
+            Some("cron_jobs")
+        } else if name_str == "data/hand_state.json" {
+            Some("hand_state")
+        } else if name_str == "data/custom_models.json" {
+            Some("custom_models")
+        } else if name_str.starts_with("agents/") {
+            Some("agents")
+        } else if name_str.starts_with("skills/") {
+            Some("skills")
+        } else if name_str.starts_with("workflows/") {
+            Some("workflows")
+        } else if name_str.starts_with("data/") {
+            Some("data")
+        } else {
+            None
+        };
+        if keep_config && component == Some("config") {
+            continue;
+        }
+        if let Some(selected) = &components {
+            match component {
+                Some(c) if selected.iter().any(|s| s == c) => {}
+                // Classified but not selected: skip. Unclassified entries
+                // (manifest-adjacent metadata) always restore.
+                Some(_) => continue,
+                None => {}
+            }
         }
 
         let target = home_dir.join(&entry_name);
@@ -643,6 +679,21 @@ pub async fn restore_backup(
             .into_json_tuple();
     }
 
+    // Selective restore: `keep_config` skips config.toml (clone mode — the
+    // target keeps its own key, port and paths), and `components` limits the
+    // restore to the named components ("config", "cron_jobs", "hand_state",
+    // "custom_models", "agents", "skills", "workflows", "data").
+    let keep_config = req
+        .get("keep_config")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let components: Option<Vec<String>> =
+        req.get("components").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|c| c.as_str().map(str::to_string))
+                .collect()
+        });
+
     let home_dir = state.kernel.home_dir().to_path_buf();
     let backups_dir = home_dir.join("backups");
     let backup_path = match find_backup_path(&backups_dir, &filename) {
@@ -671,8 +722,10 @@ pub async fn restore_backup(
     // Dispatch the blocking open + decompress + write loop onto a blocking
     // thread so it does not stall the axum/tokio worker (refs
     // blocking-fs-on-executor).
-    let result =
-        tokio::task::spawn_blocking(move || restore_backup_blocking(backup_path, home_dir)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        restore_backup_blocking(backup_path, home_dir, keep_config, components)
+    })
+    .await;
 
     let outcome = match result {
         Ok(Ok(o)) => o,

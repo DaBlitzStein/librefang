@@ -3142,8 +3142,15 @@ export async function createBackup(): Promise<{ filename?: string; path?: string
   return post<{ filename?: string; path?: string; size_bytes?: number; components?: string[]; created_at?: string }>("/api/backup", {});
 }
 
-export async function restoreBackup(filename: string): Promise<{ restored_files?: number; errors?: string[]; message?: string }> {
-  return post<{ restored_files?: number; errors?: string[]; message?: string }>("/api/restore", { filename });
+export async function restoreBackup(
+  filename: string,
+  options?: { keepConfig?: boolean; components?: string[] },
+): Promise<{ restored_files?: number; errors?: string[]; message?: string }> {
+  return post<{ restored_files?: number; errors?: string[]; message?: string }>("/api/restore", {
+    filename,
+    keep_config: options?.keepConfig,
+    components: options?.components,
+  });
 }
 
 export async function deleteBackup(filename: string): Promise<{ deleted?: string }> {

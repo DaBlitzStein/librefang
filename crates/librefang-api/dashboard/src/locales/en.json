@@ -1932,7 +1932,8 @@
     "subagent_lane_help": "Spawned child agents (agent_send)",
     "trigger_lane_help": "Event-trigger dispatches (TaskPosted, MessageReceived, …)",
     "default_per_agent_help": "Per-agent fallback when manifest omits max_concurrent_invocations",
-    "audit_anchor": "anchor"
+    "audit_anchor": "anchor",
+    "restore_keep_config": "Keep my config (clone mode)"
   },
   "telemetry": {
     "badge": "Observability",

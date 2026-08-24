@@ -426,3 +426,106 @@ async fn restore_returns_404_when_archive_missing() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// /api/restore (POST) — selective restore onto an existing system.
+//
+// `keep_config` and `components` are what make a backup restorable onto a
+// machine that is already running: clone mode keeps the target's own key,
+// port and paths, and the component list keeps a restore from dragging in
+// state the operator did not ask for. Both are decided inside the extraction
+// loop, so the only honest assertion is on the files that end up on disk.
+// ---------------------------------------------------------------------------
+
+/// Seed the kernel home with one file per component the classifier
+/// recognises, so a round-trip can distinguish "restored", "skipped by
+/// keep_config" and "skipped by the component filter".
+fn seed_home(home: &std::path::Path) {
+    std::fs::write(home.join("config.toml"), b"origin = \"backup\"\n").expect("write config.toml");
+    std::fs::create_dir_all(home.join("data")).expect("mkdir data");
+    std::fs::write(
+        home.join("data").join("cron_jobs.json"),
+        b"[\"from-backup\"]",
+    )
+    .expect("write cron_jobs.json");
+    std::fs::create_dir_all(home.join("skills")).expect("mkdir skills");
+    std::fs::write(home.join("skills").join("from-backup.md"), b"# skill")
+        .expect("write skills entry");
+}
+
+async fn create_backup_of_seeded_home(h: &Harness) -> String {
+    seed_home(h.state.kernel.home_dir());
+    let (status, body) = json_post(h, "/api/backup", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "backup failed: {body:?}");
+    body["filename"]
+        .as_str()
+        .expect("filename present in create_backup response")
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_without_options_writes_every_component_back() {
+    let h = boot(true).await;
+    let filename = create_backup_of_seeded_home(&h).await;
+    let home = h.state.kernel.home_dir().to_path_buf();
+
+    // Diverge the live system from the archive.
+    std::fs::write(home.join("config.toml"), b"origin = \"local\"\n").expect("overwrite config");
+    std::fs::remove_file(home.join("data").join("cron_jobs.json")).expect("remove cron_jobs");
+    std::fs::remove_file(home.join("skills").join("from-backup.md")).expect("remove skill");
+
+    let (status, body) = json_post(
+        &h,
+        "/api/restore",
+        serde_json::json!({"filename": filename}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "restore failed: {body:?}");
+
+    assert_eq!(
+        std::fs::read_to_string(home.join("config.toml")).expect("config.toml back"),
+        "origin = \"backup\"\n",
+        "a restore with no options must overwrite config.toml"
+    );
+    assert!(home.join("data").join("cron_jobs.json").exists());
+    assert!(home.join("skills").join("from-backup.md").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_honours_keep_config_and_the_component_selection() {
+    let h = boot(true).await;
+    let filename = create_backup_of_seeded_home(&h).await;
+    let home = h.state.kernel.home_dir().to_path_buf();
+
+    std::fs::write(home.join("config.toml"), b"origin = \"local\"\n").expect("overwrite config");
+    std::fs::remove_file(home.join("data").join("cron_jobs.json")).expect("remove cron_jobs");
+    std::fs::remove_file(home.join("skills").join("from-backup.md")).expect("remove skill");
+
+    // `config` is selected *and* `keep_config` is set, so the skip is
+    // attributable to clone mode rather than to the component filter.
+    let (status, body) = json_post(
+        &h,
+        "/api/restore",
+        serde_json::json!({
+            "filename": filename,
+            "keep_config": true,
+            "components": ["config", "cron_jobs"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "restore failed: {body:?}");
+
+    assert_eq!(
+        std::fs::read_to_string(home.join("config.toml")).expect("config.toml still there"),
+        "origin = \"local\"\n",
+        "keep_config must leave the target's own config.toml untouched"
+    );
+    assert!(
+        home.join("data").join("cron_jobs.json").exists(),
+        "a selected component must be restored"
+    );
+    assert!(
+        !home.join("skills").join("from-backup.md").exists(),
+        "a classified component that was not selected must be skipped"
+    );
+}
