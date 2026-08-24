@@ -1,0 +1,3 @@
+The terminal gains a Backups tab in Settings (key `4`), so creating, listing, restoring and deleting an archive no longer requires hand-written HTTP requests on a headless box.
+Restore carries the same options the dashboard has: space toggles clone mode and `1`-`8` toggle which components the restore touches.
+Those number keys are component toggles while the tab is active, so the sub-tab switch keys are skipped there and `Esc` is the way back — `SettingsState::sub` survives leaving and re-entering the Settings tab, so a tab that swallows the switch keys without an escape would be a one-way door for the rest of the session (#7832, #7833) (@DaBlitzStein)
