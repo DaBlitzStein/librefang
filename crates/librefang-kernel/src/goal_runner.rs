@@ -69,6 +69,9 @@ pub struct ParsedTick {
     pub learnings: Vec<String>,
 }
 
+/// Line prefix an agent uses to capture a reusable learning.
+const LEARNED_MARKER: &str = "GOAL_LEARNED:";
+
 /// Parse an agent reply for `GOAL_PROGRESS:` / `GOAL_DONE` / `GOAL_BLOCKED`
 /// markers. Case-insensitive; the last `GOAL_PROGRESS` line wins.
 pub fn parse_tick(reply: &str) -> ParsedTick {
@@ -84,8 +87,15 @@ pub fn parse_tick(reply: &str) -> ParsedTick {
             out.done = true;
         } else if marker_present(&upper, "GOAL_BLOCKED") {
             out.blocked = true;
-        } else if let Some(rest) = upper.strip_prefix("GOAL_LEARNED:") {
-            let learning = rest.trim();
+        } else if upper.starts_with(LEARNED_MARKER) {
+            // Match the marker on the uppercased copy (case-insensitive, like
+            // every other marker here) but slice the *original* line for the
+            // payload. Slicing `upper` would persist every captured learning
+            // in all caps — and those strings are stored in memory and fed
+            // verbatim into auto-generated skills, so the damage outlives the
+            // run. The byte offset is valid on `t` because `to_ascii_uppercase`
+            // is length-preserving and only rewrites ASCII bytes.
+            let learning = t[LEARNED_MARKER.len()..].trim();
             if !learning.is_empty() {
                 out.learnings.push(learning.to_string());
             }
@@ -781,18 +791,6 @@ async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
                     }
                 }
 
-                let new_status = if parsed.done && passes_verification {
-                    Some(GoalStatus::Completed)
-                } else {
-                    Some(GoalStatus::InProgress)
-                };
-                let new_progress = if parsed.done && passes_verification {
-                    Some(100)
-                } else {
-                    parsed.progress
-                };
-                patch_goal(&substrate, goal_id, new_progress, new_status);
-
                 // Evaluator model: a separate cheap model judges whether the
                 // goal condition is met (Claude Code /goal pattern). This
                 // replaces blind trust in the agent's self-reported GOAL_DONE.
@@ -812,6 +810,22 @@ async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
                     false
                 };
 
+                // Completion is the evaluator's verdict OR the agent's own
+                // marker, gated on verification. The evaluator has to be
+                // consulted *before* the goal document is patched: patching on
+                // `parsed.done` alone stranded a goal in `InProgress` forever
+                // whenever the agent finished the work but never emitted
+                // `GOAL_DONE` — the evaluator said "met", the loop broke out,
+                // and nothing ever wrote `Completed` back.
+                let done = passes_verification && (parsed.done || evaluator_done);
+                let new_status = if done {
+                    Some(GoalStatus::Completed)
+                } else {
+                    Some(GoalStatus::InProgress)
+                };
+                let new_progress = if done { Some(100) } else { parsed.progress };
+                patch_goal(&substrate, goal_id, new_progress, new_status);
+
                 // Release before persist_run: state()'s try_lock returns None (→ running:false) while held.
                 let snapshot = {
                     let mut s = state.lock().await;
@@ -827,7 +841,7 @@ async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
                 // crash before the next tick still leaves a recoverable row.
                 persist_run(&store, &snapshot);
 
-                if evaluator_done || parsed.done {
+                if done {
                     break GoalRunPhase::Finished;
                 }
                 if parsed.blocked {
@@ -942,6 +956,31 @@ mod tests {
 
         // No markers → all default.
         assert_eq!(parse_tick("just a normal reply"), ParsedTick::default());
+    }
+
+    #[test]
+    fn parse_tick_captures_learnings_preserving_original_case() {
+        // The marker is matched case-insensitively, but the captured text is
+        // persisted to memory and fed into auto-generated skills verbatim, so
+        // it must come back exactly as the agent wrote it. Slicing the
+        // uppercased copy used for matching shouted every stored learning.
+        let p = parse_tick("GOAL_LEARNED: Use ripgrep, not grep, on this repo");
+        assert_eq!(p.learnings, vec!["Use ripgrep, not grep, on this repo"]);
+
+        // Lowercase marker still registers, payload still verbatim.
+        let lower = parse_tick("goal_learned: Prefer BTreeMap for prompt ordering");
+        assert_eq!(lower.learnings, vec!["Prefer BTreeMap for prompt ordering"]);
+
+        // Non-ASCII payloads survive the byte-offset slice intact.
+        let unicode = parse_tick("GOAL_LEARNED: El daemon escucha en el puerto 4545");
+        assert_eq!(
+            unicode.learnings,
+            vec!["El daemon escucha en el puerto 4545"]
+        );
+
+        // Multiple learnings accumulate in order; blank payloads are dropped.
+        let many = parse_tick("GOAL_LEARNED: first\nGOAL_LEARNED:   \nGOAL_LEARNED: Second Thing");
+        assert_eq!(many.learnings, vec!["first", "Second Thing"]);
     }
 
     #[test]
