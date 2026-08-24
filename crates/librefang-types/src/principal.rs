@@ -7,10 +7,18 @@
 //!
 //! Ownership is not always one human. A workflow built during a support shift
 //! belongs to the support team; a compliance cron belongs to whoever holds
-//! that duty this quarter; an ops runbook belongs to a role, and the people
-//! filling it change. So the owner is a *principal*, not a user id -- the
-//! shape every IAM system converges on, for the same reason: identity
-//! outlives the individual.
+//! that duty this quarter, and the people filling it change. So the owner is a
+//! *principal*, not a user id -- the shape every IAM system converges on, for
+//! the same reason: identity outlives the individual.
+//!
+//! Two kinds, not three. A rotating duty is a group whose membership rotates,
+//! so it needs no kind of its own. A *role* in the `UserRole` sense is
+//! something else entirely and deliberately absent: that type is an ordinal
+//! privilege level (`Viewer` < `Operator` < `Admin` < `Owner`), not an
+//! identity. "Owned by Admin" would be a statement about permission rather
+//! than about who something belongs to, and it has no answer to the questions
+//! ownership must answer -- you cannot delete `Admin`, so nothing can cascade
+//! from it, and everyone at or above that level would own it equally.
 
 use serde::{Deserialize, Serialize};
 
@@ -37,11 +45,13 @@ pub enum Principal {
     ///
     /// The id and not the display name: a group is renamed far more often
     /// than it is dissolved, and a rename must not orphan what it owns.
+    ///
+    /// This is also how a rotating duty is expressed — "on-call",
+    /// "compliance" — as a group whose membership changes rather than as a
+    /// kind of its own. A duty is a set of people that varies over time,
+    /// which is precisely what a group already is, and giving it a second
+    /// representation would mean two membership mechanisms to keep in step.
     Group(String),
-    /// A duty rather than a person or a list of them — "on-call",
-    /// "compliance". Who fills it is answered elsewhere and changes; what the
-    /// role owns does not.
-    Role(String),
 }
 
 impl Principal {
@@ -52,7 +62,7 @@ impl Principal {
     /// different owners, and comparing the bare strings would merge them.
     pub fn id(&self) -> &str {
         match self {
-            Principal::User(id) | Principal::Group(id) | Principal::Role(id) => id,
+            Principal::User(id) | Principal::Group(id) => id,
         }
     }
 
@@ -61,7 +71,6 @@ impl Principal {
         let kind = match self {
             Principal::User(_) => "user",
             Principal::Group(_) => "group",
-            Principal::Role(_) => "role",
         };
         format!("{kind}:{}", self.id())
     }
@@ -88,7 +97,6 @@ mod tests {
         for p in [
             Principal::User("paco".into()),
             Principal::Group("support".into()),
-            Principal::Role("on-call".into()),
         ] {
             let back: Principal =
                 serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
@@ -122,13 +130,29 @@ mod tests {
         let parsed: Owned = toml::from_str(
             r#"
             [owner]
-            kind = "role"
+            kind = "group"
             id = "compliance"
             "#,
         )
         .expect("a hand-written owner block must parse");
 
-        assert_eq!(parsed.owner, Principal::Role("compliance".into()));
+        assert_eq!(parsed.owner, Principal::Group("compliance".into()));
+    }
+
+    /// A duty is expressed as a group, so the kind an operator would reach for
+    /// out of habit must be rejected rather than quietly accepted as something
+    /// else. Silently coercing `kind = "role"` into a group would file the
+    /// compliance cron under a group that does not exist, and the mistake
+    /// would only surface as an authorization failure much later.
+    #[test]
+    fn a_role_kind_is_not_a_principal() {
+        let err = serde_json::from_str::<Principal>(r#"{"kind":"role","id":"on-call"}"#)
+            .expect_err("`role` was removed as a kind and must not parse");
+
+        assert!(
+            err.to_string().contains("role"),
+            "the error should name the rejected kind so an operator can find it: {err}"
+        );
     }
 }
 
