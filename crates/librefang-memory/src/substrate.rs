@@ -1036,12 +1036,23 @@ impl MemorySubstrate {
     // -----------------------------------------------------------------
 
     /// Post a new task to the shared queue. Returns the task ID.
+    ///
+    /// `priority` orders the claim queue — higher is served first, ties broken
+    /// by age (see [`Self::task_claim`]). `0` is the historical value every
+    /// pre-existing row carries, so it is the neutral default.
+    ///
+    /// `timeout_secs` overrides `[task_board] claim_ttl_secs` for this row
+    /// alone: `None` inherits the global, `Some(0)` means "never reclaim",
+    /// and `Some(n)` reclaims after `n` seconds held `in_progress`
+    /// (see [`Self::task_reset_stuck`]).
     pub async fn task_post(
         &self,
         title: &str,
         description: &str,
         assigned_to: Option<&str>,
         created_by: Option<&str>,
+        priority: i64,
+        timeout_secs: Option<u32>,
     ) -> LibreFangResult<String> {
         let conn = self.pool.clone();
         let title = title.to_string();
@@ -1054,9 +1065,9 @@ impl MemorySubstrate {
             let now = chrono::Utc::now().to_rfc3339();
             let db = conn.get().map_err(LibreFangError::memory)?;
             db.execute(
-                "INSERT INTO task_queue (id, agent_id, task_type, payload, status, priority, created_at, title, description, assigned_to, created_by)
-                 VALUES (?1, ?2, ?3, ?4, 'pending', 0, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![id, &created_by, &title, b"", now, title, description, assigned_to, created_by],
+                "INSERT INTO task_queue (id, agent_id, task_type, payload, status, priority, created_at, title, description, assigned_to, created_by, timeout_secs)
+                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![id, &created_by, &title, b"", priority, now, title, description, assigned_to, created_by, timeout_secs],
             )
             .map_err(LibreFangError::memory)?;
             Ok(id)
@@ -1092,7 +1103,7 @@ impl MemorySubstrate {
             // via the API or bridge tools may store the name rather than the UUID),
             // plus any unassigned (empty assigned_to) pending tasks.
             let mut stmt = db.prepare(
-                "SELECT id, title, description, assigned_to, created_by, created_at
+                "SELECT id, title, description, assigned_to, created_by, created_at, priority
                  FROM task_queue
                  WHERE status = 'pending'
                    AND (assigned_to = ?1 OR assigned_to = ?2 OR assigned_to = '')
@@ -1119,11 +1130,12 @@ impl MemorySubstrate {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6).unwrap_or(0),
                     ))
                 });
 
                 match result {
-                    Ok((id, title, description, _assigned, created_by, created_at)) => {
+                    Ok((id, title, description, _assigned, created_by, created_at, priority)) => {
                         // Stamp `claimed_at` so the stuck-task sweeper can
                         // TTL-reset workers that never complete.
                         let claimed_at = chrono::Utc::now().to_rfc3339();
@@ -1148,6 +1160,7 @@ impl MemorySubstrate {
                             "created_by": created_by,
                             "created_at": created_at,
                             "claimed_at": claimed_at,
+                            "priority": priority,
                         })));
                     }
                     // No pending task assignable to this agent remains.
@@ -1239,13 +1252,18 @@ impl MemorySubstrate {
 
         tokio::task::spawn_blocking(move || {
             let db = conn.get().map_err(LibreFangError::memory)?;
+            // `priority` and `timeout_secs` are selected because operators act
+            // on them: the board shows what it ordered the queue by, and a
+            // task carrying its own claim TTL has to say so somewhere. Ordering
+            // stays newest-first — this is the board view, not the claim queue,
+            // whose ordering lives in `task_claim`.
             let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &status {
                 Some(s) => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue WHERE status = ?1 ORDER BY created_at DESC",
+                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at, priority, timeout_secs FROM task_queue WHERE status = ?1 ORDER BY created_at DESC",
                     vec![Box::new(s.clone())],
                 ),
                 None => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue ORDER BY created_at DESC",
+                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at, priority, timeout_secs FROM task_queue ORDER BY created_at DESC",
                     vec![],
                 ),
             };
@@ -1264,6 +1282,8 @@ impl MemorySubstrate {
                     "completed_at": row.get::<_, Option<String>>(7).unwrap_or(None),
                     "result": row.get::<_, Option<String>>(8).unwrap_or(None),
                     "claimed_at": row.get::<_, Option<String>>(9).unwrap_or(None),
+                    "priority": row.get::<_, i64>(10).unwrap_or(0),
+                    "timeout_secs": row.get::<_, Option<u32>>(11).unwrap_or(None),
                 }))
             }).map_err(LibreFangError::memory)?;
 
@@ -1278,8 +1298,17 @@ impl MemorySubstrate {
     }
 
     /// Reset `in_progress` tasks whose worker stalled without calling
-    /// `task_complete` — fixes issue #2923. A task is considered stuck when
-    /// `claimed_at` is older than `ttl_secs` seconds from now.
+    /// `task_complete` — fixes issue #2923. A task is considered stuck when it
+    /// has been held longer than its **effective TTL**.
+    ///
+    /// The effective TTL is the row's own `timeout_secs` when it has one, and
+    /// `ttl_secs` (the global `[task_board] claim_ttl_secs`) otherwise. An
+    /// effective TTL of `0` means "never reclaim", so passing `ttl_secs = 0`
+    /// keeps the historical global-disable behaviour for every row that did
+    /// not opt in, while a row that declared its own non-zero timeout is still
+    /// swept — the per-task value is a more specific statement than the
+    /// global, and the two are independent switches for the same reason the
+    /// delivery reconcile is independent of this gate.
     ///
     /// When `max_retries > 0`: tasks that have already been reset that many
     /// times are marked `failed` instead of pending, preventing infinite retry
@@ -1296,22 +1325,27 @@ impl MemorySubstrate {
         tokio::task::spawn_blocking(move || {
             let db = conn.get().map_err(LibreFangError::memory)?;
 
-            let cutoff = chrono::Utc::now()
-                - chrono::Duration::from_std(std::time::Duration::from_secs(ttl_secs))
-                    .unwrap_or_else(|_| chrono::Duration::seconds(0));
-            let cutoff_str = cutoff.to_rfc3339();
+            let now_unix = chrono::Utc::now().timestamp();
+            // `claimed_at` is RFC3339 as written by `task_claim`; SQLite's
+            // ISO-8601 parser reads that form (offset and fractional seconds
+            // included), so the epoch arithmetic below is exact rather than
+            // the lexicographic string compare the single-TTL query could
+            // get away with.
+            let global_ttl = ttl_secs as i64;
 
             let mut stmt = db
                 .prepare(
                     "SELECT id, COALESCE(retry_count, 0) FROM task_queue \
                      WHERE status = 'in_progress' \
                        AND claimed_at IS NOT NULL \
-                       AND claimed_at < ?1",
+                       AND COALESCE(timeout_secs, ?1) > 0 \
+                       AND CAST(strftime('%s', claimed_at) AS INTEGER) \
+                           + COALESCE(timeout_secs, ?1) <= ?2",
                 )
                 .map_err(LibreFangError::memory)?;
 
             let stuck: Vec<(String, u32)> = stmt
-                .query_map(rusqlite::params![cutoff_str], |row| {
+                .query_map(rusqlite::params![global_ttl, now_unix], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
                 })
                 .map_err(LibreFangError::memory)?
@@ -1365,7 +1399,7 @@ impl MemorySubstrate {
                 .prepare(
                     "SELECT id, title, description, status, assigned_to, created_by, \
                      created_at, completed_at, result, claimed_at, \
-                     COALESCE(retry_count, 0) \
+                     COALESCE(retry_count, 0), priority, timeout_secs \
                      FROM task_queue WHERE id = ?1",
                 )
                 .map_err(LibreFangError::memory)?;
@@ -1383,6 +1417,8 @@ impl MemorySubstrate {
                         "result":       row.get::<_, Option<String>>(8).unwrap_or(None),
                         "claimed_at":   row.get::<_, Option<String>>(9).unwrap_or(None),
                         "retry_count":  row.get::<_, u32>(10).unwrap_or(0),
+                        "priority":     row.get::<_, i64>(11).unwrap_or(0),
+                        "timeout_secs": row.get::<_, Option<u32>>(12).unwrap_or(None),
                     }))
                 })
                 .map_err(LibreFangError::memory)?;
@@ -1908,6 +1944,8 @@ mod tests {
                 "Check the auth module for issues",
                 Some("auditor"),
                 Some("orchestrator"),
+                0,
+                None,
             )
             .await
             .unwrap();
@@ -1928,6 +1966,8 @@ mod tests {
                 "Audit endpoint",
                 "Security audit the /api/login endpoint",
                 Some("auditor"),
+                None,
+                0,
                 None,
             )
             .await
@@ -1984,7 +2024,14 @@ mod tests {
 
         // Exactly one pending task assigned to "worker".
         substrate
-            .task_post("Race target", "Claim me exactly once", Some("worker"), None)
+            .task_post(
+                "Race target",
+                "Claim me exactly once",
+                Some("worker"),
+                None,
+                0,
+                None,
+            )
             .await
             .unwrap();
 
@@ -2041,7 +2088,14 @@ mod tests {
         const N: usize = 8;
         for i in 0..N {
             substrate
-                .task_post(&format!("task-{i}"), "claim me", Some("worker"), None)
+                .task_post(
+                    &format!("task-{i}"),
+                    "claim me",
+                    Some("worker"),
+                    None,
+                    0,
+                    None,
+                )
                 .await
                 .unwrap();
         }
@@ -2097,6 +2151,8 @@ mod tests {
                 "Check for anomalies",
                 Some("researcher"),
                 None,
+                0,
+                None,
             )
             .await
             .unwrap();
@@ -2133,7 +2189,7 @@ mod tests {
     async fn test_task_reset_stuck_expires_in_progress() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("Long task", "Takes forever", Some("worker"), None)
+            .task_post("Long task", "Takes forever", Some("worker"), None, 0, None)
             .await
             .unwrap();
 
@@ -2186,11 +2242,209 @@ mod tests {
         assert!(reset_again.is_empty());
     }
 
+    /// `priority` is enforced, not merely stored: the claim queue is ordered
+    /// `priority DESC, created_at ASC`, so a higher-priority task posted
+    /// *later* must still be served first. Posting the low-priority task first
+    /// is the point — under the historical hard-coded `priority = 0` both rows
+    /// tie and age alone decides, so this test fails if `task_post` ever stops
+    /// forwarding the caller's value.
+    #[tokio::test]
+    async fn task_claim_serves_higher_priority_before_older_task() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+
+        let low = substrate
+            .task_post("Low", "posted first", Some("worker"), None, 0, None)
+            .await
+            .unwrap();
+        let high = substrate
+            .task_post("High", "posted second", Some("worker"), None, 5, None)
+            .await
+            .unwrap();
+
+        let first = substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap()
+            .expect("a pending task is claimable");
+        assert_eq!(
+            first["id"], high,
+            "priority DESC must outrank age; got the older low-priority task"
+        );
+        assert_eq!(first["priority"], 5);
+
+        let second = substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap()
+            .expect("the second task is still claimable");
+        assert_eq!(second["id"], low);
+        assert_eq!(second["priority"], 0);
+    }
+
+    /// The value the operator posted has to survive the round trip, or the
+    /// board shows a priority the queue did not order by.
+    #[tokio::test]
+    async fn task_priority_and_timeout_round_trip_through_read_paths() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let id = substrate
+            .task_post("T", "d", Some("worker"), None, 3, Some(45))
+            .await
+            .unwrap();
+
+        let listed = substrate.task_list(Some("pending")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["priority"], 3);
+        assert_eq!(listed[0]["timeout_secs"], 45);
+
+        let got = substrate.task_get(&id).await.unwrap().expect("task exists");
+        assert_eq!(got["priority"], 3);
+        assert_eq!(got["timeout_secs"], 45);
+
+        // A task that opted out of both keeps the neutral defaults rather than
+        // inheriting the previous row's values.
+        let plain = substrate
+            .task_post("P", "d", Some("worker"), None, 0, None)
+            .await
+            .unwrap();
+        let got_plain = substrate.task_get(&plain).await.unwrap().unwrap();
+        assert_eq!(got_plain["priority"], 0);
+        assert!(
+            got_plain["timeout_secs"].is_null(),
+            "no per-task timeout must read back as null, meaning 'use the global'"
+        );
+    }
+
+    /// Claim a task for `worker` and back-date its `claimed_at` by `minutes`,
+    /// simulating a worker that stalled that long ago.
+    async fn claim_and_backdate(substrate: &MemorySubstrate, task_id: &str, minutes: i64) {
+        let claimed = substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap()
+            .expect("task is claimable");
+        assert_eq!(claimed["id"], task_id);
+        let conn = substrate.pool.get().unwrap();
+        let then = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
+        conn.execute(
+            "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
+            rusqlite::params![then, task_id],
+        )
+        .unwrap();
+    }
+
+    /// A per-task timeout **shorter** than the global reclaims a task the
+    /// global TTL would still be holding.
+    #[tokio::test]
+    async fn task_reset_stuck_per_task_timeout_reclaims_before_global() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post(
+                "Quick probe",
+                "60s budget",
+                Some("worker"),
+                None,
+                0,
+                Some(60),
+            )
+            .await
+            .unwrap();
+        claim_and_backdate(&substrate, &task_id, 5).await;
+
+        // Global TTL of 1 hour would NOT have reset this task…
+        let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
+        assert_eq!(
+            reset,
+            vec![task_id.clone()],
+            "the row's own 60s timeout must win over the 3600s global"
+        );
+        let pending = substrate.task_list(Some("pending")).await.unwrap();
+        assert_eq!(pending[0]["id"], task_id);
+    }
+
+    /// A per-task timeout **longer** than the global protects a task the
+    /// global TTL would have torn away from a worker still making progress.
+    #[tokio::test]
+    async fn task_reset_stuck_per_task_timeout_survives_shorter_global() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let long = substrate
+            .task_post("Import", "2h budget", Some("worker"), None, 0, Some(7200))
+            .await
+            .unwrap();
+        claim_and_backdate(&substrate, &long, 5).await;
+
+        // Global TTL of 60s WOULD have reset it; the row's 7200s must win.
+        let reset = substrate.task_reset_stuck(60, 0).await.unwrap();
+        assert!(
+            reset.is_empty(),
+            "the row's own 7200s timeout must survive the 60s global, got {reset:?}"
+        );
+        let in_progress = substrate.task_list(Some("in_progress")).await.unwrap();
+        assert_eq!(in_progress.len(), 1);
+        assert_eq!(in_progress[0]["id"], long);
+    }
+
+    /// `timeout_secs = 0` is the per-task spelling of "never reclaim", mirroring
+    /// `claim_ttl_secs = 0` globally — for the human-in-the-loop task on an
+    /// otherwise briskly-swept board.
+    #[tokio::test]
+    async fn task_reset_stuck_per_task_timeout_zero_never_reclaims() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let held = substrate
+            .task_post("Human review", "no TTL", Some("worker"), None, 0, Some(0))
+            .await
+            .unwrap();
+        claim_and_backdate(&substrate, &held, 600).await;
+
+        let reset = substrate.task_reset_stuck(60, 0).await.unwrap();
+        assert!(
+            reset.is_empty(),
+            "timeout_secs = 0 must never be reclaimed, got {reset:?}"
+        );
+    }
+
+    /// The global disable and the per-task timeout are independent switches:
+    /// `claim_ttl_secs = 0` means "do not reclaim tasks nobody put a clock on",
+    /// not "ignore the clock a task explicitly carries".
+    #[tokio::test]
+    async fn task_reset_stuck_applies_per_task_timeout_when_global_disabled() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let with_ttl = substrate
+            .task_post("Probe", "60s budget", Some("worker"), None, 0, Some(60))
+            .await
+            .unwrap();
+        let without_ttl = substrate
+            .task_post("Held", "inherits global", Some("worker"), None, 0, None)
+            .await
+            .unwrap();
+        claim_and_backdate(&substrate, &with_ttl, 5).await;
+        claim_and_backdate(&substrate, &without_ttl, 5).await;
+
+        let reset = substrate.task_reset_stuck(0, 0).await.unwrap();
+        assert_eq!(
+            reset,
+            vec![with_ttl.clone()],
+            "only the row carrying its own timeout may be reclaimed while the global is disabled"
+        );
+        let in_progress = substrate.task_list(Some("in_progress")).await.unwrap();
+        assert_eq!(in_progress.len(), 1);
+        assert_eq!(
+            in_progress[0]["id"], without_ttl,
+            "a row inheriting the disabled global must stay claimed"
+        );
+    }
+
     #[tokio::test]
     async fn task_reset_stuck_surfaces_corrupt_retry_count() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("Corrupt task", "Must not be skipped", Some("worker"), None)
+            .task_post(
+                "Corrupt task",
+                "Must not be skipped",
+                Some("worker"),
+                None,
+                0,
+                None,
+            )
             .await
             .unwrap();
         substrate
@@ -2369,7 +2623,7 @@ mod tests {
     async fn test_task_complete_stamps_finished_at() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None)
+            .task_post("t", "d", Some("worker"), None, 0, None)
             .await
             .unwrap();
         let _ = substrate
@@ -2455,7 +2709,7 @@ mod tests {
     async fn test_task_cancel_stamps_finished_at() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None)
+            .task_post("t", "d", Some("worker"), None, 0, None)
             .await
             .unwrap();
 
@@ -2490,7 +2744,7 @@ mod tests {
     async fn test_task_reset_to_pending_clears_finished_at() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None)
+            .task_post("t", "d", Some("worker"), None, 0, None)
             .await
             .unwrap();
 

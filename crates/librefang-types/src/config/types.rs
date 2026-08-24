@@ -3070,6 +3070,11 @@ impl Default for QueueConcurrencyConfig {
 pub struct TaskBoardConfig {
     /// How long an `in_progress` task may stay claimed before the sweeper
     /// resets it to `pending`. Default: 600 s (10 minutes). 0 disables.
+    ///
+    /// This is the fallback, not the last word: a task posted with its own
+    /// `timeout_secs` uses that instead, including when this global is `0`.
+    /// One board can therefore carry both a 30-second probe and a two-hour
+    /// import without either being served by the wrong clock.
     pub claim_ttl_secs: u64,
     /// How often the sweeper scans for stuck tasks. Default: 30 s.
     pub sweep_interval_secs: u64,

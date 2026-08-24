@@ -29,7 +29,13 @@ async fn test_task_post_preserves_assigned_to_and_created_by() {
         .expect("spawn_agent failed");
 
     let task_id = kh
-        .task_post("title", "desc", Some(&agent_id), Some("creator-1"))
+        .task_post(
+            "title",
+            "desc",
+            Some(&agent_id),
+            Some("creator-1"),
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("task_post failed");
 
