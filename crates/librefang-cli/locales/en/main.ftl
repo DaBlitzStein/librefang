@@ -1392,6 +1392,7 @@ chat-runner-goal-no-agent = No agent selected.
 chat-runner-goal-started = Goal created and started: { $description } (ID: { $id })
 chat-runner-goal-not-started = Goal created (ID: { $id }) but the run could not start.
 chat-runner-goal-failed = Could not create the goal: { $error }
+chat-runner-goal-no-id = The daemon created the goal but returned no id.
 chat-runner-no-models-available = No models available.
 chat-runner-switched-model = Switched to { $model }
 chat-runner-failed-switch-model = Failed to switch to { $model }

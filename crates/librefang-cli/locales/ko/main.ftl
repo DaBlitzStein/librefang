@@ -1377,6 +1377,7 @@ chat-runner-goal-no-agent = 선택된 에이전트가 없습니다.
 chat-runner-goal-started = 목표를 생성하고 시작했습니다: { $description } (ID: { $id })
 chat-runner-goal-not-started = 목표를 생성했지만(ID: { $id }) 실행을 시작하지 못했습니다.
 chat-runner-goal-failed = 목표를 생성할 수 없습니다: { $error }
+chat-runner-goal-no-id = 데몬이 목표를 생성했지만 ID를 반환하지 않았습니다.
 chat-runner-no-models-available = 사용 가능한 모델이 없습니다.
 chat-runner-switched-model = { $model }(으)로 전환했습니다
 chat-runner-failed-switch-model = { $model }(으)로 전환하지 못했습니다

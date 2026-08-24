@@ -461,6 +461,7 @@ chat-runner-goal-no-agent = 未选择智能体。
 chat-runner-goal-started = 目标已创建并启动：{ $description }（ID: { $id }）
 chat-runner-goal-not-started = 目标已创建（ID: { $id }），但运行未能启动。
 chat-runner-goal-failed = 无法创建目标：{ $error }
+chat-runner-goal-no-id = 守护进程已创建目标，但未返回 ID。
 chat-runner-no-models-available = 无可用模型。
 chat-runner-switched-model = 已切换到 { $model }
 chat-runner-failed-switch-model = 切换到 { $model } 失败

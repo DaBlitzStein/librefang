@@ -1391,6 +1391,7 @@ chat-runner-goal-no-agent = Агента не вибрано.
 chat-runner-goal-started = Ціль створено та запущено: { $description } (ID: { $id })
 chat-runner-goal-not-started = Ціль створено (ID: { $id }), але запуск не вдалося розпочати.
 chat-runner-goal-failed = Не вдалося створити ціль: { $error }
+chat-runner-goal-no-id = Демон створив ціль, але не повернув ідентифікатор.
 chat-runner-no-models-available = Немає доступних моделей.
 chat-runner-switched-model = Переключено на { $model }
 chat-runner-failed-switch-model = Не вдалося переключитися на { $model }

@@ -577,8 +577,8 @@ impl StandaloneChat {
             .ok_or_else(|| {
                 created["error"]
                     .as_str()
-                    .unwrap_or("goal create returned no id")
-                    .to_string()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::i18n::t("chat-runner-goal-no-id"))
             })?
             .to_string();
 
