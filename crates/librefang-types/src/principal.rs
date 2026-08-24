@@ -33,7 +33,7 @@ pub enum Principal {
     /// everywhere else in the configuration, and two identifier schemes for
     /// one entity is how references rot.
     User(String),
-    /// A group, by its stable `GroupConfig::id`.
+    /// A group, by its stable `UserGroup::id`.
     ///
     /// The id and not the display name: a group is renamed far more often
     /// than it is dissolved, and a rename must not orphan what it owns.

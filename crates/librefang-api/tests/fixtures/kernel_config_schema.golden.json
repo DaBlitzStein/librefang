@@ -589,13 +589,6 @@
         }
       ]
     },
-    "groups": {
-      "description": "Groups of users (#7745).\n\nA group is an owner in its own right: work done during a support shift belongs to the support team, not to whoever happened to be on it that day. Kept beside `users` in `config.toml` rather than in the database because that is where users already live, and splitting one identity model across two stores is how the two stop agreeing.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/GroupConfig"
-      }
-    },
     "hands": {
       "description": "Hands marketplace configuration (SSRF allowlist for a caller-supplied `registry_url` on the install endpoint).",
       "default": {
@@ -1515,6 +1508,21 @@
           "$ref": "#/definitions/UsageFooterMode"
         }
       ]
+    },
+    "user_group_mapping": {
+      "description": "Translates external group and role names into [`UserGroup`] ids.\n\nOne mechanism, several sources — see [`UserGroupMapping`]. Resolution fails closed, so an unmapped or misspelled external name grants nothing.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/UserGroupMapping"
+        }
+      ]
+    },
+    "user_groups": {
+      "description": "Groups of users (#7745).\n\nA group is an owner in its own right: work done during a support shift belongs to the support team, not to whoever happened to be on it that day. Kept beside `users` in `config.toml` rather than in the database because that is where users already live, and splitting one identity model across two stores is how the two stop agreeing.\n\nMembership is *derived*, never persisted: it is resolved in memory by `AuthManager` from these declarations plus, once #7746 lands, mapped identity-provider claims. A stored membership table would become a cache pretending to be a record the moment the provider is authoritative on every login.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/UserGroup"
+      }
     },
     "users": {
       "description": "User configurations for RBAC multi-user support.",
@@ -3919,37 +3927,6 @@
           "default": 0.8500000238418579,
           "type": "number",
           "format": "float"
-        }
-      }
-    },
-    "GroupConfig": {
-      "description": "A named set of users that can own things (#7745).",
-      "type": "object",
-      "required": [
-        "id",
-        "name"
-      ],
-      "properties": {
-        "description": {
-          "description": "What the group is for. Empty is allowed; a group nobody can explain is a group nobody will maintain, but that is a review problem, not a validation one.",
-          "default": "",
-          "type": "string"
-        },
-        "id": {
-          "description": "Stable identifier used wherever a group is referenced.\n\nReferenced by ownership records rather than the display name, because a group gets renamed (\"Support\" becomes \"Customer Success\") far more often than it gets dissolved, and a rename must not orphan everything the group owns.",
-          "type": "string"
-        },
-        "members": {
-          "description": "Member user names, matching `UserConfig::name`.\n\nNames rather than a second id space: users are already addressed by name everywhere else in this file, and two identifier schemes for the same entity is how membership drifts out of sync with the user list.",
-          "default": [],
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "name": {
-          "description": "Human-readable name, safe to change.",
-          "type": "string"
         }
       }
     },
@@ -7029,7 +7006,7 @@
           "type": "boolean"
         },
         "claim_ttl_secs": {
-          "description": "How long an `in_progress` task may stay claimed before the sweeper resets it to `pending`. Default: 600 s (10 minutes). 0 disables.",
+          "description": "How long an `in_progress` task may stay claimed before the sweeper resets it to `pending`. Default: 600 s (10 minutes). 0 disables.\n\nThis is the fallback, not the last word: a task posted with its own `timeout_secs` uses that instead, including when this global is `0`. One board can therefore carry both a 30-second probe and a two-hour import without either being served by the wrong clock.",
           "default": 600,
           "type": "integer",
           "format": "uint64",
@@ -7838,6 +7815,58 @@
               "type": "null"
             }
           ]
+        }
+      }
+    },
+    "UserGroup": {
+      "description": "A named set of users that can own things (#7745).\n\n**Flat by design: a user group never contains another user group.** This is stated in the type rather than left to be discovered because it is a decision, not an omission. Nesting buys local expressiveness at the cost of cycle detection on every membership change and a transitive-closure walk on every authorization check — but the deciding argument is external: every identity provider LibreFang federates with hands us an already *flattened* group list on the token. Nesting would be structure the authoritative source cannot express, so it would drift on the first login. Flat is the correct shape here, not a simplification of one.\n\nNamed `UserGroup` and not `Group` because [`crate::tool_policy::ToolGroup`] is already surfaced to operators as `tool_policy.groups`. A bare `[[groups]]` table would be genuinely ambiguous against a concept operators already use for something unrelated.",
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "description": {
+          "description": "What the group is for. Empty is allowed; a group nobody can explain is a group nobody will maintain, but that is a review problem, not a validation one.",
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "description": "Stable identifier used wherever a group is referenced.\n\nReferenced by ownership records rather than the display name, because a group gets renamed (\"Support\" becomes \"Customer Success\") far more often than it gets dissolved, and a rename must not orphan everything the group owns.",
+          "type": "string"
+        },
+        "members": {
+          "description": "Member user names, matching `UserConfig::name`.\n\nNames rather than a second id space: users are already addressed by name everywhere else in this file, and two identifier schemes for the same entity is how membership drifts out of sync with the user list.\n\nA `BTreeSet` rather than a `Vec` for two reasons that both bite in practice: an operator listing the same member twice is a typo and not a double membership, and group names are the kind of thing that ends up stringified into a prompt — where `HashSet`/`Vec` ordering would vary per process and silently invalidate provider prompt caches. The deterministic-ordering rule in `CLAUDE.md` asks for the container to enforce this so nobody has to remember to sort at the boundary.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "name": {
+          "description": "Human-readable name, safe to change.",
+          "type": "string"
+        }
+      }
+    },
+    "UserGroupMapping": {
+      "description": "Maps external group and role names onto local [`UserGroup`] ids.\n\nDeliberately shaped as one table per source rather than a separate type per source, so that #7746 *feeds* the `idp` table instead of inventing a parallel concept. Both tables ship now; only `channel` has a producer today.\n\nThis extends the [`ChannelRoleMapping`] precedent rather than paralleling it, including the part that matters most: resolution **fails closed**. A name absent from the table, or one pointing at a group that is not declared, grants no membership at all — the same reason `UserRole::try_from_str_role` returns `None` instead of defaulting, so that a typo under-grants rather than over-grants.",
+      "type": "object",
+      "properties": {
+        "channel": {
+          "description": "Platform role name → local `UserGroup::id`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "idp": {
+          "description": "Identity-provider group name → local `UserGroup::id`. Unfed until #7746; present now so that issue adds a producer, not a shape.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     },

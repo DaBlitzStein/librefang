@@ -7,7 +7,10 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use librefang_channels::types::{ChannelRoleQuery, SenderContext};
 use librefang_types::agent::UserId;
-use librefang_types::config::{ChannelRoleMapping, UserBudgetConfig, UserConfig};
+use librefang_types::config::{
+    ChannelRoleMapping, GroupMappingSource, UserBudgetConfig, UserConfig, UserGroup,
+    UserGroupMapping,
+};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::tool_policy::ToolGroup;
 use librefang_types::user_policy::{
@@ -15,7 +18,7 @@ use librefang_types::user_policy::{
     UserToolGate, UserToolPolicy,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -243,6 +246,45 @@ struct AuthSnapshot {
     /// Tool groups (categories) referenced by per-user policies. Cloned
     /// from `KernelConfig.tool_policy.groups` at construction.
     tool_groups: Arc<Vec<ToolGroup>>,
+    /// Declared user groups by `UserGroup::id` (#7745). A map rather than the
+    /// config's `Vec` so a mapping target can be validated in one lookup, and
+    /// ordered so the read surfaces list groups the same way every time.
+    user_groups: BTreeMap<String, UserGroup>,
+    /// Membership, inverted: user → the group ids they belong to.
+    ///
+    /// Derived here and never persisted. Inverted at build time because every
+    /// read on the authorization path asks "what does *this* user belong to",
+    /// which the config's group-major layout would answer with a full scan.
+    groups_by_user: HashMap<UserId, BTreeSet<String>>,
+    /// External-name → local-group translation, per source (#7746).
+    group_mapping: UserGroupMapping,
+}
+
+/// Everything config-derived that the authorization indexes are built from.
+///
+/// A struct rather than a growing parameter list: #7746 adds mapped identity
+/// claims as a further input, and threading that through positional arguments
+/// at every call site is how the wrong slice ends up in the wrong position.
+#[derive(Default, Clone, Copy)]
+pub struct AuthInputs<'a> {
+    /// `[[users]]` — the RBAC user list.
+    pub users: &'a [UserConfig],
+    /// `[tool_policy] groups` — tool categories referenced by per-user policy.
+    pub tool_groups: &'a [ToolGroup],
+    /// `[[user_groups]]` — declared groups and their config-declared members.
+    pub user_groups: &'a [UserGroup],
+    /// `[user_group_mapping]` — external names translated onto local groups.
+    pub group_mapping: Option<&'a UserGroupMapping>,
+}
+
+impl<'a> AuthInputs<'a> {
+    /// The user list alone, with no groups and no mapping.
+    pub fn from_users(users: &'a [UserConfig]) -> Self {
+        Self {
+            users,
+            ..Default::default()
+        }
+    }
 }
 
 /// RBAC authentication and authorization manager.
@@ -265,12 +307,28 @@ impl AuthManager {
     /// `ToolPolicy.groups` so per-user `tool_categories` can resolve
     /// group names to their tool patterns.
     pub fn with_tool_groups(user_configs: &[UserConfig], tool_groups: &[ToolGroup]) -> Self {
+        Self::from_inputs(AuthInputs {
+            users: user_configs,
+            tool_groups,
+            ..Default::default()
+        })
+    }
+
+    /// Create an AuthManager from the full set of config-derived inputs,
+    /// including user groups and the external-name mapping (#7745).
+    pub fn from_inputs(inputs: AuthInputs<'_>) -> Self {
         Self {
-            snapshot: ArcSwap::from_pointee(Self::build_snapshot(user_configs, tool_groups)),
+            snapshot: ArcSwap::from_pointee(Self::build_snapshot(inputs)),
         }
     }
 
-    fn build_snapshot(user_configs: &[UserConfig], tool_groups: &[ToolGroup]) -> AuthSnapshot {
+    fn build_snapshot(inputs: AuthInputs<'_>) -> AuthSnapshot {
+        let AuthInputs {
+            users: user_configs,
+            tool_groups,
+            user_groups: group_configs,
+            group_mapping,
+        } = inputs;
         let mut users = HashMap::with_capacity(user_configs.len());
         let mut channel_index = HashMap::new();
         for config in user_configs {
@@ -326,11 +384,77 @@ impl AuthManager {
                 "Registered user"
             );
         }
+        // Derive group membership (#7745). Config declares it group-major
+        // ("support contains paco"); every authorization read asks the
+        // opposite ("what does paco belong to"), so invert it once here
+        // rather than scanning every group on every check.
+        //
+        // A member naming nobody is dropped rather than indexed: there is no
+        // identity to attribute it to, and silently carrying the string would
+        // make a typo look like a membership in the read surfaces. It is
+        // logged so the operator can see the typo, and the group's declared
+        // `members` list is preserved verbatim for display.
+        let mut user_groups: BTreeMap<String, UserGroup> = BTreeMap::new();
+        let mut groups_by_user: HashMap<UserId, BTreeSet<String>> = HashMap::new();
+        for group in group_configs {
+            if let Some(previous) = user_groups.insert(group.id.clone(), group.clone()) {
+                warn!(
+                    group = %group.id,
+                    kept = %group.name,
+                    dropped = %previous.name,
+                    "Duplicate user group id in config; the last declaration wins"
+                );
+            }
+            for member in &group.members {
+                let user_id = UserId::from_name(member);
+                if !users.contains_key(&user_id) {
+                    warn!(
+                        group = %group.id,
+                        member = %member,
+                        "User group lists a member that is not a configured user; ignoring"
+                    );
+                    continue;
+                }
+                groups_by_user
+                    .entry(user_id)
+                    .or_default()
+                    .insert(group.id.clone());
+            }
+        }
+
+        let group_mapping = group_mapping.cloned().unwrap_or_default();
+        for (source, table) in [
+            (GroupMappingSource::Channel, &group_mapping.channel),
+            (GroupMappingSource::Idp, &group_mapping.idp),
+        ] {
+            for (external, target) in table {
+                if !user_groups.contains_key(target) {
+                    warn!(
+                        source = ?source,
+                        external = %external,
+                        target = %target,
+                        "Group mapping points at a group that is not declared; it will grant nothing"
+                    );
+                }
+            }
+        }
+
+        if !user_groups.is_empty() {
+            info!(
+                groups = user_groups.len(),
+                members = groups_by_user.len(),
+                "Registered user groups"
+            );
+        }
+
         AuthSnapshot {
             users,
             channel_index,
             role_cache: DashMap::new(),
             tool_groups: Arc::new(tool_groups.to_vec()),
+            user_groups,
+            groups_by_user,
+            group_mapping,
         }
     }
 
@@ -343,14 +467,103 @@ impl AuthManager {
     /// The replacement is built before publication.
     /// Concurrent readers retain either the complete old generation or the complete new generation.
     pub fn reload(&self, user_configs: &[UserConfig], tool_groups: &[ToolGroup]) {
-        let snapshot = Self::build_snapshot(user_configs, tool_groups);
+        self.reload_from(AuthInputs {
+            users: user_configs,
+            tool_groups,
+            ..Default::default()
+        });
+    }
+
+    /// Replace every authorization index from the full set of config-derived
+    /// inputs, including `[[user_groups]]` and `[user_group_mapping]` (#7745).
+    ///
+    /// Membership is rebuilt from scratch on every reload rather than diffed,
+    /// which is what makes it *derived*: removing a member from `config.toml`
+    /// removes the membership, with no stale row to reconcile.
+    pub fn reload_from(&self, inputs: AuthInputs<'_>) {
+        let snapshot = Self::build_snapshot(inputs);
         let registered_users = snapshot.users.len();
+        let registered_groups = snapshot.user_groups.len();
         self.snapshot.store(Arc::new(snapshot));
         info!(
             users = registered_users,
-            tool_groups = tool_groups.len(),
+            tool_groups = inputs.tool_groups.len(),
+            user_groups = registered_groups,
             "AuthManager reloaded from config"
         );
+    }
+
+    /// Every declared user group, ordered by id.
+    ///
+    /// Ordered because the read surfaces (`GET /api/user-groups`, the
+    /// dashboard, the TUI) should not reshuffle between refreshes when nothing
+    /// changed.
+    pub fn user_groups(&self) -> Vec<UserGroup> {
+        self.snapshot.load().user_groups.values().cloned().collect()
+    }
+
+    /// One declared group by its stable id.
+    pub fn user_group(&self, id: &str) -> Option<UserGroup> {
+        self.snapshot.load().user_groups.get(id).cloned()
+    }
+
+    /// The group ids a user belongs to by config declaration.
+    ///
+    /// Empty for an unknown user, and empty is a real answer: belonging to no
+    /// group is the default state, not an error.
+    pub fn groups_for_user(&self, user_id: UserId) -> BTreeSet<String> {
+        self.snapshot
+            .load()
+            .groups_by_user
+            .get(&user_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Translate external group / role names from one source into local group
+    /// ids (#7746 uses this with `GroupMappingSource::Idp`).
+    ///
+    /// Fails closed twice over: a name with no mapping entry is dropped, and a
+    /// mapping pointing at a group that is not declared is dropped too. An
+    /// external namespace therefore cannot mint a LibreFang group, whether by
+    /// typo or by a stale mapping left behind after a group was deleted.
+    pub fn map_external_groups<'a, I>(
+        &self,
+        source: GroupMappingSource,
+        external_names: I,
+    ) -> BTreeSet<String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let snapshot = self.snapshot.load();
+        external_names
+            .into_iter()
+            .filter_map(|name| snapshot.group_mapping.resolve(source, name))
+            .filter(|id| snapshot.user_groups.contains_key(*id))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Full membership for a user: config-declared groups, plus any granted by
+    /// mapping the external names they arrived with.
+    ///
+    /// The union rather than a precedence rule, because with membership
+    /// derived from config there is no stored record for a claim to contradict
+    /// — both inputs are assertions about the same login. The
+    /// stored-versus-claim precedence question only arises under a persisted
+    /// membership table, which #7745 deliberately does not introduce.
+    pub fn resolve_groups<'a, I>(
+        &self,
+        user_id: UserId,
+        source: GroupMappingSource,
+        external_names: I,
+    ) -> BTreeSet<String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut groups = self.groups_for_user(user_id);
+        groups.extend(self.map_external_groups(source, external_names));
+        groups
     }
 
     /// Identify a user from a channel identity.
@@ -2570,5 +2783,259 @@ mod channel_role_tests {
              take effect on the next resolution. Got role {role_v2:?} — \
              the old Owner survived the reload."
         );
+    }
+}
+
+#[cfg(test)]
+mod user_group_resolution_tests {
+    use super::*;
+
+    fn user(name: &str) -> UserConfig {
+        UserConfig {
+            name: name.to_string(),
+            role: "user".to_string(),
+            channel_bindings: HashMap::new(),
+            api_key_hash: None,
+            budget: None,
+            tool_policy: None,
+            tool_categories: None,
+            memory_access: None,
+            channel_tool_rules: HashMap::new(),
+        }
+    }
+
+    fn group(id: &str, members: &[&str]) -> UserGroup {
+        UserGroup {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    fn manager(
+        users: &[UserConfig],
+        groups: &[UserGroup],
+        mapping: &UserGroupMapping,
+    ) -> AuthManager {
+        AuthManager::from_inputs(AuthInputs {
+            users,
+            tool_groups: &[],
+            user_groups: groups,
+            group_mapping: Some(mapping),
+        })
+    }
+
+    /// The membership case the whole feature exists for: a person is on the
+    /// support rota *and* in the platform team, and both memberships have to
+    /// survive resolution. Config declares this group-major; the answer the
+    /// authorization path needs is user-major.
+    #[test]
+    fn a_user_in_two_groups_resolves_to_both() {
+        let users = [user("paco"), user("mia")];
+        let groups = [
+            group("support", &["paco", "mia"]),
+            group("platform", &["paco"]),
+        ];
+        let mgr = manager(&users, &groups, &UserGroupMapping::default());
+
+        let paco = mgr.groups_for_user(UserId::from_name("paco"));
+        assert_eq!(
+            paco.iter().cloned().collect::<Vec<_>>(),
+            vec!["platform".to_string(), "support".to_string()],
+            "both memberships must resolve, in a deterministic order"
+        );
+
+        let mia = mgr.groups_for_user(UserId::from_name("mia"));
+        assert_eq!(mia.iter().cloned().collect::<Vec<_>>(), vec!["support"]);
+    }
+
+    /// Belonging to nothing is the default state and a legitimate answer, not
+    /// an error and not a reason to invent a group.
+    #[test]
+    fn a_user_in_no_group_resolves_to_nothing() {
+        let users = [user("paco")];
+        let mgr = manager(&users, &[], &UserGroupMapping::default());
+
+        assert!(mgr.groups_for_user(UserId::from_name("paco")).is_empty());
+    }
+
+    /// Fail closed on the local side: a group id nobody declared grants
+    /// nothing, and asking for it does not conjure it into existence.
+    #[test]
+    fn an_undeclared_group_grants_no_membership() {
+        let users = [user("paco")];
+        let groups = [group("support", &["paco"])];
+        let mgr = manager(&users, &groups, &UserGroupMapping::default());
+
+        assert!(
+            mgr.user_group("suport").is_none(),
+            "a misspelled group id must not resolve to the real group"
+        );
+        assert!(!mgr
+            .groups_for_user(UserId::from_name("paco"))
+            .contains("suport"));
+    }
+
+    /// A group listing somebody who is not a configured user has nobody to
+    /// attribute the membership to. Carrying the raw string would make a typo
+    /// indistinguishable from a real member on the read surfaces.
+    #[test]
+    fn a_member_who_is_not_a_configured_user_is_not_indexed() {
+        let users = [user("paco")];
+        let groups = [group("support", &["paco", "ghost"])];
+        let mgr = manager(&users, &groups, &UserGroupMapping::default());
+
+        assert!(mgr.groups_for_user(UserId::from_name("ghost")).is_empty());
+        assert!(mgr
+            .groups_for_user(UserId::from_name("paco"))
+            .contains("support"));
+        assert!(
+            mgr.user_group("support").unwrap().members.contains("ghost"),
+            "the declaration is preserved verbatim so the operator can see the typo"
+        );
+    }
+
+    /// The #7746 mechanism, exercised through its only shipped source. An
+    /// external name that *is* mapped grants the local group it points at.
+    #[test]
+    fn a_mapped_external_name_grants_the_local_group() {
+        let users = [user("paco")];
+        let groups = [group("support", &[])];
+        let mut mapping = UserGroupMapping::default();
+        mapping
+            .channel
+            .insert("Support Team".to_string(), "support".to_string());
+        let mgr = manager(&users, &groups, &mapping);
+
+        let resolved = mgr.map_external_groups(GroupMappingSource::Channel, ["Support Team"]);
+        assert_eq!(
+            resolved.iter().cloned().collect::<Vec<_>>(),
+            vec!["support"]
+        );
+    }
+
+    /// Fail closed on the external side. Both failure shapes are covered
+    /// because they fail for different reasons: no mapping entry at all, and a
+    /// mapping entry pointing at a group that no longer exists.
+    #[test]
+    fn an_unmapped_or_dangling_external_name_grants_nothing() {
+        let users = [user("paco")];
+        let groups = [group("support", &[])];
+        let mut mapping = UserGroupMapping::default();
+        mapping
+            .channel
+            .insert("Support Team".to_string(), "support".to_string());
+        mapping
+            .channel
+            .insert("Old Team".to_string(), "deleted-group".to_string());
+        let mgr = manager(&users, &groups, &mapping);
+
+        assert!(
+            mgr.map_external_groups(GroupMappingSource::Channel, ["Suport Team"])
+                .is_empty(),
+            "an unmapped name must not pass through as a group id"
+        );
+        assert!(
+            mgr.map_external_groups(GroupMappingSource::Channel, ["Old Team"])
+                .is_empty(),
+            "a mapping pointing at an undeclared group must grant nothing"
+        );
+    }
+
+    /// The IdP table ships now but has no producer. It must already work, so
+    /// #7746 adds a caller rather than a mechanism.
+    #[test]
+    fn the_idp_source_is_wired_before_anything_feeds_it() {
+        let users = [user("paco")];
+        let groups = [group("support", &[])];
+        let mut mapping = UserGroupMapping::default();
+        mapping
+            .idp
+            .insert("okta-support".to_string(), "support".to_string());
+        let mgr = manager(&users, &groups, &mapping);
+
+        assert_eq!(
+            mgr.map_external_groups(GroupMappingSource::Idp, ["okta-support"])
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["support"]
+        );
+        assert!(
+            mgr.map_external_groups(GroupMappingSource::Channel, ["okta-support"])
+                .is_empty(),
+            "the two sources must stay separate namespaces"
+        );
+    }
+
+    /// Declared and mapped membership are both assertions about the same
+    /// login, so the resolved set is their union.
+    #[test]
+    fn declared_and_mapped_membership_combine() {
+        let users = [user("paco")];
+        let groups = [group("support", &["paco"]), group("platform", &[])];
+        let mut mapping = UserGroupMapping::default();
+        mapping
+            .channel
+            .insert("Platform Team".to_string(), "platform".to_string());
+        let mgr = manager(&users, &groups, &mapping);
+
+        let resolved = mgr.resolve_groups(
+            UserId::from_name("paco"),
+            GroupMappingSource::Channel,
+            ["Platform Team"],
+        );
+        assert_eq!(
+            resolved.iter().cloned().collect::<Vec<_>>(),
+            vec!["platform".to_string(), "support".to_string()]
+        );
+    }
+
+    /// Membership is derived, not stored, and this is what that buys: a
+    /// reload rebuilds it wholesale, so a member removed from `config.toml` is
+    /// actually gone rather than lingering as a stale row.
+    #[test]
+    fn a_reload_removes_a_membership_that_config_no_longer_declares() {
+        let users = [user("paco")];
+        let mgr = manager(
+            &users,
+            &[group("support", &["paco"])],
+            &UserGroupMapping::default(),
+        );
+        assert!(mgr
+            .groups_for_user(UserId::from_name("paco"))
+            .contains("support"));
+
+        mgr.reload_from(AuthInputs {
+            users: &users,
+            tool_groups: &[],
+            user_groups: &[group("support", &[])],
+            group_mapping: None,
+        });
+
+        assert!(
+            mgr.groups_for_user(UserId::from_name("paco")).is_empty(),
+            "derived membership must not survive its own declaration being removed"
+        );
+    }
+
+    /// The read surfaces list groups in a stable order regardless of how the
+    /// operator happened to order the config blocks.
+    #[test]
+    fn declared_groups_list_in_a_stable_order() {
+        let users = [user("paco")];
+        let mgr = manager(
+            &users,
+            &[
+                group("support", &[]),
+                group("audit", &[]),
+                group("ops", &[]),
+            ],
+            &UserGroupMapping::default(),
+        );
+
+        let ids: Vec<String> = mgr.user_groups().into_iter().map(|g| g.id).collect();
+        assert_eq!(ids, vec!["audit", "ops", "support"]);
     }
 }

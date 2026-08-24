@@ -518,8 +518,16 @@ pub fn build_reload_plan_with_caps(
     // memory_access) or the tool group catalogue used for category
     // resolution. Without this, a `/api/config/reload` after a policy
     // edit is a silent no-op.
+    //
+    // `[[user_groups]]` and `[user_group_mapping]` (#7745) feed the same
+    // rebuild: membership is derived in the AuthManager snapshot rather than
+    // stored, so a fresh snapshot *is* the reload. Classified hot for the same
+    // reason `[[users]]` is — an operator adding somebody to a group and
+    // calling `/api/config/reload` must not need a daemon restart to see it.
     if field_changed(&old.users, &new.users)
         || field_changed(&old.tool_policy.groups, &new.tool_policy.groups)
+        || field_changed(&old.user_groups, &new.user_groups)
+        || field_changed(&old.user_group_mapping, &new.user_group_mapping)
     {
         plan.hot_actions.push(HotAction::ReloadAuth);
     }
@@ -844,9 +852,7 @@ pub fn build_reload_plan_with_caps(
                 &new.webui_request_timeout_secs,
             ),
             "webui_request_timeout_secs",
-        ); // The identity model (membership) is not re-telegraphed in place:
-           // restart-required, like users.
-        restart_if_changed(field_changed(&old.groups, &new.groups), "groups");
+        );
     }
 
     // -- NOOP: read live from `config_ref()` / `self.config.load()` per
@@ -1035,7 +1041,8 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "provider_regions",
         "tool_policy",
         "users",
-        "groups",
+        "user_groups",
+        "user_group_mapping",
         "webui_request_timeout_secs",
         "proactive_memory",
         "queue",

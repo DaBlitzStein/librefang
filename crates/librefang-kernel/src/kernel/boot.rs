@@ -1066,7 +1066,12 @@ impl LibreFangKernel {
         // Initialize RBAC authentication manager. Tool groups are passed
         // through so per-user `tool_categories` (RBAC M3) can resolve
         // group names to their tool patterns.
-        let auth = AuthManager::with_tool_groups(&config.users, &config.tool_policy.groups);
+        let auth = AuthManager::from_inputs(crate::auth::AuthInputs {
+            users: &config.users,
+            tool_groups: &config.tool_policy.groups,
+            user_groups: &config.user_groups,
+            group_mapping: Some(&config.user_group_mapping),
+        });
         if auth.is_enabled() {
             info!("RBAC enabled with {} users", auth.user_count());
         }

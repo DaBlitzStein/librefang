@@ -486,13 +486,17 @@ impl LibreFangKernel {
                 }
                 HotAction::ReloadAuth => {
                     info!(
-                        "Hot-reload: rebuilding AuthManager ({} users, {} tool groups)",
+                        "Hot-reload: rebuilding AuthManager ({} users, {} tool groups, {} user groups)",
                         new_config.users.len(),
                         new_config.tool_policy.groups.len(),
+                        new_config.user_groups.len(),
                     );
-                    self.security
-                        .auth
-                        .reload(&new_config.users, &new_config.tool_policy.groups);
+                    self.security.auth.reload_from(crate::auth::AuthInputs {
+                        users: &new_config.users,
+                        tool_groups: &new_config.tool_policy.groups,
+                        user_groups: &new_config.user_groups,
+                        group_mapping: Some(&new_config.user_group_mapping),
+                    });
                     // Re-validate channel-role-mapping role strings on
                     // every reload so an operator who just edited the
                     // config and introduced a typo sees a WARN instead

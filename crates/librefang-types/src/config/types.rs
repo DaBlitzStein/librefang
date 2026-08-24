@@ -393,8 +393,23 @@ impl std::str::FromStr for UpdateChannel {
 }
 
 /// A named set of users that can own things (#7745).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GroupConfig {
+///
+/// **Flat by design: a user group never contains another user group.**
+/// This is stated in the type rather than left to be discovered because it is
+/// a decision, not an omission. Nesting buys local expressiveness at the cost
+/// of cycle detection on every membership change and a transitive-closure walk
+/// on every authorization check — but the deciding argument is external: every
+/// identity provider LibreFang federates with hands us an already *flattened*
+/// group list on the token. Nesting would be structure the authoritative
+/// source cannot express, so it would drift on the first login. Flat is the
+/// correct shape here, not a simplification of one.
+///
+/// Named `UserGroup` and not `Group` because [`crate::tool_policy::ToolGroup`]
+/// is already surfaced to operators as `tool_policy.groups`. A bare
+/// `[[groups]]` table would be genuinely ambiguous against a concept operators
+/// already use for something unrelated.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UserGroup {
     /// Stable identifier used wherever a group is referenced.
     ///
     /// Referenced by ownership records rather than the display name, because a
@@ -414,19 +429,80 @@ pub struct GroupConfig {
     /// Names rather than a second id space: users are already addressed by
     /// name everywhere else in this file, and two identifier schemes for the
     /// same entity is how membership drifts out of sync with the user list.
+    ///
+    /// A `BTreeSet` rather than a `Vec` for two reasons that both bite in
+    /// practice: an operator listing the same member twice is a typo and not a
+    /// double membership, and group names are the kind of thing that ends up
+    /// stringified into a prompt — where `HashSet`/`Vec` ordering would vary
+    /// per process and silently invalidate provider prompt caches. The
+    /// deterministic-ordering rule in `CLAUDE.md` asks for the container to
+    /// enforce this so nobody has to remember to sort at the boundary.
     #[serde(default)]
-    pub members: Vec<String>,
+    pub members: std::collections::BTreeSet<String>,
 }
 
-#[allow(clippy::derivable_impls)]
-impl Default for GroupConfig {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            description: String::new(),
-            members: Vec::new(),
+/// Which namespace an external group or role name arrived from.
+///
+/// Three distinct namespaces have to resolve into LibreFang's one: platform
+/// roles carried on channel bindings (`BindingContext.roles` — Discord guild
+/// roles and their equivalents), groups declared locally in `config.toml`, and
+/// groups asserted by an external identity provider (#7746). Local groups are
+/// the *target* and need no translation; the other two are sources, and they
+/// get one mechanism rather than one each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GroupMappingSource {
+    /// Platform-native roles arriving on a channel binding.
+    Channel,
+    /// Groups asserted by an external identity provider (#7746).
+    Idp,
+}
+
+/// Maps external group and role names onto local [`UserGroup`] ids.
+///
+/// Deliberately shaped as one table per source rather than a separate type per
+/// source, so that #7746 *feeds* the `idp` table instead of inventing a
+/// parallel concept. Both tables ship now; only `channel` has a producer
+/// today.
+///
+/// This extends the [`ChannelRoleMapping`] precedent rather than paralleling
+/// it, including the part that matters most: resolution **fails closed**. A
+/// name absent from the table, or one pointing at a group that is not
+/// declared, grants no membership at all — the same reason
+/// `UserRole::try_from_str_role` returns `None` instead of defaulting, so that
+/// a typo under-grants rather than over-grants.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UserGroupMapping {
+    /// Platform role name → local `UserGroup::id`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub channel: BTreeMap<String, String>,
+    /// Identity-provider group name → local `UserGroup::id`. Unfed until
+    /// #7746; present now so that issue adds a producer, not a shape.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub idp: BTreeMap<String, String>,
+}
+
+impl UserGroupMapping {
+    /// Returns true when no source declares any mapping.
+    pub fn is_empty(&self) -> bool {
+        self.channel.is_empty() && self.idp.is_empty()
+    }
+
+    /// The mapping table for one source.
+    pub fn table(&self, source: GroupMappingSource) -> &BTreeMap<String, String> {
+        match source {
+            GroupMappingSource::Channel => &self.channel,
+            GroupMappingSource::Idp => &self.idp,
         }
+    }
+
+    /// Translate one external name into a local group id.
+    ///
+    /// `None` for anything not explicitly mapped — the fail-closed half of the
+    /// contract. Callers must treat `None` as "no membership", never as "keep
+    /// the name as-is": passing an unmapped external name through would let an
+    /// external namespace mint LibreFang groups by accident.
+    pub fn resolve(&self, source: GroupMappingSource, external: &str) -> Option<&str> {
+        self.table(source).get(external).map(String::as_str)
     }
 }
 
@@ -3585,8 +3661,21 @@ pub struct KernelConfig {
     /// day. Kept beside `users` in `config.toml` rather than in the database
     /// because that is where users already live, and splitting one identity
     /// model across two stores is how the two stop agreeing.
+    ///
+    /// Membership is *derived*, never persisted: it is resolved in memory by
+    /// `AuthManager` from these declarations plus, once #7746 lands, mapped
+    /// identity-provider claims. A stored membership table would become a
+    /// cache pretending to be a record the moment the provider is
+    /// authoritative on every login.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub groups: Vec<GroupConfig>,
+    pub user_groups: Vec<UserGroup>,
+    /// Translates external group and role names into [`UserGroup`] ids.
+    ///
+    /// One mechanism, several sources — see [`UserGroupMapping`]. Resolution
+    /// fails closed, so an unmapped or misspelled external name grants
+    /// nothing.
+    #[serde(default, skip_serializing_if = "UserGroupMapping::is_empty")]
+    pub user_group_mapping: UserGroupMapping,
     /// Maps platform-native channel roles (Telegram admin, Discord guild
     /// roles, Slack workspace roles) to LibreFang `UserRole`. Used by
     /// `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role`
@@ -6615,7 +6704,8 @@ impl Default for KernelConfig {
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),
-            groups: Vec::new(),
+            user_groups: Vec::new(),
+            user_group_mapping: UserGroupMapping::default(),
             channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
             mcp_runtime_store: McpRuntimeStore::default(),
@@ -8843,40 +8933,113 @@ rule_sets = ["browser_handles", "pii_baseline"]
 }
 
 #[cfg(test)]
-mod group_config_tests {
+mod user_group_tests {
     use super::*;
 
     /// Groups live beside users in `config.toml` (#7745), so the first thing
     /// that has to hold is that an operator can write the block by hand and
     /// have it survive a parse.
     #[test]
-    fn a_group_block_parses_from_config_toml() {
+    fn a_user_group_block_parses_from_config_toml() {
         let cfg: KernelConfig = toml::from_str(
             r#"
             [[users]]
             name = "paco"
             role = "owner"
 
-            [[groups]]
+            [[user_groups]]
             id = "support"
             name = "Support"
             description = "First-line support rota"
             members = ["paco"]
             "#,
         )
-        .expect("a hand-written groups block must parse");
+        .expect("a hand-written user_groups block must parse");
 
-        assert_eq!(cfg.groups.len(), 1);
-        assert_eq!(cfg.groups[0].id, "support");
-        assert_eq!(cfg.groups[0].members, vec!["paco".to_string()]);
+        assert_eq!(cfg.user_groups.len(), 1);
+        assert_eq!(cfg.user_groups[0].id, "support");
+        assert!(cfg.user_groups[0].members.contains("paco"));
     }
 
     /// A config with no groups is every existing deployment, so the field must
     /// be optional rather than required.
     #[test]
-    fn groups_are_absent_by_default() {
+    fn user_groups_are_absent_by_default() {
         let cfg: KernelConfig = toml::from_str("").expect("an empty config must parse");
-        assert!(cfg.groups.is_empty());
+        assert!(cfg.user_groups.is_empty());
+    }
+
+    /// The table is keyed `user_groups`, not `groups`, because
+    /// `[tool_policy] groups` is an unrelated operator-facing concept. A
+    /// config written against the old key must not be silently half-read: it
+    /// has to leave `user_groups` empty rather than populate it.
+    #[test]
+    fn the_old_bare_groups_key_does_not_populate_user_groups() {
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [[groups]]
+            id = "support"
+            name = "Support"
+            "#,
+        )
+        .expect("an unknown table is ignored rather than fatal");
+
+        assert!(
+            cfg.user_groups.is_empty(),
+            "a bare [[groups]] block must not be mistaken for a user group"
+        );
+    }
+
+    /// Listing the same member twice is a typo, not a double membership, and
+    /// the container is what enforces that so no caller has to remember to
+    /// dedup.
+    #[test]
+    fn a_member_listed_twice_counts_once() {
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [[user_groups]]
+            id = "support"
+            name = "Support"
+            members = ["paco", "paco"]
+            "#,
+        )
+        .expect("a duplicated member must parse rather than error");
+
+        assert_eq!(cfg.user_groups[0].members.len(), 1);
+    }
+
+    /// Group names are the kind of thing that ends up stringified into a
+    /// prompt, where per-process ordering variance silently invalidates
+    /// provider prompt caches. `BTreeSet` makes the ordering a property of the
+    /// type rather than of every call site that reads it.
+    #[test]
+    fn membership_iterates_in_a_stable_order_regardless_of_declaration_order() {
+        let declared: KernelConfig = toml::from_str(
+            r#"
+            [[user_groups]]
+            id = "support"
+            name = "Support"
+            members = ["zoe", "adam", "mia"]
+            "#,
+        )
+        .unwrap();
+        let reversed: KernelConfig = toml::from_str(
+            r#"
+            [[user_groups]]
+            id = "support"
+            name = "Support"
+            members = ["mia", "adam", "zoe"]
+            "#,
+        )
+        .unwrap();
+
+        let order = |c: &KernelConfig| c.user_groups[0].members.iter().cloned().collect::<Vec<_>>();
+        assert_eq!(order(&declared), vec!["adam", "mia", "zoe"]);
+        assert_eq!(
+            order(&declared),
+            order(&reversed),
+            "declaration order must not reach a prompt"
+        );
     }
 
     /// The id is what ownership records point at, and it has to be separable
@@ -8884,7 +9047,7 @@ mod group_config_tests {
     /// dissolved, and a rename must not orphan everything the group owns.
     #[test]
     fn renaming_a_group_leaves_its_id_alone() {
-        let mut group = GroupConfig {
+        let mut group = UserGroup {
             id: "support".to_string(),
             name: "Support".to_string(),
             ..Default::default()
@@ -8897,14 +9060,14 @@ mod group_config_tests {
         );
     }
 
-    /// Serialising must not leave a stranded `[[groups]]` in an operator's
-    /// file when there are no groups.
+    /// Serialising must not leave a stranded `[[user_groups]]` in an
+    /// operator's file when there are no groups.
     ///
     /// Scoped to the root section on purpose: `[tool_policy]` has its own
     /// unrelated `groups` key, and a substring match against the whole
     /// document reports that one and fails for the wrong reason.
     #[test]
-    fn an_empty_group_list_writes_nothing() {
+    fn an_empty_user_group_list_writes_nothing() {
         let cfg = KernelConfig::default();
         let out = toml::to_string(&cfg).expect("default config serialises");
 
@@ -8919,9 +9082,101 @@ mod group_config_tests {
             "an empty list must leave no stranded key behind, got: {root}"
         );
         assert!(
-            !out.contains("[[groups]]"),
+            !out.contains("[[user_groups]]"),
             "an empty list must not emit an array-of-tables header"
         );
+        assert!(
+            !out.contains("[user_group_mapping]"),
+            "an empty mapping must not emit a table header either"
+        );
+    }
+}
+
+#[cfg(test)]
+mod user_group_mapping_tests {
+    use super::*;
+
+    /// The mapping is the piece #7746 inherits, so the operator-facing shape
+    /// has to be writable by hand today, with the IdP table present before
+    /// anything feeds it.
+    #[test]
+    fn both_source_tables_parse_from_config_toml() {
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [user_group_mapping.channel]
+            "Support Team" = "support"
+
+            [user_group_mapping.idp]
+            "okta-support" = "support"
+            "#,
+        )
+        .expect("a hand-written mapping block must parse");
+
+        assert_eq!(
+            cfg.user_group_mapping
+                .resolve(GroupMappingSource::Channel, "Support Team"),
+            Some("support")
+        );
+        assert_eq!(
+            cfg.user_group_mapping
+                .resolve(GroupMappingSource::Idp, "okta-support"),
+            Some("support")
+        );
+    }
+
+    /// The fail-closed half of the contract, and the whole reason this extends
+    /// `ChannelRoleMapping`/`try_from_str_role` rather than paralleling it: an
+    /// unmapped name grants nothing. Returning the name unchanged would let an
+    /// external namespace mint LibreFang groups by typo.
+    #[test]
+    fn an_unmapped_name_resolves_to_nothing() {
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [user_group_mapping.channel]
+            "Support Team" = "support"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cfg.user_group_mapping
+                .resolve(GroupMappingSource::Channel, "Suport Team"),
+            None,
+            "a misspelled source name must under-grant, never pass through"
+        );
+    }
+
+    /// The two sources are separate namespaces. A name mapped for one must not
+    /// leak into the other, or #7746 wiring the IdP table would retroactively
+    /// change what channel roles grant.
+    #[test]
+    fn the_sources_do_not_share_a_namespace() {
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [user_group_mapping.idp]
+            "support" = "support"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cfg.user_group_mapping
+                .resolve(GroupMappingSource::Idp, "support"),
+            Some("support")
+        );
+        assert_eq!(
+            cfg.user_group_mapping
+                .resolve(GroupMappingSource::Channel, "support"),
+            None,
+            "an IdP mapping must not grant anything on the channel path"
+        );
+    }
+
+    /// Every existing deployment has no mapping at all.
+    #[test]
+    fn a_mapping_is_absent_by_default() {
+        let cfg: KernelConfig = toml::from_str("").expect("an empty config must parse");
+        assert!(cfg.user_group_mapping.is_empty());
     }
 }
 
