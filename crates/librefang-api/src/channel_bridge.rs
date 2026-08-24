@@ -1362,6 +1362,62 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
+    async fn create_and_start_goal(
+        &self,
+        agent_id: AgentId,
+        description: &str,
+        loop_engineering: bool,
+    ) -> Result<String, String> {
+        let goal_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let title = description.chars().take(256).collect::<String>();
+        let entry = serde_json::json!({
+            "id": goal_id,
+            "title": title,
+            "description": description,
+            "status": "pending",
+            "progress": 0,
+            "agent_id": agent_id.to_string(),
+            "loop_engineering": loop_engineering,
+            "created_at": now,
+            "updated_at": now,
+        });
+
+        let shared_id = librefang_types::goal::goals_storage_agent_id();
+        let key = librefang_types::goal::GOALS_STORAGE_KEY;
+        self.kernel
+            .memory_substrate()
+            .structured_modify(shared_id, key, |current| {
+                let mut goals: Vec<serde_json::Value> = match current {
+                    Some(serde_json::Value::Array(arr)) => arr,
+                    _ => Vec::new(),
+                };
+                goals.push(entry.clone());
+                Ok((serde_json::Value::Array(goals), ()))
+            })
+            .map_err(|e| format!("Failed to create goal: {e}"))?;
+
+        let goal_id_parsed: librefang_types::goal::GoalId = goal_id
+            .parse()
+            .map_err(|e| format!("Invalid goal id: {e}"))?;
+
+        let started =
+            self.kernel
+                .start_goal_run(goal_id_parsed, agent_id, None /* max_iterations */);
+        if started {
+            Ok(format!(
+                "Goal created and started: {description} (ID: {goal_id})"
+            ))
+        } else {
+            // The goal document is already persisted, so the operator does not
+            // lose the request — only the run failed to schedule.
+            Ok(format!(
+                "Goal created (ID: {goal_id}) but the run could not start — \
+                 kernel self-handle unset. Restart the daemon and resume the goal."
+            ))
+        }
+    }
+
     async fn list_triggers_text(&self) -> String {
         let triggers = self.kernel.trigger_engine().list_all();
         if triggers.is_empty() {
