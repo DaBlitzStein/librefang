@@ -391,6 +391,24 @@ impl App {
                 self.sessions.status_msg =
                     crate::i18n::t_args("tui-mod-session-deleted", &[("id", &id)]);
             }
+            AppEvent::BackupsLoaded(items) => {
+                self.settings.backups = items;
+                if !self.settings.backups.is_empty() {
+                    self.settings.backup_list.select(Some(0));
+                }
+                self.settings.backup_msg.clear();
+            }
+            AppEvent::BackupCreated(msg) => {
+                self.settings.backup_msg = msg;
+                self.refresh_settings_backups();
+            }
+            AppEvent::BackupRestored(msg) => {
+                self.settings.backup_msg = msg;
+            }
+            AppEvent::BackupDeleted(msg) => {
+                self.settings.backup_msg = msg;
+                self.refresh_settings_backups();
+            }
             AppEvent::MemoryAgentsLoaded(agents) => {
                 self.memory.agents = agents;
                 if !self.memory.agents.is_empty() {
@@ -1168,6 +1186,36 @@ impl App {
         }
     }
 
+    fn refresh_settings_backups(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            event::spawn_fetch_backups(backend, self.event_tx.clone());
+        }
+    }
+
+    fn create_backup(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            event::spawn_create_backup(backend, self.event_tx.clone());
+        }
+    }
+
+    fn restore_backup(&mut self, filename: String, keep_config: bool, components: Vec<String>) {
+        if let Some(backend) = self.backend.to_ref() {
+            event::spawn_restore_backup(
+                backend,
+                filename,
+                keep_config,
+                components,
+                self.event_tx.clone(),
+            );
+        }
+    }
+
+    fn delete_backup(&mut self, filename: String) {
+        if let Some(backend) = self.backend.to_ref() {
+            event::spawn_delete_backup(backend, filename, self.event_tx.clone());
+        }
+    }
+
     fn refresh_settings_providers(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
             self.settings.loading = true;
@@ -1732,6 +1780,16 @@ impl App {
     fn handle_settings_action(&mut self, action: settings::SettingsAction) {
         match action {
             settings::SettingsAction::Continue => {}
+            settings::SettingsAction::RefreshBackups => self.refresh_settings_backups(),
+            settings::SettingsAction::CreateBackup => self.create_backup(),
+            settings::SettingsAction::RestoreBackup {
+                filename,
+                keep_config,
+                components,
+            } => {
+                self.restore_backup(filename, keep_config, components);
+            }
+            settings::SettingsAction::DeleteBackup(filename) => self.delete_backup(filename),
             settings::SettingsAction::RefreshProviders => self.refresh_settings_providers(),
             settings::SettingsAction::RefreshModels => self.refresh_settings_models(),
             settings::SettingsAction::RefreshTools => self.refresh_settings_tools(),

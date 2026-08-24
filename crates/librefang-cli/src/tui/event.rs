@@ -65,7 +65,10 @@ pub enum AppEvent {
     /// The kernel failed to boot.
     KernelError(String),
     /// An agent was successfully spawned (daemon mode).
-    AgentSpawned { id: String, name: String },
+    AgentSpawned {
+        id: String,
+        name: String,
+    },
     /// Agent spawn failed.
     AgentSpawnError(String),
     /// Daemon detection result from background thread.
@@ -107,7 +110,9 @@ pub enum AppEvent {
     /// Trigger deleted.
     TriggerDeleted(String),
     /// Agent killed successfully.
-    AgentKilled { id: String },
+    AgentKilled {
+        id: String,
+    },
     /// Agent kill failed.
     AgentKillError(String),
     /// Generic fetch error for any tab.
@@ -120,10 +125,17 @@ pub enum AppEvent {
     SessionDeleted(String),
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
+    /// The archives `GET /api/backups` reports, newest first.
+    BackupsLoaded(Vec<crate::tui::screens::settings::BackupEntry>),
+    BackupCreated(String),
+    BackupRestored(String),
+    BackupDeleted(String),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
-    MemoryKvSaved { key: String },
+    MemoryKvSaved {
+        key: String,
+    },
     /// Memory KV deleted.
     MemoryKvDeleted(String),
     /// Skills loaded.
@@ -142,11 +154,17 @@ pub enum AppEvent {
     AgentTemplatesLoaded(Vec<TemplateInfo>),
     /// The verbatim `agent.toml` for one manifest-backed agent type.
     /// `None` means it could not be read; the screen reports that rather than spawning something it made up.
-    TemplateTomlLoaded { name: String, toml: Option<String> },
+    TemplateTomlLoaded {
+        name: String,
+        toml: Option<String>,
+    },
     /// Security features loaded.
     SecurityLoaded(Vec<SecurityFeature>),
     /// Security chain verification result.
-    SecurityChainVerified { valid: bool, message: String },
+    SecurityChainVerified {
+        valid: bool,
+        message: String,
+    },
     /// Audit entries loaded (full audit screen).
     AuditEntriesLoaded(Vec<AuditEntry>),
     /// Audit chain verified.
@@ -223,7 +241,10 @@ pub enum AppEvent {
 
     // ── Async chat helpers (previously blocking on the event-loop thread) ──
     /// Agent model label fetched for chat header.
-    ChatModelLabelLoaded { agent_id: String, label: String },
+    ChatModelLabelLoaded {
+        agent_id: String,
+        label: String,
+    },
     /// Model list loaded for the model picker in chat.
     ChatModelsForPicker(Vec<super::screens::chat::ModelEntry>),
     /// Agent list loaded for the /agents chat command.
@@ -1428,6 +1449,99 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
 }
 
 /// Fetch agents for memory screen agent selector.
+pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/backups")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let mut items: Vec<crate::tui::screens::settings::BackupEntry> = body
+                        ["backups"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .map(|b| crate::tui::screens::settings::BackupEntry {
+                                    filename: b["filename"].as_str().unwrap_or("").to_string(),
+                                    size_bytes: b["size_bytes"].as_u64().unwrap_or(0),
+                                    created_at: b["created_at"].as_str().unwrap_or("").to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    items.sort_by(|a, b| b.filename.cmp(&a.filename));
+                    let _ = tx.send(AppEvent::BackupsLoaded(items));
+                }
+            }
+        }
+    });
+}
+
+pub fn spawn_create_backup(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let ok = client
+                .post(format!("{base_url}/api/backup"))
+                .json(&serde_json::json!({}))
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            let _ = tx.send(AppEvent::BackupCreated(if ok {
+                "created".to_string()
+            } else {
+                "failed".to_string()
+            }));
+        }
+    });
+}
+
+pub fn spawn_restore_backup(
+    backend: BackendRef,
+    filename: String,
+    keep_config: bool,
+    components: Vec<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let ok = client
+                .post(format!("{base_url}/api/restore"))
+                .json(&serde_json::json!({
+                    "filename": filename,
+                    "keep_config": keep_config,
+                    "components": components,
+                }))
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            let _ = tx.send(AppEvent::BackupRestored(if ok {
+                "restored".to_string()
+            } else {
+                "restore failed".to_string()
+            }));
+        }
+    });
+}
+
+pub fn spawn_delete_backup(backend: BackendRef, filename: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let ok = client
+                .delete(format!("{base_url}/api/backups/{filename}"))
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            let _ = tx.send(AppEvent::BackupDeleted(if ok {
+                "deleted".to_string()
+            } else {
+                "delete failed".to_string()
+            }));
+        }
+    });
+}
+
 pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
