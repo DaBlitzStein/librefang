@@ -102,17 +102,19 @@ mod llm_drivers;
 mod mcp_setup;
 mod mcp_summary;
 mod messaging;
+pub mod mission_workspace;
 mod pooled_driver;
 mod prompt_context;
 mod provider_probe;
 mod reviewer_sanitize;
 mod session_ops;
 mod spawn;
+pub mod step_agent;
 mod subsystem_forwards;
 pub mod subsystems;
 mod task_registry;
 mod tools_and_skills;
-pub use tools_and_skills::{SemanticMemoryAccess, SkillReloadOutcome};
+pub use tools_and_skills::{PendingSkillMcpDeclarations, SemanticMemoryAccess, SkillReloadOutcome};
 mod triggers_and_workflow;
 
 // `cron_deliver_response`, `cron_fan_out_targets`, and `cron_script_wake_gate`
