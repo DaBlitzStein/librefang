@@ -578,7 +578,7 @@ export function GoalsPage() {
                                 {statusLabel(status)}
                               </Badge>
                               {r.goal.loop_engineering && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand/10 text-brand font-bold shrink-0">{t("goals.loop_engineering")}</span>
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand/10 text-brand font-bold shrink-0">{t("goals.loop_badge")}</span>
                               )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
