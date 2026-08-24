@@ -412,7 +412,7 @@
         "tags": [
           "system"
         ],
-        "summary": "GET /api/agent-types/:name — Get agent type details.",
+        "summary": "GET /api/agent-types/:name — Get agent type details, plus a read-only privacy pass over the manifest for registry promotion (#7771).",
         "operationId": "get_agent_type",
         "parameters": [
           {
@@ -427,7 +427,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Agent type details",
+            "description": "Agent type details, plus a read-only privacy pass over the manifest for registry promotion",
             "content": {
               "application/json": {
                 "schema": {
@@ -12413,7 +12413,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Agent type details (deprecated alias of GET /api/agent-types/:name)",
+            "description": "Agent type details, plus a read-only privacy pass over the manifest for registry promotion (deprecated alias of GET /api/agent-types/:name)",
             "content": {
               "application/json": {
                 "schema": {

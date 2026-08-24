@@ -116,7 +116,7 @@ pub mod subsystems;
 mod task_registry;
 mod tools_and_skills;
 pub use tools_and_skills::PendingSkillMcpDeclarations;
-pub use tools_and_skills::SkillReloadOutcome;
+pub use tools_and_skills::{SemanticMemoryAccess, SkillReloadOutcome};
 mod triggers_and_workflow;
 
 // `cron_deliver_response`, `cron_fan_out_targets`, and `cron_script_wake_gate`

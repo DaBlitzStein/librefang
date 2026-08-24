@@ -271,14 +271,24 @@ fn build_catalog_entries(
             let prior = previous.get(&key).copied();
             let limit = limits.get(&key).copied().unwrap_or_default();
 
-            let context_window = limit
+            // Capacity moves as one unit with its provenance, the same way
+            // pricing does below (#7780). `0` is overloaded in the catalog —
+            // it means both "not applicable" (an image model has no token
+            // context) and "nobody told us" — and `limits_known` is the only
+            // thing that separates the two readings. A gateway that publishes
+            // no capacity for a model has said nothing, not zero, so its
+            // silence must not be recorded as a discovered ceiling: the flag
+            // is true only when `/model/info` reported a number or a prior
+            // entry carried a real one forward.
+            let reported_context = limit
                 .context_window
-                .or_else(|| prior.map(|p| p.context_window).filter(|c| *c > 0))
-                .unwrap_or(0);
-            let max_output_tokens = limit
+                .or_else(|| prior.map(|p| p.context_window).filter(|c| *c > 0));
+            let reported_max_output = limit
                 .max_output_tokens
-                .or_else(|| prior.map(|p| p.max_output_tokens).filter(|c| *c > 0))
-                .unwrap_or(0);
+                .or_else(|| prior.map(|p| p.max_output_tokens).filter(|c| *c > 0));
+            let limits_known = reported_context.is_some() || reported_max_output.is_some();
+            let context_window = reported_context.unwrap_or(0);
+            let max_output_tokens = reported_max_output.unwrap_or(0);
 
             // Pricing moves as one unit: a cost is never carried forward
             // while `pricing_known` is reset, and `0.0 / 0.0` is never
@@ -308,6 +318,7 @@ fn build_catalog_entries(
                 modality: prior.map(|p| p.modality).unwrap_or(Modality::Text),
                 context_window,
                 max_output_tokens,
+                limits_known,
                 input_cost_per_m,
                 output_cost_per_m,
                 pricing_known,
@@ -745,6 +756,14 @@ mod tests {
         assert_eq!(entries[0].context_window, 0);
         assert_eq!(entries[0].max_output_tokens, 0);
         assert!(!entries[0].pricing_known);
+        // `0` reads as both "not applicable" and "nobody told us"; only this
+        // flag separates them (#7780). A gateway that published nothing must
+        // not have its silence recorded as a discovered ceiling, or the
+        // provider picker presents a LibreFang default as a probed fact.
+        assert!(
+            !entries[0].limits_known,
+            "a gateway that published no capacity leaves the limits unknown"
+        );
     }
 
     #[test]
@@ -764,8 +783,26 @@ mod tests {
         let entries = build_catalog_entries("litellm", &live_ids, &limits, &[]);
         assert_eq!(entries[0].context_window, 128_000);
         assert_eq!(entries[0].max_output_tokens, 8_192);
+        assert!(
+            entries[0].limits_known,
+            "a number the gateway reported is a discovered fact, not a default"
+        );
         assert!(entries[0].pricing_known);
         assert_eq!(entries[0].input_cost_per_m, 3.0);
+    }
+
+    /// A prior entry's capacity is carried forward when the gateway goes
+    /// quiet, so the provenance flag has to travel with it — otherwise a
+    /// single silent probe demotes a real, previously-discovered ceiling to
+    /// "unknown" and the budget math falls back to the conservative default
+    /// for a model whose true window is on record.
+    #[test]
+    fn carried_forward_limits_stay_known() {
+        let live_ids = vec!["pakllm".to_string()];
+        let existing = vec![text_entry("pakllm", "litellm")];
+        let entries = build_catalog_entries("litellm", &live_ids, &HashMap::new(), &existing);
+        assert_eq!(entries[0].context_window, 200_000);
+        assert!(entries[0].limits_known);
     }
 
     #[test]

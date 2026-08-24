@@ -46,12 +46,26 @@ export function SliderInput({
   const { t } = useTranslation();
   const id = useId();
 
+  // Bounds arrive from a model catalog, so they can be inverted or absent, and
+  // the value can be outside them or not a number at all (refs #7444). Normalize
+  // once, here, so every position, attribute, and emitted value downstream is
+  // derived from a range that is known to be well-ordered.
+  const lowerBound = Math.min(min, max);
+  const upperBound = Math.max(min, max);
+  const clamp = (nextValue: number) =>
+    Math.min(upperBound, Math.max(lowerBound, nextValue));
+  const boundedValue = Number.isFinite(value) ? clamp(value) : lowerBound;
+  const emitValue = (rawValue: string) => {
+    const nextValue = Number.parseFloat(rawValue);
+    if (Number.isFinite(nextValue)) onChange(clamp(nextValue));
+  };
+
   // Index-addressed when `steps` is given: the last position is Custom, so the
   // track runs 0..steps.length inclusive.
   const customIndex = steps ? steps.length : -1;
   const stepIndex = steps
     ? (() => {
-        const exact = steps.indexOf(value);
+        const exact = steps.indexOf(boundedValue);
         // A value that is not one of the fixed sizes is Custom by definition —
         // including one typed into the number field, so the control never
         // silently rounds an operator's deliberate number to the nearest step.
@@ -60,10 +74,10 @@ export function SliderInput({
     : 0;
   const isCustom = steps ? stepIndex === customIndex : false;
 
-  const sliderMin = steps ? 0 : min;
-  const sliderMax = steps ? customIndex : max;
+  const sliderMin = steps ? 0 : lowerBound;
+  const sliderMax = steps ? customIndex : upperBound;
   const sliderStep = steps ? 1 : step;
-  const sliderValue = steps ? stepIndex : value;
+  const sliderValue = steps ? stepIndex : boundedValue;
 
   const pct =
     sliderMax === sliderMin
@@ -89,13 +103,10 @@ export function SliderInput({
         <div className="flex items-center gap-2">
           <input
             type="number"
-            value={value}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (!isNaN(v)) onChange(Math.min(max, Math.max(min, v)));
-            }}
-            min={min}
-            max={max}
+            value={boundedValue}
+            onChange={(e) => emitValue(e.target.value)}
+            min={lowerBound}
+            max={upperBound}
             step={step}
             disabled={!enabled}
             className={`w-20 rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs text-right font-mono outline-none focus:border-brand disabled:cursor-not-allowed ${dim}`}
@@ -117,7 +128,7 @@ export function SliderInput({
               // leaves 32px of usable width), the knob is 16px, so its travel
               // is exactly 32 - 16 = 16px = translate-x-4. Off is translate-x-0,
               // flush against the padding. Nothing can spill past either edge.
-              className={`flex items-center w-9 h-5 p-0.5 shrink-0 rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${
+              className={`flex items-center w-9 h-5 p-0.5 shrink-0 rounded-full transition-colors outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${
                 enabled ? "bg-brand" : "bg-text-dim hover:bg-text-dim/80"
               }`}
             >
@@ -138,15 +149,19 @@ export function SliderInput({
         step={sliderStep}
         value={sliderValue}
         onChange={(e) => {
-          const raw = parseFloat(e.target.value);
           if (!steps) {
-            onChange(raw);
+            // Same clamp as the number field: a range input can still report an
+            // out-of-bounds value when it is driven programmatically.
+            emitValue(e.target.value);
             return;
           }
+          const raw = Number.parseFloat(e.target.value);
+          if (!Number.isFinite(raw)) return;
           // Landing on Custom keeps whatever value is already there rather
           // than snapping: Custom means "I will type it", not a value.
           if (raw >= customIndex) return;
-          onChange(steps[raw]);
+          const index = Math.min(steps.length - 1, Math.max(0, Math.round(raw)));
+          onChange(steps[index]);
         }}
         disabled={!enabled}
         className={`w-full h-1.5 rounded-full appearance-none cursor-pointer disabled:cursor-not-allowed accent-brand ${dim}`}
@@ -167,9 +182,14 @@ export function SliderInput({
         </p>
       )}
       {steps ? (
-        <div className="relative h-3 text-[9px] text-text-dim/50 font-mono">
-          {[...steps.map((v, i) => ({ i, text: formatTick ? formatTick(v) : String(v) })),
-            { i: customIndex, text: t("common.custom", { defaultValue: "Custom" }) }].map(({ i, text }) => {
+        <div className={`relative h-3 text-[9px] text-text-dim/50 font-mono ${dim}`}>
+          {[
+            ...steps.map((v, i) => ({
+              i,
+              text: formatTick ? formatTick(v) : String(v),
+            })),
+            { i: customIndex, text: t("common.custom", { defaultValue: "Custom" }) },
+          ].map(({ i, text }) => {
             const p = (i / customIndex) * 100;
             const align =
               p <= 0 ? "translate-x-0" : p >= 100 ? "-translate-x-full" : "-translate-x-1/2";
@@ -198,8 +218,11 @@ export function SliderInput({
         // the width against a true position of 6%. Reading a value off the
         // legend gave an answer that was wrong by an order of magnitude.
         <div className={`relative h-3 text-[9px] text-text-dim/50 font-mono ${dim}`}>
-          {ticks.map((t) => {
-            const p = max === min ? 0 : ((t - min) / (max - min)) * 100;
+          {ticks.map((tick, index) => {
+            const p =
+              upperBound === lowerBound
+                ? 0
+                : ((tick - lowerBound) / (upperBound - lowerBound)) * 100;
             const clamped = Math.min(100, Math.max(0, p));
             // Centre each label on its mark, except at the ends, where centring
             // would push half the text outside the track.
@@ -210,12 +233,14 @@ export function SliderInput({
                   ? "-translate-x-full"
                   : "-translate-x-1/2";
             return (
+              // A caller may legitimately repeat a tick value, so the index has
+              // to be part of the key — the value alone is not unique.
               <span
-                key={t}
+                key={`${tick}-${index}`}
                 className={`absolute whitespace-nowrap ${align}`}
                 style={{ left: `${clamped}%` }}
               >
-                {formatTick ? formatTick(t) : t}
+                {formatTick ? formatTick(tick) : tick}
               </span>
             );
           })}

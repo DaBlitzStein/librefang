@@ -302,8 +302,42 @@ pub async fn list_agent_types_deprecated() -> impl IntoResponse {
     list_agent_types().await
 }
 
-/// GET /api/agent-types/:name — Get agent type details.
-#[utoipa::path(get, path = "/api/agent-types/{name}", tag = "system", operation_id = "get_agent_type", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type details", body = crate::types::JsonObject)))]
+/// Build the privacy pass over an agent type that an operator is considering
+/// contributing to a shared registry (#7771).
+///
+/// A manifest written on one machine carries that machine's details — an absolute workspace path, the environment variable holding the operator's provider credentials, a private base URL, a command allowlist, free text pasted into a system prompt.
+/// The registry validator requires only `name`, `description` and `module`, so nothing downstream catches any of it, and once published it is in git history.
+///
+/// This is read-only and advisory.
+/// It reports what a promotion would strip (`findings` with `removed_by_sanitizer: true`), what the operator has to edit by hand because it sits inside a field worth keeping (`removed_by_sanitizer: false`, summarised by `requires_review`), and the scrubbed manifest itself so it can be attached to a registry pull request today.
+/// Nothing here rewrites the operator's file.
+///
+/// `manifest_toml` is `null` when the publishable copy cannot be rendered as TOML.
+/// That is not a reason to withhold the findings, which are the part that protects the operator.
+fn promotion_preview(name: &str, manifest: &AgentManifest) -> serde_json::Value {
+    use librefang_types::manifest_privacy::{sanitize_for_publication, scan_for_publication};
+
+    let findings = scan_for_publication(manifest);
+    let requires_review = findings.iter().any(|finding| !finding.removed_by_sanitizer);
+
+    let publishable = sanitize_for_publication(manifest);
+    let manifest_toml = match toml::to_string_pretty(&publishable) {
+        Ok(rendered) => Some(rendered),
+        Err(e) => {
+            tracing::warn!("Could not render the publishable manifest for template '{name}': {e}");
+            None
+        }
+    };
+
+    serde_json::json!({
+        "requires_review": requires_review,
+        "findings": findings,
+        "manifest_toml": manifest_toml,
+    })
+}
+
+/// GET /api/agent-types/:name — Get agent type details, plus a read-only privacy pass over the manifest for registry promotion (#7771).
+#[utoipa::path(get, path = "/api/agent-types/{name}", tag = "system", operation_id = "get_agent_type", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type details, plus a read-only privacy pass over the manifest for registry promotion", body = crate::types::JsonObject)))]
 pub async fn get_agent_type(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -371,6 +405,17 @@ pub async fn get_agent_type(
                             "manifest_toml".to_string(),
                             serde_json::Value::String(content),
                         );
+                        // The read-only registry-promotion privacy pass
+                        // (#7771). It reports what publishing this manifest to
+                        // a shared registry would strip, what the operator
+                        // still has to edit by hand, and the scrubbed manifest
+                        // itself. `manifest_toml` above stays the operator's
+                        // own file, verbatim — this endpoint reports, it never
+                        // rewrites.
+                        o.insert(
+                            "promotion_preview".to_string(),
+                            promotion_preview(&name, &manifest),
+                        );
                     }
                     v
                 }),
@@ -389,7 +434,7 @@ pub async fn get_agent_type(
 }
 
 /// GET /api/templates/:name — Deprecated alias of `GET /api/agent-types/:name`.
-#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type details (deprecated alias of GET /api/agent-types/:name)", body = crate::types::JsonObject)))]
+#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type details, plus a read-only privacy pass over the manifest for registry promotion (deprecated alias of GET /api/agent-types/:name)", body = crate::types::JsonObject)))]
 pub async fn get_agent_type_deprecated(
     path: Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
