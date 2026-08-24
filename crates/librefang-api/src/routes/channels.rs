@@ -839,21 +839,45 @@ fn sidecar_discovery_rows(
 /// channel named X" for a channel that was running at that very moment.
 ///
 /// Root first, so a shadowing root entry (which is what the live config
-/// resolves to) is the one that goes. `false` still means "declared
+/// resolves to) is the one that goes. `None` still means "declared
 /// nowhere", which is the only case that deserves a 404.
+///
+/// Returns the file that was rewritten together with its pre-write contents,
+/// so the caller can put it back if a later step of the delete fails — see
+/// [`RemovedSidecarBlock`].
 fn remove_sidecar_block_anywhere(
     config_path: &std::path::Path,
     name: &str,
-) -> Result<bool, String> {
-    if super::sidecar_toml::remove_sidecar_block(config_path, name)? {
-        return Ok(true);
-    }
-    for included in included_files_with_sidecars_blocking(config_path)? {
-        if super::sidecar_toml::remove_sidecar_block(&included, name)? {
-            return Ok(true);
+) -> Result<Option<RemovedSidecarBlock>, String> {
+    let mut candidates = vec![config_path.to_path_buf()];
+    candidates.extend(included_files_with_sidecars_blocking(config_path)?);
+    for path in candidates {
+        // Snapshot before the write, not after: `remove_sidecar_block` rewrites
+        // the file in place and there is no other way back to the original.
+        let original = std::fs::read_to_string(&path).ok();
+        if super::sidecar_toml::remove_sidecar_block(&path, name)? {
+            return Ok(Some(RemovedSidecarBlock { path, original }));
         }
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// The config file a delete rewrote, plus its contents from just before the
+/// rewrite.
+///
+/// The delete is not one step: it strips the block, then asks the kernel to
+/// reload, then re-enters the channel bridge. The reload validates the WHOLE
+/// config, so it fails for reasons that have nothing to do with the channel
+/// being removed — an out-of-range `[approval] timeout_secs` elsewhere in the
+/// file is enough. Without a snapshot the first two steps disagreed
+/// permanently: the block was gone from disk, the daemon kept the channel in
+/// memory with its child process alive, the operator got a scrubbed 500, and
+/// every retry answered 404 because there was nothing left to remove.
+struct RemovedSidecarBlock {
+    path: std::path::PathBuf,
+    /// `None` when the file did not exist before the write, which
+    /// `restore_sidecar_file` turns back into "remove it again".
+    original: Option<String>,
 }
 
 /// Request body for `POST /api/channels/sidecar/{name}/configure`.
@@ -1383,7 +1407,7 @@ pub async fn delete_sidecar_channel(
     // 404 there tells the operator the channel does not exist while its
     // sidecar is delivering messages. Reconcile instead: fall through to the
     // reload, which drops the row and stops the orphaned child.
-    let live = !removed
+    let live = removed.is_none()
         && (state
             .kernel
             .config_ref()
@@ -1391,7 +1415,7 @@ pub async fn delete_sidecar_channel(
             .iter()
             .any(|sc| sc.name == name)
             || state.kernel.channel_adapters_ref().contains_key(&name));
-    if !removed && !live {
+    if removed.is_none() && !live {
         return Err(ApiErrorResponse::not_found(format!(
             "no configured sidecar channel named `{name}`"
         ))
@@ -1405,11 +1429,52 @@ pub async fn delete_sidecar_channel(
         );
     }
 
-    let plan = state
-        .kernel
-        .reload_config()
-        .await
-        .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
+    let plan = match state.kernel.reload_config().await {
+        Ok(plan) => plan,
+        Err(reload_error) => {
+            // The reload validates the whole config, so this fires for problems
+            // that have nothing to do with the channel just removed. Put the
+            // file back before answering, so the operator's next attempt sees
+            // the same state as the first one instead of a 404 for a channel
+            // the daemon is still running.
+            let restore_failed = match removed {
+                Some(block) => {
+                    let _config_guard = state.config_write_lock.lock().await;
+                    tokio::task::spawn_blocking(move || {
+                        super::sidecar_toml::restore_sidecar_file(
+                            &block.path,
+                            block.original.as_deref(),
+                        )
+                    })
+                    .await
+                    .map_err(|e| format!("rollback task failed: {e}"))
+                    .and_then(|inner| inner)
+                    .err()
+                }
+                None => None,
+            };
+            if let Some(error) = restore_failed {
+                // Both steps failed: say so plainly rather than implying the
+                // config is intact, because now it is not.
+                tracing::error!(channel = %name, "sidecar delete: rollback failed: {error}");
+                return Err(ApiErrorResponse::internal(format!(
+                    "config reload was rejected and the config.toml rollback failed too — \
+                     the `{name}` block is gone from disk while the daemon still runs it. \
+                     Reload error: {reload_error}"
+                ))
+                .into_json_tuple());
+            }
+            // Verbatim, like `POST /api/config/reload` answers the same error:
+            // it is an operator-actionable validation message, and scrubbing it
+            // is what left the operator with a bare "internal error" and no way
+            // to know the delete had already touched the file.
+            return Err(ApiErrorResponse::bad_request(format!(
+                "channel `{name}` was not removed: the daemon refused to reload the \
+                 configuration, so the change was rolled back. {reload_error}"
+            ))
+            .into_json_tuple());
+        }
+    };
 
     // Re-enter the bridge so the removed sidecar child is actually stopped, not just dropped from disk.
     // The reconcile path forces the restart: its whole point is the live child,

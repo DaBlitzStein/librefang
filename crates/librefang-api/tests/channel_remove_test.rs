@@ -211,6 +211,60 @@ async fn delete_reconciles_a_live_sidecar_that_is_no_longer_on_disk() {
     assert_eq!(status, StatusCode::NOT_FOUND, "second delete must 404");
 }
 
+/// The delete is three steps — strip the block, reload the config, re-enter
+/// the bridge — and step two validates the WHOLE config, so it is rejected for
+/// reasons that have nothing to do with the channel being removed.
+///
+/// This is the sequence the operator actually hit (rodela, 2026-08-24, in
+/// `~/.librefang/logs/daemon.log`): their config carried
+/// `[approval] timeout_secs = 43200` against a max of 300, so the first
+/// `DELETE /api/channels/sidecar/email` stripped the block, had its reload
+/// rejected — `Config reload failed; live config unchanged: validation:
+/// approval policy: timeout_secs too large (43200, max 300)` — and answered a
+/// scrubbed 500. The block was gone from disk while the daemon kept the
+/// channel and its child process, so the four retries that followed all
+/// answered 404 for a channel that was still delivering mail.
+///
+/// A rejected reload must therefore leave the file exactly as it was, and say
+/// what was rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_rolls_back_the_config_when_the_reload_is_rejected() {
+    let h = boot_router().await;
+    let config_path = h.home.join("config.toml");
+    // `[approval] timeout_secs` is validated on reload but not clamped, which
+    // is what makes an unrelated stale value fatal to every config reload.
+    let seeded = format!("{TELEGRAM_BLOCK}\n[approval]\ntimeout_secs = 43200\n");
+    std::fs::write(&config_path, &seeded).expect("seed config.toml");
+
+    let (status, body) = send(h.app.clone(), auth_delete("/api/channels/sidecar/telegram")).await;
+    let text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a rejected reload is the operator's config problem, not an internal error: {text}"
+    );
+    assert!(
+        text.contains("timeout_secs too large"),
+        "the operator must be told what the daemon rejected: {text}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still present"),
+        seeded,
+        "the block must be back on disk, byte for byte"
+    );
+
+    // And the retry must behave like the first attempt instead of reporting a
+    // channel that does not exist.
+    let (status, body) = send(h.app.clone(), auth_delete("/api/channels/sidecar/telegram")).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the retry must not degrade into a 404: {}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn delete_unknown_sidecar_404s() {
     let h = boot_router().await;
