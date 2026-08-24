@@ -334,6 +334,8 @@ use crate::types;
         routes::auto_dream_set_enabled,
 
         // ── Users / RBAC ──
+        routes::user_groups::list_user_groups,
+        routes::user_groups::get_user_group,
         routes::users::list_users,
         routes::users::get_user,
         routes::users::create_user,
@@ -563,6 +565,7 @@ use crate::types;
         routes::agents::AgentEventRowView,
         routes::agents::AgentEventsResponse,
         routes::agents::SessionContextResponse,
+        routes::user_groups::UserGroupView,
         routes::users::UserView,
         routes::users::UserUpsert,
         routes::users::BulkImportRequest,
@@ -598,6 +601,7 @@ use crate::types;
         (name = "auth", description = "OAuth/OIDC authentication endpoints"),
         (name = "openai", description = "OpenAI-compatible API endpoints"),
         (name = "users", description = "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"),
+        (name = "user-groups", description = "User groups (#7745) — read-only over config-declared `[[user_groups]]`; membership is derived, never stored, so it is edited in config.toml and picked up by POST /api/config/reload"),
         (name = "media", description = "Media generation (image, speech, video, music) and transcription; provider selection follows the `[capabilities]` routing block"),
     ),
 )]

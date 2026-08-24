@@ -13663,6 +13663,63 @@
         }
       }
     },
+    "/api/user-groups": {
+      "get": {
+        "tags": [
+          "user-groups"
+        ],
+        "operationId": "list_user_groups",
+        "responses": {
+          "200": {
+            "description": "Declared user groups, ordered by id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserGroupView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user-groups/{id}": {
+      "get": {
+        "tags": [
+          "user-groups"
+        ],
+        "operationId": "get_user_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Stable group id (not the display name)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User group detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserGroupView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
     "/api/users": {
       "get": {
         "tags": [
@@ -16385,6 +16442,43 @@
         },
         "additionalProperties": false
       },
+      "UserGroupView": {
+        "type": "object",
+        "description": "A user group as the read surfaces see it.\n\n`members` is a sorted `Vec` on the wire because JSON has no set type; the\nordering is the `BTreeSet`'s and is stable across processes, so a client\ndiffing two responses sees a change only when membership actually changed.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "members",
+          "member_count"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "What the group is for; may be empty."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier — what ownership records point at."
+          },
+          "member_count": {
+            "type": "integer",
+            "description": "Number of declared members, so a list view need not count client-side.",
+            "minimum": 0
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Member user names, matching `UserConfig::name`."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable name, safe to change."
+          }
+        }
+      },
       "UserUpsert": {
         "type": "object",
         "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending. `None` clears any existing hash on update; absent on create.",
@@ -16547,6 +16641,10 @@
     {
       "name": "users",
       "description": "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"
+    },
+    {
+      "name": "user-groups",
+      "description": "User groups (#7745) — read-only over config-declared `[[user_groups]]`; membership is derived, never stored, so it is edited in config.toml and picked up by POST /api/config/reload"
     },
     {
       "name": "media",

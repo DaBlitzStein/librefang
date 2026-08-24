@@ -54,7 +54,9 @@ type Client struct {
 	Sessions *SessionsResource
 	Skills *SkillsResource
 	System *SystemResource
+	Tasks *TasksResource
 	Tools *ToolsResource
+	UserGroups *UserGroupsResource
 	Users *UsersResource
 	Webhooks *WebhooksResource
 	Workflows *WorkflowsResource
@@ -90,7 +92,9 @@ func New(baseURL string) *Client {
 		c.Sessions = &SessionsResource{client: c}
 		c.Skills = &SkillsResource{client: c}
 		c.System = &SystemResource{client: c}
+		c.Tasks = &TasksResource{client: c}
 		c.Tools = &ToolsResource{client: c}
+		c.UserGroups = &UserGroupsResource{client: c}
 		c.Users = &UsersResource{client: c}
 		c.Webhooks = &WebhooksResource{client: c}
 		c.Workflows = &WorkflowsResource{client: c}
@@ -832,6 +836,22 @@ type GoalsResource struct{ client *Client }
 
 func (r *GoalsResource) ListGoalTemplates() (interface{}, error) {
 	return r.client.request("GET", "/api/goals/templates", nil, nil)
+}
+
+func (r *GoalsResource) PauseGoalRun(id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/goals/%s/pause", id), nil, nil)
+}
+
+func (r *GoalsResource) ResumeGoalRun(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/goals/%s/resume", id), data, nil)
+}
+
+func (r *GoalsResource) StartGoalRun(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/goals/%s/start", id), data, nil)
+}
+
+func (r *GoalsResource) StopGoalRun(id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/goals/%s/stop", id), nil, nil)
 }
 
 // ── Hands Resource
@@ -1778,12 +1798,32 @@ func (r *SystemResource) ApiVersions() (interface{}, error) {
 	return r.client.request("GET", "/api/versions", nil, nil)
 }
 
+// ── Tasks Resource
+
+type TasksResource struct{ client *Client }
+
+func (r *TasksResource) TaskQueuePostRoot(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/tasks", data, nil)
+}
+
 // ── Tools Resource
 
 type ToolsResource struct{ client *Client }
 
 func (r *ToolsResource) InvokeTool(name string, data map[string]interface{}, query map[string]string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/tools/%s/invoke", name), data, query)
+}
+
+// ── UserGroups Resource
+
+type UserGroupsResource struct{ client *Client }
+
+func (r *UserGroupsResource) ListUserGroups() (interface{}, error) {
+	return r.client.request("GET", "/api/user-groups", nil, nil)
+}
+
+func (r *UserGroupsResource) GetUserGroup(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/user-groups/%s", id), nil, nil)
 }
 
 // ── Users Resource

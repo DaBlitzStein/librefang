@@ -286,7 +286,9 @@ pub struct LibreFang {
     pub sessions: Arc<SessionsResource>,
     pub skills: Arc<SkillsResource>,
     pub system: Arc<SystemResource>,
+    pub tasks: Arc<TasksResource>,
     pub tools: Arc<ToolsResource>,
+    pub user_groups: Arc<UserGroupsResource>,
     pub users: Arc<UsersResource>,
     pub webhooks: Arc<WebhooksResource>,
     pub workflows: Arc<WorkflowsResource>,
@@ -335,7 +337,9 @@ impl LibreFang {
             sessions: Arc::new(SessionsResource::new(base_url.clone(), client.clone())),
             skills: Arc::new(SkillsResource::new(base_url.clone(), client.clone())),
             system: Arc::new(SystemResource::new(base_url.clone(), client.clone())),
+            tasks: Arc::new(TasksResource::new(base_url.clone(), client.clone())),
             tools: Arc::new(ToolsResource::new(base_url.clone(), client.clone())),
+            user_groups: Arc::new(UserGroupsResource::new(base_url.clone(), client.clone())),
             users: Arc::new(UsersResource::new(base_url.clone(), client.clone())),
             webhooks: Arc::new(WebhooksResource::new(base_url.clone(), client.clone())),
             workflows: Arc::new(WorkflowsResource::new(base_url.clone(), client.clone())),
@@ -2140,6 +2144,54 @@ impl GoalsResource {
             &self.base_url,
             reqwest::Method::GET,
             &["api", "goals", "templates"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn pause_goal_run(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "goals", id, "pause"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn resume_goal_run(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "goals", id, "resume"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn start_goal_run(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "goals", id, "start"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn stop_goal_run(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "goals", id, "stop"],
             None,
             &[],
         )
@@ -5111,6 +5163,32 @@ impl SystemResource {
     }
 }
 
+// ── Tasks ──
+
+#[derive(Debug, Clone)]
+pub struct TasksResource {
+    base_url: String,
+    client: Client,
+}
+
+impl TasksResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn task_queue_post_root(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "tasks"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+}
+
 // ── Tools ──
 
 #[derive(Debug, Clone)]
@@ -5137,6 +5215,44 @@ impl ToolsResource {
             &["api", "tools", name, "invoke"],
             Some(data),
             &[("agent_id", agent_id)],
+        )
+        .await
+    }
+}
+
+// ── UserGroups ──
+
+#[derive(Debug, Clone)]
+pub struct UserGroupsResource {
+    base_url: String,
+    client: Client,
+}
+
+impl UserGroupsResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn list_user_groups(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "user-groups"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn get_user_group(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "user-groups", id],
+            None,
+            &[],
         )
         .await
     }

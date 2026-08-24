@@ -69,6 +69,7 @@ fn api_v1_routes(webhook_body_limit: usize) -> Router<Arc<AppState>> {
         .merge(routes::prompts::router())
         .merge(routes::terminal::router())
         .merge(routes::users::router())
+        .merge(routes::user_groups::router())
         .merge(routes::webhooks::router(webhook_body_limit))
         // Passkey (WebAuthn/FIDO2) login + credential management (#5981)
         .merge(routes::passkey::router())

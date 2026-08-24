@@ -67,7 +67,9 @@ class LibreFang:
         self.sessions = _SessionsResource(self)
         self.skills = _SkillsResource(self)
         self.system = _SystemResource(self)
+        self.tasks = _TasksResource(self)
         self.tools = _ToolsResource(self)
+        self.user_groups = _UserGroupsResource(self)
         self.users = _UsersResource(self)
         self.webhooks = _WebhooksResource(self)
         self.workflows = _WorkflowsResource(self)
@@ -606,6 +608,18 @@ class _GoalsResource(_Resource):
 
     def list_goal_templates(self):
         return self._c._request("GET", "/api/goals/templates")
+
+    def pause_goal_run(self, id: str):
+        return self._c._request("POST", f"/api/goals/{id}/pause")
+
+    def resume_goal_run(self, id: str, **data):
+        return self._c._request("POST", f"/api/goals/{id}/resume", data)
+
+    def start_goal_run(self, id: str, **data):
+        return self._c._request("POST", f"/api/goals/{id}/start", data)
+
+    def stop_goal_run(self, id: str):
+        return self._c._request("POST", f"/api/goals/{id}/stop")
 
 
 # ── Hands Resource ─────────────────────────────────────────────
@@ -1342,12 +1356,31 @@ class _SystemResource(_Resource):
         return self._c._request("GET", "/api/versions")
 
 
+# ── Tasks Resource ─────────────────────────────────────────────
+
+class _TasksResource(_Resource):
+
+    def task_queue_post_root(self, **data):
+        return self._c._request("POST", "/api/tasks", data)
+
+
 # ── Tools Resource ─────────────────────────────────────────────
 
 class _ToolsResource(_Resource):
 
     def invoke_tool(self, name: str, agent_id: Any = None, **data):
         return self._c._request("POST", f"/api/tools/{name}/invoke", data, query={"agent_id": agent_id})
+
+
+# ── UserGroups Resource ───────────────────────────────────────
+
+class _UserGroupsResource(_Resource):
+
+    def list_user_groups(self):
+        return self._c._request("GET", "/api/user-groups")
+
+    def get_user_group(self, id: str):
+        return self._c._request("GET", f"/api/user-groups/{id}")
 
 
 # ── Users Resource ─────────────────────────────────────────────

@@ -51,7 +51,9 @@ class LibreFang {
     this.sessions = new SessionsResource(this);
     this.skills = new SkillsResource(this);
     this.system = new SystemResource(this);
+    this.tasks = new TasksResource(this);
     this.tools = new ToolsResource(this);
+    this.user_groups = new UserGroupsResource(this);
     this.users = new UsersResource(this);
     this.webhooks = new WebhooksResource(this);
     this.workflows = new WorkflowsResource(this);
@@ -710,6 +712,22 @@ class GoalsResource {
 
   async listGoalTemplates() {
     return this._c._request("GET", "/api/goals/templates");
+  }
+
+  async pauseGoalRun(id) {
+    return this._c._request("POST", `/api/goals/${id}/pause`);
+  }
+
+  async resumeGoalRun(id, data) {
+    return this._c._request("POST", `/api/goals/${id}/resume`, data, undefined);
+  }
+
+  async startGoalRun(id, data) {
+    return this._c._request("POST", `/api/goals/${id}/start`, data, undefined);
+  }
+
+  async stopGoalRun(id) {
+    return this._c._request("POST", `/api/goals/${id}/stop`);
   }
 }
 
@@ -1683,6 +1701,16 @@ class SystemResource {
   }
 }
 
+// ── Tasks Resource
+
+class TasksResource {
+  constructor(client) { this._c = client; }
+
+  async taskQueuePostRoot(data) {
+    return this._c._request("POST", "/api/tasks", data, undefined);
+  }
+}
+
 // ── Tools Resource
 
 class ToolsResource {
@@ -1690,6 +1718,20 @@ class ToolsResource {
 
   async invokeTool(name, data, query) {
     return this._c._request("POST", `/api/tools/${name}/invoke`, data, query);
+  }
+}
+
+// ── UserGroups Resource
+
+class UserGroupsResource {
+  constructor(client) { this._c = client; }
+
+  async listUserGroups() {
+    return this._c._request("GET", "/api/user-groups");
+  }
+
+  async getUserGroup(id) {
+    return this._c._request("GET", `/api/user-groups/${id}`);
   }
 }
 
