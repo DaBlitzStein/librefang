@@ -377,7 +377,9 @@ function useChatMessages(
   const { t } = useTranslation();
   // Server-owned slash-command catalog; drives both `/help` and the decision
   // to dispatch a command over the WS instead of sending it to the agent.
-  const { data: chatCommands } = useChatCommands();
+  // `isPending` gates the window before it arrives — see the guard in
+  // `sendMessage`.
+  const { data: chatCommands, isPending: commandsPending } = useChatCommands();
   const stopAgentMutation = useStopAgent();
   const sendAgentMessageMutation = useSendAgentMessage();
   // Used to fetch the agent's session snapshot through the queries layer so
@@ -695,6 +697,16 @@ function useChatMessages(
           { id: makeMessageId("sys"), role: "system" as const, content: text, timestamp: new Date() }
         ]);
       };
+      // Last line of defence for the catalog-still-loading window. ChatInput
+      // holds the send earlier and keeps the typed text, but it is not the
+      // only caller: the /model completion list calls `onSend` directly, and
+      // it can resolve before the command catalog does. Guarding the single
+      // point every caller funnels through is what makes the window closed
+      // rather than closed-on-the-path-I-happened-to-check.
+      if (shouldHoldSlashSend(trimmed, commandsPending)) {
+        sysMsg(t("chat.commands_loading"));
+        return;
+      }
       if (trimmed === "/help") {
         sysMsg(menuCommands(chatCommands).map(c =>
           `- \`${c.cmd}${c.args_hint ? " " + c.args_hint : ""}\` — ${commandLabel(t, c)}`
@@ -1236,7 +1248,7 @@ function useChatMessages(
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [addSkillOutput, agentId, agents, chatCommands, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
+  }, [addSkillOutput, agentId, agents, chatCommands, commandsPending, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any

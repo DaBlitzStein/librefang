@@ -60,6 +60,14 @@ describe("shouldHoldSlashSend", () => {
     expect(shouldHoldSlashSend("   /reset", true)).toBe(true);
   });
 
+  // The /model completion list calls onSend directly, bypassing the input's
+  // submit handler, and its own query can resolve before the catalog does.
+  // The guard sits on the path every caller funnels through, so this holds
+  // too.
+  it("holds a command dispatched from the /model completion list", () => {
+    expect(shouldHoldSlashSend("/model openai/gpt-4o", true)).toBe(true);
+  });
+
   it("never holds ordinary chat, even while loading", () => {
     expect(shouldHoldSlashSend("what is the status?", true)).toBe(false);
     expect(shouldHoldSlashSend("", true)).toBe(false);
