@@ -613,6 +613,7 @@ tui-tab-templates = 模板
 tui-tab-peers = 对等节点
 tui-tab-comms = 通信
 tui-tab-security = 安全
+tui-tab-user-groups = 用户组
 tui-tab-audit = 审计
 tui-tab-usage = 使用量
 tui-tab-settings = 配置
@@ -2404,3 +2405,20 @@ tui-event-backup-restored = 已恢复
 tui-event-backup-restore-failed = 恢复失败
 tui-agents-detail-tokens-summary = 系统 { $system }  ·  工具 { $tools } ({ $tool_count })  ·  总计 { $total }
 tui-settings-backup-size-bytes = ({ $bytes } 字节)
+
+# user_groups.rs (#7745)
+tui-user-groups-title = 用户组
+tui-user-groups-heading = 配置中声明的用户组
+tui-user-groups-count =
+    { $count ->
+       *[other] { $count } 个用户组
+    }
+tui-user-groups-header-id = 组 ID
+tui-user-groups-header-name = 名称
+tui-user-groups-header-members = 成员
+tui-user-groups-loading = 正在加载用户组…
+tui-user-groups-empty = 尚未声明任何用户组。请在 config.toml 中添加 [[user_groups]] 区块。
+tui-user-groups-members-of = 成员所属组：
+tui-user-groups-no-members = 尚未声明成员。
+tui-user-groups-select-hint = 选择一个用户组以查看其成员。
+tui-user-groups-hints = ↑↓ 导航  r 刷新  （只读 — 请编辑 config.toml 后重新加载配置）

@@ -29,6 +29,7 @@ use super::screens::{
     templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
     usage::{AgentUsage, ModelUsage, UsageSummary},
+    user_groups::UserGroupInfo,
     workflows::{WorkflowInfo, WorkflowRun},
 };
 
@@ -212,6 +213,8 @@ pub enum AppEvent {
     CapabilityRoutingSaved(String),
     /// Peers loaded.
     PeersLoaded(Vec<PeerInfo>),
+    /// Config-declared user groups loaded (#7745).
+    UserGroupsLoaded(Vec<UserGroupInfo>),
     /// Log entries loaded.
     LogsLoaded(Vec<LogEntry>),
     /// Goals loaded.
@@ -3329,6 +3332,65 @@ pub fn spawn_fetch_peers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::PeersLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Fetch config-declared user groups (#7745).
+///
+/// Read-only by design: membership is resolved in memory by the kernel from
+/// `[[user_groups]]`, never stored, so there is no write counterpart here.
+pub fn spawn_fetch_user_groups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/user-groups")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let groups: Vec<UserGroupInfo> = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|g| UserGroupInfo {
+                                    id: g["id"].as_str().unwrap_or("").to_string(),
+                                    name: g["name"].as_str().unwrap_or("").to_string(),
+                                    description: g["description"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    members: g["members"]
+                                        .as_array()
+                                        .map(|m| {
+                                            m.iter()
+                                                .filter_map(|v| v.as_str())
+                                                .map(str::to_string)
+                                                .collect()
+                                        })
+                                        .unwrap_or_default(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::UserGroupsLoaded(groups));
+                }
+            }
+        }
+        // In-process mode has the kernel in hand, so it answers from the same
+        // AuthManager snapshot the HTTP route reads rather than reporting an
+        // empty list and making the TUI look like the config is not loaded.
+        BackendRef::InProcess(kernel) => {
+            use librefang_kernel::KernelApi;
+            let groups: Vec<UserGroupInfo> = kernel
+                .auth_manager()
+                .user_groups()
+                .into_iter()
+                .map(|g| UserGroupInfo {
+                    id: g.id,
+                    name: g.name,
+                    description: g.description,
+                    members: g.members.into_iter().collect(),
+                })
+                .collect();
+            let _ = tx.send(AppEvent::UserGroupsLoaded(groups));
         }
     });
 }

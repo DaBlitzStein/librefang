@@ -17,7 +17,8 @@ use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, ResetScope};
 use screens::{
     agents, audit, chat, comms, dashboard, extensions, goals, hands, logs, memory, peers, security,
-    sessions, settings, skills, templates, triggers, usage, welcome, wizard, workflows,
+    sessions, settings, skills, templates, triggers, usage, user_groups, welcome, wizard,
+    workflows,
 };
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -59,6 +60,7 @@ enum Tab {
     Peers,
     Comms,
     Security,
+    UserGroups,
     Audit,
     Usage,
     Settings,
@@ -81,6 +83,7 @@ const TABS: &[Tab] = &[
     Tab::Peers,
     Tab::Comms,
     Tab::Security,
+    Tab::UserGroups,
     Tab::Audit,
     Tab::Usage,
     Tab::Settings,
@@ -105,6 +108,7 @@ impl Tab {
             Tab::Peers => format!("{} {}", "\u{25cc}", crate::i18n::t("tui-tab-peers")),
             Tab::Comms => format!("{} {}", "\u{25ef}", crate::i18n::t("tui-tab-comms")),
             Tab::Security => format!("{} {}", "\u{25c6}", crate::i18n::t("tui-tab-security")),
+            Tab::UserGroups => format!("{} {}", "\u{25cd}", crate::i18n::t("tui-tab-user-groups")),
             Tab::Audit => format!("{} {}", "\u{25c8}", crate::i18n::t("tui-tab-audit")),
             Tab::Usage => format!("{} {}", "\u{25b4}", crate::i18n::t("tui-tab-usage")),
             Tab::Settings => format!("{} {}", "\u{2699}", crate::i18n::t("tui-tab-settings")),
@@ -188,6 +192,7 @@ struct App {
     usage: usage::UsageState,
     settings: settings::SettingsState,
     peers: peers::PeersState,
+    user_groups: user_groups::UserGroupsState,
     comms: comms::CommsState,
     logs: logs::LogsState,
 
@@ -228,6 +233,7 @@ impl App {
             usage: usage::UsageState::new(),
             settings: settings::SettingsState::new(),
             peers: peers::PeersState::new(),
+            user_groups: user_groups::UserGroupsState::new(),
             comms: comms::CommsState::new(),
             logs: logs::LogsState::new(),
             kernel_booting: false,
@@ -417,6 +423,7 @@ impl App {
                     Tab::Hands => self.hands.status_msg = err,
                     Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
+                    Tab::UserGroups => self.user_groups.status_msg = err,
                     Tab::Settings => {
                         // A failed model-overrides fetch must not leave the
                         // editor's spinner (#7774) spinning forever.
@@ -729,6 +736,15 @@ impl App {
                     self.peers.list_state.select(Some(0));
                 }
                 self.peers.loading = false;
+            }
+            AppEvent::UserGroupsLoaded(list) => {
+                self.user_groups.groups = list;
+                if !self.user_groups.groups.is_empty()
+                    && self.user_groups.list_state.selected().is_none()
+                {
+                    self.user_groups.list_state.select(Some(0));
+                }
+                self.user_groups.loading = false;
             }
             AppEvent::CommsTopologyLoaded { nodes, edges } => {
                 self.comms.nodes = nodes;
@@ -1147,6 +1163,10 @@ impl App {
                     let action = self.comms.handle_key(key);
                     self.handle_comms_action(action);
                 }
+                Tab::UserGroups => {
+                    let action = self.user_groups.handle_key(key);
+                    self.handle_user_groups_action(action);
+                }
                 Tab::Logs => {
                     let action = self.logs.handle_key(key);
                     self.handle_logs_action(action);
@@ -1180,6 +1200,7 @@ impl App {
         self.peers.tick();
         self.comms.tick();
         self.logs.tick();
+        self.user_groups.tick();
 
         // Auto-poll for active tabs
         if self.phase == Phase::Main {
@@ -1236,6 +1257,7 @@ impl App {
             Tab::Usage => self.refresh_usage(),
             Tab::Settings => self.refresh_settings_providers(),
             Tab::Peers => self.refresh_peers(),
+            Tab::UserGroups => self.refresh_user_groups(),
             Tab::Comms => self.refresh_comms(),
             Tab::Logs => self.refresh_logs(),
             Tab::Chat => {} // Chat doesn't need refresh on enter
@@ -1426,6 +1448,14 @@ impl App {
         if let Some(backend) = self.backend.to_ref() {
             self.peers.loading = true;
             event::spawn_fetch_peers(backend, self.event_tx.clone());
+        }
+    }
+
+    fn refresh_user_groups(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.user_groups.loading = true;
+            self.user_groups.status_msg.clear();
+            event::spawn_fetch_user_groups(backend, self.event_tx.clone());
         }
     }
 
@@ -2191,6 +2221,13 @@ impl App {
         }
     }
 
+    fn handle_user_groups_action(&mut self, action: user_groups::UserGroupsAction) {
+        match action {
+            user_groups::UserGroupsAction::Continue => {}
+            user_groups::UserGroupsAction::Refresh => self.refresh_user_groups(),
+        }
+    }
+
     fn handle_comms_action(&mut self, action: comms::CommsAction) {
         match action {
             comms::CommsAction::Continue => {}
@@ -2853,6 +2890,7 @@ impl App {
                     Tab::Settings => settings::draw(frame, chunks[1], &mut self.settings),
                     Tab::Peers => peers::draw(frame, chunks[1], &mut self.peers),
                     Tab::Comms => comms::draw(frame, chunks[1], &mut self.comms),
+                    Tab::UserGroups => user_groups::draw(frame, chunks[1], &mut self.user_groups),
                     Tab::Logs => logs::draw(frame, chunks[1], &mut self.logs),
                 }
             }

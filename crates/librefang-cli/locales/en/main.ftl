@@ -1543,6 +1543,7 @@ tui-tab-templates = Tpl
 tui-tab-peers = Peers
 tui-tab-comms = Comms
 tui-tab-security = Sec
+tui-tab-user-groups = Groups
 tui-tab-audit = Audit
 tui-tab-usage = Usage
 tui-tab-settings = Config
@@ -2446,3 +2447,21 @@ tui-event-backup-restored = restored
 tui-event-backup-restore-failed = restore failed
 tui-agents-detail-tokens-summary = system { $system }  ·  tools { $tools } ({ $tool_count })  ·  total { $total }
 tui-settings-backup-size-bytes = ({ $bytes } bytes)
+
+# user_groups.rs (#7745)
+tui-user-groups-title = User Groups
+tui-user-groups-heading = Config-declared groups
+tui-user-groups-count =
+    { $count ->
+        [one] 1 group
+       *[other] { $count } groups
+    }
+tui-user-groups-header-id = Group ID
+tui-user-groups-header-name = Name
+tui-user-groups-header-members = Members
+tui-user-groups-loading = Loading user groups…
+tui-user-groups-empty = No user groups declared. Add a [[user_groups]] block to config.toml.
+tui-user-groups-members-of = Members of
+tui-user-groups-no-members = No members declared.
+tui-user-groups-select-hint = Select a group to see its members.
+tui-user-groups-hints = ↑↓ Navigate  r Refresh  (read-only — edit config.toml, then reload the config)

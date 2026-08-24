@@ -1528,6 +1528,7 @@ tui-tab-templates = 템플릿
 tui-tab-peers = 피어
 tui-tab-comms = 통신
 tui-tab-security = 보안
+tui-tab-user-groups = 그룹
 tui-tab-audit = 감사
 tui-tab-usage = 사용량
 tui-tab-settings = 구성
@@ -2449,3 +2450,20 @@ tui-event-backup-restored = 복원됨
 tui-event-backup-restore-failed = 복원 실패
 tui-agents-detail-tokens-summary = 시스템 { $system }  ·  도구 { $tools } ({ $tool_count })  ·  총계 { $total }
 tui-settings-backup-size-bytes = ({ $bytes } 바이트)
+
+# user_groups.rs (#7745)
+tui-user-groups-title = 사용자 그룹
+tui-user-groups-heading = 설정에 선언된 그룹
+tui-user-groups-count =
+    { $count ->
+       *[other] 그룹 { $count }개
+    }
+tui-user-groups-header-id = 그룹 ID
+tui-user-groups-header-name = 이름
+tui-user-groups-header-members = 구성원
+tui-user-groups-loading = 사용자 그룹을 불러오는 중…
+tui-user-groups-empty = 선언된 사용자 그룹이 없습니다. config.toml에 [[user_groups]] 블록을 추가하세요.
+tui-user-groups-members-of = 구성원 —
+tui-user-groups-no-members = 선언된 구성원이 없습니다.
+tui-user-groups-select-hint = 그룹을 선택하면 구성원이 표시됩니다.
+tui-user-groups-hints = ↑↓ 이동  r 새로 고침  (읽기 전용 — config.toml을 편집한 뒤 설정을 다시 불러오세요)

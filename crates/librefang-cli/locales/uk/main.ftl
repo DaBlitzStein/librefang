@@ -1542,6 +1542,7 @@ tui-tab-templates = Tpl
 tui-tab-peers = Піри
 tui-tab-comms = Зв'язок
 tui-tab-security = Sec
+tui-tab-user-groups = Групи
 tui-tab-audit = Аудит
 tui-tab-usage = Використання
 tui-tab-settings = Конфіг
@@ -2471,3 +2472,23 @@ tui-event-backup-restored = відновлено
 tui-event-backup-restore-failed = відновлення не вдалося
 tui-agents-detail-tokens-summary = система { $system }  ·  інструменти { $tools } ({ $tool_count })  ·  всього { $total }
 tui-settings-backup-size-bytes = ({ $bytes } байт)
+
+# user_groups.rs (#7745)
+tui-user-groups-title = Групи користувачів
+tui-user-groups-heading = Групи, оголошені в конфігурації
+tui-user-groups-count =
+    { $count ->
+        [one] 1 група
+        [few] { $count } групи
+        [many] { $count } груп
+       *[other] { $count } групи
+    }
+tui-user-groups-header-id = ID групи
+tui-user-groups-header-name = Назва
+tui-user-groups-header-members = Учасники
+tui-user-groups-loading = Завантаження груп користувачів…
+tui-user-groups-empty = Груп користувачів не оголошено. Додайте блок [[user_groups]] до config.toml.
+tui-user-groups-members-of = Учасники групи
+tui-user-groups-no-members = Учасників не оголошено.
+tui-user-groups-select-hint = Виберіть групу, щоб побачити її учасників.
+tui-user-groups-hints = ↑↓ Навігація  r Оновити  (лише читання — відредагуйте config.toml і перезавантажте конфігурацію)
