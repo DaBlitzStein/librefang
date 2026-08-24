@@ -5427,6 +5427,30 @@ export interface BulkImportResult {
   rows: BulkImportRow[];
 }
 
+// #7745 — user groups. Read-only by design: membership is declared in
+// `config.toml` under `[[user_groups]]` and resolved in memory, so there is no
+// stored record for a write endpoint to update. Editing a group is a config
+// edit plus `POST /api/config/reload`, which is hot.
+export interface UserGroupItem {
+  /** Stable identifier — what ownership records point at. Survives a rename. */
+  id: string;
+  /** Human-readable name, safe to change. */
+  name: string;
+  description: string;
+  /** Member user names, matching `UserItem.name`, in a stable order. */
+  members: string[];
+  member_count: number;
+}
+
+export async function listUserGroups(): Promise<UserGroupItem[]> {
+  return get<UserGroupItem[]>("/api/user-groups");
+}
+
+/** Addressed by the stable `id`, never the mutable display name. */
+export async function getUserGroup(id: string): Promise<UserGroupItem> {
+  return get<UserGroupItem>(`/api/user-groups/${encodeURIComponent(id)}`);
+}
+
 export async function listUsers(): Promise<UserItem[]> {
   return get<UserItem[]>("/api/users");
 }

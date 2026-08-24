@@ -19,6 +19,7 @@
     "agents": "Agents",
     "agent_types": "Agent Types",
     "users": "Users",
+    "user_groups": "User Groups",
     "providers": "Providers",
     "channels": "Channels",
     "skills": "Skills",
@@ -4156,5 +4157,18 @@
     "page_not_found": "Page not found",
     "go_to_overview": "Go to Overview"
   },
-  "agent_label": "Agent"
+  "agent_label": "Agent",
+  "userGroups": {
+    "title": "User Groups",
+    "subtitle": "Named sets of users that can own things. Groups are flat — a group never contains another group.",
+    "readOnlyNote": "Groups are declared in config.toml under [[user_groups]], and membership is resolved in memory rather than stored. Edit the file and reload the config to change them — no restart needed.",
+    "searchPlaceholder": "Search groups or members…",
+    "loadFailed": "Could not load user groups",
+    "noMatches": "No matching groups",
+    "empty": "No user groups declared",
+    "emptyHint": "Add a [[user_groups]] block to config.toml to declare one.",
+    "noMembers": "No members declared",
+    "memberCount_one": "{{count}} member",
+    "memberCount_other": "{{count}} members"
+  }
 }

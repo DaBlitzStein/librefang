@@ -24,6 +24,7 @@ import {
   Shield,
   Users,
   User,
+  Users2,
   Server,
   Network,
   Hand,
@@ -100,6 +101,7 @@ type DashboardRoute =
   | "/runtime"
   | "/config"
   | "/users"
+  | "/users/groups"
   | "/settings";
 type NavItem = { to: DashboardRoute; label: string; icon: NavIcon };
 type NavGroup = { key: string; label: string; items: NavItem[] };
@@ -1070,6 +1072,7 @@ function DashboardApp() {
           { to: "/runtime", label: t("nav.runtime"), icon: Activity },
           { to: "/config", label: t("nav.config", { defaultValue: "Config" }), icon: FileText },
           { to: "/users", label: t("nav.users", { defaultValue: "Users" }), icon: User },
+          { to: "/users/groups", label: t("nav.user_groups", { defaultValue: "User Groups" }), icon: Users2 },
           { to: "/settings", label: t("nav.settings"), icon: Settings },
         ],
       },

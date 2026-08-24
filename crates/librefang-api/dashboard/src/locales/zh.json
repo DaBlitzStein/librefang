@@ -19,6 +19,7 @@
     "agents": "智能体",
     "agent_types": "智能体类型",
     "users": "用户",
+    "user_groups": "用户组",
     "providers": "供应商",
     "channels": "通道",
     "skills": "技能",
@@ -4156,5 +4157,17 @@
     "page_not_found": "页面未找到",
     "go_to_overview": "前往概览"
   },
-  "agent_label": "Agent"
+  "agent_label": "Agent",
+  "userGroups": {
+    "title": "用户组",
+    "subtitle": "可以拥有资源的具名用户集合。用户组是扁平的——一个组永远不会包含另一个组。",
+    "readOnlyNote": "用户组在 config.toml 的 [[user_groups]] 中声明，成员关系在内存中解析而非存储。要修改它们，请编辑该文件并重新加载配置——无需重启。",
+    "searchPlaceholder": "搜索用户组或成员…",
+    "loadFailed": "无法加载用户组",
+    "noMatches": "没有匹配的用户组",
+    "empty": "尚未声明任何用户组",
+    "emptyHint": "在 config.toml 中添加 [[user_groups]] 区块来声明一个用户组。",
+    "noMembers": "尚未声明成员",
+    "memberCount_other": "{{count}} 名成员"
+  }
 }

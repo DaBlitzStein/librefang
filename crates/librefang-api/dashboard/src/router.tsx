@@ -175,6 +175,7 @@ const TerminalPage = lazyWithReload(() => import("./pages/TerminalPage").then(m 
 const McpServersPage = lazyWithReload(() => import("./pages/McpServersPage").then(m => ({ default: m.McpServersPage })));
 const ConfigPage = lazyWithReload(() => import("./pages/ConfigPage").then(m => ({ default: m.ConfigPage })));
 const UsersPage = lazyWithReload(() => import("./pages/UsersPage").then(m => ({ default: m.UsersPage })));
+const UserGroupsPage = lazyWithReload(() => import("./pages/UserGroupsPage").then(m => ({ default: m.UserGroupsPage })));
 const PermissionSimulatorPage = lazyWithReload(() => import("./pages/PermissionSimulatorPage").then(m => ({ default: m.PermissionSimulatorPage })));
 const AuditPage = lazyWithReload(() => import("./pages/AuditPage").then(m => ({ default: m.AuditPage })));
 const UserBudgetPage = lazyWithReload(() => import("./pages/UserBudgetPage").then(m => ({ default: m.UserBudgetPage })));
@@ -417,6 +418,13 @@ const usersRoute = createRoute({
   path: "/users",
   component: () => <LazyRouteBoundary><UsersPage /></LazyRouteBoundary>
 });
+// #7745 — read-only view over config-declared `[[user_groups]]`. Sits under
+// /users because a group is an identity concept, next to the people in it.
+const userGroupsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/users/groups",
+  component: () => <LazyRouteBoundary><UserGroupsPage /></LazyRouteBoundary>
+});
 const usersSimulatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/simulator",
@@ -538,6 +546,7 @@ const routeTree = rootRoute.addChildren([
   configNetworkRoute,
   configInfraRoute,
   usersRoute,
+  userGroupsRoute,
   usersSimulatorRoute,
   userBudgetRoute,
   userPolicyRoute,

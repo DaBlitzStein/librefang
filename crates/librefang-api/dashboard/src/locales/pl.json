@@ -19,6 +19,7 @@
     "agents": "Agenci",
     "agent_types": "Typy agentów",
     "users": "Użytkownicy",
+    "user_groups": "Grupy użytkowników",
     "providers": "Dostawcy",
     "channels": "Kanały",
     "skills": "Umiejętności",
@@ -4164,5 +4165,20 @@
     "page_not_found": "Strona nie znaleziona",
     "go_to_overview": "Przejdź do przeglądu"
   },
-  "agent_label": "Agent"
+  "agent_label": "Agent",
+  "userGroups": {
+    "title": "Grupy użytkowników",
+    "subtitle": "Nazwane zbiory użytkowników, które mogą być właścicielami. Grupy są płaskie — grupa nigdy nie zawiera innej grupy.",
+    "readOnlyNote": "Grupy są deklarowane w config.toml w sekcji [[user_groups]], a członkostwo jest rozwiązywane w pamięci, a nie przechowywane. Aby je zmienić, edytuj plik i przeładuj konfigurację — restart nie jest potrzebny.",
+    "searchPlaceholder": "Szukaj grup lub członków…",
+    "loadFailed": "Nie udało się wczytać grup użytkowników",
+    "noMatches": "Brak pasujących grup",
+    "empty": "Nie zadeklarowano żadnych grup użytkowników",
+    "emptyHint": "Dodaj blok [[user_groups]] do config.toml, aby zadeklarować grupę.",
+    "noMembers": "Nie zadeklarowano członków",
+    "memberCount_one": "{{count}} członek",
+    "memberCount_few": "{{count}} członków",
+    "memberCount_many": "{{count}} członków",
+    "memberCount_other": "{{count}} członka"
+  }
 }

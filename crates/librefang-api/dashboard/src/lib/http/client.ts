@@ -169,6 +169,9 @@ export {
   // users (RBAC M6)
   listUsers,
   getUser,
+  // user groups (#7745) — read-only; membership is config-derived
+  listUserGroups,
+  getUserGroup,
   // per-user budget (M5) / policy (M3 #3205 — wired)
   getUserBudget,
   getUserPolicy,
@@ -428,6 +431,7 @@ export type {
   TerminalWindow,
   // users / RBAC
   UserItem,
+  UserGroupItem,
   UserUpsertPayload,
   UserRoleName,
   BulkImportRow,

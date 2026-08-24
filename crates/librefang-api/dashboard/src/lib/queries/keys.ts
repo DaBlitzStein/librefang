@@ -444,6 +444,22 @@ export const userKeys = {
   detail: (name: string) => [...userKeys.details(), name] as const,
 };
 
+// #7745 — config-declared user groups (`GET /api/user-groups`). Read-only:
+// membership is derived from `config.toml` rather than stored, so there is no
+// mutation to invalidate against. The hierarchy is still complete so that a
+// future write path can invalidate the whole domain with `userGroupKeys.all`.
+//
+// `detail` is keyed on the group's stable `id`, not its display name — the two
+// are separate fields precisely because a group gets renamed far more often
+// than it gets dissolved, and a cache keyed on the name would miss after one.
+export const userGroupKeys = {
+  all: ["userGroups"] as const,
+  lists: () => [...userGroupKeys.all, "list"] as const,
+  list: () => [...userGroupKeys.lists()] as const,
+  details: () => [...userGroupKeys.all, "detail"] as const,
+  detail: (id: string) => [...userGroupKeys.details(), id] as const,
+};
+
 // M5 / #3203 — per-user spend ranking + per-user detail. Endpoint stubbed
 // until budget tracking sprouts a user dimension.
 export const userBudgetKeys = {
