@@ -5,6 +5,8 @@ import {
   deleteGoal,
   startGoalRun,
   stopGoalRun,
+  pauseGoalRun,
+  resumeGoalRun,
 } from "../http/client";
 import type { GoalItem } from "../../api";
 import { goalKeys } from "../queries/keys";
@@ -61,6 +63,33 @@ export function useStopGoalRun() {
   return useMutation({
     mutationFn: (id: string) => stopGoalRun(id),
     onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: goalKeys.run(id) });
+      qc.invalidateQueries({ queryKey: goalKeys.lists() });
+    },
+  });
+}
+
+// Pause / resume: pausing keeps the run's checkpoint — iteration, progress
+// and accumulated learnings — so a resume continues rather than restarting
+// from iteration 0. Distinct from stop, which is terminal.
+
+export function usePauseGoalRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => pauseGoalRun(id),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: goalKeys.run(id) });
+      qc.invalidateQueries({ queryKey: goalKeys.lists() });
+    },
+  });
+}
+
+export function useResumeGoalRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, maxIterations, verifyMaxRetries }: { id: string; maxIterations?: number; verifyMaxRetries?: number }) =>
+      resumeGoalRun(id, maxIterations !== undefined || verifyMaxRetries !== undefined ? { max_iterations: maxIterations, verify_max_retries: verifyMaxRetries } : undefined),
+    onSuccess: (_data, { id }) => {
       qc.invalidateQueries({ queryKey: goalKeys.run(id) });
       qc.invalidateQueries({ queryKey: goalKeys.lists() });
     },

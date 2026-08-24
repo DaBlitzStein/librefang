@@ -9,6 +9,8 @@ import {
   useDeleteGoal,
   useStartGoalRun,
   useStopGoalRun,
+  usePauseGoalRun,
+  useResumeGoalRun,
 } from "../lib/mutations/goals";
 import type { GoalItem, GoalTemplate } from "../api";
 
@@ -24,6 +26,8 @@ vi.mock("../lib/mutations/goals", () => ({
   useDeleteGoal: vi.fn(),
   useStartGoalRun: vi.fn(),
   useStopGoalRun: vi.fn(),
+  usePauseGoalRun: vi.fn(),
+  useResumeGoalRun: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -47,6 +51,8 @@ const useUpdateGoalMock = useUpdateGoal as unknown as ReturnType<typeof vi.fn>;
 const useDeleteGoalMock = useDeleteGoal as unknown as ReturnType<typeof vi.fn>;
 const useStartGoalRunMock = useStartGoalRun as unknown as ReturnType<typeof vi.fn>;
 const useStopGoalRunMock = useStopGoalRun as unknown as ReturnType<typeof vi.fn>;
+const usePauseGoalRunMock = usePauseGoalRun as unknown as ReturnType<typeof vi.fn>;
+const useResumeGoalRunMock = useResumeGoalRun as unknown as ReturnType<typeof vi.fn>;
 
 interface QueryShape<T> {
   data: T;
@@ -74,24 +80,38 @@ function setMutations(opts: {
   create?: ReturnType<typeof vi.fn>;
   update?: ReturnType<typeof vi.fn>;
   del?: ReturnType<typeof vi.fn>;
+  start?: ReturnType<typeof vi.fn>;
+  stop?: ReturnType<typeof vi.fn>;
+  pause?: ReturnType<typeof vi.fn>;
+  resume?: ReturnType<typeof vi.fn>;
   createPending?: boolean;
 } = {}): {
   create: ReturnType<typeof vi.fn>;
   update: ReturnType<typeof vi.fn>;
   del: ReturnType<typeof vi.fn>;
+  start: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof vi.fn>;
+  resume: ReturnType<typeof vi.fn>;
 } {
   const create = opts.create ?? vi.fn().mockResolvedValue({ id: "new" });
   const update = opts.update ?? vi.fn().mockResolvedValue({ id: "u" });
   const del = opts.del ?? vi.fn().mockResolvedValue(undefined);
+  const start = opts.start ?? vi.fn().mockResolvedValue({ ok: true, run: null });
+  const stop = opts.stop ?? vi.fn().mockResolvedValue({ ok: true, stopped: true });
+  const pause = opts.pause ?? vi.fn().mockResolvedValue({ ok: true, paused: true });
+  const resume = opts.resume ?? vi.fn().mockResolvedValue({ ok: true, run: null });
   useCreateGoalMock.mockReturnValue({
     mutateAsync: create,
     isPending: opts.createPending ?? false,
   });
   useUpdateGoalMock.mockReturnValue({ mutateAsync: update, isPending: false });
   useDeleteGoalMock.mockReturnValue({ mutateAsync: del, isPending: false });
-  useStartGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
-  useStopGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
-  return { create, update, del };
+  useStartGoalRunMock.mockReturnValue({ mutateAsync: start, isPending: false });
+  useStopGoalRunMock.mockReturnValue({ mutateAsync: stop, isPending: false });
+  usePauseGoalRunMock.mockReturnValue({ mutateAsync: pause, isPending: false });
+  useResumeGoalRunMock.mockReturnValue({ mutateAsync: resume, isPending: false });
+  return { create, update, del, start, stop, pause, resume };
 }
 
 function renderPage(): void {
@@ -392,6 +412,229 @@ describe("GoalsPage", () => {
     expect(update.mock.calls[0][0]).toMatchObject({
       id: "g-parent",
       data: expect.objectContaining({ title: "Renamed parent" }),
+    });
+  });
+
+  // Pause / resume must be distinguishable from stop: pause keeps the
+  // checkpoint, stop discards it.
+
+  const RUNNING_GOAL: GoalItem = {
+    id: "g-running",
+    title: "Running goal",
+    status: "in_progress",
+    progress: 40,
+    agent_id: "agent-1",
+  };
+
+  const PAUSED_GOAL: GoalItem = {
+    id: "g-paused",
+    title: "Paused goal",
+    status: "in_progress",
+    progress: 60,
+    agent_id: "agent-1",
+  };
+
+  it("pauses a running goal via usePauseGoalRun rather than stopping it", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([RUNNING_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    useGoalRunMock.mockReturnValue(
+      makeQuery({
+        running: true,
+        run: {
+          goal_id: "g-running",
+          agent_id: "agent-1",
+          phase: "running",
+          iteration: 3,
+          max_iterations: 10,
+          last_progress: 40,
+          started_at: "",
+          updated_at: "",
+        },
+      }),
+    );
+    const { pause, stop } = setMutations();
+    renderPage();
+
+    // Title carries the live iteration count (goals.run_active).
+    fireEvent.click(screen.getByTitle('goals.run_active:{"iteration":3,"max":10}'));
+    await Promise.resolve();
+
+    expect(pause).toHaveBeenCalledWith("g-running");
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("shows a distinct paused indicator and resumes via useResumeGoalRun rather than starting fresh", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([PAUSED_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    useGoalRunMock.mockReturnValue(
+      makeQuery({
+        running: false,
+        run: {
+          goal_id: "g-paused",
+          agent_id: "agent-1",
+          phase: "paused",
+          iteration: 5,
+          max_iterations: 20,
+          last_progress: 60,
+          started_at: "",
+          updated_at: "",
+        },
+      }),
+    );
+    const { resume, start, stop } = setMutations();
+    renderPage();
+
+    // The paused state must be visible without hovering, not only in a
+    // tooltip — the "Paused" badge is always rendered next to the controls.
+    expect(screen.getByText("goals.run_paused")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("goals.run_resume"));
+    await Promise.resolve();
+
+    expect(resume).toHaveBeenCalledWith({ id: "g-paused" });
+    expect(start).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("still allows stopping a paused run, discarding its checkpoint", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([PAUSED_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    useGoalRunMock.mockReturnValue(
+      makeQuery({
+        running: false,
+        run: {
+          goal_id: "g-paused",
+          agent_id: "agent-1",
+          phase: "paused",
+          iteration: 5,
+          max_iterations: 20,
+          last_progress: 60,
+          started_at: "",
+          updated_at: "",
+        },
+      }),
+    );
+    const { stop, resume } = setMutations();
+    renderPage();
+
+    fireEvent.click(screen.getByTitle("goals.run_stop"));
+    await Promise.resolve();
+
+    expect(stop).toHaveBeenCalledWith("g-paused");
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  // Loop cadence (tick_interval_secs): validated client-side against the
+  // same bounds the API enforces (crates/librefang-types/src/goal.rs).
+
+  it("rejects an out-of-range loop cadence and blocks the create submit", () => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { create } = setMutations();
+    renderPage();
+
+    const titleInput = screen.getByPlaceholderText(
+      "goals.goal_title_placeholder",
+    ) as HTMLInputElement;
+    fireEvent.change(titleInput, { target: { value: "Cadence test" } });
+
+    const tickInput = screen.getByLabelText(
+      "goals.tick_interval_label",
+    ) as HTMLInputElement;
+    fireEvent.change(tickInput, { target: { value: "999999" } });
+
+    expect(
+      screen.getByText('goals.tick_interval_range:{"min":1,"max":86400}'),
+    ).toBeInTheDocument();
+
+    const submitBtn = screen
+      .getAllByText("goals.create_goal")
+      .map((el) => el.closest("button"))
+      .find((b): b is HTMLButtonElement => !!b && b.type === "submit");
+    expect(submitBtn).toBeDisabled();
+
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("includes a valid loop cadence in the create payload", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { create } = setMutations();
+    renderPage();
+
+    const titleInput = screen.getByPlaceholderText(
+      "goals.goal_title_placeholder",
+    ) as HTMLInputElement;
+    fireEvent.change(titleInput, { target: { value: "Cadence test" } });
+
+    const tickInput = screen.getByLabelText(
+      "goals.tick_interval_label",
+    ) as HTMLInputElement;
+    fireEvent.change(tickInput, { target: { value: "30" } });
+
+    const submitBtn = screen
+      .getAllByText("goals.create_goal")
+      .map((el) => el.closest("button"))
+      .find((b): b is HTMLButtonElement => !!b && b.type === "submit");
+    fireEvent.click(submitBtn!);
+    await Promise.resolve();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0]).toMatchObject({ tick_interval_secs: 30 });
+  });
+
+  it("leaves the loop cadence out of the create payload when the field is left blank", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { create } = setMutations();
+    renderPage();
+
+    const titleInput = screen.getByPlaceholderText(
+      "goals.goal_title_placeholder",
+    ) as HTMLInputElement;
+    fireEvent.change(titleInput, { target: { value: "No cadence override" } });
+
+    const submitBtn = screen
+      .getAllByText("goals.create_goal")
+      .map((el) => el.closest("button"))
+      .find((b): b is HTMLButtonElement => !!b && b.type === "submit");
+    fireEvent.click(submitBtn!);
+    await Promise.resolve();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0]).not.toHaveProperty("tick_interval_secs");
+  });
+
+  it("pre-fills the edit form's cadence field and clears an override with null when left blank", async () => {
+    const goalWithCadence: GoalItem = {
+      ...PARENT_GOAL,
+      tick_interval_secs: 15,
+    };
+    useGoalsMock.mockReturnValue(makeQuery([goalWithCadence]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { update } = setMutations();
+    renderPage();
+
+    fireEvent.click(screen.getByTitle("common.edit"));
+
+    // The page keeps the always-visible "create" card mounted next to the
+    // row now in edit mode, and both carry a cadence field — scope the
+    // lookup to the edit row via its title input's container.
+    const editTitleInput = screen.getByDisplayValue("Parent goal") as HTMLInputElement;
+    const editRoot = within(editTitleInput.parentElement!);
+    const tickInput = editRoot.getByLabelText(
+      "goals.tick_interval_label",
+    ) as HTMLInputElement;
+    expect(tickInput.value).toBe("15");
+
+    fireEvent.change(tickInput, { target: { value: "" } });
+    fireEvent.click(screen.getByText("common.save"));
+    await Promise.resolve();
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[0][0]).toMatchObject({
+      id: "g-parent",
+      data: expect.objectContaining({ tick_interval_secs: null }),
     });
   });
 });

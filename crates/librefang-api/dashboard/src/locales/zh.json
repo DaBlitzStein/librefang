@@ -2864,6 +2864,10 @@
     "clear_all_partial": "已删除 {{succeeded}}/{{total}} 个目标，失败 {{failed}} 个。",
     "run_start": "自主执行",
     "run_stop": "停止自主执行",
+    "run_pause": "暂停执行",
+    "run_paused": "已暂停",
+    "run_paused_detail": "已在第 {{iteration}}/{{max}} 轮暂停 —— 恢复可从此处继续，停止则会丢弃该检查点。",
+    "run_resume": "从检查点恢复",
     "run_needs_agent": "请先为该目标指派一个 agent 才能自主执行",
     "run_active": "执行中 · 第 {{iteration}}/{{max}} 轮",
     "help": "Goals 是战略规划面——一棵 agent（或你）正在追的目标树，含进度、状态和父子关系。模板播种常见目标形状；树视图展示层级和向上汇总的进度。\n\n使用步骤：\n\n1. 创建。\"Create goal\" 打开表单填标题、描述、父目标、状态。或 \"Pick template\" 一次性铺开预置目标树（如 \"ship a feature\"、\"research a topic\"）。\n\n2. 跟踪。每个节点显示 pending / in-progress / completed。父节点进度由子节点汇总。点节点可内联编辑状态或描述。\n\n3. 清理。\"Clear all\" 整棵清空（带二次确认）——开新阶段时常用。\n\n跟 Scheduler / Workflows 的区别：\n\n  · Goals —— 想做什么。长期意图，可被 agent 读取。\n  · Scheduler / Workflows —— 怎么做。具体的触发与步骤。\n\n典型场景：\n\n  · 给 agent 一个长期方向，规划时可以参考。\n  · 跟踪一个跨周项目，人和 agent 都看同一棵树。\n\n注意事项：\n\n  · 模板是起点，应用后随便改。\n  · 删父节点会带走子节点，\"Clear all\" 前请确认。",
@@ -2872,7 +2876,12 @@
     "loop_badge": "循环",
     "loop_engineering": "Loop engineering",
     "no_agent_selected": "No agent selected",
-    "verifier_agent_id": "Verifier agent"
+    "verifier_agent_id": "Verifier agent",
+    "tick_interval_label": "循环节奏（秒）",
+    "tick_interval_help": "该目标自主执行期间，agent 在每轮迭代之间等待的时长。留空则使用默认值。节奏越短，检查越频繁，但消耗 token 也越快。",
+    "tick_interval_placeholder": "默认",
+    "tick_interval_invalid": "请输入整数秒数。",
+    "tick_interval_range": "节奏必须在 {{min}} 到 {{max}} 秒之间。"
   },
   "sessions": {
     "title": "会话",

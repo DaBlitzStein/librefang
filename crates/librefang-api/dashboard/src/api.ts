@@ -1102,6 +1102,11 @@ export interface GoalItem {
   progress?: number;
   loop_engineering?: boolean;
   verify_agent_id?: string;
+  // Seconds between loop iterations while this goal's autonomous run is
+  // active. `undefined` means the runner's own default applies — mirrors
+  // `Goal.tick_interval_secs: Option<u32>` in
+  // crates/librefang-types/src/goal.rs.
+  tick_interval_secs?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -4354,6 +4359,7 @@ export async function createGoal(payload: {
   agent_id?: string;
   status?: string;
   progress?: number;
+  tick_interval_secs?: number;
 }): Promise<GoalItem> {
   return post<GoalItem>("/api/goals", payload);
 }
@@ -4367,6 +4373,7 @@ export async function updateGoal(
     progress?: number;
     parent_id?: string | null;
     agent_id?: string | null;
+    tick_interval_secs?: number | null;
   }
 ): Promise<GoalItem> {
   // Issue #3832: handler now returns the mutated GoalItem instead of an ack
@@ -4383,7 +4390,15 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 export interface GoalRunState {
   goal_id: string;
   agent_id: string;
-  phase: "running" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
+  phase:
+    | "running"
+    | "finished"
+    | "max_iterations_reached"
+    | "rate_limited"
+    | "stopped"
+    // Resumable checkpoint (unlike "stopped") — see GoalRunPhase::Paused in
+    // crates/librefang-types/src/goal.rs.
+    | "paused";
   iteration: number;
   max_iterations: number;
   last_progress: number;
@@ -4405,13 +4420,34 @@ export async function startGoalRun(
   );
 }
 
-/** Stop an active autonomous run for a goal. */
+/** Stop an active autonomous run for a goal. Terminal — the checkpoint is dropped, so a later start begins at iteration 0. */
 export async function stopGoalRun(
   goalId: string
 ): Promise<{ ok: boolean; stopped: boolean }> {
   return post<{ ok: boolean; stopped: boolean }>(
     `/api/goals/${encodeURIComponent(goalId)}/stop`,
     {}
+  );
+}
+
+/** Suspend an active run, keeping its checkpoint (iteration, progress, learnings) so a later resume continues rather than restarts. */
+export async function pauseGoalRun(
+  goalId: string
+): Promise<{ ok: boolean; paused: boolean }> {
+  return post<{ ok: boolean; paused: boolean }>(
+    `/api/goals/${encodeURIComponent(goalId)}/pause`,
+    {}
+  );
+}
+
+/** Continue a paused run from its checkpoint. 409s if the goal has no paused run — use `startGoalRun` to begin a fresh one instead. */
+export async function resumeGoalRun(
+  goalId: string,
+  payload?: { max_iterations?: number; verify_max_retries?: number }
+): Promise<{ ok: boolean; run: GoalRunState | null }> {
+  return post<{ ok: boolean; run: GoalRunState | null }>(
+    `/api/goals/${encodeURIComponent(goalId)}/resume`,
+    payload ?? {}
   );
 }
 

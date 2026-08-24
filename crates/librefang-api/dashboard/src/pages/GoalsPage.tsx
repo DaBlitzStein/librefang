@@ -9,6 +9,8 @@ import {
   useDeleteGoal,
   useStartGoalRun,
   useStopGoalRun,
+  usePauseGoalRun,
+  useResumeGoalRun,
 } from "../lib/mutations/goals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -18,7 +20,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Pause, Square, ChevronDown, ChevronRight } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -29,6 +31,24 @@ const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>
   users: Users,
   alert: AlertTriangle,
 };
+
+// Mirrors MIN_GOAL_TICK_INTERVAL_SECS / MAX_GOAL_TICK_INTERVAL_SECS in
+// crates/librefang-types/src/goal.rs (~line 189 / 196). The API clamps an
+// out-of-range value reached indirectly (e.g. a stored value from an older
+// build) but rejects one on create/update with a 400, so the form validates
+// against the same bounds instead of letting the round trip fail server-side.
+const MIN_GOAL_TICK_INTERVAL_SECS = 1;
+const MAX_GOAL_TICK_INTERVAL_SECS = 86_400;
+
+/** Parse a cadence form field (blank = "use the default"). */
+function parseTickIntervalSecs(raw: string): { value?: number; error?: "invalid" | "range" } {
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+  if (!/^\d+$/.test(trimmed)) return { error: "invalid" };
+  const n = Number(trimmed);
+  if (n < MIN_GOAL_TICK_INTERVAL_SECS || n > MAX_GOAL_TICK_INTERVAL_SECS) return { error: "range" };
+  return { value: n };
+}
 
 /**
  * Start / stop the autonomous long-horizon run for a single goal (#5744).
@@ -43,9 +63,15 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
   const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
   const startMutation = useStartGoalRun();
   const stopMutation = useStopGoalRun();
+  const pauseMutation = usePauseGoalRun();
+  const resumeMutation = useResumeGoalRun();
 
   const run = runQuery.data?.run;
   const isRunning = runQuery.data?.running === true && run?.phase === "running";
+  // Paused is a resumable checkpoint, distinct from a terminal stop (#5744 /
+  // pause-resume): the goal document's own `status` doesn't carry this —
+  // it's read straight off the live run state.
+  const isPaused = run?.phase === "paused";
 
   if (!hasAgent) {
     return (
@@ -74,26 +100,93 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
       addToast(toastErr(err, t("common.error")), "error");
     }
   };
+  const onPause = async () => {
+    try {
+      await pauseMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
+  const onResume = async () => {
+    try {
+      await resumeMutation.mutateAsync({ id: goal.id });
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
+
+  // Stop keeps the same look in every phase it can act on — it always means
+  // "discard the checkpoint", whether the run is actively ticking or already
+  // paused.
+  const stopButton = (
+    <button
+      type="button"
+      onClick={() => void onStop()}
+      disabled={stopMutation.isPending}
+      className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+      title={t("goals.run_stop")}
+    >
+      {stopMutation.isPending ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <Square className="h-3.5 w-3.5" />
+      )}
+    </button>
+  );
 
   if (isRunning) {
     return (
-      <button
-        type="button"
-        onClick={() => void onStop()}
-        disabled={stopMutation.isPending}
-        className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-        title={
-          run
-            ? t("goals.run_active", { iteration: run.iteration, max: run.max_iterations })
-            : t("goals.run_stop")
-        }
-      >
-        {stopMutation.isPending ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Square className="h-3.5 w-3.5" />
-        )}
-      </button>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => void onPause()}
+          disabled={pauseMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-colors"
+          title={
+            run
+              ? t("goals.run_active", { iteration: run.iteration, max: run.max_iterations })
+              : t("goals.run_pause")
+          }
+        >
+          {pauseMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Pause className="h-3.5 w-3.5" />
+          )}
+        </button>
+        {stopButton}
+      </div>
+    );
+  }
+
+  if (isPaused) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Badge
+          variant="brand"
+          title={
+            run
+              ? t("goals.run_paused_detail", { iteration: run.iteration, max: run.max_iterations })
+              : t("goals.run_paused")
+          }
+        >
+          {t("goals.run_paused")}
+        </Badge>
+        <button
+          type="button"
+          onClick={() => void onResume()}
+          disabled={resumeMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
+          title={t("goals.run_resume")}
+        >
+          {resumeMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Play className="h-3.5 w-3.5" />
+          )}
+        </button>
+        {stopButton}
+      </div>
     );
   }
 
@@ -118,9 +211,9 @@ export function GoalsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
-  const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "" });
+  const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "", tick_interval_secs: "" });
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, agent_id: "", loop_engineering: false, verify_agent_id: "" });
+  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, agent_id: "", loop_engineering: false, verify_agent_id: "", tick_interval_secs: "" });
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const agentsQuery = useAgents();
@@ -134,6 +227,24 @@ export function GoalsPage() {
   const deleteMutation = useDeleteGoal();
   const goals = useMemo(() => goalsQuery.data ?? [], [goalsQuery.data]);
   const templates = templatesQuery.data ?? [];
+
+  const tickIntervalErrorText = (result: { error?: "invalid" | "range" }) =>
+    result.error === "invalid"
+      ? t("goals.tick_interval_invalid")
+      : result.error === "range"
+        ? t("goals.tick_interval_range", {
+            min: MIN_GOAL_TICK_INTERVAL_SECS,
+            max: MAX_GOAL_TICK_INTERVAL_SECS,
+          })
+        : undefined;
+  const createTickResult = useMemo(
+    () => parseTickIntervalSecs(createDraft.tick_interval_secs),
+    [createDraft.tick_interval_secs],
+  );
+  const editTickResult = useMemo(
+    () => parseTickIntervalSecs(editDraft.tick_interval_secs),
+    [editDraft.tick_interval_secs],
+  );
 
   const runBatch = async <T,>(items: readonly T[], action: (item: T) => Promise<unknown>) => {
     let succeeded = 0;
@@ -158,16 +269,21 @@ export function GoalsPage() {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!createDraft.title.trim()) return;
+    if (createTickResult.error) {
+      addToast(tickIntervalErrorText(createTickResult) ?? t("common.error"), "error");
+      return;
+    }
     try {
       // Drop blank parent_id / agent_id instead of posting `""` (#6562): the form seeds both as empty strings, and an empty parent_id used to fail the backend's parent-existence check with "Parent goal '' not found".
-      const { parent_id, agent_id, ...rest } = createDraft;
+      const { parent_id, agent_id, tick_interval_secs: _tickIntervalRaw, ...rest } = createDraft;
       await createMutation.mutateAsync({
         ...rest,
         ...(parent_id.trim() ? { parent_id: parent_id.trim() } : {}),
         ...(agent_id.trim() ? { agent_id: agent_id.trim() } : {}),
+        ...(createTickResult.value !== undefined ? { tick_interval_secs: createTickResult.value } : {}),
       });
       addToast(t("common.success"), "success");
-      setCreateDraft({ title: "", description: "", status: "pending", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "" });
+      setCreateDraft({ title: "", description: "", status: "pending", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "", tick_interval_secs: "" });
     } catch (err) {
       addToast(toastErr(err, t("common.error")), "error");
     }
@@ -207,13 +323,24 @@ export function GoalsPage() {
       agent_id: goal.agent_id || "",
       loop_engineering: goal.loop_engineering || false,
       verify_agent_id: goal.verify_agent_id || "",
+      tick_interval_secs:
+        goal.tick_interval_secs !== undefined ? String(goal.tick_interval_secs) : "",
     });
   };
 
   const handleSaveEdit = async () => {
     if (!editingId || !editDraft.title.trim()) return;
+    if (editTickResult.error) {
+      addToast(tickIntervalErrorText(editTickResult) ?? t("common.error"), "error");
+      return;
+    }
     try {
-      await updateMutation.mutateAsync({ id: editingId, data: editDraft });
+      // `null` clears a stored override back to the runner default; the
+      // update route only recognises `null` for that, not an empty string
+      // (unlike parent_id / agent_id above), so the blank-input case is
+      // translated explicitly here rather than forwarded as-is.
+      const payload = { ...editDraft, tick_interval_secs: editTickResult.value ?? null };
+      await updateMutation.mutateAsync({ id: editingId, data: payload });
       addToast(t("common.success"), "success");
       setEditingId(null);
     } catch (err) {
@@ -357,6 +484,24 @@ export function GoalsPage() {
                 <option value="">{t("goals.no_agent_selected")}</option>
                 {agents.map(a => <option key={a.id} value={a.id}>{a.name ?? a.id}</option>)}
               </select>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="goal-create-tick-interval-empty" className="text-xs font-bold text-text-dim">{t("goals.tick_interval_label")}</label>
+                <input
+                  id="goal-create-tick-interval-empty"
+                  type="number"
+                  inputMode="numeric"
+                  min={MIN_GOAL_TICK_INTERVAL_SECS}
+                  max={MAX_GOAL_TICK_INTERVAL_SECS}
+                  value={createDraft.tick_interval_secs}
+                  onChange={e => setCreateDraft({...createDraft, tick_interval_secs: e.target.value})}
+                  placeholder={t("goals.tick_interval_placeholder")}
+                  className={inputClass}
+                />
+                <p className="text-[11px] text-text-dim">{t("goals.tick_interval_help")}</p>
+                {createTickResult.error && (
+                  <p className="text-xs text-error">{tickIntervalErrorText(createTickResult)}</p>
+                )}
+              </div>
               <label className="flex items-center gap-3 text-sm cursor-pointer">
                 <input type="checkbox" checked={createDraft.loop_engineering}
                   onChange={e => setCreateDraft({...createDraft, loop_engineering: e.target.checked})}
@@ -368,7 +513,7 @@ export function GoalsPage() {
                   onChange={e => setCreateDraft({...createDraft, verify_agent_id: e.target.value})}
                   placeholder={t("goals.verifier_agent_id")} className={inputClass} />
               )}
-              <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2">
+              <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim() || !!createTickResult.error} className="mt-2">
                 {createMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
                 {t("goals.create_goal")}
               </Button>
@@ -480,6 +625,24 @@ export function GoalsPage() {
                   <option value="">{t("goals.no_agent_selected")}</option>
                   {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                 </select>
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="goal-create-tick-interval" className="text-xs font-bold text-text-dim">{t("goals.tick_interval_label")}</label>
+                  <input
+                    id="goal-create-tick-interval"
+                    type="number"
+                    inputMode="numeric"
+                    min={MIN_GOAL_TICK_INTERVAL_SECS}
+                    max={MAX_GOAL_TICK_INTERVAL_SECS}
+                    value={createDraft.tick_interval_secs}
+                    onChange={e => setCreateDraft({...createDraft, tick_interval_secs: e.target.value})}
+                    placeholder={t("goals.tick_interval_placeholder")}
+                    className={inputClass}
+                  />
+                  <p className="text-[11px] text-text-dim">{t("goals.tick_interval_help")}</p>
+                  {createTickResult.error && (
+                    <p className="text-xs text-error">{tickIntervalErrorText(createTickResult)}</p>
+                  )}
+                </div>
                 <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
                   <input type="checkbox" checked={createDraft.loop_engineering}
                     onChange={e => setCreateDraft({...createDraft, loop_engineering: e.target.checked})}
@@ -491,7 +654,7 @@ export function GoalsPage() {
                     onChange={e => setCreateDraft({...createDraft, verify_agent_id: e.target.value})}
                     placeholder={t("goals.verifier_agent_id")} className={inputClass} />
                 )}
-                <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2">
+                <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim() || !!createTickResult.error} className="mt-2">
                   {createMutation.isPending ? t("common.loading") : t("goals.create_goal")}
                 </Button>
               </form>
@@ -532,6 +695,25 @@ export function GoalsPage() {
                               <option value="">{t("goals.no_agent_selected")}</option>
                               {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                             </select>
+                            <div className="basis-full flex flex-col gap-1">
+                              <label htmlFor="goal-edit-tick-interval" className="text-xs font-bold text-text-dim">{t("goals.tick_interval_label")}</label>
+                              <input
+                                id="goal-edit-tick-interval"
+                                type="number"
+                                inputMode="numeric"
+                                min={MIN_GOAL_TICK_INTERVAL_SECS}
+                                max={MAX_GOAL_TICK_INTERVAL_SECS}
+                                value={editDraft.tick_interval_secs}
+                                onChange={e => setEditDraft({...editDraft, tick_interval_secs: e.target.value})}
+                                placeholder={t("goals.tick_interval_placeholder")}
+                                className={inputClass}
+                                style={{ width: "160px" }}
+                              />
+                              <p className="text-[11px] text-text-dim">{t("goals.tick_interval_help")}</p>
+                              {editTickResult.error && (
+                                <p className="text-xs text-error">{tickIntervalErrorText(editTickResult)}</p>
+                              )}
+                            </div>
                             <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
                               <input type="checkbox" checked={editDraft.loop_engineering}
                                 onChange={e => setEditDraft({...editDraft, loop_engineering: e.target.checked})}
@@ -543,7 +725,7 @@ export function GoalsPage() {
                                 onChange={e => setEditDraft({...editDraft, verify_agent_id: e.target.value})}
                                 placeholder={t("goals.verifier_agent_id")} className={inputClass} />
                             )}
-                            <Button variant="primary" size="sm" onClick={handleSaveEdit}>{t("common.save")}</Button>
+                            <Button variant="primary" size="sm" onClick={handleSaveEdit} disabled={!!editTickResult.error}>{t("common.save")}</Button>
                             <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>{t("common.cancel")}</Button>
                           </div>
                         </div>
