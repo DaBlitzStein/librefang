@@ -677,6 +677,18 @@ impl LibreFangKernel {
                 .unwrap_or_default();
             let catalog = self.mcp_catalog_load();
             for name in &servers {
+                // `"*"` is the allowlist's own vocabulary, not a server name.
+                // `tools_and_skills` reads `["*"]` as "every connected MCP
+                // server" — the explicit opt-in that is distinct from the
+                // empty list — so it is the one entry that must never be
+                // looked up in the catalog. Validating it as a name rejected
+                // the only way to express "all of them" through this route,
+                // and an operator who picked that option from the dashboard
+                // got "Unknown MCP server '*'" for a value the kernel itself
+                // defines (#5855).
+                if name == "*" {
+                    continue;
+                }
                 let normalized = librefang_runtime::mcp::normalize_name(name);
                 let in_catalog = catalog.get(name).is_some()
                     || catalog

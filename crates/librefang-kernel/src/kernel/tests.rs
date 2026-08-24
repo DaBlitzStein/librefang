@@ -3777,6 +3777,79 @@ fn test_set_agent_mcp_servers_rejects_name_unknown_everywhere() {
 }
 
 #[test]
+fn test_set_agent_mcp_servers_accepts_the_all_servers_wildcard() {
+    // `["*"]` is the allowlist's own vocabulary for "every connected MCP
+    // server" — the explicit opt-in that `tools_and_skills` reads as distinct
+    // from the empty list. Validating it as if it were a server name rejected
+    // the one value that expresses the option, so an operator who chose "all
+    // servers" from the dashboard got `Unknown MCP server '*'` back for a
+    // token the kernel itself defines (#5855).
+    //
+    // The wildcard has to be accepted on an install with no MCP server
+    // configured, connected, or in the catalog at all: "all of them" is
+    // well-formed even when the set is currently empty, and it is exactly
+    // that install where the old lookup could never succeed.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "wildcard-mcp-agent".to_string(),
+                description: "MCP wildcard acceptance regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("spawn");
+
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["*".to_string()])
+        .expect("the all-servers wildcard must be accepted");
+
+    let entry = kernel.agents.registry.get(agent_id).expect("agent exists");
+    assert_eq!(
+        entry.manifest.mcp_servers,
+        vec!["*".to_string()],
+        "the wildcard must be persisted verbatim — `tools_and_skills` matches on `\"*\"`, \
+         so rewriting it to an empty list or an expanded name list changes its meaning"
+    );
+
+    // Mixing the wildcard with a genuinely unknown name must still fail:
+    // skipping `"*"` is a targeted exemption for the one reserved token, not
+    // a hole that lets an unvalidated name ride along beside it.
+    let err = kernel
+        .set_agent_mcp_servers(
+            agent_id,
+            vec!["*".to_string(), "totally-made-up-server".to_string()],
+        )
+        .expect_err("an unknown name alongside the wildcard must still be rejected");
+    match err {
+        KernelError::LibreFang(LibreFangError::InvalidInput(ref msg)) => {
+            assert!(
+                msg.contains("totally-made-up-server"),
+                "error message must name the rejected server, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput, got: {other:?}"),
+    }
+
+    kernel.shutdown();
+}
+
+#[test]
 fn test_set_agent_mcp_servers_real_world_regression_pending_plus_new_configured_entries() {
     // Reproduces the real bug report exactly: an agent already carries
     // `fetch` as a catalog-only pending declaration (never installed,
