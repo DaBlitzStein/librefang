@@ -17,7 +17,7 @@ import { agentQueries, useAgents, useAgentSessions } from "../lib/queries/agents
 import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { useChatCommands, type ChatCommand } from "../lib/queries/commands";
-import { backendCommandNames, commandLabel, menuCommands } from "../lib/chatCommands";
+import { backendCommandNames, commandLabel, menuCommands, shouldHoldSlashSend } from "../lib/chatCommands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
@@ -1825,7 +1825,20 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   const isSlashPrefix = message.startsWith("/") && !message.includes(" ");
   const isModelArg = /^\/model\s/i.test(message);
 
-  const { data: chatCommands } = useChatCommands();
+  const { data: chatCommands, isPending: commandsPending } = useChatCommands();
+
+  // A slash command typed before the catalog lands would be sent to the agent
+  // as plain text, because the list that identifies it as a command has not
+  // arrived yet — burning tokens on a prompt like `/goal ship it` and
+  // answering with nonsense. The hard-coded array this replaced was there on
+  // the first frame, so blocking the send is what preserves that guarantee
+  // without reintroducing a second copy of the catalog.
+  //
+  // Derived, not stateful: it appears the moment a `/` is typed inside the
+  // window and clears itself when the query resolves. See
+  // `shouldHoldSlashSend` for why a failed fetch is deliberately not held.
+  const commandsLoading = shouldHoldSlashSend(message, commandsPending);
+
   const filteredCmds = useMemo(
     () => isSlashPrefix
       ? menuCommands(chatCommands).filter(c => c.cmd.startsWith(message.toLowerCase()))
@@ -2034,6 +2047,9 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
     e.preventDefault();
     if (effectiveDisabled || anyUploading) return;
     if (!message.trim() && !hasSendableAttachments) return;
+    // Hold the send rather than letting the command through as a prompt. The
+    // typed text is kept so the user only has to press Enter again.
+    if (commandsLoading) return;
     // Slash commands bypass the LLM send path (they're handled in
     // useChatMessages.sendMessage), so they cannot carry attachments.
     // Preserve the chips through a slash so the user doesn't silently lose
@@ -2106,6 +2122,13 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           <span>{authStatus === "local_offline"
             ? t("chat.provider_offline", { provider: providerName || "unknown" })
             : t("chat.auth_missing", { provider: providerName || "unknown" })}</span>
+        </div>
+      )}
+      {/* Slash command catalog still in flight — send is held, not swallowed */}
+      {commandsLoading && (
+        <div className="flex items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm text-text-dim">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+          <span>{t("chat.commands_loading")}</span>
         </div>
       )}
       {/* Slash command autocomplete */}
@@ -2234,7 +2257,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
         ) : (
           <button
             type="submit"
-            disabled={effectiveDisabled || anyUploading || (!message.trim() && !hasSendableAttachments)}
+            disabled={effectiveDisabled || anyUploading || commandsLoading || (!message.trim() && !hasSendableAttachments)}
             className="group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3.5 sm:px-5 rounded-2xl bg-linear-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
           >
             {anyUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
