@@ -15,11 +15,14 @@ Behaviour parity with the Rust adapter:
   read JSON envelopes (``hello`` / ``events_api`` / ``interactive`` /
   ``disconnect``). Each ``events_api`` / ``interactive`` envelope
   must be ACK'd by echoing back ``{"envelope_id": "..."}``.
-* **Event handling**: only ``message`` and ``app_mention`` types
-  produce ``message`` events. Subtype filter: bare messages pass,
-  ``message_changed`` extracts ``event.message`` (edit), every other
-  subtype is dropped (joins, leaves, file_share, etc.). Self-skip on
-  ``bot_id`` present OR ``user == bot_user_id``.
+* **Event handling**: only ``message`` and ``app_mention`` types produce ``message`` events.
+  Subtype filter: bare messages pass, ``message_changed`` extracts ``event.message`` (edit), ``file_share`` passes as an ordinary message carrying ``files`` (#7087), every other subtype is dropped (joins, leaves, topic changes, etc.).
+  Self-skip on ``bot_id`` present OR ``user == bot_user_id``.
+* **Inbound attachments** (#7087): a message's ``files`` array becomes an ``Image`` / ``Video`` / ``Audio`` / ``File`` content variant carrying ``url_private_download``, and the adapter declares ``header_rules`` so the daemon fetches that URL with the bot token — Slack's private file URLs 302 to a login page without it.
+  The URL is forwarded rather than the bytes because the daemon's media pipeline is what produces a vision image block, an audio transcription or a saved document path; inbound ``FileData`` is rendered as a text placeholder and its payload discarded, so inlining bytes would deliver nothing.
+  One attachment per message (the wire carries one ``ChannelContent``), the attachment outranks the message text including a slash command, and the message text rides along as the caption for every variant that has one.
+  Policy knobs: ``SLACK_FILE_DOWNLOADS``, ``SLACK_FILE_MAX_BYTES``, ``SLACK_FILE_ALLOWED_EXTENSIONS``, ``SLACK_FILE_DOWNLOAD_CHANNELS`` and ``SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS``.
+  Link-unfurl ``attachments[].image_url`` is deliberately **not** followed: it is preview metadata for a URL somebody pasted, not an upload, and fetching it would point the daemon at an arbitrary host.
 * **Allowed channels**: empty list = allow all. When non-empty,
   channel must be in the list; DMs (``channel`` starts with ``D``)
   are exempt (the operator's per-user DM allowlist handles those).
@@ -33,9 +36,7 @@ Behaviour parity with the Rust adapter:
 * **Block Kit interactive**: ``block_actions`` payloads → first
   action's ``value`` becomes ``ButtonCallback.action``; ``action_id``,
   ``trigger_id``, and the ``block_action`` flag ride in metadata.
-* **REST send**: ``POST /api/chat.postMessage`` with the bot token,
-  optional ``thread_ts`` and ``unfurl_links``. 3 000-char chunking
-  (matches the Rust ``SLACK_MSG_LIMIT``).
+* **REST send**: text and Block Kit responses use ``chat.postMessage`` with optional ``thread_ts`` / ``unfurl_links`` and 3 000-char chunking. ``File`` / ``FileData`` attachments use Slack's external upload flow, preserve ``thread_ts``, and require the ``files:write`` bot scope.
 * **Reactions** (#6731): the receipt is driven by the daemon's AgentPhase lifecycle, not by the receive hook — ``eyes`` on ``queued``, flipped to ``white_check_mark`` on ``done`` and ``x`` on ``error``.
   A message the daemon declines to answer (group mention-only gating, a rate-limit rejection, a slash command handled in-bridge) never reaches ``queued``, so it never gets a reaction at all instead of being left with a permanent ``eyes``.
   Opt out via ``SLACK_REACTIONS=false``.
@@ -43,9 +44,7 @@ Behaviour parity with the Rust adapter:
   Single-step turns post no card and keep just the receipt reactions.
   Toggled independently of the receipt via ``SLACK_PROGRESS_CARD`` (#6730), which defaults to whatever ``SLACK_REACTIONS`` is set to so neither knob silently turns the other's output on.
 
-Stdlib-only: HTTPS via ``urllib.request``, WebSocket via a
-hand-rolled RFC 6455 client over ``socket`` + ``ssl`` (same pattern
-as the discord sidecar #5299).
+Stdlib-only: Slack Web API calls use the shared urllib transport, URL-backed file downloads use DNS-pinned ``http.client`` connections, and WebSocket uses a hand-rolled RFC 6455 client over ``socket`` + ``ssl`` (same pattern as the discord sidecar #5299).
 
 Configure via ``[[sidecar_channels]]``::
 
@@ -60,6 +59,11 @@ Configure via ``[[sidecar_channels]]``::
     # SLACK_FORCE_FLAT_REPLIES = "false"
     # SLACK_REACTIONS = "true"
     # SLACK_PROGRESS_CARD = "true"
+    # SLACK_FILE_DOWNLOADS = "true"
+    # SLACK_FILE_MAX_BYTES = "10485760"
+    # SLACK_FILE_ALLOWED_EXTENSIONS = "png,jpg,pdf,mp4"
+    # SLACK_FILE_DOWNLOAD_CHANNELS = "C0123"
+    # SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS = "C0789"
     # SLACK_ACCOUNT_ID = "workspace-prod"
 
 Secrets via ``~/.librefang/secrets.env``: ``SLACK_APP_TOKEN`` (the
@@ -70,14 +74,18 @@ API call).
 from __future__ import annotations
 
 import asyncio
+import http.client
+import ipaddress
 import json
 import os
 import re
+import socket
+import ssl
 import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
@@ -113,9 +121,255 @@ MAX_BLOCKS_PER_MESSAGE = 50
 
 SEND_TIMEOUT_SECS = 15.0
 HANDSHAKE_TIMEOUT_SECS = 15.0
+MAX_FILE_UPLOAD_BYTES = 10 * 1024 * 1024
+
+# Hosts that serve Slack's own `url_private` / `url_private_download` file URLs.
+# Inbound attachments are pinned to this set (#7087) and it is the exact set declared in `header_rules`, so the bot token is only ever attached to a fetch of a Slack-hosted file.
+#
+# `files.remote.add` lets any workspace member register a "file" whose `url_private` points at a host of their choosing, and a link unfurl can put an arbitrary `image_url` in `attachments`.
+# Both reach this adapter through an authentic Socket Mode envelope, so "the event came from Slack" says nothing about who chose the URL — the host pin is what keeps a member-chosen address from being fetched with the bot's credentials.
+SLACK_FILE_HOSTS = ("files.slack.com", "slack-files.com")
+
+# Slack `file.mode` values whose `url_private` no longer serves bytes.
+SLACK_UNFETCHABLE_FILE_MODES = frozenset({"tombstone", "hidden_by_limit"})
+
+# Default ceiling on an inbound attachment.
+# Same 10 MiB as the outbound upload cap so a round trip (user uploads, agent edits, agent posts back) does not fail one direction with a size the other accepted.
+DEFAULT_INBOUND_FILE_MAX_BYTES = MAX_FILE_UPLOAD_BYTES
 
 INITIAL_BACKOFF_SECS = 1.0
 READ_TICK_SECS = 30.0
+
+
+def _resolve_public_url(
+    url: str,
+    *,
+    require_https: bool = False,
+) -> tuple[urllib.parse.SplitResult, str, list[tuple[int, tuple]]]:
+    """Parse a URL, resolve every address, and reject the whole answer set if any target is non-public."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError) as e:
+        raise RuntimeError(f"invalid URL: {e}") from e
+    if parsed.scheme not in ("http", "https"):
+        raise RuntimeError("only http/https URLs are allowed")
+    if require_https and parsed.scheme != "https":
+        raise RuntimeError("HTTPS is required")
+    if not host:
+        raise RuntimeError("URL has no host")
+    if parsed.username is not None or parsed.password is not None:
+        raise RuntimeError("URL credentials are not allowed")
+    if port is not None and not (1 <= port <= 65535):
+        raise RuntimeError("URL port is out of range")
+
+    normalized = host.rstrip(".").lower()
+    if (
+        normalized in {"localhost", "ip6-localhost", "metadata", "metadata.google.internal"}
+        or normalized.endswith(".localhost")
+        or normalized.endswith(".local")
+    ):
+        raise RuntimeError(f"host '{host}' is reserved or private")
+    try:
+        hostname = normalized.encode("idna").decode("ascii")
+    except UnicodeError as e:
+        raise RuntimeError(f"invalid internationalized hostname: {e}") from e
+    resolved_port = port or (443 if parsed.scheme == "https" else 80)
+    try:
+        answers = socket.getaddrinfo(
+            hostname,
+            resolved_port,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as e:
+        raise RuntimeError(f"DNS resolution failed for '{host}': {e}") from e
+
+    targets: list[tuple[int, tuple]] = []
+    seen: set[tuple[int, str, int]] = set()
+    for family, _socktype, _proto, _canonname, sockaddr in answers:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
+        address = sockaddr[0].split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError as e:
+            raise RuntimeError(f"DNS returned invalid address '{address}'") from e
+        if not ip.is_global:
+            raise RuntimeError(f"host '{host}' resolves to non-public IP {ip}")
+        key = (family, str(ip), sockaddr[1])
+        if key not in seen:
+            seen.add(key)
+            targets.append((family, sockaddr))
+    if not targets:
+        raise RuntimeError(f"DNS resolution returned no usable addresses for '{host}'")
+    return parsed, hostname, targets
+
+
+def _validate_file_url(url: str) -> Optional[str]:
+    """Return an SSRF rejection reason, or ``None`` after validating every resolved address."""
+    try:
+        _resolve_public_url(url)
+    except RuntimeError as e:
+        return str(e)
+    return None
+
+
+def _read_bounded_response(response, max_bytes: int) -> bytes:
+    content_length = response.headers.get("content-length") if response.headers is not None else None
+    if content_length:
+        try:
+            declared = int(content_length)
+        except (TypeError, ValueError):
+            declared = None
+        if declared is not None and declared > max_bytes:
+            raise RuntimeError(f"file exceeds {max_bytes} byte upload cap")
+    data = response.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise RuntimeError(f"file exceeds {max_bytes} byte upload cap")
+    return data
+
+
+class _PreSendConnectionError(RuntimeError):
+    """A connection failure that occurred before any request bytes could be sent."""
+
+
+def _request_pinned_once(
+    parsed: urllib.parse.SplitResult,
+    hostname: str,
+    target: tuple[int, tuple],
+    *,
+    method: str,
+    body: Optional[bytes],
+    headers: Optional[dict[str, str]],
+    max_bytes: int,
+) -> tuple[int, bytes, Optional[str]]:
+    """Issue one request through an already-validated address while retaining the original Host header and TLS SNI."""
+    family, sockaddr = target
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if parsed.scheme == "https":
+        connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+            hostname,
+            port,
+            timeout=SEND_TIMEOUT_SECS,
+            context=ssl.create_default_context(),
+        )
+    else:
+        connection = http.client.HTTPConnection(
+            hostname,
+            port,
+            timeout=SEND_TIMEOUT_SECS,
+        )
+
+    def _create_connection(
+        _address,
+        timeout=SEND_TIMEOUT_SECS,
+        source_address=None,
+        **_kwargs,
+    ):
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except BaseException:
+            sock.close()
+            raise
+
+    connection._create_connection = _create_connection
+    path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    try:
+        try:
+            connection.connect()
+        except (OSError, http.client.HTTPException) as e:
+            raise _PreSendConnectionError(str(e)) from e
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        data = _read_bounded_response(response, max_bytes)
+        return response.status, data, response.getheader("location")
+    finally:
+        connection.close()
+
+
+def _public_http_request(
+    url: str,
+    *,
+    method: str,
+    body: Optional[bytes] = None,
+    headers: Optional[dict[str, str]] = None,
+    max_bytes: int,
+    require_https: bool = False,
+) -> tuple[int, bytes]:
+    """Resolve and pin every request hop so validation and connection cannot diverge through DNS rebinding."""
+    current_url = url
+    method = method.upper()
+    for redirect_count in range(6):
+        parsed, hostname, targets = _resolve_public_url(
+            current_url,
+            require_https=require_https,
+        )
+        result = None
+        last_error: Optional[BaseException] = None
+        for target in targets:
+            try:
+                result = _request_pinned_once(
+                    parsed,
+                    hostname,
+                    target,
+                    method=method,
+                    body=body,
+                    headers=headers,
+                    max_bytes=max_bytes,
+                )
+                break
+            except _PreSendConnectionError as e:
+                last_error = e
+            except (OSError, http.client.HTTPException) as e:
+                if method != "GET":
+                    raise RuntimeError(f"request outcome is uncertain; refusing to retry {method} on another address") from e
+                last_error = e
+        if result is None:
+            raise RuntimeError(f"request failed for every validated address: {last_error}") from last_error
+
+        status, data, location = result
+        if status not in (301, 302, 303, 307, 308) or not location:
+            return status, data
+        if redirect_count == 5:
+            raise RuntimeError("too many redirects (cap: 5)")
+        if method != "GET" and status not in (307, 308):
+            raise RuntimeError(f"redirect status {status} would not preserve {method}")
+        try:
+            next_url = urllib.parse.urljoin(current_url, location)
+        except (TypeError, ValueError) as e:
+            raise RuntimeError(f"invalid URL in redirect: {e}") from e
+        current_url = next_url
+    raise RuntimeError("too many redirects (cap: 5)")
+
+
+def _safe_filename(raw: Any) -> str:
+    if not isinstance(raw, str):
+        return "file"
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1].replace("\x00", "").strip()
+    if name in ("", ".", ".."):
+        return "file"
+    return name[:255]
+
+
+def _coerce_file_data(raw: Any) -> Optional[bytes]:
+    if isinstance(raw, bytes):
+        return raw
+    if isinstance(raw, bytearray):
+        return bytes(raw)
+    if not isinstance(raw, list):
+        return None
+    if any(isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= 255 for item in raw):
+        return None
+    return bytes(raw)
+
+
 def _bool_env(raw: str, *, default: bool) -> bool:
     """Parse a permissive bool env var. ``""`` / unset → ``default``."""
     v = raw.strip().lower()
@@ -155,6 +409,177 @@ def parse_users_info(body: dict) -> tuple[Optional[str], Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Inbound attachments (#7087)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SlackFilePolicy:
+    """Resolved policy for inbound attachments.
+
+    ``enabled=False`` — the default when no policy is supplied — reproduces the pre-#7087 behaviour of dropping every file-bearing message, so an operator can turn the feature off without changing anything else.
+
+    ``channels`` is an allow-list (empty = every channel) and ``excluded_channels`` a deny-list applied on top of it, which is the ergonomic shape for the two things operators actually ask for: "only this one channel accepts uploads" and "every channel except this busy one".
+    """
+
+    enabled: bool = False
+    max_bytes: int = DEFAULT_INBOUND_FILE_MAX_BYTES
+    allowed_extensions: frozenset = frozenset()
+    channels: tuple = ()
+    excluded_channels: tuple = ()
+
+    def enabled_for(self, channel: str) -> bool:
+        """Whether attachments in ``channel`` should be forwarded to the agent."""
+        if not self.enabled:
+            return False
+        if channel in self.excluded_channels:
+            return False
+        return not self.channels or channel in self.channels
+
+    def extension_allowed(self, name: Any, filetype: Any) -> bool:
+        """Whether this file's extension passes the allow-list. An empty allow-list accepts everything."""
+        if not self.allowed_extensions:
+            return True
+        return _file_extension(name, filetype) in self.allowed_extensions
+
+
+def _file_extension(name: Any, filetype: Any) -> str:
+    """Lowercased extension for an inbound Slack file object.
+
+    The filename wins because it is what the agent's tools will see; Slack's own ``filetype`` token is the fallback for uploads that arrive without a usable name.
+    Returns ``""`` when neither yields one, which a non-empty allow-list then rejects.
+    """
+    head, dot, tail = _safe_filename(name).rpartition(".")
+    if dot and head and tail:
+        return tail.lower()
+    if isinstance(filetype, str):
+        return filetype.strip().lstrip(".").lower()
+    return ""
+
+
+def _is_slack_file_url(url: Any) -> bool:
+    """Whether ``url`` is an HTTPS URL served by one of Slack's own file hosts.
+
+    Userinfo is refused outright rather than ignored: ``https://files.slack.com@evil.example/x``
+    reads as a Slack URL to a human and resolves to ``evil.example``.
+    """
+    if not isinstance(url, str) or not url:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname
+    except (TypeError, ValueError):
+        return False
+    if parsed.scheme != "https" or not host:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    return host.rstrip(".").lower() in SLACK_FILE_HOSTS
+
+
+def _file_rejection(entry: Any, policy: SlackFilePolicy) -> Optional[str]:
+    """Return why this Slack file object must not be forwarded, or ``None`` when it passes policy."""
+    if not isinstance(entry, dict):
+        return "file entry is not an object"
+    mode = entry.get("mode")
+    if mode in SLACK_UNFETCHABLE_FILE_MODES:
+        # A deleted file, or one Slack has hidden behind a free-plan storage limit, still arrives with a `url_private` that no longer resolves.
+        # Refusing it here keeps a `[File download failed]` line out of the agent's prompt.
+        return f"file mode is {mode}"
+    url = entry.get("url_private_download") or entry.get("url_private")
+    if not isinstance(url, str) or not url:
+        return "file has neither url_private_download nor url_private"
+    if not _is_slack_file_url(url):
+        return "file URL is not served by a Slack file host"
+    if not policy.extension_allowed(
+        entry.get("name") or entry.get("title"), entry.get("filetype"),
+    ):
+        return "file extension is not in the allow-list"
+    size = entry.get("size")
+    if isinstance(size, int) and not isinstance(size, bool) and size > policy.max_bytes:
+        return f"file is {size} bytes, over the {policy.max_bytes} byte cap"
+    return None
+
+
+def _file_content(entry: dict, companion_text: str) -> dict[str, Any]:
+    """Map one policy-approved Slack file object onto a ``ChannelContent`` variant.
+
+    The URL is handed to the daemon rather than the bytes: the daemon's media pipeline is what turns a URL into an image block for vision, a transcription for audio, or a saved path for a document, and it attaches the bot token for exactly the hosts this adapter declared in ``header_rules``.
+    Inlining bytes as ``FileData`` would not reach any of that — the inbound side of the bridge renders ``FileData`` as a text placeholder and discards the payload.
+    """
+    url = entry.get("url_private_download") or entry.get("url_private")
+    filename = _safe_filename(entry.get("name") or entry.get("title"))
+    raw_mime = entry.get("mimetype")
+    mimetype = raw_mime.strip() if isinstance(raw_mime, str) else ""
+    caption = companion_text or None
+    duration_seconds = 0
+    raw_ms = entry.get("duration_ms")
+    if isinstance(raw_ms, int) and not isinstance(raw_ms, bool) and raw_ms > 0:
+        duration_seconds = raw_ms // 1000
+
+    if mimetype.startswith("image/"):
+        return Content.image(url, caption=caption, mime_type=mimetype)
+    if mimetype.startswith("video/"):
+        return Content.video(url, caption=caption,
+                             duration_seconds=duration_seconds,
+                             filename=filename)
+    if mimetype.startswith("audio/"):
+        title = entry.get("title")
+        return Content.audio(url, caption=caption,
+                             duration_seconds=duration_seconds,
+                             title=title if isinstance(title, str) and title else None)
+    if companion_text:
+        # `ChannelContent::File` has no caption field, so the accompanying message text has nowhere to ride.
+        # Same limitation (and the same warning) as the discord sidecar's file attachments.
+        log.warn(
+            "slack file attachment has companion text that cannot be sent as a caption",
+            filename=filename,
+        )
+    return Content.file(url, filename)
+
+
+def parse_slack_files(
+    files: Any,
+    *,
+    channel: str,
+    companion_text: str,
+    policy: Optional[SlackFilePolicy],
+) -> Optional[dict[str, Any]]:
+    """Pick the first policy-approved attachment out of a message's ``files`` array.
+
+    Returns the ``ChannelContent`` for it, or ``None`` when downloads are off for this channel, the array is absent, or nothing in it passes policy.
+
+    One attachment per message, matching the discord sidecar: the wire protocol carries a single ``ChannelContent`` per message, so a multi-file upload has to pick one.
+    Extras are counted in a warning rather than silently dropped.
+    """
+    if policy is None or not policy.enabled_for(channel):
+        return None
+    if not isinstance(files, list) or not files:
+        return None
+
+    chosen: Optional[dict] = None
+    rejected = 0
+    extra = 0
+    for entry in files:
+        reason = _file_rejection(entry, policy)
+        if reason is not None:
+            log.warn("slack inbound attachment rejected",
+                     channel=channel, reason=reason)
+            rejected += 1
+            continue
+        if chosen is None:
+            chosen = entry
+        else:
+            extra += 1
+    if chosen is None:
+        return None
+    if extra:
+        log.warn("slack forwarded only the first eligible attachment",
+                 channel=channel, ignored=extra, rejected=rejected)
+    return _file_content(chosen, companion_text)
+
+
+# ---------------------------------------------------------------------------
 # Inbound event parsing — port of crate::slack::parse_slack_event and
 # parse_slack_block_action. Pure functions so tests can exercise every
 # filter / variant without standing up the Socket Mode WS.
@@ -167,11 +592,14 @@ def parse_slack_event(
     bot_user_id: Optional[str],
     allowed_channels: list[str],
     account_id: Optional[str],
+    file_policy: Optional[SlackFilePolicy] = None,
 ) -> Optional[dict]:
-    """Mirror of the Rust ``parse_slack_event``.
+    """Mirror of the Rust ``parse_slack_event``, extended with inbound attachments.
 
     Returns the ``message`` event dict ready to ``emit``, or ``None``
     when the payload should be skipped.
+
+    ``file_policy`` defaults to ``None``, which drops every attachment and leaves the pre-#7087 text-only behaviour untouched.
     """
     if not isinstance(event, dict):
         return None
@@ -186,11 +614,12 @@ def parse_slack_event(
             return None
         msg_data = inner
         is_edit = True
-    elif subtype is not None:
-        # Other subtypes (joins, leaves, file_share, …) are skipped —
-        # matches the Rust adapter precisely.
+    elif subtype is not None and subtype != "file_share":
+        # Other subtypes (joins, leaves, topic changes, …) are skipped — matches the Rust adapter precisely.
         return None
     else:
+        # `file_share` shares this arm: it is an ordinary message that also carries `files`, and dropping the whole subtype (#7087) discarded the user's upload before any content parsing ran.
+        # The attachment itself is still gated by `file_policy` below.
         msg_data = event
         is_edit = False
 
@@ -217,15 +646,28 @@ def parse_slack_event(
     ):
         return None
 
-    text = msg_data.get("text")
-    if not isinstance(text, str) or not text:
+    raw_text = msg_data.get("text")
+    text = raw_text if isinstance(raw_text, str) else ""
+
+    file_content = parse_slack_files(
+        msg_data.get("files"),
+        channel=channel,
+        companion_text=text,
+        policy=file_policy,
+    )
+    # An upload with no comment is a complete message; a text-only message with no text is not.
+    if file_content is None and not text:
         return None
 
     ts = (msg_data.get("ts") if is_edit else None) or event.get("ts") or "0"
     if not isinstance(ts, str):
         ts = str(ts)
 
-    if text.startswith("/"):
+    if file_content is not None:
+        # The attachment outranks the text, slash commands included: one message carries one `ChannelContent`, and the upload is the part the agent cannot reconstruct from the transcript.
+        # Same precedence as the discord sidecar.
+        content = file_content
+    elif text.startswith("/"):
         head, _, tail = text[1:].partition(" ")
         content = Content.command(head, tail.split() if tail else [])
     else:
@@ -445,6 +887,34 @@ class SlackAdapter(SidecarAdapter):
                   "bool",
                   placeholder="true",
                   advanced=True),
+            Field("SLACK_FILE_DOWNLOADS",
+                  "Forward user-uploaded files and images to the agent",
+                  "bool",
+                  placeholder="true",
+                  advanced=True),
+            Field("SLACK_FILE_MAX_BYTES",
+                  "Maximum inbound attachment size in bytes",
+                  "number",
+                  placeholder=str(DEFAULT_INBOUND_FILE_MAX_BYTES),
+                  advanced=True),
+            Field("SLACK_FILE_ALLOWED_EXTENSIONS",
+                  "Allowed attachment extensions (comma-separated, empty = "
+                  "allow all)",
+                  "list",
+                  placeholder="png, jpg, pdf, mp4",
+                  advanced=True),
+            Field("SLACK_FILE_DOWNLOAD_CHANNELS",
+                  "Channel IDs that accept attachments (comma-separated, "
+                  "empty = every channel)",
+                  "list",
+                  placeholder="C0123, C0456",
+                  advanced=True),
+            Field("SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS",
+                  "Channel IDs that never accept attachments "
+                  "(comma-separated)",
+                  "list",
+                  placeholder="C0789",
+                  advanced=True),
             Field("SLACK_ACCOUNT_ID",
                   "Account ID (multi-bot routing)",
                   "text",
@@ -494,6 +964,49 @@ class SlackAdapter(SidecarAdapter):
         acct = os.environ.get("SLACK_ACCOUNT_ID", "").strip()
         self.account_id = acct or None
 
+        # Inbound attachment policy (#7087).
+        max_bytes_raw = os.environ.get("SLACK_FILE_MAX_BYTES", "").strip()
+        try:
+            file_max_bytes = int(max_bytes_raw or DEFAULT_INBOUND_FILE_MAX_BYTES)
+        except (TypeError, ValueError):
+            log.error("SLACK_FILE_MAX_BYTES invalid (must be an integer)",
+                      value=max_bytes_raw)
+            raise SystemExit(2) from None
+        if file_max_bytes < 1:
+            log.warn("SLACK_FILE_MAX_BYTES < 1; using the default instead",
+                     requested=file_max_bytes,
+                     default=DEFAULT_INBOUND_FILE_MAX_BYTES)
+            file_max_bytes = DEFAULT_INBOUND_FILE_MAX_BYTES
+        self.file_policy = SlackFilePolicy(
+            enabled=_bool_env(
+                os.environ.get("SLACK_FILE_DOWNLOADS", ""), default=True,
+            ),
+            max_bytes=file_max_bytes,
+            allowed_extensions=frozenset(
+                ext.lstrip(".").lower()
+                for ext in _split_csv(
+                    os.environ.get("SLACK_FILE_ALLOWED_EXTENSIONS", ""),
+                )
+                if ext.strip(". ")
+            ),
+            channels=tuple(_split_csv(
+                os.environ.get("SLACK_FILE_DOWNLOAD_CHANNELS", ""),
+            )),
+            excluded_channels=tuple(_split_csv(
+                os.environ.get("SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS", ""),
+            )),
+        )
+        # `url_private_download` 302s to a login page without the bot token, so the daemon needs it to fetch what we forward.
+        # `header_rules` is the mechanism for that (matrix uses it for MSC3916 media): the daemon exact-matches the request host against these rules and attaches nothing for anything else, so the token cannot follow a member-chosen URL out of the workspace — see `fetch_headers_for` in `crates/librefang-channels/src/sidecar.rs`.
+        # The rules are only declared when attachment forwarding is on, so an operator who turns it off does not ship the token at all.
+        #
+        # Sorted so the ready event is byte-identical across runs.
+        if self.file_policy.enabled:
+            self.header_rules = [
+                (host, [["Authorization", f"Bearer {self.bot_token}"]])
+                for host in sorted(SLACK_FILE_HOSTS)
+            ]
+
         self.api_base = DEFAULT_API_BASE
         self.bot_user_id: Optional[str] = None
         # (channel, ts) → emoji name. Cleared when the triggering turn
@@ -519,6 +1032,9 @@ class SlackAdapter(SidecarAdapter):
     # MAX_PENDING_REACTIONS): a turn that never reaches a terminal phase
     # must not grow the map without bound.
     MAX_TASK_PROGRESS = 1_000
+
+    # Match the channel_send local-file boundary so the sidecar never holds or forwards a larger inline attachment than the producing tool permits.
+    MAX_UPLOAD_BYTES = MAX_FILE_UPLOAD_BYTES
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -625,6 +1141,95 @@ class SlackAdapter(SidecarAdapter):
                 f"slack apps.connections.open: invalid url {url!r}"
             )
         return url
+
+    def _fetch_file_url(self, url: str) -> bytes:
+        """Download one public file URL with DNS-pinned redirect and size guards."""
+        status, data = _public_http_request(
+            url,
+            method="GET",
+            headers={"User-Agent": "librefang-slack-sidecar/1 (https://librefang.org)"},
+            max_bytes=self.MAX_UPLOAD_BYTES,
+        )
+        if status >= 300:
+            raise RuntimeError(f"file download failed (status={status})")
+        return data
+
+    def _upload_file_bytes(
+        self,
+        channel_id: str,
+        data: bytes,
+        filename: str,
+        *,
+        thread_ts: Optional[str] = None,
+    ) -> bool:
+        """Upload bytes with Slack's external-upload flow and share them once."""
+        filename = _safe_filename(filename)
+        if not data:
+            log.warn("slack file upload refused empty payload", filename=filename)
+            return False
+        if len(data) > self.MAX_UPLOAD_BYTES:
+            log.warn(
+                "slack file upload exceeds size cap",
+                filename=filename,
+                size=len(data),
+                max_bytes=self.MAX_UPLOAD_BYTES,
+            )
+            return False
+
+        ticket_body = json.dumps({"filename": filename, "length": len(data)}).encode("utf-8")
+        status, ticket, raw = self._http(
+            f"{self.api_base}/files.getUploadURLExternal",
+            method="POST",
+            body=ticket_body,
+            headers=self._auth_headers(content_type=True),
+        )
+        if status >= 300 or not isinstance(ticket, dict) or ticket.get("ok") is not True:
+            error = ticket.get("error") if isinstance(ticket, dict) else raw[:200].decode("utf-8", "replace")
+            log.warn("slack files.getUploadURLExternal failed", status=status, error=error or "unknown")
+            return False
+        upload_url = ticket.get("upload_url")
+        file_id = ticket.get("file_id")
+        if not isinstance(upload_url, str) or not isinstance(file_id, str) or not upload_url or not file_id:
+            log.warn("slack upload ticket missing URL or file id")
+            return False
+        try:
+            upload_status, upload_response = _public_http_request(
+                upload_url,
+                method="POST",
+                body=data,
+                headers={"Content-Type": "application/octet-stream"},
+                max_bytes=200,
+                require_https=True,
+            )
+        except RuntimeError as e:
+            log.warn("slack file byte upload failed", error=str(e))
+            return False
+        if upload_status >= 300:
+            log.warn(
+                "slack file byte upload failed",
+                status=upload_status,
+                body=upload_response.decode("utf-8", "replace"),
+            )
+            return False
+
+        complete_payload: dict[str, Any] = {
+            "files": [{"id": file_id, "title": filename}],
+            "channel_id": channel_id,
+        }
+        if thread_ts:
+            complete_payload["thread_ts"] = thread_ts
+        complete_body = json.dumps(complete_payload).encode("utf-8")
+        status, complete, raw = self._http(
+            f"{self.api_base}/files.completeUploadExternal",
+            method="POST",
+            body=complete_body,
+            headers=self._auth_headers(content_type=True),
+        )
+        if status >= 300 or not isinstance(complete, dict) or complete.get("ok") is not True:
+            error = complete.get("error") if isinstance(complete, dict) else raw[:200].decode("utf-8", "replace")
+            log.warn("slack files.completeUploadExternal failed", status=status, error=error or "unknown")
+            return False
+        return True
 
     def _post_message(
         self,
@@ -896,6 +1501,7 @@ class SlackAdapter(SidecarAdapter):
                 bot_user_id=self.bot_user_id,
                 allowed_channels=self.allowed_channels,
                 account_id=self.account_id,
+                file_policy=self.file_policy,
             )
             if ev is None:
                 return
@@ -999,6 +1605,50 @@ class SlackAdapter(SidecarAdapter):
                     thread_ts=thread_ts, blocks=blocks,
                 ),
             )
+        elif isinstance(content, dict) and "FileData" in content:
+            payload = content["FileData"]
+
+            def _send_file_data() -> None:
+                if not isinstance(payload, dict):
+                    log.warn("slack FileData payload is not an object")
+                    return
+                data = _coerce_file_data(payload.get("data"))
+                if data is None:
+                    log.warn("slack FileData bytes are malformed")
+                    return
+                self._upload_file_bytes(
+                    channel_id,
+                    data,
+                    _safe_filename(payload.get("filename")),
+                    thread_ts=thread_ts,
+                )
+
+            await loop.run_in_executor(None, _send_file_data)
+        elif isinstance(content, dict) and "File" in content:
+            payload = content["File"]
+
+            def _send_file_url() -> None:
+                if not isinstance(payload, dict):
+                    log.warn("slack File payload is not an object")
+                    return
+                url = payload.get("url")
+                if not isinstance(url, str) or not url:
+                    log.warn("slack File URL is missing")
+                    return
+                filename = _safe_filename(payload.get("filename"))
+                try:
+                    data = self._fetch_file_url(url)
+                except RuntimeError as e:
+                    log.warn("slack File URL download failed", error=str(e))
+                    return
+                self._upload_file_bytes(
+                    channel_id,
+                    data,
+                    filename,
+                    thread_ts=thread_ts,
+                )
+
+            await loop.run_in_executor(None, _send_file_url)
         elif content and not (isinstance(content, dict) and "Text" in content):
             await loop.run_in_executor(
                 None,

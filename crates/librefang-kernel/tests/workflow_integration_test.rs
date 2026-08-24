@@ -495,12 +495,14 @@ async fn workflow_describe_returns_explicit_input_schema() {
                 param_type: "string".to_string(),
                 required: true,
                 description: Some("Article topic".to_string()),
+                default: None,
             },
             WorkflowInputParam {
                 name: "cover".to_string(),
                 param_type: "image".to_string(),
                 required: false,
                 description: None,
+                default: None,
             },
         ]),
     };
@@ -652,6 +654,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
             param_type: "string".to_string(),
             required: true,
             description: None,
+            default: None,
         }]),
     };
     kernel.register_workflow(explicit).await;
@@ -790,12 +793,14 @@ async fn workflow_engine_substitutes_input_schema_vars_into_step_prompt() {
                 param_type: "string".to_string(),
                 required: true,
                 description: Some("Article topic".to_string()),
+                default: None,
             },
             WorkflowInputParam {
                 name: "cover".to_string(),
                 param_type: "file".to_string(),
                 required: true,
                 description: Some("Cover image artifact".to_string()),
+                default: None,
             },
         ]),
     };

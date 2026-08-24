@@ -26,7 +26,7 @@ use super::screens::{
     sessions::SessionInfo,
     settings::{ModelInfo, ProviderInfo, TestResult, ToolInfo},
     skills::{ClawHubResult, McpServerInfo, SkillInfo},
-    templates::ProviderAuth,
+    templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
     usage::{AgentUsage, ModelUsage, UsageSummary},
     workflows::{WorkflowInfo, WorkflowRun},
@@ -158,6 +158,14 @@ pub enum AppEvent {
     McpServersLoaded(Vec<McpServerInfo>),
     /// Templates providers loaded (auth status).
     TemplateProvidersLoaded(Vec<ProviderAuth>),
+    /// Manifest-backed agent types from `GET /api/templates` (#7760).
+    AgentTemplatesLoaded(Vec<TemplateInfo>),
+    /// The verbatim `agent.toml` for one manifest-backed agent type.
+    /// `None` means it could not be read; the screen reports that rather than spawning something it made up.
+    TemplateTomlLoaded {
+        name: String,
+        toml: Option<String>,
+    },
     /// Security features loaded.
     SecurityLoaded(Vec<SecurityFeature>),
     /// Security chain verification result.
@@ -2478,6 +2486,144 @@ pub fn spawn_fetch_mcp_servers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) 
 }
 
 /// Fetch provider auth status for templates screen.
+/// Reject a template name that could escape the templates directory or the URL path.
+/// Mirrors `validate_template_name` in the API so a name the daemon would refuse fails here too instead of producing a confusing 404.
+/// Names only ever originate from a directory listing, so this is belt-and-braces.
+fn is_safe_template_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Directory the in-process backend reads agent types from.
+///
+/// Installed agent types live flat as `~/.librefang/agent-types/<name>.toml` (see `librefang_types::registry_paths::installed_agent_types_dir`), which is exactly what `GET /api/agent-types` — and its deprecated `/api/templates` alias — serves, so the two backends stay in agreement.
+fn templates_dir() -> std::path::PathBuf {
+    librefang_types::registry_paths::installed_agent_types_dir(
+        &crate::commands::common::cli_librefang_home(),
+    )
+}
+
+/// Read the agent types on disk.
+/// The in-process backend has no HTTP surface to ask, so it reads the same directory `GET /api/agent-types` serves.
+fn local_agent_templates() -> Vec<TemplateInfo> {
+    let dir = templates_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let manifest_path = entry.path();
+        if !manifest_path.is_file()
+            || manifest_path.extension().and_then(|e| e.to_str()) != Some("toml")
+        {
+            continue;
+        }
+        // The file stem is the identity `/api/agent-types/{name}/toml` resolves by, so it — not the manifest's own `name` field — is what a row must carry, or spawning it 404s.
+        let name = manifest_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if !is_safe_template_name(&name) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        match toml::from_str::<librefang_types::agent::AgentManifest>(&content) {
+            Ok(manifest) => out.push(TemplateInfo {
+                name,
+                description: manifest.description,
+                category: templates::MANIFEST_CATEGORY.to_string(),
+                provider: manifest.model.provider,
+                model: manifest.model.model,
+                source: TemplateSource::Manifest,
+            }),
+            // Naming the file turns "my agent type vanished" into a one-line diagnosis instead of a silent absence.
+            Err(e) => tracing::warn!(
+                "skipping agent template {}: invalid manifest: {e}",
+                manifest_path.display()
+            ),
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+fn parse_api_templates(body: &serde_json::Value) -> Vec<TemplateInfo> {
+    body["templates"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let name = t["name"].as_str()?.to_string();
+                    Some(TemplateInfo {
+                        name,
+                        description: t["description"].as_str().unwrap_or_default().to_string(),
+                        category: templates::MANIFEST_CATEGORY.to_string(),
+                        provider: t["provider"].as_str().unwrap_or("default").to_string(),
+                        model: t["model"].as_str().unwrap_or("default").to_string(),
+                        source: TemplateSource::Manifest,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fetch the operator-created agent types (#7760).
+///
+/// The templates screen used to render a compiled-in list and nothing else, so `GET /api/templates` was never called and every agent type an operator created was invisible.
+pub fn spawn_fetch_agent_templates(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let templates = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                client
+                    .get(format!("{base_url}/api/templates"))
+                    .send()
+                    .ok()
+                    .and_then(|resp| resp.json::<serde_json::Value>().ok())
+                    .map(|body| parse_api_templates(&body))
+                    .unwrap_or_default()
+            }
+            BackendRef::InProcess(_) => local_agent_templates(),
+        };
+        let _ = tx.send(AppEvent::AgentTemplatesLoaded(templates));
+    });
+}
+
+/// Fetch one agent type's `agent.toml` verbatim, for spawning.
+///
+/// The screen used to string-format a manifest from the row's name and description and pin a fixed tool list onto it, so every agent type spawned from there got shell plus filesystem write plus network regardless of what its real manifest declared (#7760).
+/// Reading the real file is the fix.
+pub fn spawn_fetch_template_toml(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let toml = if !is_safe_template_name(&name) {
+            None
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    client
+                        .get(format!("{base_url}/api/templates/{name}/toml"))
+                        .send()
+                        .ok()
+                        .filter(|resp| resp.status().is_success())
+                        .and_then(|resp| resp.text().ok())
+                }
+                BackendRef::InProcess(_) => {
+                    std::fs::read_to_string(templates_dir().join(format!("{name}.toml"))).ok()
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::TemplateTomlLoaded { name, toml });
+    });
+}
+
 pub fn spawn_fetch_template_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {

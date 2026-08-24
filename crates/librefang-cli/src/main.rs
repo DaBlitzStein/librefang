@@ -687,7 +687,8 @@ fn main() {
             text,
             json,
             incognito,
-        }) => cmd_message(&agent, &text, json, incognito),
+            session_id,
+        }) => cmd_message(&agent, &text, json, incognito, session_id.as_deref()),
         Some(Commands::System(sub)) => match sub {
             SystemCommands::Info { json } => cmd_system_info(json),
             SystemCommands::Version { json } => cmd_system_version(json),

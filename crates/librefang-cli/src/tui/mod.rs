@@ -583,6 +583,22 @@ impl App {
                 }
                 self.skills.loading = false;
             }
+            AppEvent::AgentTemplatesLoaded(templates) => {
+                self.templates.loading = false;
+                self.templates.set_manifest_templates(templates);
+            }
+            AppEvent::TemplateTomlLoaded { name, toml } => match toml {
+                Some(toml) => {
+                    self.templates.status_msg.clear();
+                    self.spawn_agent(toml);
+                }
+                None => {
+                    self.templates.status_msg = crate::i18n::t_args(
+                        "tui-templates-manifest-unavailable",
+                        &[("name", &name)],
+                    );
+                }
+            },
             AppEvent::TemplateProvidersLoaded(providers) => {
                 self.templates.providers = providers;
             }
@@ -1297,6 +1313,8 @@ impl App {
 
     fn refresh_templates(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
+            self.templates.loading = true;
+            event::spawn_fetch_agent_templates(backend.clone(), self.event_tx.clone());
             event::spawn_fetch_template_providers(backend, self.event_tx.clone());
         }
     }
@@ -1990,28 +2008,22 @@ impl App {
         match action {
             templates::TemplatesAction::Continue => {}
             templates::TemplatesAction::Refresh => self.refresh_templates(),
-            templates::TemplatesAction::SpawnTemplate(name) => {
-                // Find template and generate TOML manifest
-                if let Some(t) = self.templates.templates.iter().find(|t| t.name == name) {
-                    if t.custom {
-                        // Operator-created agent type: spawn from the real
-                        // template file so tools/skills/model carry over.
-                        let path = librefang_types::registry_paths::installed_agent_types_dir(
-                            &crate::commands::common::cli_librefang_home(),
-                        )
-                        .join(format!("{}.toml", t.name));
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            self.spawn_agent(content);
-                        }
-                    } else {
-                        let toml_content = format!(
-                            "name = \"{}\"\ndescription = \"{}\"\n\n[model]\nprovider = \"{}\"\nmodel = \"{}\"\n\n[capabilities]\ntools = [\"shell\", \"file_read\", \"file_write\", \"web_fetch\", \"web_search\"]\n",
-                            t.name, t.description, t.provider, t.model,
-                        );
+            templates::TemplatesAction::SpawnTemplate { name, source } => match source {
+                // A builtin has no file anywhere, so its declaration is the profile its table names — never an invented tool list.
+                templates::TemplateSource::Builtin => {
+                    if let Some(t) = self.templates.templates.iter().find(|t| t.name == name) {
+                        let toml_content = templates::builtin_manifest_toml(t);
                         self.spawn_agent(toml_content);
                     }
                 }
-            }
+                // An operator-created type is spawned from its own manifest, fetched verbatim.
+                // Nothing here reconstructs it (#7760).
+                templates::TemplateSource::Manifest => {
+                    if let Some(backend) = self.backend.to_ref() {
+                        event::spawn_fetch_template_toml(backend, name, self.event_tx.clone());
+                    }
+                }
+            },
         }
     }
 

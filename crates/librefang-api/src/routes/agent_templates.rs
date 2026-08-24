@@ -240,25 +240,46 @@ pub async fn list_agent_types() -> impl IntoResponse {
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
             }
+            // The file stem is the identity every other agent-type route
+            // resolves by (`/api/agent-types/{name}`, `…/{name}/toml`), so a
+            // row must carry it rather than the manifest's own `name` field.
             let name = path
                 .file_stem()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let description = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|content| toml::from_str::<AgentManifest>(&content).ok())
-                .map(|m| m.description)
-                .unwrap_or_default();
+            // Do not advertise a type whose name `/api/agent-types/{name}` and `…/{name}/toml` will reject — a listed row a client cannot fetch or spawn from is a dead end (#7760).
+            if validate_agent_type_name(&name).is_err() {
+                tracing::warn!("skipping agent type with unusable name: {name:?}");
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let manifest = match toml::from_str::<AgentManifest>(&content) {
+                Ok(manifest) => manifest,
+                Err(e) => {
+                    // One operator typo must not blank the whole catalog for every client.
+                    // Skip the entry and name the file so the mistake is diagnosable instead of arriving as an entry with an empty description (#7760).
+                    tracing::warn!(
+                        "skipping agent type {}: invalid manifest: {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
             templates.push(serde_json::json!({
                 "name": name,
-                "description": description,
+                "description": manifest.description,
+                // `provider` / `model` let a client show and gate on what the type actually declares rather than assuming a default (#7760).
+                "provider": manifest.model.provider,
+                "model": manifest.model.model,
                 "source": "template",
             }));
         }
     }
 
-    // Deterministic ordering
+    // `read_dir` order is filesystem-defined; sort so the catalog renders in a stable order across calls and hosts.
     templates.sort_by(|a, b| {
         a["name"]
             .as_str()

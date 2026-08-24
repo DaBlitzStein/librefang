@@ -354,8 +354,8 @@
         "tags": [
           "system"
         ],
-        "summary": "GET /api/agent-types — List available agent types from\n`~/.librefang/templates/` (source = \"template\").",
-        "description": "Used to also merge in `~/.librefang/workspaces/agents/` (source =\n\"agent\") — dropped in the fix for the \"Agent Types page is uneditable\"\nbug reported against an install with 42 agents and 0 templates. That\nmerge meant every live agent showed up here with no way to edit or\ndelete it (the dashboard's `AgentTypesPage` can only manage files under\n`templates/`), and the confusing \"Managed via Agents\" label was the\nsymptom, not the cause. The underlying capability — spawning a worker\nfrom an existing agent's manifest by name — still exists at the\nresolution layer (`resolve_ephemeral_manifest`, `resolve_manifest`,\n`load_agent_manifest_from_template_dirs` all fall back to\n`workspaces/agents/<name>/agent.toml` when no template matches); only the\n*listing* stops conflating the two concepts. The bridge from \"I have\nagents, not templates\" to a populated, editable list is\n`POST /api/agents/{id}/save-as-agent-type`, which extracts a live agent's\nmanifest into a real, editable `templates/<name>.toml` file.",
+        "summary": "GET /api/agent-types — List available agent types from\n`~/.librefang/agent-types/` (source = \"template\").",
+        "description": "Used to also merge in `~/.librefang/workspaces/agents/` (source =\n\"agent\") — dropped in the fix for the \"Agent Types page is uneditable\"\nbug reported against an install with 42 agents and 0 templates. That\nmerge meant every live agent showed up here with no way to edit or\ndelete it (the dashboard's `AgentTypesPage` can only manage files under\n`agent-types/`), and the confusing \"Managed via Agents\" label was the\nsymptom, not the cause. The underlying capability — spawning a worker\nfrom an existing agent's manifest by name — still exists at the\nresolution layer (`resolve_ephemeral_manifest`, `resolve_manifest`,\n`load_agent_manifest_from_template_dirs` all fall back to\n`workspaces/agents/<name>/agent.toml` when no template matches); only the\n*listing* stops conflating the two concepts. The bridge from \"I have\nagents, not templates\" to a populated, editable list is\n`POST /api/agents/{id}/save-as-agent-type`, which extracts a live agent's\nmanifest into a real, editable `agent-types/<name>.toml` file.",
         "operationId": "list_agent_types",
         "responses": {
           "200": {
@@ -847,6 +847,34 @@
           },
           "409": {
             "description": "Confirmation required"
+          }
+        }
+      }
+    },
+    "/api/agents/purge": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/purge — remove every trace of an agent by name.",
+        "description": "The counterpart to `DELETE /api/agents/{id}?purge_data=true` for agents\nthat are ALREADY deleted: the roster entry is gone, so there is no id to\naddress them by, but their workspace directory, agent-type template and\n(when the roster entry survived a partial delete) sessions and memories\nare still on disk. Idempotent — purging something already clean reports\nan empty result rather than failing.",
+        "operationId": "purge_agent_data",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PurgeAgentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Purge completed; body reports what was removed"
+          },
+          "400": {
+            "description": "Invalid or path-shaped agent name"
           }
         }
       }
@@ -1822,7 +1850,6 @@
         "tags": [
           "agents"
         ],
-        "summary": "PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.",
         "operationId": "set_agent_mcp_servers",
         "parameters": [
           {
@@ -1836,11 +1863,11 @@
           }
         ],
         "requestBody": {
-          "description": "Array of MCP server names",
+          "description": "Object containing the MCP server allowlist",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonArray"
+                "$ref": "#/components/schemas/SetAgentMcpServersRequest"
               }
             }
           },
@@ -1849,6 +1876,16 @@
         "responses": {
           "200": {
             "description": "Update an agent's MCP server allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
             "content": {
               "application/json": {
                 "schema": {
@@ -2370,7 +2407,7 @@
           "agents"
         ],
         "summary": "POST /api/agents/{id}/save-as-agent-type — Extract a live agent's\ncurrent manifest into a reusable agent-type template.",
-        "description": "**Not the same as [`clone_agent`]**, and the two are easy to confuse\nbecause both start from an existing agent:\n- `POST /api/agents/{id}/clone` duplicates a *running instance* — new\n  workspace directory, optionally copied skills/tools files, a fresh\n  agent that starts running immediately under a new name. The source\n  agent's memory and sessions are never copied; the clone starts empty.\n- This endpoint does not spawn anything and does not touch the source\n  agent at all. It snapshots the agent's current configuration (model,\n  system prompt, tools, skills, channels, resources, …) into a\n  `templates/<template_name>.toml` file. That file shows up on the\n  Agent Types page, can be edited and deleted there like any other\n  template, and can be spawned from repeatedly later via\n  `POST /api/agents {\"template\": \"<template_name>\"}` or\n  `POST /api/agents/ephemeral {\"agent_type\": \"<template_name>\"}` —\n  without ever touching the original agent's session, memory, or\n  workspace.\n\nThis is the bridge for installs that have agents but no templates: it\nturns an existing agent's configuration into a reusable, editable\nstarting point for spawning more agents like it, instead of requiring a\ntemplate to be authored from scratch.",
+        "description": "**Not the same as [`clone_agent`]**, and the two are easy to confuse\nbecause both start from an existing agent:\n- `POST /api/agents/{id}/clone` duplicates a *running instance* — new\n  workspace directory, optionally copied skills/tools files, a fresh\n  agent that starts running immediately under a new name. The source\n  agent's memory and sessions are never copied; the clone starts empty.\n- This endpoint does not spawn anything and does not touch the source\n  agent at all. It snapshots the agent's current configuration (model,\n  system prompt, tools, skills, channels, resources, …) into an\n  `agent-types/<template_name>.toml` file. That file shows up on the\n  Agent Types page, can be edited and deleted there like any other\n  template, and can be spawned from repeatedly later via\n  `POST /api/agents {\"template\": \"<template_name>\"}` or\n  `POST /api/agents/ephemeral {\"agent_type\": \"<template_name>\"}` —\n  without ever touching the original agent's session, memory, or\n  workspace.\n\nThis is the bridge for installs that have agents but no templates: it\nturns an existing agent's configuration into a reusable, editable\nstarting point for spawning more agents like it, instead of requiring a\ntemplate to be authored from scratch.",
         "operationId": "save_agent_as_agent_type",
         "parameters": [
           {
@@ -3144,6 +3181,37 @@
         "responses": {
           "200": {
             "description": "Agent suspended"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/token-usage": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/token-usage — what this agent costs, in two views.",
+        "description": "`injected` is the static footprint every request carries before a single\nmessage: the system prompt plus the assembled tool definitions (skills,\nMCP servers and built-ins all land in the same list, which is exactly\nwhat `available_tools` builds for the prompt). `recent` is the last calls\nit actually made, so an expensive turn is attributable instead of hidden\ninside a daily total.\n\nCounts are estimates from the same CJK-aware heuristic the compactor uses\nto decide when to fold history, so the number here and the number that\ndrives trimming cannot drift apart.",
+        "operationId": "agent_token_usage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Injected footprint and recent calls"
+          },
+          "400": {
+            "description": "Invalid agent id"
+          },
+          "404": {
+            "description": "Agent not found"
           }
         }
       }
@@ -9442,6 +9510,102 @@
         }
       }
     },
+    "/api/models/overrides/{id}": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/models/overrides/{id} — Get inference parameter overrides for a model.",
+        "operationId": "get_model_overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Override key, `provider:model_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Inference parameter overrides for the model (empty object if none set)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "models"
+        ],
+        "summary": "PUT /api/models/overrides/{id} — Set inference parameter overrides for a model.",
+        "description": "The body **replaces** the whole `ModelOverrides` entity for this model\n(not a partial patch) — round-trip a `GET` first when changing a single\nfield so unrelated overrides (e.g. a capability override set from a\ndifferent surface) are not dropped.",
+        "operationId": "set_model_overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Override key, `provider:model_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Persisted inference parameter overrides for the model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "models"
+        ],
+        "summary": "DELETE /api/models/overrides/{id} — Remove inference parameter overrides for a model.",
+        "operationId": "delete_model_overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Override key, `provider:model_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Overrides removed"
+          }
+        }
+      }
+    },
     "/api/models/{id}": {
       "get": {
         "tags": [
@@ -15086,6 +15250,19 @@
           }
         }
       },
+      "PurgeAgentRequest": {
+        "type": "object",
+        "description": "Body for `POST /api/agents/purge`.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the agent whose leftovers should be removed."
+          }
+        }
+      },
       "PushMessageRequest": {
         "type": "object",
         "description": "Request to push a proactive outbound message from an agent to a channel.",
@@ -15174,7 +15351,7 @@
         "properties": {
           "template_name": {
             "type": "string",
-            "description": "Filename (and manifest `name`) of the resulting\n`~/.librefang/templates/<template_name>.toml`. Independent of the\nsource agent's own name — the source agent is untouched and keeps\nrunning under its original name; only the extracted template file\ngets this name. Passing the source agent's own name is fine and is\nthe common case (turn \"researcher\" the agent into a \"researcher\"\ntemplate that mirrors its current config)."
+            "description": "Filename (and manifest `name`) of the resulting\n`~/.librefang/agent-types/<template_name>.toml`. Independent of the\nsource agent's own name — the source agent is untouched and keeps\nrunning under its original name; only the extracted template file\ngets this name. Passing the source agent's own name is fine and is\nthe common case (turn \"researcher\" the agent into a \"researcher\"\ntemplate that mirrors its current config)."
           }
         },
         "additionalProperties": false
@@ -15224,6 +15401,23 @@
         "properties": {
           "content": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetAgentMcpServersRequest": {
+        "type": "object",
+        "description": "PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.",
+        "required": [
+          "mcp_servers"
+        ],
+        "properties": {
+          "mcp_servers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "MCP server names assigned to the agent.\nAn empty list disables MCP servers for the agent; `[\"*\"]` enables all connected servers."
           }
         },
         "additionalProperties": false

@@ -508,23 +508,41 @@ pub async fn get_agent_mcp_servers(
 }
 
 /// PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetAgentMcpServersRequest {
+    /// MCP server names assigned to the agent.
+    /// An empty list disables MCP servers for the agent; `["*"]` enables all connected servers.
+    pub mcp_servers: Vec<String>,
+}
+
 #[utoipa::path(
     put,
     path = "/api/agents/{id}/mcp_servers",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonArray, description = "Array of MCP server names"),
+    request_body(content = SetAgentMcpServersRequest, description = "Object containing the MCP server allowlist"),
     responses(
-        (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject)
+        (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed request body", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_mcp_servers(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<serde_json::Value>,
+    body: Result<Json<SetAgentMcpServersRequest>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.body_text()})),
+            )
+        }
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -534,14 +552,7 @@ pub async fn set_agent_mcp_servers(
             )
         }
     };
-    let servers: Vec<String> = body["mcp_servers"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let servers = body.mcp_servers;
     match state
         .kernel
         .set_agent_mcp_servers(agent_id, servers.clone())
@@ -1081,30 +1092,20 @@ pub async fn patch_agent_config(
         }
     }
 
-    // Update model/provider — always go through set_agent_model so that
-    // provider-change semantics (prefix stripping, canonical-session cleanup,
-    // and clearing of stale per-agent api_key_env / base_url overrides) are
-    // applied uniformly. Bypassing it via update_model_and_provider was the
-    // root cause of #2380: switching to a non-default provider via the
-    // dashboard left stale CLOUDVERSE_API_KEY / cloudverse base_url on the
-    // manifest, so the new provider's request was sent to the old URL with
-    // the old credentials and rejected with "Missing Authentication header".
-    //
-    // `provider` must apply even when `model` is absent or empty. Before
-    // this fix, a `PATCH {"provider": "litellm"}` with no `model` field hit
-    // neither branch below and returned 200 while changing nothing — the
-    // same #2380 failure class (a field the OpenAPI schema advertises,
-    // silently discarded), just one field over. `set_agent_model` always
-    // needs a `model` argument, so a provider-only PATCH falls back to the
-    // agent's current model, which keeps the model unchanged while the
-    // provider switch still runs through the shared cleanup path above.
-    let explicit_provider = req.provider.as_deref().filter(|p| !p.is_empty());
-    let explicit_model = req.model.as_deref().filter(|m| !m.is_empty());
-    if explicit_model.is_some() || explicit_provider.is_some() {
-        let model_to_apply = match explicit_model {
-            Some(m) => m.to_string(),
+    // Update model/provider through set_agent_model so provider-change semantics (prefix stripping, canonical-session cleanup, and stale per-agent credential/base URL removal) are applied uniformly.
+    // Bypassing it via update_model_and_provider was the root cause of #2380: switching to a non-default provider via the dashboard left a stale CLOUDVERSE_API_KEY / cloudverse base_url on the manifest, so the new provider's request went to the old URL with the old credentials and was rejected with "Missing Authentication header".
+    // A provider-only PATCH keeps the stored model: `set_agent_model` always needs a `model` argument, so the current one is reused and only the provider switch runs.
+    // Ignoring that shape returned 200 without changing anything (#7765) — the same #2380 failure class (a field the OpenAPI schema advertises, silently discarded), one field over.
+    let requested_model = req.model.as_deref().filter(|model| !model.is_empty());
+    let explicit_provider = req
+        .provider
+        .as_deref()
+        .filter(|provider| !provider.is_empty());
+    if requested_model.is_some() || explicit_provider.is_some() {
+        let model = match requested_model {
+            Some(model) => model.to_string(),
             None => match state.kernel.agent_registry().get(agent_id) {
-                Some(entry) => entry.manifest.model.model.clone(),
+                Some(entry) => entry.manifest.model.model,
                 None => {
                     return (
                         StatusCode::NOT_FOUND,
@@ -1115,11 +1116,12 @@ pub async fn patch_agent_config(
         };
         if let Err(e) = state
             .kernel
-            .set_agent_model(agent_id, &model_to_apply, explicit_provider)
+            .set_agent_model(agent_id, &model, explicit_provider)
         {
+            let status = kernel_err_to_status(&e);
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
             );
         }
     }
