@@ -2836,6 +2836,7 @@
     "cmd_peers": "연결된 피어 표시",
     "cmd_a2a": "A2A 에이전트 표시",
     "cmd_queue": "에이전트 대기열 상태 표시",
+    "cmd_goal": "자율 목표를 생성하고 시작합니다",
     "cmd_col_command": "명령",
     "cmd_col_desc": "설명",
     "no_agents_available": "에이전트가 없습니다.",

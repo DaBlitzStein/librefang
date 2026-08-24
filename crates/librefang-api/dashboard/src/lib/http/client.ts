@@ -56,6 +56,8 @@ export {
   getConfigSchema,
   fetchRegistrySchema,
   getRawConfigToml,
+  // chat command catalog
+  listChatCommands,
   // goals
   listGoals,
   listGoalTemplates,
@@ -393,6 +395,7 @@ export type {
   AutoDreamStatusName,
   AutoDreamTriggerOutcome,
   AutoDreamTurn,
+  ChatCommand,
   CronActionSpec,
   CronDeliverySpec,
   CronDeliveryTarget,

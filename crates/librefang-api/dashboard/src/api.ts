@@ -4298,6 +4298,28 @@ export async function getHandInstanceStatus(instanceId: string): Promise<HandIns
   return get<HandInstanceStatus>(`/api/hands/instances/${encodeURIComponent(instanceId)}/status`);
 }
 
+/** One entry of the server-owned chat slash-command catalog.
+ *
+ *  Mirrors `librefang_channels::commands::CommandDef` projected through
+ *  `GET /api/commands`. `exec` is absent for commands the catalog lists but
+ *  the chat cannot run — those stay out of the slash menu. */
+export interface ChatCommand {
+  cmd: string;
+  desc: string;
+  /** i18n key under `chat.`; falls back to `desc` when the locale lacks it. */
+  desc_key?: string;
+  args_hint?: string;
+  no_args?: boolean;
+  exec?: "client" | "backend";
+  /** Present only on skill-derived entries. */
+  source?: string;
+}
+
+export async function listChatCommands(): Promise<ChatCommand[]> {
+  const data = await get<{ commands: ChatCommand[] }>("/api/commands");
+  return data.commands ?? [];
+}
+
 export async function listGoals(): Promise<GoalItem[]> {
   const data = await get<PaginatedResponse<GoalItem>>("/api/goals");
   return data.items ?? [];
