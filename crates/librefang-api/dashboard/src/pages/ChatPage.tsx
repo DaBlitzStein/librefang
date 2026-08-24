@@ -16,6 +16,8 @@ import { usePendingApprovals } from "../lib/queries/approvals";
 import { agentQueries, useAgents, useAgentSessions } from "../lib/queries/agents";
 import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
+import { useChatCommands, type ChatCommand } from "../lib/queries/commands";
+import { backendCommandNames, commandLabel, menuCommands } from "../lib/chatCommands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
@@ -105,30 +107,12 @@ interface ChatAttachment {
   content_type?: string;
 }
 
-// Slash commands — desc is an i18n key under "chat.cmd_*"
-// noArgs: clicking fills + sends immediately; argsHint: shown as placeholder after completion
-const SLASH_COMMANDS = [
-  { cmd: "/help",    descKey: "cmd_help",    noArgs: true },
-  { cmd: "/clear",   descKey: "cmd_clear",   noArgs: true },
-  { cmd: "/agents",  descKey: "cmd_agents",  noArgs: true },
-  { cmd: "/info",    descKey: "cmd_info",    noArgs: true },
-  { cmd: "/new",     descKey: "cmd_new",     noArgs: true, backend: true },
-  { cmd: "/compact", descKey: "cmd_compact", noArgs: true, backend: true },
-  { cmd: "/reset",   descKey: "cmd_reset",   noArgs: true, backend: true },
-  { cmd: "/reboot",  descKey: "cmd_reboot",  noArgs: true, backend: true },
-  { cmd: "/stop",    descKey: "cmd_stop",    noArgs: true, backend: true },
-  { cmd: "/model",   descKey: "cmd_model",   argsHint: "<provider/model>", backend: true },
-  { cmd: "/usage",   descKey: "cmd_usage",   noArgs: true, backend: true },
-  { cmd: "/context", descKey: "cmd_context", noArgs: true, backend: true },
-  { cmd: "/verbose", descKey: "cmd_verbose", argsHint: "[level]", backend: true },
-  { cmd: "/budget",  descKey: "cmd_budget",  noArgs: true, backend: true },
-  { cmd: "/peers",   descKey: "cmd_peers",   noArgs: true, backend: true },
-  { cmd: "/a2a",     descKey: "cmd_a2a",     noArgs: true, backend: true },
-  { cmd: "/queue",   descKey: "cmd_queue",   noArgs: true, backend: true },
-];
-
-// Commands that require backend processing via WebSocket command protocol
-const BACKEND_COMMANDS = SLASH_COMMANDS.filter(c => c.backend).map(c => c.cmd.slice(1));
+// Slash commands come from `GET /api/commands`, which projects the central
+// `COMMAND_REGISTRY` (see `librefang_channels::commands`). This list used to be
+// hard-coded here, which is why `/goal` worked in Telegram and nowhere else —
+// upstream #3355. Adding a command to the registry with `Scope::DASHBOARD` now
+// surfaces it here with no dashboard change at all. Client-resolved commands
+// are handled inline in `sendMessage`; the rest go out as WS command frames.
 
 let _nextMessageId = 0;
 function makeMessageId(prefix: string): string {
@@ -388,6 +372,9 @@ function useChatMessages(
   onAutoPinSession?: (sessionId: string) => void,
 ) {
   const { t } = useTranslation();
+  // Server-owned slash-command catalog; drives both `/help` and the decision
+  // to dispatch a command over the WS instead of sending it to the agent.
+  const { data: chatCommands } = useChatCommands();
   const stopAgentMutation = useStopAgent();
   const sendAgentMessageMutation = useSendAgentMessage();
   // Used to fetch the agent's session snapshot through the queries layer so
@@ -706,8 +693,8 @@ function useChatMessages(
         ]);
       };
       if (trimmed === "/help") {
-        sysMsg(SLASH_COMMANDS.map(c =>
-          `- \`${c.cmd}${c.argsHint ? " " + c.argsHint : ""}\` — ${t(`chat.${c.descKey}`)}`
+        sysMsg(menuCommands(chatCommands).map(c =>
+          `- \`${c.cmd}${c.args_hint ? " " + c.args_hint : ""}\` — ${commandLabel(t, c)}`
         ).join("\n"));
         return;
       }
@@ -730,7 +717,7 @@ function useChatMessages(
       const parts = trimmed.slice(1).split(/\s+/, 2);
       const cmd = parts[0];
       const cmdArgs = trimmed.slice(1 + cmd.length).trim();
-      if (BACKEND_COMMANDS.includes(cmd)) {
+      if (backendCommandNames(chatCommands).includes(cmd)) {
         setMessages(prev => [...prev,
           { id: makeMessageId("user"), role: "user" as const, content: trimmed, timestamp: new Date() },
         ]);
@@ -1246,7 +1233,7 @@ function useChatMessages(
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [addSkillOutput, agentId, agents, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
+  }, [addSkillOutput, agentId, agents, chatCommands, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
@@ -1838,9 +1825,12 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   const isSlashPrefix = message.startsWith("/") && !message.includes(" ");
   const isModelArg = /^\/model\s/i.test(message);
 
+  const { data: chatCommands } = useChatCommands();
   const filteredCmds = useMemo(
-    () => isSlashPrefix ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(message.toLowerCase())) : [],
-    [isSlashPrefix, message],
+    () => isSlashPrefix
+      ? menuCommands(chatCommands).filter(c => c.cmd.startsWith(message.toLowerCase()))
+      : [],
+    [chatCommands, isSlashPrefix, message],
   );
 
   const modelQuery = useModels({}, { enabled: isModelArg });
@@ -1866,8 +1856,8 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   // Reset selection when list changes
   useEffect(() => { setActiveIndex(-1); }, [message]);
 
-  const selectCmd = useCallback((c: typeof SLASH_COMMANDS[number]) => {
-    if (c.noArgs) {
+  const selectCmd = useCallback((c: ChatCommand) => {
+    if (c.no_args) {
       onSend(c.cmd);
       setMessage("");
     } else {
@@ -2126,8 +2116,8 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
               onClick={() => selectCmd(c)}
               className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-left transition-colors ${i === activeIndex ? "bg-main" : "hover:bg-main"}`}>
               <span className="text-xs font-mono font-bold text-brand">{c.cmd}</span>
-              {c.argsHint && <span className="text-[10px] font-mono text-text-dim/60">{c.argsHint}</span>}
-              <span className="text-[10px] text-text-dim ml-auto">{t(`chat.${c.descKey}`)}</span>
+              {c.args_hint && <span className="text-[10px] font-mono text-text-dim/60">{c.args_hint}</span>}
+              <span className="text-[10px] text-text-dim ml-auto">{commandLabel(t, c)}</span>
             </button>
           ))}
         </div>
