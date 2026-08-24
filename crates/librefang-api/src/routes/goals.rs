@@ -519,6 +519,14 @@ fn optional_id_field(req: &serde_json::Value, key: &str) -> Option<String> {
 /// so a bad stored value can never wedge a run, but an operator typing a
 /// cadence into the dashboard should be told their number was refused rather
 /// than discover later that the loop ticks at a rate they never chose.
+///
+/// A blank string is a clear signal, not a malformed number — see
+/// [`is_clear_signal`]. Answering `400 tick_interval_secs must be a
+/// non-negative integer` to the cleared number input that every other clearable
+/// field accepts made "reset the cadence to the default" a client-specific
+/// incantation: the dashboard learned to send an explicit `null`, while the CLI
+/// / SDK / a hand-rolled script sending `""` got a rejection with no hint that
+/// a different spelling of the same intent would have worked.
 fn validate_tick_interval(
     req: &serde_json::Value,
 ) -> Result<Option<u32>, (StatusCode, Json<serde_json::Value>)> {
@@ -526,7 +534,7 @@ fn validate_tick_interval(
     let Some(raw) = req.get("tick_interval_secs") else {
         return Ok(None);
     };
-    if raw.is_null() {
+    if is_clear_signal(raw) {
         return Ok(None);
     }
     let Some(secs) = raw.as_u64() else {
@@ -545,9 +553,11 @@ fn validate_tick_interval(
     Ok(Some(secs_u32))
 }
 
-/// Whether an update payload's `parent_id` / `agent_id` means "clear it".
+/// Whether an update payload's `parent_id` / `agent_id` / `tick_interval_secs`
+/// means "clear it".
 ///
 /// `null` is the explicit clear signal; a blank string is the same intent arriving from a form control that was reset rather than omitted (#6562).
+/// Every clearable field on a goal routes through this one predicate so the API presents a single rule to its clients instead of a per-field dialect.
 fn is_clear_signal(value: &serde_json::Value) -> bool {
     value.is_null() || value.as_str().is_some_and(|s| s.trim().is_empty())
 }
@@ -852,10 +862,12 @@ pub async fn update_goal_by_id(
                             g["evaluator_model"] = serde_json::Value::String(v.to_string());
                         }
                     }
-                    // `null` clears the override back to the default cadence.
+                    // `null` — or a blank string, the same intent from a reset
+                    // form control — clears the override back to the default
+                    // cadence, matching `parent_id` / `agent_id` above.
                     // Range already checked above, before the transaction.
                     if let Some(ti) = req.get("tick_interval_secs") {
-                        if ti.is_null() {
+                        if is_clear_signal(ti) {
                             g.as_object_mut()
                                 .map(|obj| obj.remove("tick_interval_secs"));
                         } else if let Some(v) = ti.as_u64() {

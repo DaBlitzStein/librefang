@@ -1166,6 +1166,130 @@ async fn goal_update_can_set_and_clear_the_tick_interval() {
     assert!(cleared.get("tick_interval_secs").is_none());
 }
 
+/// A blank string clears the cadence override exactly as `null` does.
+///
+/// It used to answer `400 tick_interval_secs must be a non-negative integer`
+/// while `parent_id` and `agent_id` accepted the same blank string as "clear
+/// this field". A cleared number input submits `""`, so resetting a goal to the
+/// default cadence worked only for clients that had learned to send an explicit
+/// `null` — the dashboard — and failed for everyone else.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_update_clears_the_tick_interval_with_a_blank_string() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Retune me", "tick_interval_secs": 30}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    for blank in ["", "   "] {
+        let (status, updated) = json_request(
+            &h,
+            Method::PUT,
+            &format!("/api/goals/{id}"),
+            Some(serde_json::json!({"tick_interval_secs": 30})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["tick_interval_secs"].as_u64(), Some(30));
+
+        let (status, cleared) = json_request(
+            &h,
+            Method::PUT,
+            &format!("/api/goals/{id}"),
+            Some(serde_json::json!({ "tick_interval_secs": blank })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "blank {blank:?}: {cleared:?}");
+        assert!(
+            cleared.get("tick_interval_secs").is_none(),
+            "blank {blank:?} must clear the override: {cleared:?}"
+        );
+    }
+}
+
+/// Create agrees with update: a blank cadence is "no override", not a 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_create_treats_a_blank_tick_interval_as_absent() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Default cadence", "tick_interval_secs": ""}),
+    )
+    .await;
+    assert!(
+        goal.get("tick_interval_secs").is_none(),
+        "blank cadence must not be persisted: {goal:?}"
+    );
+}
+
+/// The three clearable fields answer a blank string identically.
+///
+/// Pinned as one test on purpose: the incoherence this fixes was not a bug in
+/// any single field but a drift between them, and a per-field test would let
+/// the next clearable field be added with its own dialect.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_clearable_goal_field_treats_a_blank_string_as_a_clear() {
+    let h = boot().await;
+    let parent = create_goal(&h, serde_json::json!({"title": "parent"})).await;
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Clear me",
+            "parent_id": parent_id,
+            "agent_id": uuid::Uuid::new_v4().to_string(),
+            "tick_interval_secs": 45,
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+    for field in ["parent_id", "agent_id", "tick_interval_secs"] {
+        assert!(
+            goal.get(field).is_some(),
+            "{field} was not seeded: {goal:?}"
+        );
+    }
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({
+            "parent_id": "",
+            "agent_id": "",
+            "tick_interval_secs": "",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    for field in ["parent_id", "agent_id", "tick_interval_secs"] {
+        assert!(
+            body.get(field).is_none(),
+            "blank {field} must clear it: {body:?}"
+        );
+    }
+}
+
+/// A non-blank string is still a malformed cadence, not a clear: only the empty
+/// case moved, so `"30"` keeps its 400 rather than being silently parsed.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_update_still_rejects_a_non_numeric_tick_interval() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "Retune me"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"tick_interval_secs": "30"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 /// A per-request cadence override is accepted at start, and an invalid one is
 /// refused before the run is spawned.
 #[tokio::test(flavor = "multi_thread")]
