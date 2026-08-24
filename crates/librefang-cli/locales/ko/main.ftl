@@ -2135,6 +2135,18 @@ tui-triggers-type-channelmessage-desc = 채널에서 메시지 수신
 
 # --- Memory screen ---
 tui-memory-title-screen = 메모리
+tui-memory-config-remembering = 무엇을 기억하는가
+tui-memory-config-auto-memorize = 자동으로 기억
+tui-memory-config-auto-retrieve = 자동으로 회상
+tui-memory-config-extraction-model = 기억을 작성하는 모델
+tui-memory-config-inherited = (시스템 기본값에서 상속됨)
+tui-memory-config-searching = 기억을 검색하는 방식
+tui-memory-config-embedding-provider = 검색 제공자
+tui-memory-config-embedding-model = 검색 모델
+tui-memory-config-on = 켬
+tui-memory-config-off = 끔
+tui-memory-config-loading = 설정을 읽는 중...
+tui-memory-config-hint =   r 새로고침 · Esc 뒤로
 tui-memory-label-select-agent =   메모리를 탐색할 에이전트를 선택하십시오:
 tui-memory-header-agent-name = 에이전트 이름
 tui-memory-header-id = ID

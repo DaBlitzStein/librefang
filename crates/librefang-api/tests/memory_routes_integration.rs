@@ -365,6 +365,8 @@ async fn get_memory_config_returns_documented_shape() {
         "auto_memorize",
         "auto_retrieve",
         "extraction_model",
+        "effective_extraction_model",
+        "extraction_model_source",
         "max_retrieve",
     ] {
         assert!(
@@ -374,6 +376,59 @@ async fn get_memory_config_returns_documented_shape() {
     }
     // Default `ProactiveMemoryConfig::default()` has enabled = true.
     assert_eq!(pm["enabled"], serde_json::Value::Bool(true));
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/memory/config — an unset extraction model still names what runs
+// ---------------------------------------------------------------------------
+
+/// `extraction_model` unset means "inherit the kernel default". Reporting only
+/// the raw setting therefore answers the wrong question: the caller learns
+/// nobody chose a model, not which model is doing the work.
+///
+/// That gap is not hypothetical. On a live deployment an agent conversing on a
+/// fast model had its memory extraction inheriting a slow reasoning model that
+/// could not finish inside its own 30 s ceiling, so extraction failed on every
+/// turn and each finished reply was held for over two minutes. No surface
+/// could name the culprit, because no surface reported the resolved value.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_memory_config_names_the_inherited_extraction_model() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory/config"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = read_json(resp).await;
+    let pm = &body["proactive_memory"];
+
+    // The test harness sets no `extraction_model`, which is the case that
+    // used to be unreportable.
+    assert!(
+        pm["extraction_model"].as_str().unwrap_or("").is_empty(),
+        "fixture was expected to leave extraction_model unset: {body}"
+    );
+    assert_eq!(
+        pm["extraction_model_source"], "inherited_default",
+        "an unset extraction_model must be reported as inherited, not as a choice: {body}"
+    );
+
+    // The resolved name must be non-empty and must match the model the
+    // fallback actually resolves to — otherwise the field is decoration.
+    let effective = pm["effective_extraction_model"].as_str().unwrap_or("");
+    assert!(
+        !effective.is_empty(),
+        "effective_extraction_model must name a model even when none is configured: {body}"
+    );
+    assert_eq!(
+        effective,
+        harness._state.kernel.config_ref().default_model.model,
+        "effective_extraction_model must equal the kernel default it inherits from: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1661,6 +1661,24 @@ pub async fn memory_query_relations(
 #[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = crate::types::JsonObject)))]
 pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.kernel.config_ref();
+
+    // `extraction_model` unset means "inherit the kernel default", and that
+    // used to be all a caller could learn: an absent field, with no way to ask
+    // which model was actually doing the work. That gap cost a live deployment
+    // hours — an agent conversing on a fast model had its memory extraction
+    // silently inheriting a slow reasoning model, and no surface could show
+    // it. So report the resolved model alongside the raw setting, plus where
+    // it came from, the same provenance shape the context-window field uses.
+    let configured_extraction_model = config
+        .proactive_memory
+        .extraction_model
+        .as_deref()
+        .filter(|s| !s.is_empty());
+    let (effective_extraction_model, extraction_model_source) = match configured_extraction_model {
+        Some(m) => (m.to_string(), "configured"),
+        None => (config.default_model.model.clone(), "inherited_default"),
+    };
+
     Json(serde_json::json!({
         "embedding_provider": config.memory.embedding_provider,
         "embedding_model": &config.memory.embedding_model,
@@ -1671,6 +1689,13 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
             "auto_memorize": config.proactive_memory.auto_memorize,
             "auto_retrieve": config.proactive_memory.auto_retrieve,
             "extraction_model": &config.proactive_memory.extraction_model,
+            // The model extraction will actually run on, whether or not
+            // anyone chose it.
+            "effective_extraction_model": effective_extraction_model,
+            // "configured" when `extraction_model` is set, otherwise
+            // "inherited_default" — the operator never picked this, it came
+            // from `[default_model]`.
+            "extraction_model_source": extraction_model_source,
             "max_retrieve": config.proactive_memory.max_retrieve,
         },
     }))

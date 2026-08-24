@@ -2135,6 +2135,18 @@ tui-triggers-type-channelmessage-desc = Message received on a channel
 
 # --- Memory screen ---
 tui-memory-title-screen = Memory
+tui-memory-config-remembering = What gets remembered
+tui-memory-config-auto-memorize = Remember automatically
+tui-memory-config-auto-retrieve = Recall automatically
+tui-memory-config-extraction-model = Model that writes memories
+tui-memory-config-inherited = (inherited from the system default)
+tui-memory-config-searching = How memories are searched
+tui-memory-config-embedding-provider = Search provider
+tui-memory-config-embedding-model = Search model
+tui-memory-config-on = on
+tui-memory-config-off = off
+tui-memory-config-loading = Reading configuration...
+tui-memory-config-hint =   r refresh · Esc back
 tui-memory-label-select-agent =   Select an agent to browse its memory:
 tui-memory-header-agent-name = Agent Name
 tui-memory-header-id = ID

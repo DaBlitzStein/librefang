@@ -1758,6 +1758,8 @@ export interface ModelItem {
   display_name?: string;
   provider: string;
   tier?: string;
+  // Effective (catalog ∘ operator override). `0` is the catalog's "unknown"
+  // sentinel — never a limit. Refs #7774.
   context_window?: number;
   max_output_tokens?: number;
   input_cost_per_m?: number;
@@ -1774,6 +1776,12 @@ export interface ModelItem {
     supports_vision?: boolean;
     supports_streaming?: boolean;
     supports_thinking?: boolean;
+  };
+  // Raw catalog capacity limits — the same "Auto = revert target" role for the
+  // limit editors. Refs #7774.
+  limits_catalog?: {
+    context_window?: number;
+    max_output_tokens?: number;
   };
   aliases?: string[];
   available?: boolean;
@@ -1831,6 +1839,13 @@ export interface ModelOverrides {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Refs #7774: operator corrections to the model's capacity limits —
+  // undefined = use the catalog value, a positive number = force it. These are
+  // facts about the model, not per-request parameters: `max_tokens` above is the
+  // output cap sent on the wire, `max_output_tokens` here is what the model can
+  // produce at most.
+  context_window?: number;
+  max_output_tokens?: number;
 }
 
 export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {
@@ -2979,7 +2994,16 @@ export interface MemoryConfigResponse {
     enabled?: boolean;
     auto_memorize?: boolean;
     auto_retrieve?: boolean;
+    /** The raw setting. Empty or absent means "inherit the kernel default",
+     *  which is why it cannot be shown on its own — see the two fields
+     *  below. */
     extraction_model?: string;
+    /** The model extraction actually runs on, whether or not anyone chose
+     *  it. Always populated. */
+    effective_extraction_model?: string;
+    /** `"configured"` when `extraction_model` is set, `"inherited_default"`
+     *  when it fell through to `[default_model]`. */
+    extraction_model_source?: "configured" | "inherited_default";
     max_retrieve?: number;
   };
   /**
@@ -3142,8 +3166,15 @@ export async function createBackup(): Promise<{ filename?: string; path?: string
   return post<{ filename?: string; path?: string; size_bytes?: number; components?: string[]; created_at?: string }>("/api/backup", {});
 }
 
-export async function restoreBackup(filename: string): Promise<{ restored_files?: number; errors?: string[]; message?: string }> {
-  return post<{ restored_files?: number; errors?: string[]; message?: string }>("/api/restore", { filename });
+export async function restoreBackup(
+  filename: string,
+  options?: { keepConfig?: boolean; components?: string[] },
+): Promise<{ restored_files?: number; errors?: string[]; message?: string }> {
+  return post<{ restored_files?: number; errors?: string[]; message?: string }>("/api/restore", {
+    filename,
+    keep_config: options?.keepConfig,
+    components: options?.components,
+  });
 }
 
 export async function deleteBackup(filename: string): Promise<{ deleted?: string }> {
