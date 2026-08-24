@@ -1056,6 +1056,7 @@ impl LibreFangKernel {
         let goal_runner = crate::goal_runner::GoalRunner::new_with_store(
             supervisor.subscribe(),
             librefang_memory::GoalRunStore::new(memory.pool()),
+            memory.clone(),
         );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
@@ -3095,9 +3096,12 @@ system_prompt = "You are a helpful assistant."
                             goal.as_ref().map(|g| g.loop_engineering).unwrap_or(false);
                         let verify_agent_id = goal.as_ref().and_then(|g| g.verify_agent_id);
                         let evaluator_model = goal.as_ref().and_then(|g| g.evaluator_model.clone());
+                        let tick_interval_secs = goal.as_ref().and_then(|g| g.tick_interval_secs);
                         // Use None for max_iterations to get the default.
-                        // The runner will load the goal from the store and
-                        // resume from the last persisted progress.
+                        // `goal_run_start` reads the run's persisted row as a
+                        // resume checkpoint, so the loop continues from the
+                        // iteration and learnings the dead process reached
+                        // rather than re-running the goal from scratch.
                         kernel.goal_run_start(
                             goal_id,
                             agent_id,
@@ -3106,6 +3110,7 @@ system_prompt = "You are a helpful assistant."
                             verify_agent_id,
                             None, // verify_max_retries
                             evaluator_model,
+                            tick_interval_secs,
                         );
                     }
                 }

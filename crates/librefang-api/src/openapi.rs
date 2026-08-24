@@ -418,6 +418,10 @@ use crate::types;
 
         // ── Goals ──
         routes::list_goal_templates,
+        routes::start_goal_run,
+        routes::stop_goal_run,
+        routes::pause_goal_run,
+        routes::resume_goal_run,
 
         // ── Inbox ──
         routes::inbox_status,

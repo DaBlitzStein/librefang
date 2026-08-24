@@ -23,6 +23,19 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   `NULL` inherits the global and `0` means "never reclaim", the per-task spelling of the global disable; the two switches are independent, so `claim_ttl_secs = 0` no longer suppresses a deadline a task explicitly declared (schema v51, no backfill — every pre-existing row already means "inherit").
   Both fields are settable from `POST /api/tasks` and from the dashboard's New Task dialog, and are shown on the board only when non-neutral, since every historical task carries priority 0.
   The agent-facing `task_post` tool keeps posting with the neutral defaults: these are operator controls, and widening that tool's schema would change every agent's system prompt, and so its provider cache, for knobs the operator sets from the dashboard — worth doing deliberately, not as a side effect (@DaBlitzStein)
+- Goals can be paused and resumed, not only cancelled.
+  `POST /api/goals/{id}/pause` suspends a run while keeping everything needed to continue it — the iteration count, the progress reached, and the learnings captured so far — and `POST /api/goals/{id}/resume` picks up from there.
+  `POST /api/goals/{id}/stop` keeps its existing meaning and is now explicitly the cancel: it discards the checkpoint, so starting the goal again begins from iteration 0.
+  Previously `stop` was the only way to halt a run and it deleted the run row outright while `start` reset the iteration count unconditionally, so "pause" was only expressible as "start over".
+  Pause is cooperative rather than an abort: the loop finishes the turn it is on before checkpointing, because the accumulated learnings live on that task's stack and killing it is precisely how a pause loses the work it exists to protect.
+  A `200` therefore means the pause was accepted, not that the run has already stopped — poll `GET /api/goals/{id}/run` for the phase to reach `paused`.
+  The checkpoint is stored in the shared KV alongside the goals themselves rather than in the `goal_runs` table, whose schema pins `phase` with a `CHECK` constraint that SQLite cannot alter in place; a paused run is not an active run, so the table that mirrors active runs was the wrong home for it regardless, and one KV value makes the write atomic (@DaBlitzStein)
+- A goal's loop cadence is configurable per goal via `tick_interval_secs`, settable on create, on update, and as a per-request override on start.
+  It was hard-wired to a 2-second `TICK_INTERVAL` constant with nothing exposing it.
+  The default is unchanged at 2 seconds, so existing goals behave exactly as before.
+  Accepted range is 1 to 86400 seconds: the floor cannot exceed 2 without invalidating the existing default, and is 1 rather than 0 because 0 removes the only gap between consecutive provider calls, turning a run into a tight loop that bills tokens as fast as the provider answers.
+  The ceiling matches cron's own `MAX_EVERY_SECS` so the two recurring-work surfaces agree on how far apart repetitions may sit.
+  The HTTP layer rejects out-of-range values with a 400 so an operator is told, while the runner clamps with a warning as a last line of defence for values reaching it by other paths (@DaBlitzStein)
 
 ### Fixed
 
@@ -32,6 +45,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   The tick now scopes on the goal id, so each goal derives its own session.
   Isolation is unconditional rather than opt-in the way cron's `session_mode = "new"` is, because the trade-off is not the same: cron's flag buys per-*fire* isolation at the cost of prompt-cache reuse, while per-*goal* scoping keeps every tick of one goal on one session and so costs nothing — there is no coherent reason to want two unrelated goals sharing a history.
   On upgrade, a goal already mid-run continues under a new session id and therefore starts from an empty conversation history; its durable state (progress, status, iteration count) is unaffected, and the history it leaves behind was contaminated by definition (@DaBlitzStein)
+- Auto-resuming a goal run after a daemon restart restarted the goal instead of resuming it.
+  `recover_stale_runs` deleted the persisted row before handing the goal to `goal_run_start`, and the run loop seeded its iteration counter from a local initialised to `0` rather than from the persisted state — so a run interrupted at iteration 20 of 25 silently began again at 0 and could burn the full cap a second time.
+  Boot's own comment already claimed the loop "picks up from the last checkpoint"; it now does (@DaBlitzStein)
+
 - `/goal` now works in the dashboard chat and in the TUI chat, not only in channels (#3355).
   The command was registered with `Scope::CHANNEL` alone, so the TUI's registry pre-flight rejected it and the dashboard never listed it — while Telegram, which is the surface the command shipped against, worked fine.
   Behind that was a split-brain catalog: four hand-written command lists that did not reference each other — `COMMAND_REGISTRY` in `librefang-channels`, a `BUILTIN_COMMANDS` const behind `GET /api/commands`, a `SLASH_COMMANDS` array in `ChatPage.tsx`, and the execution `match` in `ws.rs` — plus a `Scope::DASHBOARD` flag that was declared, documented, and used by nobody.

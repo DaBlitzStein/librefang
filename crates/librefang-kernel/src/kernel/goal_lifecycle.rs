@@ -24,7 +24,11 @@ impl LibreFangKernel {
     /// complete, the iteration cap (`max_iterations`, default
     /// [`DEFAULT_GOAL_MAX_ITERATIONS`]) is reached, an operator stops it, or the
     /// kernel shuts down.
-    #[allow(clippy::too_many_arguments)] // 8-context-arg public API; grouping churns trait+callers
+    ///
+    /// Starting a goal that was paused (or interrupted by a crash) resumes it
+    /// from its persisted checkpoint rather than restarting it; see
+    /// [`crate::goal_runner::GoalRunner::start`].
+    #[allow(clippy::too_many_arguments)] // 9-context-arg public API; grouping churns trait+callers
     pub fn goal_run_start(
         &self,
         goal_id: GoalId,
@@ -34,6 +38,7 @@ impl LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
+        tick_interval_secs: Option<u32>,
     ) -> bool {
         let max = max_iterations.unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS).max(1);
         let substrate = self.substrate_ref().clone();
@@ -236,13 +241,27 @@ impl LibreFangKernel {
             verify_agent_id,
             verify_max_retries,
             evaluator_model,
+            tick_interval_secs,
         );
         true
     }
 
-    /// Stop an active goal run. Returns whether a run was stopped.
+    /// Cancel an active goal run, discarding its resume checkpoint.
+    ///
+    /// Terminal by design: the durable row is dropped, so starting the goal
+    /// again begins from iteration 0. Use [`Self::goal_run_pause`] to suspend a
+    /// run that should later continue where it left off.
     pub fn goal_run_stop(&self, goal_id: GoalId) -> bool {
         self.workflows.goal_runner.stop(goal_id)
+    }
+
+    /// Pause an active goal run, preserving its resume checkpoint.
+    ///
+    /// Returns whether a live run was signalled. The loop finishes its current
+    /// turn, checkpoints iteration / progress / learnings, and exits in
+    /// `Paused`; `goal_run_start` then resumes from there.
+    pub fn goal_run_pause(&self, goal_id: GoalId) -> bool {
+        self.workflows.goal_runner.pause(goal_id)
     }
 
     /// Snapshot the observable state of a goal's run, if one is active.

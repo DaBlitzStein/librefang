@@ -125,6 +125,14 @@ pub struct Goal {
     /// Claude Code /goal uses Haiku as the evaluator — cheap and objective.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluator_model: Option<String>,
+    /// Seconds the runner waits between iterations of this goal's loop.
+    ///
+    /// `None` uses [`DEFAULT_GOAL_TICK_INTERVAL_SECS`], which is the value the
+    /// cadence was hard-wired to before it became configurable. Clamped into
+    /// `[MIN_GOAL_TICK_INTERVAL_SECS, MAX_GOAL_TICK_INTERVAL_SECS]` by
+    /// [`clamp_goal_tick_interval_secs`] at run start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_interval_secs: Option<u32>,
     /// When the goal was created.
     pub created_at: DateTime<Utc>,
     /// When the goal was last updated.
@@ -152,7 +160,56 @@ impl Goal {
         if self.progress > 100 {
             return Err(format!("progress must be 0-100, got {}", self.progress));
         }
+        if let Some(secs) = self.tick_interval_secs {
+            if !(MIN_GOAL_TICK_INTERVAL_SECS..=MAX_GOAL_TICK_INTERVAL_SECS).contains(&secs) {
+                return Err(format!(
+                    "tick_interval_secs must be {MIN_GOAL_TICK_INTERVAL_SECS}-{MAX_GOAL_TICK_INTERVAL_SECS}, got {secs}"
+                ));
+            }
+        }
         Ok(())
+    }
+}
+
+/// Seconds the goal runner waits between loop iterations when the goal does
+/// not override it. Preserves the cadence the runner used while the value was
+/// a hard-wired `TICK_INTERVAL` constant.
+pub const DEFAULT_GOAL_TICK_INTERVAL_SECS: u32 = 2;
+
+/// Floor for a goal's configurable cadence.
+///
+/// Deliberately far below cron's `MIN_EVERY_SECS` of 60
+/// (`crate::scheduler`): a goal tick is a live in-process loop that evaluates
+/// its own stop condition each round, not a scheduler poll, and the pre-
+/// existing default of 2s has to remain a legal value — so the floor cannot
+/// exceed 2. It is 1 rather than 0 because 0 removes the only gap between
+/// consecutive provider calls, turning the run into a tight loop that bills
+/// tokens as fast as the provider will answer. One second is the smallest
+/// value that still yields between turns.
+pub const MIN_GOAL_TICK_INTERVAL_SECS: u32 = 1;
+
+/// Ceiling for a goal's configurable cadence, matching cron's own
+/// `MAX_EVERY_SECS` (24 hours) so the two recurring-work surfaces agree on how
+/// far apart repetitions may legitimately sit. Past that horizon the work
+/// belongs in a cron job, which survives a daemon restart without holding a
+/// live task open.
+pub const MAX_GOAL_TICK_INTERVAL_SECS: u32 = 86_400;
+
+/// Resolve a goal's requested cadence into the seconds the runner will sleep.
+///
+/// `None` yields the default. Out-of-range values are clamped rather than
+/// rejected — the runner must never refuse to start a goal over a cadence it
+/// can correct, matching how the kernel treats `max_history_messages`. Callers
+/// that want to reject instead (the HTTP layer, so the operator sees the
+/// mistake) validate up front via [`Goal::validate`]. Returns the resolved
+/// seconds and whether clamping occurred, so the caller can log it.
+pub fn clamp_goal_tick_interval_secs(requested: Option<u32>) -> (u32, bool) {
+    match requested {
+        None => (DEFAULT_GOAL_TICK_INTERVAL_SECS, false),
+        Some(secs) => {
+            let clamped = secs.clamp(MIN_GOAL_TICK_INTERVAL_SECS, MAX_GOAL_TICK_INTERVAL_SECS);
+            (clamped, clamped != secs)
+        }
     }
 }
 
@@ -219,8 +276,24 @@ pub enum GoalRunPhase {
     MaxIterationsReached,
     /// The loop stopped on the provider rate-limit circuit breaker.
     RateLimited,
-    /// An operator stopped the run.
+    /// An operator cancelled the run. Terminal: the durable row is dropped, so
+    /// a subsequent start begins from iteration 0.
     Stopped,
+    /// An operator paused the run. Unlike [`GoalRunPhase::Stopped`] this is a
+    /// resumable checkpoint: the durable row survives with the iteration count
+    /// and progress reached, and a later start continues from there rather
+    /// than restarting the goal.
+    Paused,
+}
+
+impl GoalRunPhase {
+    /// Whether this phase is a resumable checkpoint rather than a settled end.
+    ///
+    /// `Running` counts: a row left in `Running` on disk means the process died
+    /// mid-run, and boot recovery resumes it from the last checkpoint.
+    pub fn is_resumable(self) -> bool {
+        matches!(self, GoalRunPhase::Paused | GoalRunPhase::Running)
+    }
 }
 
 impl std::fmt::Display for GoalRunPhase {
@@ -231,6 +304,29 @@ impl std::fmt::Display for GoalRunPhase {
             GoalRunPhase::MaxIterationsReached => write!(f, "max_iterations_reached"),
             GoalRunPhase::RateLimited => write!(f, "rate_limited"),
             GoalRunPhase::Stopped => write!(f, "stopped"),
+            GoalRunPhase::Paused => write!(f, "paused"),
+        }
+    }
+}
+
+/// Parse the `phase` column the `goal_runs` table stores.
+///
+/// The store persists phases as the [`Display`](std::fmt::Display) string, and
+/// reading a run back out of it (to surface a paused run whose in-memory task
+/// has already exited) needs the inverse. Keeping both directions in one place
+/// stops the round-trip from drifting when a variant is added.
+impl std::str::FromStr for GoalRunPhase {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "running" => Ok(GoalRunPhase::Running),
+            "finished" => Ok(GoalRunPhase::Finished),
+            "max_iterations_reached" => Ok(GoalRunPhase::MaxIterationsReached),
+            "rate_limited" => Ok(GoalRunPhase::RateLimited),
+            "stopped" => Ok(GoalRunPhase::Stopped),
+            "paused" => Ok(GoalRunPhase::Paused),
+            other => Err(format!("unknown goal run phase: {other}")),
         }
     }
 }
@@ -326,6 +422,7 @@ mod tests {
             loop_engineering: false,
             verify_agent_id: None,
             evaluator_model: None,
+            tick_interval_secs: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -424,5 +521,117 @@ mod tests {
         let g = valid_goal();
         let json = serde_json::to_string(&g).unwrap();
         assert!(!json.contains("parent_id"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Configurable tick cadence
+    // -----------------------------------------------------------------------
+
+    /// An unset cadence must reproduce the value the runner used while it was
+    /// a hard-wired constant, so upgrading changes nothing for existing goals.
+    #[test]
+    fn unset_tick_interval_resolves_to_the_historical_default() {
+        assert_eq!(
+            clamp_goal_tick_interval_secs(None),
+            (DEFAULT_GOAL_TICK_INTERVAL_SECS, false)
+        );
+        assert_eq!(DEFAULT_GOAL_TICK_INTERVAL_SECS, 2);
+    }
+
+    /// A goal set to the default explicitly is not reported as clamped.
+    #[test]
+    fn in_range_tick_interval_passes_through_unclamped() {
+        for secs in [
+            MIN_GOAL_TICK_INTERVAL_SECS,
+            DEFAULT_GOAL_TICK_INTERVAL_SECS,
+            300,
+            MAX_GOAL_TICK_INTERVAL_SECS,
+        ] {
+            assert_eq!(clamp_goal_tick_interval_secs(Some(secs)), (secs, false));
+        }
+    }
+
+    /// Zero is the case the floor exists for: it would remove every gap
+    /// between provider calls.
+    #[test]
+    fn zero_tick_interval_is_clamped_up_to_the_floor() {
+        assert_eq!(
+            clamp_goal_tick_interval_secs(Some(0)),
+            (MIN_GOAL_TICK_INTERVAL_SECS, true)
+        );
+    }
+
+    #[test]
+    fn oversized_tick_interval_is_clamped_down_to_the_ceiling() {
+        assert_eq!(
+            clamp_goal_tick_interval_secs(Some(u32::MAX)),
+            (MAX_GOAL_TICK_INTERVAL_SECS, true)
+        );
+    }
+
+    #[test]
+    fn out_of_range_tick_interval_fails_validation() {
+        let mut g = valid_goal();
+        g.tick_interval_secs = Some(0);
+        assert!(g.validate().unwrap_err().contains("tick_interval_secs"));
+
+        g.tick_interval_secs = Some(MAX_GOAL_TICK_INTERVAL_SECS + 1);
+        assert!(g.validate().unwrap_err().contains("tick_interval_secs"));
+
+        g.tick_interval_secs = Some(DEFAULT_GOAL_TICK_INTERVAL_SECS);
+        assert!(g.validate().is_ok());
+    }
+
+    /// A goal document written before the field existed must still load.
+    #[test]
+    fn goal_without_tick_interval_deserializes() {
+        let json = serde_json::json!({
+            "id": GoalId::new(),
+            "title": "legacy",
+            "status": "pending",
+            "created_at": Utc::now(),
+            "updated_at": Utc::now(),
+        });
+        let g: Goal = serde_json::from_value(json).unwrap();
+        assert_eq!(g.tick_interval_secs, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Run phases
+    // -----------------------------------------------------------------------
+
+    /// The store persists phases via `Display` and reads them back via
+    /// `FromStr`; a variant that survives one direction but not the other
+    /// silently turns a paused run into an unreadable row.
+    #[test]
+    fn every_run_phase_round_trips_through_its_stored_string() {
+        for phase in [
+            GoalRunPhase::Running,
+            GoalRunPhase::Finished,
+            GoalRunPhase::MaxIterationsReached,
+            GoalRunPhase::RateLimited,
+            GoalRunPhase::Stopped,
+            GoalRunPhase::Paused,
+        ] {
+            let stored = phase.to_string();
+            assert_eq!(stored.parse::<GoalRunPhase>().unwrap(), phase, "{stored}");
+        }
+    }
+
+    #[test]
+    fn unknown_phase_string_is_rejected() {
+        assert!("wat".parse::<GoalRunPhase>().is_err());
+    }
+
+    /// Pause is resumable, cancel is not — that distinction is the whole point
+    /// of having both.
+    #[test]
+    fn only_paused_and_running_are_resumable() {
+        assert!(GoalRunPhase::Paused.is_resumable());
+        assert!(GoalRunPhase::Running.is_resumable());
+        assert!(!GoalRunPhase::Stopped.is_resumable());
+        assert!(!GoalRunPhase::Finished.is_resumable());
+        assert!(!GoalRunPhase::MaxIterationsReached.is_resumable());
+        assert!(!GoalRunPhase::RateLimited.is_resumable());
     }
 }

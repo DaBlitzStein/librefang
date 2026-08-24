@@ -156,9 +156,15 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// Start a long-horizon autonomous run driving `agent_id` toward
     /// `goal_id`. `max_iterations` bounds the run (default
     /// [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`]).
+    /// `tick_interval_secs` sets the cadence between iterations (default
+    /// [`librefang_types::goal::DEFAULT_GOAL_TICK_INTERVAL_SECS`], clamped
+    /// into range).
     /// Returns whether the run actually started (false when the kernel
     /// self-handle is unset and the run cannot be scheduled).
-    #[allow(clippy::too_many_arguments)] // 8-context-arg trait API; grouping churns impl+callers
+    ///
+    /// Resumes from the persisted checkpoint when the goal was paused or
+    /// interrupted mid-run; starts from iteration 0 otherwise.
+    #[allow(clippy::too_many_arguments)] // 9-context-arg trait API; grouping churns impl+callers
     fn start_goal_run(
         &self,
         goal_id: librefang_types::goal::GoalId,
@@ -168,9 +174,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
+        tick_interval_secs: Option<u32>,
     ) -> bool;
-    /// Stop an active goal run. Returns whether a run was stopped.
+    /// Cancel an active goal run, discarding its resume checkpoint. Returns
+    /// whether a run was cancelled.
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
+    /// Pause an active goal run, keeping its resume checkpoint. Returns
+    /// whether a live run was signalled.
+    fn pause_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
     /// Snapshot the observable state of a goal's run, if one is active.
     fn goal_run_state(
         &self,
@@ -979,6 +990,7 @@ impl KernelApi for LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
+        tick_interval_secs: Option<u32>,
     ) -> bool {
         self.goal_run_start(
             goal_id,
@@ -988,10 +1000,14 @@ impl KernelApi for LibreFangKernel {
             verify_agent_id,
             verify_max_retries,
             evaluator_model,
+            tick_interval_secs,
         )
     }
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
         self.goal_run_stop(goal_id)
+    }
+    fn pause_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
+        self.goal_run_pause(goal_id)
     }
     fn goal_run_state(
         &self,

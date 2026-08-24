@@ -6793,6 +6793,191 @@
         }
       }
     },
+    "/api/goals/{id}/pause": {
+      "post": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "POST /api/goals/{id}/pause — Suspend an active run, keeping its checkpoint.",
+        "description": "The loop finishes the turn it is on, then checkpoints its iteration count,\nprogress and accumulated learnings and exits in the `paused` phase. Because\nthe in-flight agent turn is allowed to complete rather than being aborted,\nthe pause lands after that turn plus at most one tick interval — so a `200`\nhere means \"pause requested and will be honoured\", not \"already stopped\".\nPoll `GET /api/goals/{id}/run` for the phase to reach `paused`.\n\nMirrors [`stop_goal_run`]'s response shape: `paused` reports whether a live\nrun was there to signal.",
+        "operationId": "pause_goal_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Goal id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pause processed; `paused` reports whether a run was active",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid goal id"
+          }
+        }
+      }
+    },
+    "/api/goals/{id}/resume": {
+      "post": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "POST /api/goals/{id}/resume — Continue a paused run from its checkpoint.",
+        "description": "Differs from [`start_goal_run`] only in refusing when there is nothing to\nresume: without that guard \"resume\" on a goal with no checkpoint would\nsilently restart it from iteration 0, discarding the progress the operator\nbelieved they had preserved.",
+        "operationId": "resume_goal_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Goal id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/JsonObject"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run resumed from its checkpoint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid goal id, unassigned agent, or out-of-range cadence"
+          },
+          "404": {
+            "description": "Goal not found"
+          },
+          "409": {
+            "description": "Goal has no paused run to resume"
+          }
+        }
+      }
+    },
+    "/api/goals/{id}/start": {
+      "post": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "POST /api/goals/{id}/start — Begin an autonomous long-horizon run that\ndrives the goal's assigned agent toward completion (#5744).",
+        "description": "Optional body: `{ \"max_iterations\": <u32>, \"verify_max_retries\": <u32>,\n\"tick_interval_secs\": <u32> }`.\n\nA goal that was paused resumes from its checkpoint rather than restarting;\nsee [`resume_goal_run`] for the variant that requires one to exist.",
+        "operationId": "start_goal_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Goal id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/JsonObject"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run started (or resumed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid goal id, unassigned agent, or out-of-range cadence"
+          },
+          "404": {
+            "description": "Goal not found"
+          }
+        }
+      }
+    },
+    "/api/goals/{id}/stop": {
+      "post": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "POST /api/goals/{id}/stop — Cancel an active autonomous run for a goal.",
+        "description": "Terminal: the run's resume checkpoint is discarded, so starting the goal\nagain begins from iteration 0. Use `POST /api/goals/{id}/pause` to suspend a\nrun that should later continue where it left off.",
+        "operationId": "stop_goal_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Goal id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel processed; `stopped` reports whether a run was active",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid goal id"
+          }
+        }
+      }
+    },
     "/api/hands": {
       "get": {
         "tags": [
@@ -12793,6 +12978,48 @@
         "responses": {
           "200": {
             "description": "Daemon status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "POST /api/tasks — Enqueue a task on behalf of an external caller.",
+        "description": "Body: `{\"title\": \"...\", \"description\": \"...\", \"assigned_to\": \"<agent-id|name>\"?, \"created_by\": \"<agent-id>\"?, \"priority\": <int>?, \"timeout_secs\": <uint>?}`\n\nWraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,\ncron scripts, external integrations) can enqueue tasks without a\nruntime/agent context. The agent-side `task_post` tool keeps the\ncaller's agent id automatically; this HTTP form takes `created_by`\nas an optional explicit field for provenance.\n\n`priority` orders the claim queue (higher first, ties by age) and\n`timeout_secs` overrides `[task_board] claim_ttl_secs` for this task —\nboth are enforced by the kernel, not merely recorded.\n\nAn `assigned_to` that names no known agent is rejected with 400 rather\nthan stored: `task_claim` refuses an unknown agent, so such a row would\nsit `pending` forever with nothing to say why.",
+        "operationId": "task_queue_post_root",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Task enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid title, description, priority, timeout_secs, or unknown assignee",
             "content": {
               "application/json": {
                 "schema": {
