@@ -1061,13 +1061,13 @@ tui-init-routing-tier-balanced-desc = 标准对话、一般任务
 tui-init-routing-tier-frontier-desc = 多步推理、代码生成
 tui-init-complete-success-daemon = 设置完成 — 守护进程运行中
 tui-init-complete-success = 设置完成！
-tui-init-complete-label-provider =   提供商:    
-tui-init-complete-label-model =   模型:       
-tui-init-complete-label-daemon =   守护进程:    
+tui-init-complete-label-provider = { "  " }提供商:{ "    " }
+tui-init-complete-label-model = { "  " }模型:{ "       " }
+tui-init-complete-label-daemon = { "  " }守护进程:{ "    " }
 tui-init-complete-daemon-running = 运行于 { $url }
 tui-init-complete-daemon-not-running = 未运行
 tui-init-complete-daemon-pending = 等待中
-tui-init-complete-question =   您想如何使用 LibreFang？
+tui-init-complete-question = { "  " }您想如何使用 LibreFang？
 tui-init-complete-desktop-desc-installed = 带系统托盘的原生窗口
 tui-init-complete-desktop-desc-not-installed = 未安装
 tui-init-complete-opt-desktop = 桌面应用
@@ -1205,7 +1205,7 @@ tui-workflows-review-desc =   描述:
 tui-workflows-hints-create-submit =   [Enter] 创建  [Esc] 返回
 tui-workflows-hints-create-next =   [Enter] 下一步  [Esc] 返回
 tui-workflows-title-run-input = 运行: { $name }
-tui-workflows-label-run-input =   输入 (JSON 或文本):
+tui-workflows-label-run-input = { "  " }输入 (JSON 或文本):
 tui-workflows-placeholder-run-input = 输入工作流输入...
 tui-workflows-hints-run-input =   [Enter] 运行  [Esc] 取消
 tui-workflows-title-run-result = 工作流运行结果
@@ -2138,8 +2138,8 @@ auth-api-key-config-entry =   api_key_hash = "{ $hash }"
 auth-api-key-remove-plaintext-hint = 然后删除明文 `api_key` 行。客户端仍然发送密钥本身，只是守护进程保存的副本发生了变化。
 auth-api-key-cli-driver-caveat = 例外：如果使用基于 CLI 的驱动（claude-code），请保留一份可发送的副本 —— `api_key = "vault:NAME"` 或 LIBREFANG_API_KEY 环境变量。这类驱动会调用守护进程自身的 /mcp 端点，而哈希无法作为 bearer 令牌发送，两者都不配置时每次工具调用都会返回 401。
 # Agent command specific keys
-agent-spawn-id-label =   ID：  { $id }
-agent-spawn-name-label =   名称：{ $name }
+agent-spawn-id-label = { "  " }ID：  { $id }
+agent-spawn-name-label = { "  " }名称：{ $name }
 error-unknown = 未知错误
 label-unknown = <未知>
 label-header-state = 状态

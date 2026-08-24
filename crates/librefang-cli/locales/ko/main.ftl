@@ -1145,8 +1145,8 @@ auth-api-key-remove-plaintext-hint = 그런 다음 평문 `api_key` 줄을 제�
 auth-api-key-cli-driver-caveat = 예외: CLI 기반 드라이버(claude-code)를 사용한다면 전송 가능한 사본을 남겨 두십시오 — `api_key = "vault:NAME"` 또는 LIBREFANG_API_KEY 변수입니다. 이런 드라이버는 데몬 자신의 /mcp 엔드포인트를 호출하며, 해시는 bearer 토큰으로 전송할 수 없으므로 둘 다 없으면 모든 도구 호출이 401을 받습니다.
 
 # Agent command specific keys
-agent-spawn-id-label =   ID:   { $id }
-agent-spawn-name-label =   이름: { $name }
+agent-spawn-id-label = { "  " }ID:   { $id }
+agent-spawn-name-label = { "  " }이름: { $name }
 error-unknown = 알 수 없는 오류
 label-unknown = <알 수 없음>
 label-header-state = 상태
@@ -1988,13 +1988,13 @@ tui-init-routing-tier-balanced-desc = 일반 대화, 일반 작업
 tui-init-routing-tier-frontier-desc = 다단계 추론, 코드 생성
 tui-init-complete-success-daemon = 설정 완료 — 데몬 실행 중
 tui-init-complete-success = 설정 완료!
-tui-init-complete-label-provider =   제공자:    
-tui-init-complete-label-model =   모델:       
-tui-init-complete-label-daemon =   데몬:      
+tui-init-complete-label-provider = { "  " }제공자:{ "    " }
+tui-init-complete-label-model = { "  " }모델:{ "       " }
+tui-init-complete-label-daemon = { "  " }데몬:{ "      " }
 tui-init-complete-daemon-running = { $url }에서 실행 중
 tui-init-complete-daemon-not-running = 실행되지 않음
 tui-init-complete-daemon-pending = 대기 중
-tui-init-complete-question =   LibreFang을 어떻게 사용하시겠습니까?
+tui-init-complete-question = { "  " }LibreFang을 어떻게 사용하시겠습니까?
 tui-init-complete-desktop-desc-installed = 시스템 트레이가 있는 네이티브 창
 tui-init-complete-desktop-desc-not-installed = 설치되지 않음
 tui-init-complete-opt-desktop = 데스크톱 앱
@@ -2132,7 +2132,7 @@ tui-workflows-review-desc =   설명:
 tui-workflows-hints-create-submit =   [Enter] 생성  [Esc] 뒤로
 tui-workflows-hints-create-next =   [Enter] 다음  [Esc] 뒤로
 tui-workflows-title-run-input = 실행: { $name }
-tui-workflows-label-run-input =   입력 (JSON 또는 텍스트):
+tui-workflows-label-run-input = { "  " }입력 (JSON 또는 텍스트):
 tui-workflows-placeholder-run-input = 워크플로 입력을 입력하십시오...
 tui-workflows-hints-run-input =   [Enter] 실행  [Esc] 취소
 tui-workflows-title-run-result = 워크플로 실행 결과

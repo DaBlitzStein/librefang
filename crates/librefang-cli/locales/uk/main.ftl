@@ -1159,8 +1159,8 @@ auth-api-key-remove-plaintext-hint = Потім видаліть рядок `api
 auth-api-key-cli-driver-caveat = Виняток: якщо ви використовуєте драйвер на основі CLI (claude-code), залиште копію, яку можна надіслати — `api_key = "vault:NAME"` або змінну LIBREFANG_API_KEY. Такі драйвери звертаються до власної точки /mcp демона, а хеш не можна надіслати як bearer-токен, тож без жодного з них кожен виклик інструмента отримує 401.
 
 # Agent command specific keys
-agent-spawn-id-label =   ID:   { $id }
-agent-spawn-name-label =   Ім'я: { $name }
+agent-spawn-id-label = { "  " }ID:   { $id }
+agent-spawn-name-label = { "  " }Ім'я: { $name }
 error-unknown = Невідома помилка
 label-unknown = <невідомо>
 label-header-state = СТАТУС
@@ -2007,13 +2007,13 @@ tui-init-routing-tier-balanced-desc = звичайна розмова, зага�
 tui-init-routing-tier-frontier-desc = багатокрокові міркування, генерація коду
 tui-init-complete-success-daemon = Налаштування завершено — демон запущено
 tui-init-complete-success = Налаштування завершено!
-tui-init-complete-label-provider =   Провайдер:    
-tui-init-complete-label-model =   Модель:       
-tui-init-complete-label-daemon =   Демон:        
+tui-init-complete-label-provider = { "  " }Провайдер:{ "    " }
+tui-init-complete-label-model = { "  " }Модель:{ "       " }
+tui-init-complete-label-daemon = { "  " }Демон:{ "        " }
 tui-init-complete-daemon-running = працює на { $url }
 tui-init-complete-daemon-not-running = не запущено
 tui-init-complete-daemon-pending = очікується
-tui-init-complete-question =   Як ви хочете використовувати LibreFang?
+tui-init-complete-question = { "  " }Як ви хочете використовувати LibreFang?
 tui-init-complete-desktop-desc-installed = нативне вікно з системним треєм
 tui-init-complete-desktop-desc-not-installed = не встановлено
 tui-init-complete-opt-desktop = Desktop-додаток
@@ -2151,7 +2151,7 @@ tui-workflows-review-desc =   Опис:
 tui-workflows-hints-create-submit =   [Enter] Створити  [Esc] Назад
 tui-workflows-hints-create-next =   [Enter] Далі  [Esc] Назад
 tui-workflows-title-run-input = Запуск: { $name }
-tui-workflows-label-run-input =   Вхідні дані (JSON або текст):
+tui-workflows-label-run-input = { "  " }Вхідні дані (JSON або текст):
 tui-workflows-placeholder-run-input = введіть вхідні дані воркфлоу...
 tui-workflows-hints-run-input =   [Enter] Запуск  [Esc] Скасувати
 tui-workflows-title-run-result = Результат виконання воркфлоу

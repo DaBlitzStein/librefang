@@ -1160,8 +1160,8 @@ auth-api-key-remove-plaintext-hint = Then remove the plaintext `api_key` line. C
 auth-api-key-cli-driver-caveat = Exception: if you run a CLI-based driver (claude-code), keep a transmittable copy — `api_key = "vault:NAME"` or the LIBREFANG_API_KEY variable. Those drivers call the daemon's own /mcp endpoint, and a hash cannot be sent as a bearer token, so with neither set every tool call gets 401.
 
 # Agent command specific keys
-agent-spawn-id-label =   ID:   { $id }
-agent-spawn-name-label =   Name: { $name }
+agent-spawn-id-label = { "  " }ID:   { $id }
+agent-spawn-name-label = { "  " }Name: { $name }
 error-unknown = Unknown error
 label-unknown = <unknown>
 label-header-state = STATE
@@ -2003,13 +2003,13 @@ tui-init-routing-tier-balanced-desc = standard conversation, general tasks
 tui-init-routing-tier-frontier-desc = multi-step reasoning, code generation
 tui-init-complete-success-daemon = Setup complete — daemon running
 tui-init-complete-success = Setup complete!
-tui-init-complete-label-provider =   Provider:    
-tui-init-complete-label-model =   Model:       
-tui-init-complete-label-daemon =   Daemon:      
+tui-init-complete-label-provider = { "  " }Provider:{ "    " }
+tui-init-complete-label-model = { "  " }Model:{ "       " }
+tui-init-complete-label-daemon = { "  " }Daemon:{ "      " }
 tui-init-complete-daemon-running = running at { $url }
 tui-init-complete-daemon-not-running = not running
 tui-init-complete-daemon-pending = pending
-tui-init-complete-question =   How do you want to use LibreFang?
+tui-init-complete-question = { "  " }How do you want to use LibreFang?
 tui-init-complete-desktop-desc-installed = native window with system tray
 tui-init-complete-desktop-desc-not-installed = not installed
 tui-init-complete-opt-desktop = Desktop app
@@ -2158,7 +2158,7 @@ tui-workflows-review-desc =   Desc:
 tui-workflows-hints-create-submit =   [Enter] Create  [Esc] Back
 tui-workflows-hints-create-next =   [Enter] Next  [Esc] Back
 tui-workflows-title-run-input = Run: { $name }
-tui-workflows-label-run-input =   Input (JSON or text):
+tui-workflows-label-run-input = { "  " }Input (JSON or text):
 tui-workflows-placeholder-run-input = enter workflow input...
 tui-workflows-hints-run-input =   [Enter] Run  [Esc] Cancel
 tui-workflows-title-run-result = Workflow Run Result

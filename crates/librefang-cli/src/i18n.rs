@@ -236,6 +236,110 @@ mod tests {
         assert_eq!(t("tui-goals-phase-label"), "  Run Phase: ");
     }
 
+    /// The init wizard's completion summary aligns its values into a column by
+    /// padding each label out to a fixed width, so these labels carry
+    /// *trailing* padding as well as the 2-space indent — 15 columns each in
+    /// English. Fluent strips both ends, which collapsed the column entirely
+    /// and left `Provider:`, `Model:` and `Daemon:` flush against the margin.
+    ///
+    /// Rendered by `tui/screens/init_wizard.rs`.
+    #[test]
+    fn init_wizard_summary_labels_keep_their_column_padding() {
+        init("en");
+        assert_eq!(t("tui-init-complete-label-provider"), "  Provider:    ");
+        assert_eq!(t("tui-init-complete-label-model"), "  Model:       ");
+        assert_eq!(t("tui-init-complete-label-daemon"), "  Daemon:      ");
+        // The whole point is that the three line up.
+        for key in [
+            "tui-init-complete-label-provider",
+            "tui-init-complete-label-model",
+            "tui-init-complete-label-daemon",
+        ] {
+            assert_eq!(t(key).chars().count(), 15, "`{key}` broke the value column");
+        }
+        // Same screen, same indent: the question renders with no prefix of its
+        // own, directly under a separator drawn from a literal `"  " + "─"…`.
+        assert_eq!(
+            t("tui-init-complete-question"),
+            "  How do you want to use LibreFang?"
+        );
+    }
+
+    /// The counter-example, and the reason this fix is three screens wide
+    /// rather than a sweep of every indented key: `tui-init-complete-hints`
+    /// sits on that same screen and looks identical in the `.ftl`, but its
+    /// call site already adds the indent itself — `hint_bar(&format!("  {}",
+    /// …))`. Restoring the indent in the source would render it at four
+    /// spaces. It must stay bare.
+    #[test]
+    fn init_wizard_hints_stay_unindented_because_the_call_site_indents() {
+        init("en");
+        let hints = t("tui-init-complete-hints");
+        assert!(
+            !hints.starts_with(' '),
+            "`tui-init-complete-hints` must not carry its own indent — \
+             init_wizard.rs already prefixes it: {hints:?}"
+        );
+    }
+
+    /// `librefang agent spawn` prints these two labels immediately above
+    /// literal `println!("  {}", ...)` notes in `commands/agent.rs`, so losing
+    /// the indent leaves the ID and Name flush left while the notes below them
+    /// stay indented. This is terminal stdout, not the TUI.
+    #[test]
+    fn agent_spawn_labels_keep_their_indent() {
+        init("en");
+        assert_eq!(
+            t_args("agent-spawn-id-label", &[("id", "abc")]),
+            "  ID:   abc"
+        );
+        assert_eq!(
+            t_args("agent-spawn-name-label", &[("name", "bob")]),
+            "  Name: bob"
+        );
+    }
+
+    /// The fix has to land in every locale, not just the source one — a
+    /// translated bundle that still carries bare edge whitespace loses it just
+    /// the same. Ukrainian is the check because its script is single-width, so
+    /// its 16-column padding is verifiable as plain character counts.
+    #[test]
+    fn init_wizard_summary_labels_keep_padding_in_translations() {
+        init("uk");
+        for key in [
+            "tui-init-complete-label-provider",
+            "tui-init-complete-label-model",
+            "tui-init-complete-label-daemon",
+        ] {
+            let value = t(key);
+            assert!(
+                value.starts_with("  "),
+                "`{key}` lost its indent in uk: {value:?}"
+            );
+            assert!(
+                value.ends_with(' '),
+                "`{key}` lost its column padding in uk: {value:?}"
+            );
+            assert_eq!(
+                value.chars().count(),
+                16,
+                "`{key}` broke the uk value column"
+            );
+        }
+    }
+
+    /// The workflows screen indents its section title with a literal
+    /// `"  \u{25b7} "` span, so this label has to carry the matching 2-space
+    /// indent or it renders in column 0 under an indented heading.
+    #[test]
+    fn workflows_run_input_label_keeps_its_indent() {
+        init("en");
+        assert_eq!(
+            t("tui-workflows-label-run-input"),
+            "  Input (JSON or text):"
+        );
+    }
+
     #[test]
     fn falls_back_to_english_for_missing_locale_key() {
         let lang_id: LanguageIdentifier = "zh-CN".parse().expect("language id must parse");
