@@ -3141,7 +3141,11 @@ export interface TaskQueueItem {
   completed_at?: string;
   result?: string;
   claimed_at?: string;
+  /** Claim-queue ordering key — higher is claimed first, ties broken by age. */
   priority?: number;
+  /** Per-task override for `[task_board] claim_ttl_secs`, in seconds.
+   *  `null` inherits the global TTL; `0` means the task is never reclaimed. */
+  timeout_secs?: number | null;
   [key: string]: unknown;
 }
 
@@ -3150,6 +3154,11 @@ export interface CreateTaskPayload {
   description: string;
   assigned_to?: string;
   created_by?: string;
+  /** Claim-queue ordering key — higher is claimed first. Omit for 0. */
+  priority?: number;
+  /** Per-task claim TTL in seconds. Omit to inherit `[task_board]
+   *  claim_ttl_secs`; `0` means never reclaim. */
+  timeout_secs?: number;
 }
 
 export interface CreateTaskResult {

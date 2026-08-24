@@ -17,6 +17,12 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   Understanding previously picked its provider from a hardcoded env-var cascade inside the media engine, outside the provider registry entirely, with no way for an operator to say which one to use.
   Two limits are deliberate rather than oversights: generation routing is kernel-wide only, because a per-agent override would have to be threaded through the five generation call sites in the tool runner, a different domain from the understanding path this touches; and there is no equivalent for inbound audio on the API and dashboard paths, where `speech_to_text` already routes the transcription call correctly but a user turn carries no audio content block for it to act on — only the channel path carries audio, and it already transcribes.
   Closing that second gap is a change to the shape of a message, not to routing (@DaBlitzStein)
+- Task Board tasks can carry a priority and their own claim deadline, and both are enforced rather than recorded.
+  `priority` is the key the claim queue is already ordered by (`priority DESC, created_at ASC`), so a task posted later at a higher priority is claimed before an older one; the column existed since the first schema but `task_post` hard-coded `0` into every row and neither `task_list` nor `task_get` read it back, so the dashboard displayed a field nothing could set and nothing ordered by.
+  `timeout_secs` overrides the global `[task_board] claim_ttl_secs` for one task at the single place a claim deadline is enforced — the stuck-task sweeper — so one board can carry both a 30-second probe and a two-hour import without either being served by the wrong clock.
+  `NULL` inherits the global and `0` means "never reclaim", the per-task spelling of the global disable; the two switches are independent, so `claim_ttl_secs = 0` no longer suppresses a deadline a task explicitly declared (schema v51, no backfill — every pre-existing row already means "inherit").
+  Both fields are settable from `POST /api/tasks` and from the dashboard's New Task dialog, and are shown on the board only when non-neutral, since every historical task carries priority 0.
+  The agent-facing `task_post` tool keeps posting with the neutral defaults: these are operator controls, and widening that tool's schema would change every agent's system prompt, and so its provider cache, for knobs the operator sets from the dashboard — worth doing deliberately, not as a side effect (@DaBlitzStein)
 
 ### Fixed
 
@@ -47,6 +53,21 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - The TUI goals screen's Goal Judge and Run Phase labels rendered with no leading indent and stuck directly to the value that followed, unlike their sibling literal labels ("  Reviewer: ", "  Iteration: ") on the same detail pane.
   The cause was in the `.ftl` source, not the rendering code: Fluent's parser strips leading and trailing inline whitespace from a message's plain-text value, so `tui-goals-judge-label =   Goal Judge: ` lost both its 2-space indent and its trailing space on every load.
   Fixed by wrapping the significant whitespace in Fluent string-literal placeables (`{ "  " }Goal Judge:{ " " }`), the standard idiom for preserving spacing that the bare-text form cannot, across all six affected `tui-goals-*` keys in all four locales (`en`, `ko`, `uk`, `zh-CN`) (@DaBlitzStein)
+- Three more label groups lost significant whitespace to the same Fluent trimming, and are fixed with the same idiom in all four locales (@DaBlitzStein).
+  The init wizard's completion summary is the worst of them: `tui-init-complete-label-{provider,model,daemon}` carry *trailing* padding that pads each label out to a fixed width so the values line up in a column, and trimming collapsed that column entirely, leaving `Provider:`, `Model:` and `Daemon:` flush against the margin.
+  `librefang agent spawn` printed its ID and Name flush left while the literal `println!("  {}", …)` notes directly below them stayed indented.
+  The workflows screen's run-input label sat in column 0 under a heading indented by a literal `"  ▷ "` span.
+  The padding of each locale is preserved byte for byte rather than recomputed, because the column width depends on the rendered width of the translated text, not on the English one.
+  Worth noting for whoever revisits the translations: `en` and `uk` pad to a consistent 15 and 16 columns, but the `ko` and `zh-CN` values pad to 13/14/13 and 13/14/15 terminal cells respectively — they line up neither by character count nor by display width, so those two summaries stay visually ragged even with the whitespace preserved
+- `POST /api/tasks` no longer accepts a task assigned to an agent that does not exist.
+  Only `title` was validated; `assigned_to` was passed through untouched, so a typo produced a `201` and a row that sat `pending` forever with nothing to say why — the sweeper only touches `in_progress`, and `task_claim` refuses the unknown agent with `AgentNotFound`, so nothing ever moved it.
+  The two ends of the same field disagreed, which is the actual defect: the claim end validated and the post end did not.
+  Validation lives in the kernel handle, so it covers the HTTP route, the agent tool and the peer-forwarded post alike, and accepts both spellings the claim path matches — canonical UUID or display name (#2841) — so tasks posted before the dashboard began sending ids keep working.
+  The route reports it as `400` rather than the shared contract's `404`, because on this endpoint the missing thing is a field of the request body and not the addressed resource.
+  An absent or empty `assigned_to` is still accepted: that is the "any worker may claim this" form (@DaBlitzStein)
+- The Task Board's agent picker is built from the agent registry instead of from the assignees of tasks that already exist.
+  The list was derived by de-duplicating `assigned_to` across the current board, which meant a newly created agent could not be assigned its first task, a deleted agent was offered indefinitely, and an empty board offered no picker at all — it degraded to a free-text box whose contents could only ever be rejected.
+  The picker now uses the same `useAgents()` hook the Scheduler page already used, sends the agent id (stable across renames) and resolves it back to the name for display, so a task posted by id does not render as a raw UUID and a name-stored task from before the change stays readable and filterable (@DaBlitzStein)
 
 ## [2026.8.19] - 2026-08-19
 
