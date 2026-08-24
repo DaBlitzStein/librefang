@@ -26,6 +26,9 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   The description is generated once per turn, before the turn enters history, rather than at the redaction gate inside the agent loop — that gate runs once per iteration, so a ten-step tool-use turn would have paid for ten descriptions of the same image.
   It is also strictly conditional: a vision-capable model is never charged for a description, an image the channel bridge already described is not described again, and the operator's `[media] image_description` switch still governs the path.
   A provider failure degrades to `[Image description unavailable]` — which at least tells the model it is not looking at the image — rather than dropping the turn (@DaBlitzStein)
+- The TUI goals screen's Goal Judge and Run Phase labels rendered with no leading indent and stuck directly to the value that followed, unlike their sibling literal labels ("  Reviewer: ", "  Iteration: ") on the same detail pane.
+  The cause was in the `.ftl` source, not the rendering code: Fluent's parser strips leading and trailing inline whitespace from a message's plain-text value, so `tui-goals-judge-label =   Goal Judge: ` lost both its 2-space indent and its trailing space on every load.
+  Fixed by wrapping the significant whitespace in Fluent string-literal placeables (`{ "  " }Goal Judge:{ " " }`), the standard idiom for preserving spacing that the bare-text form cannot, across all six affected `tui-goals-*` keys in all four locales (`en`, `ko`, `uk`, `zh-CN`) (@DaBlitzStein)
 
 ## [2026.8.19] - 2026-08-19
 

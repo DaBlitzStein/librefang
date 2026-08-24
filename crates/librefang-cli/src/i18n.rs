@@ -220,6 +220,22 @@ mod tests {
         );
     }
 
+    /// Regression test for the goals-screen label misalignment: Fluent's
+    /// parser strips leading and trailing inline whitespace from a
+    /// message's value unless it is wrapped in `{ "..." }` literals, so a
+    /// `.ftl` source line with plain leading/trailing spaces after `=`
+    /// renders without them. `tui-goals-judge-label` and
+    /// `tui-goals-phase-label` are meant to render with a 2-space indent
+    /// (to align with sibling literal labels like `"  Reviewer: "` in
+    /// `tui/screens/goals.rs`) and a trailing space before the value that
+    /// follows.
+    #[test]
+    fn goals_labels_preserve_significant_whitespace() {
+        init("en");
+        assert_eq!(t("tui-goals-judge-label"), "  Goal Judge: ");
+        assert_eq!(t("tui-goals-phase-label"), "  Run Phase: ");
+    }
+
     #[test]
     fn falls_back_to_english_for_missing_locale_key() {
         let lang_id: LanguageIdentifier = "zh-CN".parse().expect("language id must parse");
