@@ -318,7 +318,7 @@ async fn templates_list_carries_provider_and_model_from_the_manifest() {
     let _ = templates_root();
 
     let unique = "tmpl_list_provider";
-    write_template(
+    write_real_template(
         unique,
         r#"name = "delta"
 version = "0.1.0"
@@ -348,7 +348,7 @@ tools = ["file_read"]
     assert_eq!(row["model"], "claude-test-9", "{body}");
     assert_eq!(row["description"], "Delta test template", "{body}");
 
-    remove_template(unique);
+    remove_real_template(unique);
 }
 
 /// A single unparseable manifest used to fail the whole listing with a 500, so one operator typo blanked every agent type for every client.
@@ -360,8 +360,8 @@ async fn templates_list_skips_a_malformed_manifest_instead_of_failing() {
 
     let good = "tmpl_skip_good";
     let bad = "tmpl_skip_bad";
-    write_template(good, &minimal_manifest_toml("echo", "Echo survives"));
-    write_template(bad, "this is not = = valid toml [[[");
+    write_real_template(good, &minimal_manifest_toml("echo", "Echo survives"));
+    write_real_template(bad, "this is not = = valid toml [[[");
 
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/templates").await;
@@ -380,18 +380,20 @@ async fn templates_list_skips_a_malformed_manifest_instead_of_failing() {
         "the malformed template must be skipped, not rendered: {body}"
     );
 
-    remove_template(good);
-    remove_template(bad);
+    remove_real_template(good);
+    remove_real_template(bad);
 }
 
 /// The listing must not advertise a name that `/templates/{name}` and `/templates/{name}/toml` will reject — a row a client cannot fetch or spawn from is a dead end on the screen.
+///
+/// The fixture has to be a real agent-type file (`agent-types/<name>.toml`), not a workspace agent: the listing only walks `agent-types/`, so seeding anywhere else makes an "is absent from the list" assertion pass for the wrong reason.
 #[tokio::test(flavor = "multi_thread")]
 async fn templates_list_omits_names_the_detail_routes_reject() {
     let _g = templates_lock().lock().await;
     let _ = templates_root();
 
     let unusable = "tmpl.dotted.name";
-    write_template(unusable, &minimal_manifest_toml("dotted", "Dotted"));
+    write_real_template(unusable, &minimal_manifest_toml("dotted", "Dotted"));
 
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/templates").await;
@@ -405,7 +407,7 @@ async fn templates_list_omits_names_the_detail_routes_reject() {
         "a name the validator rejects must not be listed: {body}"
     );
 
-    remove_template(unusable);
+    remove_real_template(unusable);
 }
 
 #[tokio::test(flavor = "multi_thread")]
