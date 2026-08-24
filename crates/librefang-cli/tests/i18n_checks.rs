@@ -121,6 +121,7 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "models aliases",
         "models providers",
         "models connect",
+        "models overrides",
         "approvals list",
         "approvals respond",
         "approvals approve",
@@ -356,12 +357,57 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         return false;
     }
 
+    // A format string whose every letter sits inside a `{...}` placeholder
+    // carries no English to translate.
+    //
+    // `"    {model:<20} {input}/{output}  ${cost:.4}"` is a column layout: the
+    // words in it are argument names the compiler resolves, and what reaches
+    // the screen is a model id, two token counts and a price. Moving it into a
+    // `.ftl` would give a translator a row of padding specifiers to not
+    // translate — and Fluent cannot express `:<20` anyway, so the alignment
+    // would have to stay in Rust regardless, leaving the key a lie about where
+    // the layout lives.
+    //
+    // This generalises the one-off entries above (`"{label}:"`, `"{:<13}{}"`,
+    // and friends), which are the same category enumerated one string at a
+    // time. Prose outside the braces still trips the check: `"{} files
+    // deleted"` keeps "files deleted", `"Error: {err}"` keeps "Error:".
+    if strip_placeholders(trimmed)
+        .chars()
+        .all(|c| !c.is_alphabetic())
+    {
+        return false;
+    }
+
     // If alphabetic characters remain, it's likely a user-facing string (e.g. English text).
     if trimmed.chars().any(|c| c.is_alphabetic()) {
         return true;
     }
 
     false
+}
+
+/// Remove every `{...}` group from a format string, leaving the literal text
+/// around the placeholders.
+///
+/// Escaped braces (`{{` / `}}`) are printed verbatim rather than substituted,
+/// so a literal containing them is left untouched — stripping there would
+/// discard real text and hide a string that does need translating.
+fn strip_placeholders(lit: &str) -> String {
+    if lit.contains("{{") || lit.contains("}}") {
+        return lit.to_string();
+    }
+    let mut out = String::with_capacity(lit.len());
+    let mut depth = 0usize;
+    for c in lit.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 #[allow(clippy::while_let_on_iterator)]

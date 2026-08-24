@@ -2386,3 +2386,38 @@ tui-agents-prompt-select-prompt =   Виберіть промпт з біблі�
 tui-agents-title-custom-model-routing = Власний — Маршрутизація моделей
 tui-agents-title-edit-routing = Редагувати маршрутизацію моделей
 tui-agents-title-prompt-picker = Бібліотека промптів
+
+# audit chain reanchor (librefang monitoring audit reanchor)
+label-seq = seq
+monitoring-audit-reanchor-chain-intact = ланцюг аудиту цілий — переприв'язувати нічого
+monitoring-audit-reanchor-diagnose-failed = не вдалося прочитати audit_entries: { $error }
+monitoring-audit-reanchor-break-found-header = Знайдено розрив ланцюга
+monitoring-audit-reanchor-expected = очікувалося
+monitoring-audit-reanchor-found = знайдено
+monitoring-audit-reanchor-would-header =   Буде виконано:
+monitoring-audit-reanchor-would-delete =     1. ВИДАЛИТИ рядки з seq >= { $seq } з `audit_entries` у { $path }
+monitoring-audit-reanchor-would-marker =     2. Вставити маркер ChainReanchored на звільненому seq, зчеплений з останнім уцілілим записом
+monitoring-audit-reanchor-preserves-history = Записи до розриву не змінюються — запустіть повторно з `--confirm`, щоб застосувати.
+monitoring-audit-reanchor-failed = не вдалося переприв'язати ланцюг: { $error }
+monitoring-audit-reanchor-anchor-refresh-failed = не вдалося оновити якір { $path }: { $error }
+monitoring-audit-reanchor-anchor-refresh-fix = запустіть `librefang security verify` після старту демона, щоб підтвердити узгодженість якоря
+monitoring-audit-reanchor-success = Аудит переприв'язано: видалено { $rows_deleted } рядк(ів) від розриву далі, відновлено на seq { $marker_seq }.
+monitoring-audit-reanchor-history-preserved = Кожен запис до розриву збережено. Наступний запуск демона перевіриться без помилок.
+
+# purge command
+purge-failed-no-database = Не вдалося очистити: немає бази даних за шляхом { $path }
+purge-failed-open-database = Не вдалося очистити: відкриття бази даних: { $error }
+purge-nothing-to-purge = Нічого очищати: '{ $agent }' не залишив слідів у цій інсталяції.
+purge-purged-header = Очищено '{ $agent }':
+purge-removed-roster-entry =   - запис у реєстрі, сесії, спогади та рядки KV
+purge-removed-workspace =   - каталог робочого простору
+purge-removed-agent-type =   - шаблон типу агента
+purge-failed = Не вдалося очистити: { $error }
+
+# TUI status messages
+tui-event-error-prefixed = Помилка: { $error }
+tui-event-purge-failed = Очищення: { $detail }
+tui-event-backup-restored = відновлено
+tui-event-backup-restore-failed = відновлення не вдалося
+tui-agents-detail-tokens-summary = система { $system }  ·  інструменти { $tools } ({ $tool_count })  ·  всього { $total }
+tui-settings-backup-size-bytes = ({ $bytes } байт)

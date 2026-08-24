@@ -2319,3 +2319,38 @@ tui-agents-prompt-select-prompt =   从库中选择提示词:
 tui-agents-title-custom-model-routing = 自定义 — 模型路由
 tui-agents-title-edit-routing = 编辑模型路由
 tui-agents-title-prompt-picker = 提示词库
+
+# audit chain reanchor (librefang monitoring audit reanchor)
+label-seq = seq
+monitoring-audit-reanchor-chain-intact = 审计链完整 — 无需重新锚定
+monitoring-audit-reanchor-diagnose-failed = 无法读取 audit_entries: { $error }
+monitoring-audit-reanchor-break-found-header = 发现链断裂
+monitoring-audit-reanchor-expected = 期望
+monitoring-audit-reanchor-found = 实际
+monitoring-audit-reanchor-would-header =   将执行:
+monitoring-audit-reanchor-would-delete =     1. 从 { $path } 的 `audit_entries` 中删除 seq >= { $seq } 的行
+monitoring-audit-reanchor-would-marker =     2. 在腾出的 seq 处插入 ChainReanchored 标记, 并链接到最后一条幸存记录
+monitoring-audit-reanchor-preserves-history = 断裂之前的记录不会被改动 — 使用 `--confirm` 重新运行以应用。
+monitoring-audit-reanchor-failed = 重新锚定审计链失败: { $error }
+monitoring-audit-reanchor-anchor-refresh-failed = 刷新锚点 { $path } 失败: { $error }
+monitoring-audit-reanchor-anchor-refresh-fix = 启动守护进程后运行 `librefang security verify` 以确认锚点一致
+monitoring-audit-reanchor-success = 审计轨迹已重新锚定: 从断裂处起移除了 { $rows_deleted } 行, 并在 seq { $marker_seq } 处恢复。
+monitoring-audit-reanchor-history-preserved = 断裂之前的每条记录都已保留。下次守护进程启动将顺利通过校验。
+
+# purge command
+purge-failed-no-database = 清除失败: { $path } 处没有数据库
+purge-failed-open-database = 清除失败: 打开数据库: { $error }
+purge-nothing-to-purge = 无需清除: '{ $agent }' 未在本安装中留下任何痕迹。
+purge-purged-header = 已清除 '{ $agent }':
+purge-removed-roster-entry =   - 名册条目、会话、记忆和 KV 行
+purge-removed-workspace =   - 工作区目录
+purge-removed-agent-type =   - 智能体类型模板
+purge-failed = 清除失败: { $error }
+
+# TUI status messages
+tui-event-error-prefixed = 错误: { $error }
+tui-event-purge-failed = 清除: { $detail }
+tui-event-backup-restored = 已恢复
+tui-event-backup-restore-failed = 恢复失败
+tui-agents-detail-tokens-summary = 系统 { $system }  ·  工具 { $tools } ({ $tool_count })  ·  总计 { $total }
+tui-settings-backup-size-bytes = ({ $bytes } 字节)

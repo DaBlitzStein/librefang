@@ -6,43 +6,62 @@
 //! the usual situation when cleaning up after an agent that is already gone.
 
 use crate::commands::common::librefang_home;
+use crate::i18n;
 
 pub fn cmd_purge(agent: &str) -> i32 {
     let home = librefang_home();
     let db = home.join("data").join("librefang.db");
     if !db.exists() {
-        eprintln!("Purge failed: no database at {}", db.display());
+        eprintln!(
+            "{}",
+            i18n::t_args(
+                "purge-failed-no-database",
+                &[("path", &db.display().to_string())]
+            )
+        );
         return 1;
     }
 
     let substrate = match librefang_memory::MemorySubstrate::open(&db, 0.01) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Purge failed: open database: {e}");
+            eprintln!(
+                "{}",
+                i18n::t_args("purge-failed-open-database", &[("error", &e.to_string())])
+            );
             return 1;
         }
     };
 
     match librefang_kernel::agent_purge::purge_agent(&substrate, &home, agent) {
         Ok(report) if report.is_empty() => {
-            println!("Nothing to purge: '{agent}' left no trace in this installation.");
+            println!(
+                "{}",
+                i18n::t_args("purge-nothing-to-purge", &[("agent", agent)])
+            );
             0
         }
         Ok(report) => {
-            println!("Purged '{agent}':");
+            println!(
+                "{}",
+                i18n::t_args("purge-purged-header", &[("agent", agent)])
+            );
             if report.roster_entry_removed {
-                println!("  - roster entry, sessions, memories and KV rows");
+                println!("{}", i18n::t("purge-removed-roster-entry"));
             }
             if report.workspace_removed {
-                println!("  - workspace directory");
+                println!("{}", i18n::t("purge-removed-workspace"));
             }
             if report.agent_type_removed {
-                println!("  - agent-type template");
+                println!("{}", i18n::t("purge-removed-agent-type"));
             }
             0
         }
         Err(e) => {
-            eprintln!("Purge failed: {e}");
+            eprintln!(
+                "{}",
+                i18n::t_args("purge-failed", &[("error", &e.to_string())])
+            );
             1
         }
     }

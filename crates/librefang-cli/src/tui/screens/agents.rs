@@ -1759,11 +1759,16 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 )));
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "  system {}  ·  tools {} ({})  ·  total {}",
-                        usage.system_prompt_tokens,
-                        usage.tools_tokens,
-                        usage.tool_count,
-                        usage.total_tokens
+                        "  {}",
+                        crate::i18n::t_args(
+                            "tui-agents-detail-tokens-summary",
+                            &[
+                                ("system", &usage.system_prompt_tokens.to_string()),
+                                ("tools", &usage.tools_tokens.to_string()),
+                                ("tool_count", &usage.tool_count.to_string()),
+                                ("total", &usage.total_tokens.to_string()),
+                            ],
+                        )
                     ),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 )));
@@ -1976,6 +1981,16 @@ fn draw_mcp_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
 }
 
 fn draw_edit_workspaces(f: &mut Frame, area: Rect, state: &AgentSelectState) {
+    // Every other sub-screen frames itself with a titled block; this one drew
+    // a bare paragraph into the raw area, so the workspaces editor was the one
+    // place in the agent screen that gave no indication of what it was. The
+    // title string already existed in all four locale files — it was simply
+    // never called, which is what the dead-key check was reporting.
+    let area = widgets::render_screen_block(
+        f,
+        area,
+        &crate::i18n::t("tui-agents-title-custom-workspaces"),
+    );
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
         crate::i18n::t("tui-agents-workspaces-help"),
         Style::default().fg(theme::TEXT_SECONDARY),

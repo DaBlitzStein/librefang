@@ -2378,3 +2378,21 @@ cmd-goal-max-iterations =   Goal reached max iterations.
 cmd-goal-rate-limited =   Goal run rate-limited.
 cmd-goal-stopped =   Goal run stopped.
 cmd-goal-error =   error: { $error }
+
+# purge command
+purge-failed-no-database = Purge failed: no database at { $path }
+purge-failed-open-database = Purge failed: open database: { $error }
+purge-nothing-to-purge = Nothing to purge: '{ $agent }' left no trace in this installation.
+purge-purged-header = Purged '{ $agent }':
+purge-removed-roster-entry =   - roster entry, sessions, memories and KV rows
+purge-removed-workspace =   - workspace directory
+purge-removed-agent-type =   - agent-type template
+purge-failed = Purge failed: { $error }
+
+# TUI status messages
+tui-event-error-prefixed = Error: { $error }
+tui-event-purge-failed = Purge: { $detail }
+tui-event-backup-restored = restored
+tui-event-backup-restore-failed = restore failed
+tui-agents-detail-tokens-summary = system { $system }  ·  tools { $tools } ({ $tool_count })  ·  total { $total }
+tui-settings-backup-size-bytes = ({ $bytes } bytes)

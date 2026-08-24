@@ -977,7 +977,7 @@ pub fn spawn_run_workflow(
                     let result = if let Some(output) = body["output"].as_str() {
                         output.to_string()
                     } else if let Some(err) = body["error"].as_str() {
-                        format!("Error: {err}")
+                        crate::i18n::t_args("tui-event-error-prefixed", &[("error", err)])
                     } else if let Some(run_id) = body["run_id"].as_str() {
                         // Accepted but still running: say so, with the id.
                         format!(
@@ -1475,10 +1475,16 @@ pub fn spawn_purge_agent_data(backend: BackendRef, agent_name: String, tx: mpsc:
                 }
                 Ok(resp) => {
                     let status = resp.status();
-                    let _ = tx.send(AppEvent::FetchError(format!("Purge: {status}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-purge-failed",
+                        &[("detail", &status.to_string())],
+                    )));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Purge: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-purge-failed",
+                        &[("detail", &e.to_string())],
+                    )));
                 }
             }
         }
@@ -2108,10 +2114,14 @@ pub fn spawn_restore_backup(
                 .send()
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
+            // Both arms land in the same status line, so both are translated.
+            // Only the failure arm trips the untranslated-literal check (the
+            // success arm is a single word), and shipping half a translated
+            // pair is how a screen ends up mixing two languages in one field.
             let _ = tx.send(AppEvent::BackupRestored(if ok {
-                "restored".to_string()
+                crate::i18n::t("tui-event-backup-restored")
             } else {
-                "restore failed".to_string()
+                crate::i18n::t("tui-event-backup-restore-failed")
             }));
         }
     });

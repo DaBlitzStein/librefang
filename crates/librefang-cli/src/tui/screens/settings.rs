@@ -996,7 +996,13 @@ fn draw_backups(f: &mut Frame, area: Rect, state: &mut SettingsState) {
                         Style::default().add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!("  ({} bytes)", b.size_bytes),
+                        format!(
+                            "  {}",
+                            crate::i18n::t_args(
+                                "tui-settings-backup-size-bytes",
+                                &[("bytes", &b.size_bytes.to_string())],
+                            )
+                        ),
                         Style::default().fg(theme::TEXT_SECONDARY),
                     ),
                     Span::styled(

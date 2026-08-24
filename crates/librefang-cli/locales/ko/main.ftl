@@ -2364,3 +2364,38 @@ tui-agents-prompt-select-prompt =   라이브러리에서 프롬프트 선택:
 tui-agents-title-custom-model-routing = 사용자 정의 — 모델 라우팅
 tui-agents-title-edit-routing = 모델 라우팅 편집
 tui-agents-title-prompt-picker = 프롬프트 라이브러리
+
+# audit chain reanchor (librefang monitoring audit reanchor)
+label-seq = seq
+monitoring-audit-reanchor-chain-intact = 감사 체인이 온전합니다 — 재고정할 항목이 없습니다
+monitoring-audit-reanchor-diagnose-failed = audit_entries를 읽지 못했습니다: { $error }
+monitoring-audit-reanchor-break-found-header = 체인 단절 발견
+monitoring-audit-reanchor-expected = 예상값
+monitoring-audit-reanchor-found = 실제값
+monitoring-audit-reanchor-would-header =   수행 예정:
+monitoring-audit-reanchor-would-delete =     1. { $path }의 `audit_entries`에서 seq >= { $seq }인 행 삭제
+monitoring-audit-reanchor-would-marker =     2. 비워진 seq에 ChainReanchored 마커를 삽입하고 마지막 잔존 항목에 연결
+monitoring-audit-reanchor-preserves-history = 단절 이전 항목은 절대 변경되지 않습니다 — 적용하려면 `--confirm`으로 다시 실행하세요.
+monitoring-audit-reanchor-failed = 체인 재고정에 실패했습니다: { $error }
+monitoring-audit-reanchor-anchor-refresh-failed = 앵커 { $path } 갱신에 실패했습니다: { $error }
+monitoring-audit-reanchor-anchor-refresh-fix = 데몬을 시작한 뒤 `librefang security verify`를 실행하여 앵커 일관성을 확인하세요
+monitoring-audit-reanchor-success = 감사 추적을 재고정했습니다: 단절 지점부터 { $rows_deleted }개 행을 제거하고 seq { $marker_seq }에서 재개했습니다.
+monitoring-audit-reanchor-history-preserved = 단절 이전의 모든 항목이 보존되었습니다. 다음 데몬 부팅 시 정상적으로 검증됩니다.
+
+# purge command
+purge-failed-no-database = 삭제 실패: { $path }에 데이터베이스가 없습니다
+purge-failed-open-database = 삭제 실패: 데이터베이스 열기: { $error }
+purge-nothing-to-purge = 삭제할 항목이 없습니다: '{ $agent }'은(는) 이 설치에 흔적을 남기지 않았습니다.
+purge-purged-header = '{ $agent }' 삭제됨:
+purge-removed-roster-entry =   - 로스터 항목, 세션, 기억 및 KV 행
+purge-removed-workspace =   - 작업 공간 디렉터리
+purge-removed-agent-type =   - 에이전트 유형 템플릿
+purge-failed = 삭제 실패: { $error }
+
+# TUI status messages
+tui-event-error-prefixed = 오류: { $error }
+tui-event-purge-failed = 삭제: { $detail }
+tui-event-backup-restored = 복원됨
+tui-event-backup-restore-failed = 복원 실패
+tui-agents-detail-tokens-summary = 시스템 { $system }  ·  도구 { $tools } ({ $tool_count })  ·  총계 { $total }
+tui-settings-backup-size-bytes = ({ $bytes } 바이트)
