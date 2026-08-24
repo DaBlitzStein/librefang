@@ -26,6 +26,12 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- Two goals running in loop mode on the same agent no longer share one conversation history.
+  Every goal tick was dispatched with `SenderContext { channel: "autonomous", chat_id: None }`, which the kernel's channel branch collapses to `SessionId::for_channel(agent, "autonomous")` — a single session per agent, not per goal.
+  Two concurrent runs therefore interleaved their prompts into one history, and each read the other's turns back as its own context.
+  The tick now scopes on the goal id, so each goal derives its own session.
+  Isolation is unconditional rather than opt-in the way cron's `session_mode = "new"` is, because the trade-off is not the same: cron's flag buys per-*fire* isolation at the cost of prompt-cache reuse, while per-*goal* scoping keeps every tick of one goal on one session and so costs nothing — there is no coherent reason to want two unrelated goals sharing a history.
+  On upgrade, a goal already mid-run continues under a new session id and therefore starts from an empty conversation history; its durable state (progress, status, iteration count) is unaffected, and the history it leaves behind was contaminated by definition (@DaBlitzStein)
 - `/goal` now works in the dashboard chat and in the TUI chat, not only in channels (#3355).
   The command was registered with `Scope::CHANNEL` alone, so the TUI's registry pre-flight rejected it and the dashboard never listed it — while Telegram, which is the surface the command shipped against, worked fine.
   Behind that was a split-brain catalog: four hand-written command lists that did not reference each other — `COMMAND_REGISTRY` in `librefang-channels`, a `BUILTIN_COMMANDS` const behind `GET /api/commands`, a `SLASH_COMMANDS` array in `ChatPage.tsx`, and the execution `match` in `ws.rs` — plus a `Scope::DASHBOARD` flag that was declared, documented, and used by nobody.

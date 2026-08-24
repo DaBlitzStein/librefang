@@ -53,13 +53,7 @@ impl LibreFangKernel {
         let send = move |aid: AgentId, msg: String| {
             let k = send_kernel.clone();
             async move {
-                let sender = SenderContext {
-                    channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
-                    user_id: aid.to_string(),
-                    display_name: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
-                    is_internal_system: true,
-                    ..Default::default()
-                };
+                let sender = goal_tick_sender_context(aid, goal_id, SYSTEM_CHANNEL_AUTONOMOUS);
                 match k.send_message_with_sender_context(aid, &msg, &sender).await {
                     Ok(r) => Ok(r.response),
                     Err(e) => Err(e.to_string()),
@@ -159,14 +153,10 @@ impl LibreFangKernel {
                         Err(e) => Err(e),
                     }
                 } else {
-                    // Fallback: send to the agent itself for evaluation.
-                    let sender = SenderContext {
-                        channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
-                        user_id: agent_id.to_string(),
-                        display_name: "goal-evaluator".to_string(),
-                        is_internal_system: true,
-                        ..Default::default()
-                    };
+                    // Fallback: send to the agent itself for evaluation. Same
+                    // per-goal scope as the tick above, so the evaluator turn
+                    // lands in the goal's own session rather than a shared one.
+                    let sender = goal_tick_sender_context(agent_id, goal_id, "goal-evaluator");
                     match k
                         .send_message_with_sender_context(agent_id, &prompt, &sender)
                         .await
@@ -299,6 +289,45 @@ impl LibreFangKernel {
     }
 }
 
+/// Build the [`SenderContext`] every goal-run turn is dispatched with.
+///
+/// Single source of truth for the two call sites in [`LibreFangKernel::goal_run_start`]
+/// (the tick itself and the self-evaluation fallback) so they cannot drift on
+/// the fields that decide which session the turn lands in.
+///
+/// ## Why `chat_id` carries the goal id
+///
+/// `send_message_full`'s channel branch derives the session as
+/// `SessionId::for_sender_scope(agent, channel, chat_id)`, which collapses to
+/// `for_channel(agent, "autonomous")` when `chat_id` is absent. Every goal of a
+/// given agent therefore used to resolve to one single session: two goals
+/// running at once interleaved their prompts into one conversation history,
+/// and each read back the other's turns as its own context.
+///
+/// Scoping by goal id splits them without costing prompt-cache reuse. Cache
+/// reuse depends on consecutive turns of *one* goal sharing a session prefix,
+/// and they still do — the scope is a function of the goal, not of the tick, so
+/// all of a goal's iterations land on the same id. What changes is only that a
+/// *different* goal no longer lands on that same id. This is why the isolation
+/// is unconditional rather than opt-in the way cron's `session_mode = "new"`
+/// is: cron's flag trades cache reuse for per-*fire* isolation, a real
+/// trade-off with a losing side. Per-*goal* isolation has no losing side, and
+/// there is no coherent reason to want two unrelated goals sharing one history.
+fn goal_tick_sender_context(
+    agent_id: AgentId,
+    goal_id: GoalId,
+    display_name: &str,
+) -> SenderContext {
+    SenderContext {
+        channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
+        user_id: agent_id.to_string(),
+        chat_id: Some(goal_id.to_string()),
+        display_name: display_name.to_string(),
+        is_internal_system: true,
+        ..Default::default()
+    }
+}
+
 /// Parse an evaluator's free-text reply into a goal-achieved verdict.
 ///
 /// The evaluator is prompted to answer "YES"/"NO", but models routinely wrap
@@ -318,6 +347,96 @@ fn evaluator_reply_is_yes(reply: &str) -> bool {
         }
     }
     saw_yes && !saw_no
+}
+
+#[cfg(test)]
+mod goal_session_scope_tests {
+    use super::*;
+    use librefang_types::agent::SessionId;
+
+    /// Reproduce the session id `send_message_full` derives for a goal tick.
+    ///
+    /// Mirrors the channel branch of `messaging.rs::send_message_full`
+    /// verbatim — `resolve_scope_channel` then `SessionId::for_sender_scope`
+    /// — so this asserts against the real derivation rather than a local
+    /// re-statement of it.
+    fn derived_session_id(ctx: &SenderContext, agent_id: AgentId) -> SessionId {
+        let scope = LibreFangKernel::resolve_scope_channel(&ctx.channel, ctx.is_internal_system);
+        SessionId::for_sender_scope(agent_id, &scope, ctx.chat_id.as_deref())
+    }
+
+    /// Two loop-mode goals driven by the SAME agent must not share a session.
+    ///
+    /// Before the fix every goal tick synthesized `chat_id: None`, collapsing
+    /// to `SessionId::for_channel(agent, "autonomous")` — so two concurrent
+    /// goal runs interleaved their prompts into one conversation history.
+    #[test]
+    fn two_goals_on_one_agent_do_not_share_a_session() {
+        let agent = AgentId::new();
+        let goal_a = GoalId::new();
+        let goal_b = GoalId::new();
+
+        let ctx_a = goal_tick_sender_context(agent, goal_a, SYSTEM_CHANNEL_AUTONOMOUS);
+        let ctx_b = goal_tick_sender_context(agent, goal_b, SYSTEM_CHANNEL_AUTONOMOUS);
+
+        assert_ne!(
+            derived_session_id(&ctx_a, agent),
+            derived_session_id(&ctx_b, agent),
+            "two goals of the same agent resolved to one session — their \
+             prompts interleave in a single conversation history"
+        );
+    }
+
+    /// Isolation is per GOAL, not per tick: every tick of one goal must keep
+    /// landing on the same session, or the provider prompt cache is destroyed
+    /// and the agent loses its own turn-to-turn context mid-run.
+    #[test]
+    fn repeated_ticks_of_one_goal_share_its_session() {
+        let agent = AgentId::new();
+        let goal = GoalId::new();
+
+        let first = goal_tick_sender_context(agent, goal, SYSTEM_CHANNEL_AUTONOMOUS);
+        let second = goal_tick_sender_context(agent, goal, SYSTEM_CHANNEL_AUTONOMOUS);
+
+        assert_eq!(
+            derived_session_id(&first, agent),
+            derived_session_id(&second, agent),
+        );
+    }
+
+    /// The self-evaluation fallback turn is part of the same goal run, so it
+    /// must share the tick's session — a different `display_name` must not
+    /// fan out a second session.
+    #[test]
+    fn evaluator_fallback_shares_the_goal_tick_session() {
+        let agent = AgentId::new();
+        let goal = GoalId::new();
+
+        let tick = goal_tick_sender_context(agent, goal, SYSTEM_CHANNEL_AUTONOMOUS);
+        let evaluator = goal_tick_sender_context(agent, goal, "goal-evaluator");
+
+        assert_eq!(
+            derived_session_id(&tick, agent),
+            derived_session_id(&evaluator, agent),
+        );
+    }
+
+    /// The same goal id under two different agents stays separate — the agent
+    /// dimension is still part of the key.
+    #[test]
+    fn one_goal_across_two_agents_does_not_share_a_session() {
+        let goal = GoalId::new();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        let ctx_a = goal_tick_sender_context(agent_a, goal, SYSTEM_CHANNEL_AUTONOMOUS);
+        let ctx_b = goal_tick_sender_context(agent_b, goal, SYSTEM_CHANNEL_AUTONOMOUS);
+
+        assert_ne!(
+            derived_session_id(&ctx_a, agent_a),
+            derived_session_id(&ctx_b, agent_b),
+        );
+    }
 }
 
 #[cfg(test)]
