@@ -138,6 +138,16 @@ pub struct DaemonAgent {
     pub state: String,
     pub provider: String,
     pub model: String,
+    /// `kind:id` label for the stamped owner (#7744), `None` when unowned.
+    ///
+    /// `None` and "unowned" are the same state here and are drawn as such:
+    /// an agent created before ownership existed, or created with no
+    /// authenticated caller, genuinely has nobody attached to it, and hiding
+    /// that would leave an operator with no way to find the agents still
+    /// relying on the `author` fallback.
+    pub owner_label: Option<String>,
+    /// Free-text provenance from the manifest (#7744).
+    pub author: String,
 }
 
 #[derive(Clone)]
@@ -147,6 +157,10 @@ pub struct InProcessAgent {
     pub state: String,
     pub provider: String,
     pub model: String,
+    /// `kind:id` label for the stamped owner (#7744), `None` when unowned.
+    pub owner_label: Option<String>,
+    /// Free-text provenance from the manifest (#7744).
+    pub author: String,
 }
 
 #[derive(Clone, Default)]
@@ -166,6 +180,12 @@ pub struct AgentDetail {
     pub skills_mode: String,
     pub mcp_servers: Vec<String>,
     pub mcp_servers_mode: String,
+    /// `kind:id` label for the stamped owner (#7744), `None` when unowned.
+    pub owner_label: Option<String>,
+    /// Free-text provenance from the manifest. Shown beside the owner rather
+    /// than instead of it — the two answer different questions, and the
+    /// difference between them is the point (#7744).
+    pub author: String,
 }
 
 /// Token cost of an agent, for the detail screen.
@@ -337,6 +357,8 @@ impl AgentSelectState {
                         state: a["state"].as_str().unwrap_or("?").to_string(),
                         provider: a["model_provider"].as_str().unwrap_or("?").to_string(),
                         model: a["model_name"].as_str().unwrap_or("?").to_string(),
+                        owner_label: a["owner_label"].as_str().map(str::to_string),
+                        author: a["author"].as_str().unwrap_or_default().to_string(),
                     });
                 }
             }
@@ -355,6 +377,11 @@ impl AgentSelectState {
                 state: format!("{:?}", entry.state),
                 provider: entry.manifest.model.provider.clone(),
                 model: entry.manifest.model.model.clone(),
+                // Straight from the manifest rather than from a re-fetch:
+                // in-process mode reads the kernel's own registry, so this is
+                // the same value the API would render.
+                owner_label: entry.manifest.owner_label(),
+                author: entry.manifest.author.clone(),
             });
         }
         self.rebuild_filter();
@@ -448,6 +475,8 @@ impl AgentSelectState {
             state: a.state.clone(),
             model: a.model.clone(),
             provider: a.provider.clone(),
+            owner_label: a.owner_label.clone(),
+            author: a.author.clone(),
             ..Default::default()
         }
     }
@@ -461,6 +490,8 @@ impl AgentSelectState {
             state: a.state.clone(),
             model: a.model.clone(),
             provider: a.provider.clone(),
+            owner_label: a.owner_label.clone(),
+            author: a.author.clone(),
             ..Default::default()
         }
     }
@@ -1641,6 +1672,27 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                     Span::styled(detail.tags.join(", "), Style::default().fg(theme::CYAN)),
                 ]));
             }
+            // Who the agent belongs to (#7744). Always drawn, including when
+            // unowned: the operators who most need this line are the ones
+            // upgrading a deployment full of agents that have no owner yet,
+            // and an omitted row is indistinguishable from a build that does
+            // not record owners at all.
+            lines.push(Line::from(vec![
+                Span::styled(crate::i18n::t("tui-agents-detail-owner"), Style::default()),
+                match detail.owner_label {
+                    Some(ref label) => Span::styled(label, Style::default().fg(theme::CYAN)),
+                    None => Span::styled(
+                        crate::i18n::t("tui-agents-detail-owner-unowned"),
+                        theme::dim_style(),
+                    ),
+                },
+            ]));
+            if !detail.author.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled(crate::i18n::t("tui-agents-detail-author"), Style::default()),
+                    Span::styled(&detail.author, theme::dim_style()),
+                ]));
+            }
             if !detail.capabilities.is_empty() {
                 lines.push(Line::from(vec![
                     Span::styled(crate::i18n::t("tui-agents-detail-caps"), Style::default()),
@@ -2455,6 +2507,8 @@ mod workspaces_tests {
             skills_mode: String::new(),
             mcp_servers: vec![],
             mcp_servers_mode: String::new(),
+            owner_label: None,
+            author: String::new(),
         });
         state
     }
