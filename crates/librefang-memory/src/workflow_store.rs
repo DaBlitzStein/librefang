@@ -112,7 +112,7 @@ impl WorkflowStore {
                 paused_current_input = excluded.paused_current_input,
                 step_results = excluded.step_results,
                 completed_at = excluded.completed_at,
-                owner_agent_id = excluded.owner_agent_id,
+                owner_agent_id = COALESCE(excluded.owner_agent_id, workflow_runs.owner_agent_id),
                 total_steps = excluded.total_steps",
             rusqlite::params![
                 row.id,
@@ -267,7 +267,7 @@ impl WorkflowStore {
                     error = excluded.error,
                     step_results = excluded.step_results,
                     completed_at = excluded.completed_at,
-                    owner_agent_id = excluded.owner_agent_id,
+                    owner_agent_id = COALESCE(excluded.owner_agent_id, workflow_runs.owner_agent_id),
                     total_steps = excluded.total_steps",
                 rusqlite::params![
                     row.id,
