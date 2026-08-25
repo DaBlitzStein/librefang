@@ -44,6 +44,7 @@ async fn resolve_manifest(
     state: &AppState,
     req: &SpawnRequest,
     lang: &'static str,
+    caller: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> Result<ResolvedManifest, ManifestError> {
     // Resolve template name → manifest_toml
     let manifest_toml = if req.manifest_toml.trim().is_empty() {
@@ -160,8 +161,51 @@ async fn resolve_manifest(
         }
     }
 
+    // #7744 — stamp ownership from the credential that authenticated the
+    // request, overwriting anything the manifest TOML declared.
+    //
+    // Unconditional, and that is the whole point: `owner` is a real field on
+    // `AgentManifest`, so a client can write an `[owner]` block into
+    // `manifest_toml` and name anyone. Honouring it only when absent would let
+    // the deliberate claim through and reject only the accidental one. What
+    // the caller *says* about ownership is discarded; what the server *knows*
+    // about who called is recorded.
+    //
+    // Here rather than in each handler because both spawn paths — `POST
+    // /api/agents` and `POST /api/agents/bulk` — funnel through this function,
+    // and an unstamped second path is the same hole with an extra step.
+    manifest.owner = owner_for_new_agent(state, caller);
+
     let name = manifest.name.clone();
     Ok(ResolvedManifest { manifest, name })
+}
+
+/// The principal to record as the owner of something this request creates
+/// (#7744).
+///
+/// An authenticated caller owns what they asked to be built, as a `User`
+/// principal and not a group: the request only proves who authenticated, and
+/// inferring a group from their membership would pick wrong the moment they
+/// belong to two. Attribution to a group is an explicit choice, made by
+/// writing the manifest by hand or by declaring `default_owner`; the default
+/// is the person.
+///
+/// With no caller — the trusted loopback/no-auth deployment mode — this falls
+/// back to `KernelConfig::default_owner`, which is the operator stating who
+/// locally-created agents belong to. That is a declaration, not a guess, which
+/// is why it is allowed to stand in for a credential here. Unset, the agent is
+/// left unowned rather than attributed to a placeholder, and the daemon says
+/// so once at boot.
+fn owner_for_new_agent(
+    state: &AppState,
+    caller: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> Option<librefang_types::principal::Principal> {
+    match caller {
+        Some(user) => Some(librefang_types::principal::Principal::User(
+            user.0.name.clone(),
+        )),
+        None => state.kernel.config_ref().default_owner.clone(),
+    }
 }
 
 /// POST /api/agents — Spawn a new agent.
@@ -184,6 +228,7 @@ async fn resolve_manifest(
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
@@ -197,7 +242,7 @@ pub async fn spawn_agent(
         store.as_ref(),
         key.as_deref(),
         &body_bytes,
-        move || async move { spawn_agent_inner(state, l, &inner_body).await },
+        move || async move { spawn_agent_inner(state, l, api_user.as_ref(), &inner_body).await },
     )
     .await
 }
@@ -208,6 +253,7 @@ pub async fn spawn_agent(
 async fn spawn_agent_inner(
     state: Arc<AppState>,
     l: &'static str,
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     body_bytes: &[u8],
 ) -> (StatusCode, Vec<u8>) {
     let req: SpawnRequest = match serde_json::from_slice(body_bytes) {
@@ -233,7 +279,7 @@ async fn spawn_agent_inner(
         "POST /api/agents request body"
     );
 
-    let resolved = match resolve_manifest(&state, &req, l).await {
+    let resolved = match resolve_manifest(&state, &req, l, api_user).await {
         Ok(r) => r,
         Err(e) => {
             let (status, code) = if e.message.contains("too large") {
@@ -358,6 +404,7 @@ pub async fn spawn_ephemeral_agent(
 pub async fn bulk_create_agents(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<BulkCreateRequest>,
 ) -> impl IntoResponse {
     let l = super::resolve_lang(lang.as_ref());
@@ -368,7 +415,7 @@ pub async fn bulk_create_agents(
     let mut results: Vec<BulkCreateResult> = Vec::with_capacity(req.agents.len());
 
     for (index, spawn_req) in req.agents.iter().enumerate() {
-        match resolve_manifest(&state, spawn_req, l).await {
+        match resolve_manifest(&state, spawn_req, l, api_user.as_ref()).await {
             Err(e) => {
                 results.push(BulkCreateResult {
                     index,
@@ -688,13 +735,15 @@ pub async fn list_agents(
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Query(mut params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
-    // Scope agents by authenticated user: non-admin/owner callers can only list agents they authored.
-    // The override is unconditional for non-admins — an explicit `?owner=<someone-else>` from a plain User-role caller must not be trusted, or it defeats the scoping this same #6753 change enforces on every other agent-scoped route (`can_access_agent`).
+    // Scope agents by authenticated user: non-admin/owner callers can only list agents they own.
+    // Discarding the supplied value is unconditional for non-admins — an explicit `?owner=<someone-else>` from a plain User-role caller must not be trusted, or it defeats the scoping this same #6753 change enforces on every other agent-scoped route (`can_access_agent`).
     // Admin/Owner callers, and requests admitted only via the trusted no-auth compatibility mode (`api_user` is `None`), keep whatever `owner` filter they supplied, if any.
+    //
+    // #7744 dropped the value here instead of overwriting it with the caller's own name. The overwrite conflated two jobs — untrusting the input and expressing what the caller may see — and the second no longer fits in one string now that a group they belong to can own an agent too. The scoping itself moved to a dedicated retain further down; what is left here is only the untrusting.
     if let Some(ref user) = api_user {
         use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin {
-            params.owner = Some(user.0.name.clone());
+            params.owner = None;
         }
     }
     let catalog_guard = state.kernel.model_catalog_ref().load();
@@ -737,11 +786,38 @@ pub async fn list_agents(
         agents.retain(|e| format!("{:?}", e.state).to_lowercase() == status_lower);
     }
 
-    // Filter by owner (matches manifest.author). For non-admin callers this
-    // is injected automatically above so they only see their own agents.
+    // Mandatory scoping for non-admin callers (#7744).
+    //
+    // Applied as its own retain rather than by rewriting `?owner=`, because
+    // one string cannot express what a caller may see: they own their own
+    // agents *and* every agent owned by a group they belong to, and the
+    // single-valued filter can only name one of those. Reusing the filter for
+    // both jobs is what previously made group ownership invisible here while
+    // `can_access_agent` happily opened the same agent by id — the list was
+    // narrower than the permission.
+    //
+    // `is_owned_by` is the same predicate `can_access_agent` uses, so list and
+    // detail cannot disagree about whose agent it is.
+    if let Some(ref user) = api_user {
+        use crate::middleware::UserRole;
+        if user.0.role < UserRole::Admin {
+            let groups = super::super::caller_group_ids(&state, &user.0);
+            agents.retain(|e| e.manifest.is_owned_by(&user.0.name, &groups));
+        }
+    }
+
+    // Explicit `?owner=` filter, narrowing only — the scoping above has
+    // already run, so a non-admin cannot widen their view with it (their
+    // untrusted value was discarded up front, see the top of this handler).
+    //
+    // Resolves the stamped `owner` principal and falls back to
+    // `manifest.author` only for agents that have none. Accepts `group:<id>`
+    // and `user:<name>` alongside the historical bare name, so an admin can
+    // ask for a group's agents at all: with only the bare form, group-owned
+    // agents would be unreachable through this filter no matter what was
+    // typed.
     if let Some(ref owner) = params.owner {
-        let owner_lower = owner.to_lowercase();
-        agents.retain(|e| e.manifest.author.to_lowercase() == owner_lower);
+        agents.retain(|e| e.manifest.matches_owner_filter(owner));
     }
 
     let total = agents.len();
@@ -1201,6 +1277,14 @@ pub async fn get_agent(
             "system_prompt": entry.manifest.model.system_prompt,
             "description": entry.manifest.description,
             "tags": entry.manifest.tags,
+            // Provenance as declared, kept beside the stamped owner below —
+            // they answer different questions (#7744).
+            "author": entry.manifest.author,
+            // Emitted even when absent, so a client can tell "unowned" from
+            // "this build does not model owners"; both would otherwise read as
+            // a missing key and only one is worth acting on.
+            "owner": entry.manifest.owner.as_ref().map(|o| serde_json::to_value(o).unwrap_or(serde_json::Value::Null)),
+            "owner_label": entry.manifest.owner_label(),
             "identity": {
                 "emoji": entry.identity.emoji,
                 "avatar_url": entry.identity.avatar_url,

@@ -1062,11 +1062,7 @@ pub async fn list_agent_sessions(
     if let Some(ref user) = api_user {
         use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin {
-            let entry = state.kernel.agent_registry().get(agent_id);
-            let owned = entry
-                .as_ref()
-                .map(|e| e.manifest.author.eq_ignore_ascii_case(&user.0.name))
-                .unwrap_or(false);
+            let owned = super::super::user_owns_agent(&state, agent_id, &user.0);
             if !owned {
                 return (
                     StatusCode::NOT_FOUND,

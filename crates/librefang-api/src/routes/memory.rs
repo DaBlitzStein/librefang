@@ -2009,12 +2009,7 @@ fn assert_kv_owner_or_admin(
     if user.0.role >= UserRole::Admin {
         return Ok(());
     }
-    let owned = state
-        .kernel
-        .agent_registry()
-        .get(agent_id)
-        .map(|e| e.manifest.author.eq_ignore_ascii_case(&user.0.name))
-        .unwrap_or(false);
+    let owned = crate::routes::user_owns_agent(state, agent_id, &user.0);
     if owned {
         Ok(())
     } else {

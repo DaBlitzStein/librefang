@@ -363,6 +363,19 @@ pub(crate) fn enrich_agent_json(
         "supports_thinking": supports_thinking,
         "ready": ready,
         "profile": e.manifest.profile,
+        // Provenance, as the manifest declares it. Kept beside `owner` rather
+        // than replaced by it: they answer different questions, and folding
+        // one into the other would lose the distinction that made ownership
+        // worth stamping.
+        "author": e.manifest.author,
+        // Who the agent belongs to (#7744). Emitted even when absent, so a
+        // client can tell "unowned" from "this build does not model owners" —
+        // the two would otherwise both read as a missing key, and only one of
+        // them is something an operator should act on.
+        "owner": e.manifest.owner.as_ref().map(|o| serde_json::to_value(o).unwrap_or(serde_json::Value::Null)),
+        // The `kind:id` form, so a surface can label a row without
+        // reimplementing the tagged-enum shape in four languages.
+        "owner_label": e.manifest.owner_label(),
         "schedule": schedule,
         "sessions_24h": sessions_24h,
         "cost_24h": cost_24h,

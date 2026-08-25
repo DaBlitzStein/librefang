@@ -56,6 +56,17 @@ async fn boot() -> Harness {
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
         cfg.api_key = "owner-scope-master-key".to_string();
         cfg.users = configs;
+        // Alice is on the support rota, Bob is not (#7744 / #7745). Declared
+        // on the shared harness so the group-ownership cases exercise the real
+        // `AuthManager` membership resolution rather than a stub — membership
+        // is derived from this config at boot, so a group nobody is in would
+        // make those assertions pass for the wrong reason.
+        cfg.user_groups = vec![librefang_types::config::UserGroup {
+            id: "support".to_string(),
+            name: "Support".to_string(),
+            description: String::new(),
+            members: ["Alice".to_string()].into_iter().collect(),
+        }];
     }))
     .with_api_key("owner-scope-master-key")
     .with_user_api_keys(auth_users);
@@ -599,4 +610,348 @@ async fn non_admin_cannot_override_owner_filter_on_list_agents() {
             "{key} should still see Alice's agent via ?owner=Alice: {body}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ownership stamping (#7744)
+// ---------------------------------------------------------------------------
+//
+// These live here, at the *stamping* site, rather than beside the `Principal`
+// definition. A test next to the type can only prove the field round-trips;
+// the bug this closes is that the server never wrote it from the credential,
+// which is only observable through the route that spawns the agent.
+
+async fn request_json(
+    app: &Router,
+    method: Method,
+    path: &str,
+    bearer: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {bearer}"));
+    let body = match body {
+        Some(value) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&value).expect("serialize request"))
+        }
+        None => Body::empty(),
+    };
+    let resp = app
+        .clone()
+        .oneshot(builder.body(body).expect("build request"))
+        .await
+        .expect("route response");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    (
+        status,
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+    )
+}
+
+/// Spawn over HTTP as `bearer`, with `author` written into the manifest body.
+/// Returns the new agent's id.
+async fn spawn_over_http(app: &Router, bearer: &str, author: &str) -> String {
+    let name = format!("stamped-{}", uuid::Uuid::new_v4());
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/agents",
+        bearer,
+        Some(serde_json::json!({
+            "manifest_toml": format!(
+                "name = \"{name}\"\nauthor = \"{author}\"\nmodule = \"builtin:chat\"\n"
+            ),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn should succeed: {body}");
+    body["agent_id"]
+        .as_str()
+        .expect("agent_id in spawn response")
+        .to_string()
+}
+
+/// The agent belongs to whoever authenticated, not to whoever the request body
+/// named.
+///
+/// This is the hole the field exists to close: `author` is free text on the
+/// posted manifest, and `can_access_agent` gated on it. A caller could
+/// therefore write somebody else's name into the manifest and the agent would
+/// answer to that name — self-assertion doing the work of authentication.
+///
+/// The assertion is deliberately two-sided. Checking only that `owner` reads
+/// back as `Admin` would still pass if `author` kept its old authority
+/// somewhere; so Bob, whose name is on the manifest, must also be refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_an_agent_stamps_the_caller_not_the_author_in_the_body() {
+    let h = boot().await;
+
+    // Admin spawns, but writes Bob's name into the manifest.
+    let agent_id = spawn_over_http(&h.app, ADMIN_KEY, "Bob").await;
+
+    let (status, body) = get_json(&h.app, &format!("/api/agents/{agent_id}"), ADMIN_KEY).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["owner"],
+        serde_json::json!({"kind": "user", "id": "Admin"}),
+        "the owner must come from the bearer token, not from `author` in the body: {body}"
+    );
+    assert_eq!(
+        body["author"], "Bob",
+        "`author` is still recorded as provenance — it is only stripped of authority: {body}"
+    );
+
+    // And the name in the body grants Bob nothing.
+    let status = request_status(
+        &h.app,
+        Method::GET,
+        &format!("/api/agents/{agent_id}"),
+        BOB_KEY,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "writing `author = \"Bob\"` must not hand Bob the agent"
+    );
+}
+
+/// An edit must not reassign ownership.
+///
+/// `PATCH {"manifest_toml": ...}` is a whole-manifest replacement, and `owner`
+/// is a field on `AgentManifest` — so it is expressible in the TOML a client
+/// posts. Without preservation, the right to edit an agent would silently
+/// become the right to take it.
+///
+/// The fixture is spawned over HTTP by Admin so it is genuinely owned before
+/// the edit. Seeding an unowned agent and watching it stay unowned would
+/// compare null to null and pass with the preservation deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn editing_an_agent_cannot_change_who_owns_it() {
+    let h = boot().await;
+    let agent_id = spawn_over_http(&h.app, ADMIN_KEY, "Admin").await;
+
+    let (_, before) = get_json(&h.app, &format!("/api/agents/{agent_id}"), ADMIN_KEY).await;
+    assert_eq!(
+        before["owner"],
+        serde_json::json!({"kind": "user", "id": "Admin"}),
+        "the fixture must actually be owned, or this test proves nothing: {before}"
+    );
+
+    // A full replacement that explicitly claims the agent for Bob.
+    let name = before["name"].as_str().expect("name").to_string();
+    let (status, body) = request_json(
+        &h.app,
+        Method::PATCH,
+        &format!("/api/agents/{agent_id}"),
+        ADMIN_KEY,
+        Some(serde_json::json!({
+            "manifest_toml": format!(
+                "name = \"{name}\"\ndescription = \"after\"\nmodule = \"builtin:chat\"\n\n[owner]\nkind = \"user\"\nid = \"Bob\"\n"
+            ),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (_, after) = get_json(&h.app, &format!("/api/agents/{agent_id}"), ADMIN_KEY).await;
+    assert_eq!(
+        after["description"], "after",
+        "the edit must actually apply, or this test proves nothing: {after}"
+    );
+    assert_eq!(
+        after["owner"], before["owner"],
+        "an edit must leave ownership exactly as it was: {after}"
+    );
+
+    // The claim in the body must not have granted Bob anything either.
+    let status = request_status(
+        &h.app,
+        Method::GET,
+        &format!("/api/agents/{agent_id}"),
+        BOB_KEY,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an `[owner]` block in the edit body must not transfer the agent"
+    );
+}
+
+/// An agent stored before ownership existed keeps working.
+///
+/// Every `agent.toml` on disk today has no `[owner]` block. If the absent
+/// field were read as "owned by nobody", `is_owned_by` would deny its author
+/// and the upgrade would quietly lock operators out of their own agents. The
+/// fallback to `author` is what makes this a widening change rather than a
+/// breaking one — it is exactly the rule that was there before.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_with_no_owner_stays_reachable_by_its_author() {
+    let h = boot().await;
+    // `spawn_authored` goes through the kernel, not the route, so nothing
+    // stamps it — the same shape as a manifest already on disk.
+    let agent_id = spawn_authored(&h.state, "Alice");
+
+    let (status, body) = get_json(&h.app, &format!("/api/agents/{agent_id}"), ALICE_KEY).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a pre-ownership agent must stay reachable by its author: {body}"
+    );
+    assert_eq!(
+        body["owner"],
+        serde_json::Value::Null,
+        "unowned must be reported as null, not invented: {body}"
+    );
+    assert_eq!(
+        body["owner_label"],
+        serde_json::Value::Null,
+        "an unowned agent has no label to show: {body}"
+    );
+
+    // It appears in her list, and not in Bob's.
+    let (_, alice_list) = get_json(&h.app, "/api/agents", ALICE_KEY).await;
+    assert!(
+        alice_list["items"]
+            .as_array()
+            .expect("items[]")
+            .iter()
+            .any(|a| a["id"] == serde_json::json!(agent_id.to_string())),
+        "Alice must still see her pre-ownership agent: {alice_list}"
+    );
+    let (_, bob_list) = get_json(&h.app, "/api/agents", BOB_KEY).await;
+    assert!(
+        bob_list["items"]
+            .as_array()
+            .expect("items[]")
+            .iter()
+            .all(|a| a["id"] != serde_json::json!(agent_id.to_string())),
+        "the author fallback must not widen access to other users: {bob_list}"
+    );
+}
+
+/// A group-owned agent belongs to the group's members, not to nobody.
+///
+/// `Principal::Group` is the reason ownership is a principal rather than a
+/// user id: work done on a support shift belongs to the team. If access
+/// resolved a group owner by string-comparing it against the caller's name,
+/// nobody below Admin would ever match, and recording a group as the owner
+/// would be a way to lose an agent rather than to share one.
+///
+/// Both directions are asserted. That Alice can reach it shows membership is
+/// consulted at all; that Bob cannot shows the check is membership and not
+/// merely "has an owner we could not parse, allow it".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_owned_agent_is_reachable_by_the_groups_members() {
+    let h = boot().await;
+    let agent_id = h
+        .state
+        .kernel
+        .spawn_agent_typed(AgentManifest {
+            name: format!("group-owned-{}", uuid::Uuid::new_v4()),
+            // Nobody's name, so a stray `author` match cannot be what makes
+            // this pass.
+            author: "nobody".to_string(),
+            owner: Some(librefang_types::principal::Principal::Group(
+                "support".to_string(),
+            )),
+            ..AgentManifest::default()
+        })
+        .expect("spawn group-owned agent");
+
+    let (status, body) = get_json(&h.app, &format!("/api/agents/{agent_id}"), ALICE_KEY).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Alice is in `support`, so the agent is hers to reach: {body}"
+    );
+    assert_eq!(
+        body["owner_label"], "group:support",
+        "the surfaces need the qualified label to render an owner: {body}"
+    );
+
+    let status = request_status(
+        &h.app,
+        Method::GET,
+        &format!("/api/agents/{agent_id}"),
+        BOB_KEY,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "Bob is not in `support` and must not reach a support-owned agent"
+    );
+
+    // The list must agree with the detail route, or a group-owned agent
+    // becomes one you can only open if you already know its id.
+    let (_, alice_list) = get_json(&h.app, "/api/agents", ALICE_KEY).await;
+    assert!(
+        alice_list["items"]
+            .as_array()
+            .expect("items[]")
+            .iter()
+            .any(|a| a["id"] == serde_json::json!(agent_id.to_string())),
+        "the list must show what the detail route lets Alice open: {alice_list}"
+    );
+    let (_, bob_list) = get_json(&h.app, "/api/agents", BOB_KEY).await;
+    assert!(
+        bob_list["items"]
+            .as_array()
+            .expect("items[]")
+            .iter()
+            .all(|a| a["id"] != serde_json::json!(agent_id.to_string())),
+        "Bob must not see a support-owned agent in his list: {bob_list}"
+    );
+}
+
+/// `?owner=` addresses the real owner, including a group.
+///
+/// The filter previously compared against `manifest.author`, so it could only
+/// ever name a user. With ownership stamped, an admin auditing "what does the
+/// support team own" had no way to ask — the qualified `group:<id>` form is
+/// what makes that question expressible.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_filter_can_address_a_group() {
+    let h = boot().await;
+    let group_agent = h
+        .state
+        .kernel
+        .spawn_agent_typed(AgentManifest {
+            name: format!("group-filter-{}", uuid::Uuid::new_v4()),
+            author: "nobody".to_string(),
+            owner: Some(librefang_types::principal::Principal::Group(
+                "support".to_string(),
+            )),
+            ..AgentManifest::default()
+        })
+        .expect("spawn group-owned agent");
+    let user_agent = spawn_authored(&h.state, "Alice");
+
+    let (status, body) = get_json(&h.app, "/api/agents?owner=group:support", ADMIN_KEY).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<String> = body["items"]
+        .as_array()
+        .expect("items[]")
+        .iter()
+        .filter_map(|a| a["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        ids.contains(&group_agent.to_string()),
+        "`?owner=group:support` must find the support-owned agent: {body}"
+    );
+    assert!(
+        !ids.contains(&user_agent.to_string()),
+        "a user-authored agent must not answer to a group filter: {body}"
+    );
 }

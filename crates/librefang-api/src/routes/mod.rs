@@ -197,13 +197,64 @@ fn prune_route_caches_at(
     }
 }
 
+/// The local group ids a caller belongs to (#7745), for ownership checks.
+///
+/// Read from the resolved `AuthManager` snapshot rather than from raw config, so what gates access is the same membership the `/api/user-groups` surfaces report — membership is derived at snapshot time and there is no stored table for the two to drift apart on.
+pub(crate) fn caller_group_ids(
+    state: &AppState,
+    user: &crate::middleware::AuthenticatedApiUser,
+) -> std::collections::BTreeSet<String> {
+    state.kernel.auth_manager().groups_for_user(user.user_id)
+}
+
+/// The ids of every agent `user` owns, for list endpoints that filter agent-scoped rows (cron jobs, triggers, schedules) down to the caller's own.
+///
+/// Those endpoints each rebuilt this set inline from `manifest.author`, which meant three copies of the ownership rule and three places for it to fall behind [`can_access_agent`]. One helper resolves group membership once per request and applies the same predicate, so a group-owned agent's cron jobs are visible to the group rather than to nobody.
+pub(crate) fn agent_ids_owned_by(
+    state: &AppState,
+    user: &crate::middleware::AuthenticatedApiUser,
+) -> std::collections::HashSet<librefang_types::agent::AgentId> {
+    let groups = caller_group_ids(state, user);
+    state
+        .kernel
+        .agent_registry()
+        .list()
+        .iter()
+        .filter(|e| e.manifest.is_owned_by(&user.name, &groups))
+        .map(|e| e.id)
+        .collect()
+}
+
+/// Whether `user` owns one specific agent, for the single-agent guards that do their own Admin handling and their own not-found response.
+///
+/// Answers ownership only — no Admin bypass, no missing-agent policy — because the call sites disagree about both: `comms_send` fails closed when there is no authenticated identity, while the read-only stats routes treat that as the trusted no-auth mode and allow it. Folding those decisions in here would force one of the two to change behaviour silently.
+pub(crate) fn user_owns_agent(
+    state: &AppState,
+    agent_id: librefang_types::agent::AgentId,
+    user: &crate::middleware::AuthenticatedApiUser,
+) -> bool {
+    state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|e| {
+            e.manifest
+                .is_owned_by(&user.name, &caller_group_ids(state, user))
+        })
+        .unwrap_or(false)
+}
+
 /// Whether the current API principal may access an agent-scoped resource.
 ///
 /// Admin and Owner roles can inspect every agent.
-/// Lower roles are limited to agents whose manifest author matches their authenticated name.
+/// Lower roles are limited to agents they own — see [`AgentManifest::is_owned_by`], which resolves a stamped `owner` principal first and falls back to the historical `author` string only for agents that have none.
 /// `None` remains allowed for the explicitly trusted loopback/no-auth deployment mode, matching the existing API compatibility contract.
 ///
+/// Ownership (#7744) rather than `author` alone, because `author` is free text the client sends with the manifest: before this, a plain User-role caller could post `author = "<someone-else>"` and the agent would answer to that name, or post their own and have every check agree — self-assertion doing the work of authentication. The stamped `owner` is written by the server from the credential that authenticated the request, so the two now differ exactly when somebody claimed something they were not.
+///
 /// An agent that is not in the registry is denied to every principal, including Admin: an agent-scoped resource addressed by an id that resolves to nothing is reported as 404 rather than served, so id enumeration cannot distinguish "exists but not yours" from "does not exist".
+///
+/// [`AgentManifest::is_owned_by`]: librefang_types::agent::AgentManifest::is_owned_by
 pub(crate) fn can_access_agent(
     state: &AppState,
     agent_id: librefang_types::agent::AgentId,
@@ -218,7 +269,9 @@ pub(crate) fn can_access_agent(
     if user.0.role >= crate::middleware::UserRole::Admin {
         return true;
     }
-    entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
+    entry
+        .manifest
+        .is_owned_by(&user.0.name, &caller_group_ids(state, &user.0))
 }
 
 /// Shared application state.

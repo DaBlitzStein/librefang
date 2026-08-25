@@ -19,21 +19,15 @@ pub async fn list_schedules(
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let jobs = state.kernel.cron().list_all_jobs();
-    // Owner-scoping (#6753 follow-up): same cross-owner read leak as `/api/cron/jobs` — post-filter to jobs on agents the caller authors.
+    // Owner-scoping (#6753 follow-up): same cross-owner read leak as `/api/cron/jobs` — post-filter to jobs on agents the caller owns.
     // Mirrors `list_triggers` / `list_cron_jobs`.
-    let restrict_to: Option<String> = match api_user.as_ref() {
-        Some(u) if u.0.role < crate::middleware::UserRole::Admin => Some(u.0.name.clone()),
+    // The caller is carried whole rather than as their name (#7744): resolving ownership now needs their group membership too, and a bare name cannot answer that.
+    let restrict_to = match api_user.as_ref() {
+        Some(u) if u.0.role < crate::middleware::UserRole::Admin => Some(&u.0),
         _ => None,
     };
-    let jobs: Vec<_> = if let Some(ref user_name) = restrict_to {
-        let owned_ids: std::collections::HashSet<AgentId> = state
-            .kernel
-            .agent_registry()
-            .list()
-            .iter()
-            .filter(|e| e.manifest.author.eq_ignore_ascii_case(user_name))
-            .map(|e| e.id)
-            .collect();
+    let jobs: Vec<_> = if let Some(user) = restrict_to {
+        let owned_ids = super::super::agent_ids_owned_by(&state, user);
         jobs.into_iter()
             .filter(|j| owned_ids.contains(&j.agent_id))
             .collect()

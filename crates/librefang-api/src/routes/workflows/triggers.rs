@@ -233,21 +233,18 @@ pub async fn list_triggers(
         .and_then(|id| id.parse::<AgentId>().ok());
 
     // Owner-scoping: non-admins can't see triggers for agents they don't
-    // author. Two enforcement points:
+    // own. Two enforcement points:
     //   1. With ?agent_id=... — verify the caller owns that agent.
-    //   2. Without — post-filter the trigger list by author.
-    let restrict_to: Option<String> = match api_user.as_ref() {
-        Some(u) if u.0.role < crate::middleware::UserRole::Admin => Some(u.0.name.clone()),
+    //   2. Without — post-filter the trigger list by owner.
+    // The caller is carried whole rather than as their name (#7744): resolving
+    // ownership now needs their group membership too, and a bare name cannot
+    // answer that.
+    let restrict_to = match api_user.as_ref() {
+        Some(u) if u.0.role < crate::middleware::UserRole::Admin => Some(&u.0),
         _ => None,
     };
-    if let (Some(user_name), Some(aid)) = (restrict_to.as_ref(), agent_filter) {
-        let owns = state
-            .kernel
-            .agent_registry()
-            .get(aid)
-            .as_ref()
-            .map(|e| e.manifest.author.eq_ignore_ascii_case(user_name))
-            .unwrap_or(false);
+    if let (Some(user), Some(aid)) = (restrict_to, agent_filter) {
+        let owns = super::super::user_owns_agent(&state, aid, user);
         if !owns {
             return (
                 StatusCode::OK,
@@ -258,16 +255,9 @@ pub async fn list_triggers(
     }
 
     let triggers = state.kernel.list_triggers(agent_filter);
-    let list: Vec<serde_json::Value> = if let Some(ref user_name) = restrict_to {
-        // No explicit agent_id — fall back to per-trigger owner check.
-        let owned_ids: std::collections::HashSet<librefang_types::agent::AgentId> = state
-            .kernel
-            .agent_registry()
-            .list()
-            .iter()
-            .filter(|e| e.manifest.author.eq_ignore_ascii_case(user_name))
-            .map(|e| e.id)
-            .collect();
+    let list: Vec<serde_json::Value> = if let Some(user) = restrict_to {
+        // No explicit agent_id — check each trigger's agent instead.
+        let owned_ids = super::super::agent_ids_owned_by(&state, user);
         triggers
             .iter()
             .filter(|tr| owned_ids.contains(&tr.agent_id))

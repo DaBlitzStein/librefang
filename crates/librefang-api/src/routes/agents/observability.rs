@@ -88,7 +88,10 @@ pub async fn get_agent_stats(
     if let Some(ref user) = api_user {
         use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin
-            && !entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
+            && !entry.manifest.is_owned_by(
+                &user.0.name,
+                &super::super::caller_group_ids(&state, &user.0),
+            )
         {
             return (
                 StatusCode::NOT_FOUND,
@@ -196,7 +199,10 @@ pub async fn list_agent_events(
     if let Some(ref user) = api_user {
         use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin
-            && !entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
+            && !entry.manifest.is_owned_by(
+                &user.0.name,
+                &super::super::caller_group_ids(&state, &user.0),
+            )
         {
             return (
                 StatusCode::NOT_FOUND,

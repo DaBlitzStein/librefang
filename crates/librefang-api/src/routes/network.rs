@@ -2133,9 +2133,13 @@ pub async fn comms_send(
     // every authenticated role, but the auth layer only proves
     // "some user is logged in", not "this user owns this agent".
     //
-    // Ownership is modelled via `manifest.author` (case-insensitive
-    // match against `AuthenticatedApiUser.name`); the same field
-    // `/api/agents?owner=...` already gates on at `agents.rs:971`.
+    // Ownership is modelled via the stamped `manifest.owner` principal,
+    // falling back to `manifest.author` only for agents created before
+    // ownership existed (#7744) — the same rule `can_access_agent` and
+    // `/api/agents?owner=...` apply. Before that field, this check compared
+    // the caller's name against a string the agent's own manifest declared,
+    // so anyone who could spawn an agent could also choose whose name it
+    // answered to and forge messages from it.
     // Admin / Owner roles can send from any agent (parity with
     // `agents.rs:922,1133,1240`'s Admin override on other
     // ownership-scoped operations).
@@ -2143,7 +2147,9 @@ pub async fn comms_send(
         use crate::middleware::UserRole;
         let allowed = match api_user.as_ref().map(|u| &u.0) {
             Some(u) if u.role >= UserRole::Admin => true,
-            Some(u) => u.name.eq_ignore_ascii_case(&from_entry.manifest.author),
+            Some(u) => from_entry
+                .manifest
+                .is_owned_by(&u.name, &crate::routes::caller_group_ids(&state, u)),
             // No authenticated identity means there is no ownership claim to
             // compare. Production no-auth mode injects a synthetic Owner, so
             // None only occurs when middleware was bypassed and must fail closed.
