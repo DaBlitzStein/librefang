@@ -343,7 +343,8 @@ impl GoalRunner {
         max_iterations: u32,
         substrate: Arc<MemorySubstrate>,
         send_message: F,
-    ) where
+    ) -> bool
+    where
         F: Fn(AgentId, String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
     {
@@ -354,6 +355,14 @@ impl GoalRunner {
         // guard is never held across an await point; `tokio::spawn` only
         // enqueues the task and does not block.
         let _guard = lock_goal_run_start_stop(&self.start_lock);
+
+        // Goal deletion commits before it calls `stop()`, which takes this same
+        // lock. Consequently either this read observes the deletion and no run
+        // is created, or deletion waits for the insertion and then removes it.
+        // There is no window where a deleted goal can leave an orphaned loop.
+        if load_goal(&substrate, goal_id).is_none() {
+            return false;
+        }
 
         // Replace any prior run for this goal. `stop_locked` (not `stop`)
         // because we already hold `start_lock`, which is non-reentrant.
@@ -418,6 +427,7 @@ impl GoalRunner {
             },
         );
         info!(goal_id = %goal_id, agent_id = %agent_id, max_iterations, "Goal run started");
+        true
     }
 
     /// Recover goal runs left in `Running` phase by a prior crash or restart.
@@ -1154,8 +1164,10 @@ mod tests {
     async fn start_replaces_terminal_row_with_a_fresh_started_at() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let store = store_from(&substrate);
-        let goal_id = GoalId::new();
         let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
         let stale_started = Utc::now() - chrono::Duration::days(1);
         store
             .save_run(&GoalRunRow {
@@ -1194,6 +1206,31 @@ mod tests {
         );
 
         assert!(runner.stop(goal_id));
+    }
+
+    #[tokio::test]
+    async fn start_rejects_a_goal_missing_from_the_shared_store() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let goal_id = GoalId::new();
+        let agent_id = AgentId::new();
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone());
+
+        let started =
+            runner.start(
+                goal_id,
+                agent_id,
+                25,
+                substrate,
+                |_agent_id, _message| async move {
+                    std::future::pending::<Result<String, String>>().await
+                },
+            );
+
+        assert!(!started);
+        assert!(runner.state(goal_id).is_none());
+        assert!(store.get_run(&goal_id.to_string()).unwrap().is_none());
     }
 
     #[test]
