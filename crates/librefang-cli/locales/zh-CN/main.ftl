@@ -479,11 +479,10 @@ chat-runner-press-esc-to-exit =   按 Esc 键退出。
 
 # tui/event.rs
 tui-event-workflow-completed = 工作流已完成
-tui-event-workflow-steps-invalid = 步骤必须是 JSON 数组
+tui-event-workflow-steps-invalid = 步骤不是有效的 JSON：{ $error }
 tui-event-workflow-exec-not-available-in-process = 进程内模式下工作流执行不可用
 tui-event-workflow-create-not-available-in-process = 进程内模式下工作流创建不可用
 tui-event-workflow-steps-empty = 需要填写步骤：请输入步骤对象的 JSON 数组
-tui-event-workflow-steps-invalid = 步骤不是有效的 JSON：{ $error }
 tui-event-workflow-steps-not-array = 步骤必须是步骤对象的 JSON 数组
 tui-event-workflow-create-failed = 创建工作流失败（{ $status }）：{ $detail }
 tui-event-trigger-create-not-available-in-process = 进程内模式下触发器创建不可用
@@ -2394,21 +2393,6 @@ tui-agents-title-edit-routing = 编辑模型路由
 tui-agents-title-prompt-picker = 提示词库
 
 # audit chain reanchor (librefang monitoring audit reanchor)
-label-seq = seq
-monitoring-audit-reanchor-chain-intact = 审计链完整 — 无需重新锚定
-monitoring-audit-reanchor-diagnose-failed = 无法读取 audit_entries: { $error }
-monitoring-audit-reanchor-break-found-header = 发现链断裂
-monitoring-audit-reanchor-expected = 期望
-monitoring-audit-reanchor-found = 实际
-monitoring-audit-reanchor-would-header =   将执行:
-monitoring-audit-reanchor-would-delete =     1. 从 { $path } 的 `audit_entries` 中删除 seq >= { $seq } 的行
-monitoring-audit-reanchor-would-marker =     2. 在腾出的 seq 处插入 ChainReanchored 标记, 并链接到最后一条幸存记录
-monitoring-audit-reanchor-preserves-history = 断裂之前的记录不会被改动 — 使用 `--confirm` 重新运行以应用。
-monitoring-audit-reanchor-failed = 重新锚定审计链失败: { $error }
-monitoring-audit-reanchor-anchor-refresh-failed = 刷新锚点 { $path } 失败: { $error }
-monitoring-audit-reanchor-anchor-refresh-fix = 启动守护进程后运行 `librefang security verify` 以确认锚点一致
-monitoring-audit-reanchor-success = 审计轨迹已重新锚定: 从断裂处起移除了 { $rows_deleted } 行, 并在 seq { $marker_seq } 处恢复。
-monitoring-audit-reanchor-history-preserved = 断裂之前的每条记录都已保留。下次守护进程启动将顺利通过校验。
 
 # purge command
 purge-failed-no-database = 清除失败: { $path } 处没有数据库

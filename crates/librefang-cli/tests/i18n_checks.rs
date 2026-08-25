@@ -1127,3 +1127,64 @@ fn test_locales_cover_used_i18n_keys() {
     assert_locale_covers_required_i18n_keys(manifest_dir, "uk", "Ukrainian", &required_keys);
     assert_locale_covers_required_i18n_keys(manifest_dir, "zh-CN", "Chinese", &required_keys);
 }
+
+/// A Fluent bundle refuses a duplicated message id, and `i18n::init` turns
+/// that refusal into a panic at process start:
+///
+/// ```text
+/// panicked at crates/librefang-cli/src/i18n.rs:85:
+/// default language pack must be valid: "failed to add Fluent resource:
+///   [Overriding { kind: Message, id: \"tui-event-workflow-steps-invalid\" }]"
+/// ```
+///
+/// Nothing else catches it. A duplicate compiles, passes clippy, and passes
+/// every other test in this file — `collect_locale_keys` returns a `Vec`, so
+/// coverage and dead-key checks see the key present either way. The daemon
+/// then fails to boot, restarts, and fails again.
+///
+/// This is not hypothetical: a merge introduced seven duplicates across the
+/// four locales and took a live instance down until it was rolled back.
+#[test]
+fn no_locale_declares_the_same_key_twice() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let locales_dir = manifest_dir.join("locales");
+    let mut offenders: Vec<String> = Vec::new();
+
+    for entry in fs::read_dir(&locales_dir).unwrap() {
+        let dir = entry.unwrap().path();
+        let main_ftl = dir.join("main.ftl");
+        if !main_ftl.is_file() {
+            continue;
+        }
+        let locale = dir.file_name().unwrap().to_string_lossy().to_string();
+
+        let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for (idx, line) in fs::read_to_string(&main_ftl).unwrap().lines().enumerate() {
+            // A message id starts at column 0; an attribute (`.foo =`) and a
+            // continuation line are indented, and neither can collide.
+            let Some((head, _)) = line.split_once('=') else {
+                continue;
+            };
+            let key = head.trim_end();
+            if key.is_empty()
+                || !key
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                continue;
+            }
+            if let Some(first) = seen.insert(key.to_string(), idx + 1) {
+                offenders.push(format!(
+                    "{locale}/main.ftl: `{key}` declared at line {first} and again at line {}",
+                    idx + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "duplicate Fluent message ids will panic the daemon on start:\n  {}",
+        offenders.join("\n  ")
+    );
+}

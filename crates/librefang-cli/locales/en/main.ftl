@@ -713,7 +713,6 @@ monitoring-daemon-running-error = daemon is running at { $url }; refusing to tou
 monitoring-daemon-running-error-fix = stop the daemon first: `librefang stop`
 monitoring-anchor-remove-failed = failed to remove anchor { $path }: { $error }
 monitoring-audit-reset-seed-fresh = The next daemon boot will seed a fresh Merkle chain from the current tip.
-label-seq = seq
 monitoring-audit-reanchor-verified = Audit chain verifies — nothing to repair.
 monitoring-audit-reanchor-diagnose-failed = cannot read the audit chain: { $error }
 monitoring-audit-reanchor-break = Chain break at seq { $seq } ({ $kind }): expected { $expected }, found { $found }.
@@ -1409,11 +1408,10 @@ chat-runner-press-esc-to-exit =   Press Esc to exit.
 
 # tui/event.rs
 tui-event-workflow-completed = Workflow completed
-tui-event-workflow-steps-invalid = Steps must be a JSON array
+tui-event-workflow-steps-invalid = Steps are not valid JSON: { $error }
 tui-event-workflow-exec-not-available-in-process = Workflow execution not available in in-process mode
 tui-event-workflow-create-not-available-in-process = Workflow creation not available in in-process mode
 tui-event-workflow-steps-empty = Steps are required: enter a JSON array of step objects
-tui-event-workflow-steps-invalid = Steps are not valid JSON: { $error }
 tui-event-workflow-steps-not-array = Steps must be a JSON array of step objects
 tui-event-workflow-create-failed = Create workflow failed ({ $status }): { $detail }
 tui-event-trigger-create-not-available-in-process = Trigger creation not available in in-process mode

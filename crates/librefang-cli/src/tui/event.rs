@@ -1098,7 +1098,7 @@ pub fn spawn_create_workflow(
                 Ok(v @ serde_json::Value::Array(_)) => v,
                 _ => {
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-workflow-steps-invalid",
+                        "tui-event-workflow-steps-not-array",
                     )));
                     return;
                 }

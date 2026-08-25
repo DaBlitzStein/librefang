@@ -1422,11 +1422,10 @@ chat-runner-press-esc-to-exit =   Натисніть Esc для виходу.
 
 # tui/event.rs
 tui-event-workflow-completed = Воркфлоу завершено
-tui-event-workflow-steps-invalid = Кроки мають бути масивом JSON
+tui-event-workflow-steps-invalid = Кроки не є коректним JSON: { $error }
 tui-event-workflow-exec-not-available-in-process = Виконання воркфлоу недоступне в інпроцес-режимі
 tui-event-workflow-create-not-available-in-process = Створення воркфлоу недоступне в інпроцес-режимі
 tui-event-workflow-steps-empty = Потрібні кроки: введіть JSON-масив об'єктів кроків
-tui-event-workflow-steps-invalid = Кроки не є коректним JSON: { $error }
 tui-event-workflow-steps-not-array = Кроки мають бути JSON-масивом об'єктів кроків
 tui-event-workflow-create-failed = Не вдалося створити воркфлоу ({ $status }): { $detail }
 tui-event-trigger-create-not-available-in-process = Створення тригерів недоступне в інпроцес-режимі
@@ -2461,21 +2460,6 @@ tui-agents-title-edit-routing = Редагувати маршрутизацію 
 tui-agents-title-prompt-picker = Бібліотека промптів
 
 # audit chain reanchor (librefang monitoring audit reanchor)
-label-seq = seq
-monitoring-audit-reanchor-chain-intact = ланцюг аудиту цілий — переприв'язувати нічого
-monitoring-audit-reanchor-diagnose-failed = не вдалося прочитати audit_entries: { $error }
-monitoring-audit-reanchor-break-found-header = Знайдено розрив ланцюга
-monitoring-audit-reanchor-expected = очікувалося
-monitoring-audit-reanchor-found = знайдено
-monitoring-audit-reanchor-would-header =   Буде виконано:
-monitoring-audit-reanchor-would-delete =     1. ВИДАЛИТИ рядки з seq >= { $seq } з `audit_entries` у { $path }
-monitoring-audit-reanchor-would-marker =     2. Вставити маркер ChainReanchored на звільненому seq, зчеплений з останнім уцілілим записом
-monitoring-audit-reanchor-preserves-history = Записи до розриву не змінюються — запустіть повторно з `--confirm`, щоб застосувати.
-monitoring-audit-reanchor-failed = не вдалося переприв'язати ланцюг: { $error }
-monitoring-audit-reanchor-anchor-refresh-failed = не вдалося оновити якір { $path }: { $error }
-monitoring-audit-reanchor-anchor-refresh-fix = запустіть `librefang security verify` після старту демона, щоб підтвердити узгодженість якоря
-monitoring-audit-reanchor-success = Аудит переприв'язано: видалено { $rows_deleted } рядк(ів) від розриву далі, відновлено на seq { $marker_seq }.
-monitoring-audit-reanchor-history-preserved = Кожен запис до розриву збережено. Наступний запуск демона перевіриться без помилок.
 
 # purge command
 purge-failed-no-database = Не вдалося очистити: немає бази даних за шляхом { $path }
