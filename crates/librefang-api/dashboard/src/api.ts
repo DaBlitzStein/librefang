@@ -347,6 +347,18 @@ export type SessionResetReason =
   | "suspended"
   | "manual";
 
+/** Who something belongs to (#7744).
+ *
+ *  Mirrors `librefang_types::principal::Principal`, whose wire form is a
+ *  tagged enum: `{"kind": "user", "id": "paco"}`. The kind is carried rather
+ *  than inferred because a user and a group can share a name and are still
+ *  different owners — collapsing them to the bare id would hand one's agents
+ *  to the other. */
+export interface AgentOwner {
+  kind: "user" | "group";
+  id: string;
+}
+
 export interface AgentItem {
   id: string;
   name: string;
@@ -371,6 +383,19 @@ export interface AgentItem {
   sessions_24h?: number;
   /** Sum of `usage_events.cost_usd` for the agent in the last 24 hours. */
   cost_24h?: number;
+  /** Free-text provenance from the manifest, set by whoever wrote it.
+   *  Kept for display only — it carries no authority. See `owner`. */
+  author?: string;
+  /** Who the agent belongs to (#7744), stamped server-side from the
+   *  authenticated caller rather than taken from the manifest body.
+   *  `null` means unowned — an agent created before ownership existed, or
+   *  created with no caller to attribute it to. Distinguishable from an
+   *  older daemon that does not model owners, which omits the key entirely. */
+  owner?: AgentOwner | null;
+  /** Pre-rendered `kind:id` form of `owner` (`user:paco`, `group:support`),
+   *  so a row can be labelled without reassembling the tagged enum here.
+   *  `null` exactly when `owner` is. */
+  owner_label?: string | null;
   identity?: AgentIdentity;
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";

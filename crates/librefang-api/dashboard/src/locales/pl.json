@@ -910,7 +910,11 @@
       "manifest_load_failed": "Nie udało się wczytać bieżącej konfiguracji.",
       "proactive_conditions": "Warunki (rozdzielone przecinkami)",
       "proactive_conditions_placeholder": "np. agent.tags contains 'urgent'",
-      "proactive_conditions_hint": "To zastępuje całą listę warunków — nie jest wstępnie wypełnione bieżącą wartością. Użyj pełnego edytora manifestu, aby zobaczyć aktualny stan."
+      "proactive_conditions_hint": "To zastępuje całą listę warunków — nie jest wstępnie wypełnione bieżącą wartością. Użyj pełnego edytora manifestu, aby zobaczyć aktualny stan.",
+      "owner": "Właściciel",
+      "owner_unowned": "bez właściciela",
+      "owner_unowned_hint": "Utworzono, zanim zaczęto zapisywać właściciela, albo bez uwierzytelnionego wywołującego. Dostęp opiera się wtedy na polu author z manifestu.",
+      "author": "autor"
     },
     "tab": {
       "conversation": "Rozmowa",

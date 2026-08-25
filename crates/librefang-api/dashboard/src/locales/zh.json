@@ -910,7 +910,11 @@
       "manifest_load_failed": "加载当前配置失败。",
       "proactive_conditions": "条件（以逗号分隔）",
       "proactive_conditions_placeholder": "例如 agent.tags contains 'urgent'",
-      "proactive_conditions_hint": "这将替换整个条件列表——它不会预先填充当前值。请使用完整清单编辑器查看当前生效的内容。"
+      "proactive_conditions_hint": "这将替换整个条件列表——它不会预先填充当前值。请使用完整清单编辑器查看当前生效的内容。",
+      "owner": "所有者",
+      "owner_unowned": "无所有者",
+      "owner_unowned_hint": "创建于记录所有权之前，或创建时没有经过身份验证的调用方。访问权限回退到清单的 author 字段。",
+      "author": "作者"
     },
     "tab": {
       "conversation": "对话",

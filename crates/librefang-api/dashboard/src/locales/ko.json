@@ -910,7 +910,11 @@
       "manifest_load_failed": "현재 설정을 불러오지 못했습니다.",
       "proactive_conditions": "조건 (쉼표로 구분)",
       "proactive_conditions_placeholder": "예: agent.tags contains 'urgent'",
-      "proactive_conditions_hint": "이 목록은 전체 조건 목록을 대체합니다 — 현재 값으로 미리 채워지지 않습니다. 현재 적용된 값을 보려면 전체 매니페스트 편집기를 사용하세요."
+      "proactive_conditions_hint": "이 목록은 전체 조건 목록을 대체합니다 — 현재 값으로 미리 채워지지 않습니다. 현재 적용된 값을 보려면 전체 매니페스트 편집기를 사용하세요.",
+      "owner": "소유자",
+      "owner_unowned": "소유자 없음",
+      "owner_unowned_hint": "소유권을 기록하기 전에 생성되었거나 인증된 호출자 없이 생성되었습니다. 접근 권한은 매니페스트의 author 필드로 대체됩니다.",
+      "author": "작성자"
     },
     "tab": {
       "conversation": "대화",

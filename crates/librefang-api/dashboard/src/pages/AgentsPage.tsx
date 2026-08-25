@@ -126,6 +126,10 @@ type AgentView = AgentDetail & {
   model_name?: string;
   model_provider?: string;
   last_active?: string;
+  /** Free-text provenance from the manifest — display only (#7744). */
+  author?: string;
+  /** `kind:id` label for the stamped owner, `null` when unowned (#7744). */
+  owner_label?: string | null;
   triggers?: AgentTriggerSummary[];
   cron_jobs?: AgentCronSummary[];
   capabilities?: Omit<NonNullable<AgentDetail["capabilities"]>, "tools" | "skills"> & {
@@ -1481,6 +1485,37 @@ export function AgentsPage() {
                   ? ` · ${agent.model?.model || (agent as AgentView).model_name}`
                   : ""}
                 {(agent as AgentView).profile ? ` · ${(agent as AgentView).profile}` : ""}
+              </p>
+              {/* Who the agent belongs to (#7744). Read-only here: reassigning
+                  an owner is not part of this increment, and a field that
+                  looks editable but silently discards the edit is worse than
+                  no field. Unowned is rendered explicitly rather than hidden —
+                  an operator upgrading an existing deployment needs to see
+                  which agents still have nobody attached to them, and an
+                  absent row reads as "no such concept". */}
+              <p className="font-mono text-[11.5px] text-text-dim/80 truncate mt-0.5">
+                <span className="text-text-dim/60">
+                  {t("agents.detail.owner", { defaultValue: "Owner" })}:{" "}
+                </span>
+                {(agent as AgentView).owner_label ? (
+                  <span className="text-text-main">{(agent as AgentView).owner_label}</span>
+                ) : (
+                  <span
+                    title={t("agents.detail.owner_unowned_hint", {
+                      defaultValue:
+                        "Created before ownership was recorded, or created without an authenticated caller. Access falls back to the manifest's author field.",
+                    })}
+                  >
+                    {t("agents.detail.owner_unowned", { defaultValue: "unowned" })}
+                  </span>
+                )}
+                {(agent as AgentView).author ? (
+                  <span className="text-text-dim/60">
+                    {" · "}
+                    {t("agents.detail.author", { defaultValue: "author" })}:{" "}
+                    {(agent as AgentView).author}
+                  </span>
+                ) : null}
               </p>
             </div>
             {/* Action cluster — labels collapse on mobile so the row keeps
