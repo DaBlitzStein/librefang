@@ -4177,10 +4177,14 @@ export interface AgentType {
 export type AgentTypeInput = AgentType;
 
 export async function listAgentTypes(): Promise<AgentTypeSummary[]> {
-  const data = await get<PaginatedResponse<AgentTypeSummary>>(
+  // The route answers `{ templates: [...] }`, not the paginated `{ items }`
+  // shape. Reading `items` yielded `undefined` and the `?? []` turned that into
+  // an empty catalog: the page rendered blank while 34 types sat on disk, with
+  // no error anywhere to point at it.
+  const data = await get<{ templates?: AgentTypeSummary[] }>(
     "/api/agent-types",
   );
-  return data.items ?? [];
+  return data.templates ?? [];
 }
 
 export async function getAgentType(name: string): Promise<AgentType> {
