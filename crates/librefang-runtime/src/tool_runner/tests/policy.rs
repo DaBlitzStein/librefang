@@ -1158,8 +1158,24 @@ async fn test_agent_spawn_subset_capabilities_allowed() {
 /// so a tainted `system_prompt` (e.g. a tool result carrying a credential)
 /// seeded the ephemeral worker's system prompt without crossing the taint
 /// boundary the permanent-spawn branch enforces. Both branches must reject.
+///
+/// The fix now lives *above* the branch rather than inside it: #7875 rebuilt
+/// the ephemeral path on the kernel's spawn engine and hoisted the `name` and
+/// `system_prompt` taint screens to the top of `tool_agent_spawn`, so one copy
+/// covers both shapes. That is what this test pins — delete the hoisted screen
+/// and the ephemeral request below reaches `spawn_ephemeral_worker` with the
+/// credential intact.
+///
+/// `name` is supplied because the schema marks it required for both shapes (an
+/// ephemeral spawn uses it as the mission label). Omitting it fails on the
+/// missing parameter before the taint gate, which proves nothing either way.
 #[tokio::test]
 async fn test_agent_spawn_ephemeral_rejects_tainted_system_prompt() {
+    // `tool_agent_spawn_ephemeral` parses the caller id as a UUID, so a
+    // placeholder string would abort both halves below before the spawn engine
+    // and hide whether the taint gate is on the path at all.
+    const PARENT: &str = "3f2a6c1e-9b47-4d8a-8f01-2c5e7a9d4b60";
+
     let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
         should_fail_escalation: false,
     });
@@ -1168,12 +1184,13 @@ async fn test_agent_spawn_ephemeral_rejects_tainted_system_prompt() {
         "agent_spawn",
         &serde_json::json!({
             "ephemeral": true,
+            "name": "ticket-summariser",
             "message": "summarise the ticket",
             "system_prompt": "You are a helper. Use api_key=sk-live-AbCdEf0123456789 when calling the API.",
         }),
         Some(&kernel),
         None,
-        Some("parent-agent-id"),
+        Some(PARENT),
         None,
         None,
         None,
@@ -1212,19 +1229,24 @@ async fn test_agent_spawn_ephemeral_rejects_tainted_system_prompt() {
     );
 
     // Control: the identical spawn with a clean system_prompt gets past the
-    // taint gate (it then fails on the mock kernel's unimplemented
-    // `spawn_ephemeral`, which is a different error).
+    // taint gate and travels the whole ephemeral path, failing only on the
+    // mock kernel's unimplemented `spawn_ephemeral` — which is what makes the
+    // rejection above attributable to the gate rather than to some earlier
+    // parameter check. The parent id is a real UUID here for the same reason:
+    // `tool_agent_spawn_ephemeral` parses it, and a non-UUID would stop the
+    // control short of the spawn engine and prove nothing about reachability.
     let clean = execute_tool(
         "test-id",
         "agent_spawn",
         &serde_json::json!({
             "ephemeral": true,
+            "name": "ticket-summariser",
             "message": "summarise the ticket",
             "system_prompt": "You are a helper.",
         }),
         Some(&kernel),
         None,
-        Some("parent-agent-id"),
+        Some(PARENT),
         None,
         None,
         None,
@@ -1254,6 +1276,13 @@ async fn test_agent_spawn_ephemeral_rejects_tainted_system_prompt() {
     assert!(
         !clean.content.contains("Taint violation"),
         "Clean system_prompt must not trip the taint gate, got: {}",
+        clean.content
+    );
+    assert!(
+        clean.content.contains("spawn_ephemeral"),
+        "the clean request must reach the kernel's spawn engine and stop only there; anything \
+         else means the tainted request above was rejected by an earlier check and this test no \
+         longer covers the taint gate. Got: {}",
         clean.content
     );
 }

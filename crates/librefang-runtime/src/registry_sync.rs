@@ -919,7 +919,13 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// The fan-out must reach the agent-template pre-install through the shared resolver, not its own `join("agents")`, so a missing directory is reported once rather than skipping the block in silence (#7767).
+    /// The fan-out must reach the agent-type pre-install through the shared resolver, not its own `join("agents")`, so a missing directory is reported once rather than skipping the block in silence (#7767).
+    ///
+    /// The fixture uses the registry's *legacy* `agents/` directory name on purpose: that is the case an ad-hoc `join("agent-types")` would silently drop, so resolving it is what proves the shared resolver — and its legacy fallback — is on the path.
+    ///
+    /// The destination is the installed agent-types store, not `workspaces/agents/`.
+    /// #7758 moved it there: the old destination is where *deployed* agent instances live, and pre-installing registry content into it manufactured dozens of agents the operator never asked to run.
+    /// `fanout_registry_content_never_touches_deployed_agents` guards that half; this test guards that the content still lands somewhere.
     #[test]
     fn fanout_agent_templates_goes_through_the_shared_resolver() {
         let tmp = tempfile::tempdir().unwrap();
@@ -938,13 +944,15 @@ mod tests {
         fanout_registry_content(&home_dir, &registry_cache);
 
         assert!(
-            home_dir
-                .join("workspaces")
-                .join("agents")
-                .join("hello-world")
-                .join("agent.toml")
+            librefang_types::registry_paths::installed_agent_types_dir(&home_dir)
+                .join("hello-world.toml")
                 .exists(),
-            "a resolved agents directory pre-installs its templates",
+            "a resolved agents directory pre-installs its types into the canonical store, \
+             flattened to `<name>.toml`",
+        );
+        assert!(
+            !home_dir.join("workspaces").join("agents").exists(),
+            "and never into `workspaces/agents/`, which holds deployed instances (#7758)",
         );
     }
 
@@ -963,8 +971,17 @@ mod tests {
 
         fanout_registry_content(&home_dir, &registry_cache);
 
+        // Asserted against the store the fan-out actually writes to (#7758).
+        // Pointing this at `workspaces/agents/` instead would hold whatever the
+        // fan-out did, since nothing writes there any more.
+        let agent_types_dest =
+            librefang_types::registry_paths::installed_agent_types_dir(&home_dir);
         assert!(
-            !home_dir.join("workspaces").join("agents").exists(),
+            !agent_types_dest.exists()
+                || std::fs::read_dir(&agent_types_dest)
+                    .unwrap()
+                    .next()
+                    .is_none(),
             "nothing is pre-installed when the directory cannot be resolved",
         );
     }

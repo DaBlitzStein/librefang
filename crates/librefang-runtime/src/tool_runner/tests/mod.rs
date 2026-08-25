@@ -879,6 +879,9 @@ struct DispatchCapture {
     /// When set, `run_workflow` answers with the nesting-depth refusal the kernel raises past `max_agent_call_depth` (refs #6659) instead of the trait's default "workflow engine unavailable".
     /// Lets a test drive `tool_workflow_run`'s error mapping without a real kernel.
     deny_workflow_run: bool,
+    /// When set, `create_workflow` answers with the `InvalidInput` a breached resource ceiling produces kernel-side (refs #6943), instead of the trait's default "workflow engine unavailable".
+    /// Lets a test drive `tool_workflow_create`'s error mapping without a real kernel — the ceilings themselves live in `build_created_workflow`, which this crate cannot reach without depending on the kernel.
+    workflow_create_breaches_ceiling: bool,
 }
 
 #[async_trait::async_trait]
@@ -1136,6 +1139,26 @@ impl WorkflowRunner for DispatchCapture {
                 "Nested workflow run depth exceeded (max 5); this run is already 5 agent turns \
                  deep."
                     .to_string(),
+            ));
+        }
+        Err(librefang_kernel_handle::KernelOpError::unavailable(
+            "Workflow engine",
+        ))
+    }
+
+    async fn create_workflow(
+        &self,
+        _spec: &serde_json::Value,
+        _caller_agent_id: Option<&str>,
+    ) -> Result<librefang_kernel_handle::WorkflowSummary, librefang_kernel_handle::KernelOpError>
+    {
+        self.calls.lock().unwrap().push("create_workflow".into());
+        if self.workflow_create_breaches_ceiling {
+            // Wording mirrors `build_created_workflow`'s real rejection so a
+            // test can assert the ceiling reaches the model, not just that
+            // *some* string did.
+            return Err(librefang_kernel_handle::KernelOpError::InvalidInput(
+                "a workflow may declare at most 50 steps, got 51".to_string(),
             ));
         }
         Err(librefang_kernel_handle::KernelOpError::unavailable(
@@ -1610,18 +1633,33 @@ async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
     );
 }
 
-// ── workflow_create resource-cap tests (#6943 review) ──────────────────────
+// ── workflow_create ceiling-relay tests (#6943, now enforced kernel-side) ──
 //
-// `workflow_create` is always-native (`ALWAYS_NATIVE_TOOLS`), so every
-// agent has it without configuration. Neither the tool's JSON schema nor
-// the workflow engine capped step count or timeouts before this fix — a
-// schema `maxItems` is advisory only and a model can ignore it. These tests
-// drive `tool_workflow_create` directly and assert the handler itself
-// rejects an oversized request before ever reaching the kernel (the
-// `DispatchCapture` stub's default `create_workflow` always errors with
-// "unavailable", so reaching it would surface as `ToolError::Upstream`
-// instead of `InvalidParameter` — that distinction is what proves the cap
-// is enforced pre-dispatch, not merely documented in the schema).
+// `workflow_create` is always-native (`ALWAYS_NATIVE_TOOLS`), so every agent
+// has it without configuration, and the resource ceilings #6943 added are the
+// only thing between a model and a ten-thousand-step workflow — a schema
+// `maxItems` is advisory and a model can ignore it.
+//
+// Those ceilings are no longer enforced in this crate. `tool_workflow_create`
+// is deliberately thin: it checks only what it can name a parameter for
+// (`name`, `steps`) and forwards the whole spec to the kernel, which owns name
+// legality, the ceilings, `Workflow::validate()` and the atomic name
+// reservation. See the handler's doc comment for why keeping a second copy on
+// this side is exactly how the schema and the enforced rule drift apart.
+//
+// The cap *values* are asserted where they are now enforced, in
+// `librefang_kernel::kernel::handles::workflow_runner::tests` —
+// `build_created_workflow_caps_the_step_count` (50, inclusive) and
+// `build_created_workflow_caps_both_timeouts` (3600s per step, 86400s total),
+// against the `MAX_CREATED_*` constants themselves. The three tests that used
+// to live here and assert those numbers a second time were replaced by the two
+// below.
+//
+// What is still this crate's job is the *relay*. A breached ceiling comes back
+// as `KernelOpError::InvalidInput`, and the model only learns which limit it
+// broke if that reaches it as an `InvalidParameter` carrying the kernel's
+// reason. Flattened into `ToolError::Upstream` it reads as a downstream crash,
+// and a model that cannot see the ceiling just retries the same payload.
 
 fn workflow_create_step(name: &str) -> serde_json::Value {
     serde_json::json!({
@@ -1632,88 +1670,108 @@ fn workflow_create_step(name: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn workflow_create_rejects_too_many_steps() {
-    let kernel: Arc<dyn KernelHandle> = Arc::new(DispatchCapture::default());
-    let steps: Vec<serde_json::Value> = (0..51)
-        .map(|i| workflow_create_step(&format!("step-{i}")))
-        .collect();
+async fn workflow_create_relays_a_kernel_ceiling_breach_as_invalid_parameter() {
+    let kernel: Arc<dyn KernelHandle> = Arc::new(DispatchCapture {
+        workflow_create_breaches_ceiling: true,
+        ..Default::default()
+    });
     let input = serde_json::json!({
         "name": "too-many-steps",
-        "steps": steps,
+        "steps": [workflow_create_step("only-step")],
     });
 
     let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
         .await
-        .expect_err("51 steps must be rejected");
+        .expect_err("a ceiling breach must surface as an error");
     match &err {
         ToolError::InvalidParameter { name, reason } => {
-            assert_eq!(*name, "steps");
+            assert_eq!(
+                *name, "workflow",
+                "the kernel's reason already names the offending field, so the relay must not \
+                 pin the error to one schema parameter that may not be the one at fault"
+            );
             assert!(
                 reason.contains("50"),
-                "reason should mention the cap: {reason}"
+                "the kernel's reason must survive intact so the model learns which ceiling it \
+                 broke, got: {reason}"
             );
         }
-        other => panic!("expected InvalidParameter, got {other:?}"),
+        other => panic!(
+            "expected InvalidParameter (a fixable payload); Upstream would read as a downstream \
+             crash and invite a retry of the same oversized spec. Got {other:?}"
+        ),
     }
 }
 
+/// The handler must keep no second copy of the step ceiling: both a spec at the
+/// cap and one over it have to reach the kernel, which is the only side that
+/// can decide. A local pre-check would pass today and silently diverge the
+/// first time the kernel's `MAX_CREATED_WORKFLOW_STEPS` moves.
 #[tokio::test]
-async fn workflow_create_accepts_step_count_at_the_cap() {
-    let kernel: Arc<dyn KernelHandle> = Arc::new(DispatchCapture::default());
-    let steps: Vec<serde_json::Value> = (0..50)
-        .map(|i| workflow_create_step(&format!("step-{i}")))
-        .collect();
-    let input = serde_json::json!({
-        "name": "exactly-at-cap",
-        "steps": steps,
-    });
+async fn workflow_create_keeps_no_local_copy_of_the_step_ceiling() {
+    for step_count in [50usize, 51] {
+        let capture = Arc::new(DispatchCapture::default());
+        let kernel: Arc<dyn KernelHandle> = capture.clone();
+        let steps: Vec<serde_json::Value> = (0..step_count)
+            .map(|i| workflow_create_step(&format!("step-{i}")))
+            .collect();
+        let input = serde_json::json!({
+            "name": "step-count-probe",
+            "steps": steps,
+        });
 
-    // The default `DispatchCapture::create_workflow` stub always errors
-    // with "unavailable" — reaching that (an `Upstream` error) rather than
-    // an `InvalidParameter` proves 50 steps cleared the cap check.
-    let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
-        .await
-        .expect_err("stub kernel has no workflow engine");
-    assert!(
-        matches!(err, ToolError::Upstream { .. }),
-        "50 steps must pass validation and reach the kernel, got {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn workflow_create_rejects_step_timeout_over_the_ceiling() {
-    let kernel: Arc<dyn KernelHandle> = Arc::new(DispatchCapture::default());
-    let mut step = workflow_create_step("only-step");
-    step["timeout_secs"] = serde_json::json!(60 * 60 + 1);
-    let input = serde_json::json!({
-        "name": "step-timeout-too-long",
-        "steps": [step],
-    });
-
-    let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
-        .await
-        .expect_err("a step timeout over 3600s must be rejected");
-    match &err {
-        ToolError::InvalidParameter { name, .. } => assert_eq!(*name, "steps"),
-        other => panic!("expected InvalidParameter, got {other:?}"),
+        // The default `DispatchCapture::create_workflow` stub always errors
+        // with "unavailable", so an `Upstream` error is what reaching the
+        // kernel looks like from here.
+        let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
+            .await
+            .expect_err("the stub kernel has no workflow engine");
+        assert!(
+            matches!(err, ToolError::Upstream { .. }),
+            "{step_count} steps must be forwarded, not judged locally, got {err:?}"
+        );
+        assert_eq!(
+            capture.calls.lock().unwrap().as_slice(),
+            ["create_workflow"],
+            "{step_count} steps must actually reach the kernel"
+        );
     }
 }
 
+/// Both timeout ceilings are likewise the kernel's to enforce: an over-ceiling
+/// `timeout_secs` / `total_timeout_secs` must be forwarded rather than rejected
+/// here, for the same reason as the step count above.
 #[tokio::test]
-async fn workflow_create_rejects_total_timeout_over_the_ceiling() {
-    let kernel: Arc<dyn KernelHandle> = Arc::new(DispatchCapture::default());
-    let input = serde_json::json!({
-        "name": "total-timeout-too-long",
-        "steps": [workflow_create_step("only-step")],
-        "total_timeout_secs": 24 * 60 * 60 + 1,
-    });
+async fn workflow_create_keeps_no_local_copy_of_the_timeout_ceilings() {
+    let mut over_ceiling_step = workflow_create_step("only-step");
+    over_ceiling_step["timeout_secs"] = serde_json::json!(60 * 60 + 1);
+    let specs = [
+        serde_json::json!({
+            "name": "step-timeout-too-long",
+            "steps": [over_ceiling_step],
+        }),
+        serde_json::json!({
+            "name": "total-timeout-too-long",
+            "steps": [workflow_create_step("only-step")],
+            "total_timeout_secs": 24 * 60 * 60 + 1,
+        }),
+    ];
 
-    let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
-        .await
-        .expect_err("a total_timeout_secs over 86400s must be rejected");
-    match &err {
-        ToolError::InvalidParameter { name, .. } => assert_eq!(*name, "total_timeout_secs"),
-        other => panic!("expected InvalidParameter, got {other:?}"),
+    for input in specs {
+        let capture = Arc::new(DispatchCapture::default());
+        let kernel: Arc<dyn KernelHandle> = capture.clone();
+        let err = super::workflow::tool_workflow_create(&input, Some(&kernel), Some("agent-1"))
+            .await
+            .expect_err("the stub kernel has no workflow engine");
+        assert!(
+            matches!(err, ToolError::Upstream { .. }),
+            "an over-ceiling timeout must be forwarded, not judged locally, got {err:?}"
+        );
+        assert_eq!(
+            capture.calls.lock().unwrap().as_slice(),
+            ["create_workflow"],
+            "the spec must actually reach the kernel"
+        );
     }
 }
 
