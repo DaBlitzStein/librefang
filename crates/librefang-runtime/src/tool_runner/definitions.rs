@@ -361,10 +361,6 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "ephemeral": {
-                            "type": "boolean",
-                            "description": "When true, spawn a temporary worker that runs the task and returns the result directly. No workspace, no DB persistence. When false (default), spawn a permanent agent."
-                        },
                         "name": {
                             "type": "string",
                             "description": "Permanent: unique name for the new agent — ensure it does not conflict with existing agents. Ephemeral: a short label for the mission (e.g. \"research\"); it does not have to be unique and a uid suffix is appended for you."
