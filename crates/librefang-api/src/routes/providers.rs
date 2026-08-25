@@ -303,6 +303,30 @@ pub async fn list_models(
             tracing::warn!(%error, "EveryAPI live catalog unavailable; using registered snapshot");
         }
     }
+    // Live discovery for operator-defined OpenAI-compatible gateways
+    // (litellm, a self-hosted vLLM/llama.cpp proxy under its own provider
+    // id, …) — refs #7775. `custom_gateway_catalog::refresh_if_stale` is a
+    // cheap no-op for any provider outside its scope (registry-known ids,
+    // `everyapi`, a provider with no base URL / no usable auth), so it's
+    // safe to call over every candidate id without a pre-check here.
+    let custom_gateway_targets: Vec<String> = match provider_filter.as_deref() {
+        Some(provider) => vec![provider.to_string()],
+        None => state
+            .kernel
+            .model_catalog_ref()
+            .load()
+            .list_providers()
+            .iter()
+            .map(|p| p.id.clone())
+            .collect(),
+    };
+    for provider_id in &custom_gateway_targets {
+        if let Err(error) =
+            crate::custom_gateway_catalog::refresh_if_stale(&state.kernel, provider_id).await
+        {
+            tracing::warn!(%error, provider = %provider_id, "custom gateway live catalog unavailable; using checked-in snapshot");
+        }
+    }
     let cli_tier_ok = tier_filter
         .as_deref()
         .map(|t| t == "custom")
