@@ -888,6 +888,14 @@ pub fn build_reload_plan_with_caps(
             "tool_timeouts",
         );
         noop_if_changed(field_changed(&old.thinking, &new.thinking), "thinking");
+        // #7744 — read from `config_ref()` at the moment an agent is stamped,
+        // so the swapped config is the whole reload. Nothing to reapply, and
+        // deliberately nothing to backfill: already-stored owners are not
+        // revisited when this changes (see `KernelConfig::default_owner`).
+        noop_if_changed(
+            field_changed(&old.default_owner, &new.default_owner),
+            "default_owner",
+        );
         noop_if_changed(field_changed(&old.triggers, &new.triggers), "triggers");
         noop_if_changed(
             field_changed(&old.notification, &new.notification),
@@ -1043,6 +1051,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "users",
         "user_groups",
         "user_group_mapping",
+        "default_owner",
         "webui_request_timeout_secs",
         "proactive_memory",
         "queue",

@@ -149,6 +149,12 @@ impl SetupWizard {
             version: librefang_types::VERSION.to_string(),
             description: intent.description.clone(),
             author: "wizard".to_string(),
+            // The wizard builds a manifest, it does not decide who owns the
+            // agent: it has no caller identity to hand on, and the surface
+            // that spawns the result does. Stamping "wizard" here would put a
+            // tool's name where a person's belongs — exactly the confusion
+            // `owner` exists to end (#7744).
+            owner: None,
             module: "builtin:chat".to_string(),
             schedule,
             session_mode: librefang_types::agent::SessionMode::default(),

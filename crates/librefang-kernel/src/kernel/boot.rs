@@ -1075,6 +1075,27 @@ impl LibreFangKernel {
         if auth.is_enabled() {
             info!("RBAC enabled with {} users", auth.user_count());
         }
+        // #7744 — say once, at boot, what happens to agents created without a
+        // credential. The trusted loopback/no-auth path has nobody to stamp,
+        // so those agents land unowned and fall back to the self-asserted
+        // `author` string for access. That is the historical behaviour and not
+        // a fault, but it is invisible: an operator only discovers it when
+        // somebody reaches an agent they should not. Naming the configured
+        // owner in the other branch is equally load-bearing — a `default_owner`
+        // pointing at a group nobody is in silently locks every non-admin out
+        // of everything created locally, and that is far easier to spot in a
+        // startup line than in a 403.
+        match &config.default_owner {
+            Some(owner) => info!(
+                default_owner = %owner,
+                "Agents created without an authenticated caller will be owned by this principal"
+            ),
+            None => warn!(
+                "No `default_owner` configured: agents created without an authenticated caller \
+                 will be unowned and fall back to the manifest's self-declared `author` for \
+                 access checks. Set `default_owner` in config.toml to attribute them."
+            ),
+        }
         // Validate channel-role-mapping role strings at boot so operator
         // typos (e.g. `admin_role = "admn"`) surface as a WARN line at
         // startup rather than as silent default-deny on every message.

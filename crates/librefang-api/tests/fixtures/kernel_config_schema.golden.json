@@ -446,6 +446,17 @@
         }
       ]
     },
+    "default_owner": {
+      "description": "Who owns things created with no authenticated caller to attribute them to (#7744).\n\nThe daemon's trusted loopback/no-auth mode has no credential to stamp, and a deployment that runs that way still wants its agents to belong to somebody. This is the operator saying who, explicitly — not the system guessing, which is why there is no default value and why leaving it unset is a supported answer rather than a misconfiguration.\n\nApplies **only at the moment something is created**. It never retroactively reinterprets a stored record: an agent already on disk with no owner stays unowned, because a config edit that silently confiscated existing agents — revoking access from whoever the historical `author` match grants it to today — would be a worse failure than the ambiguity it set out to fix.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Principal"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "default_routing": {
       "description": "Kernel-wide Smart Model Router defaults applied to any agent whose `agent.toml` does not set its own `[routing]` block. The `init` wizard writes user-selected tier models here under `[default_routing]` so the chosen routing actually reaches the kernel — see issue #4466. Per-agent `routing` always wins when present.",
       "anyOf": [
@@ -5544,6 +5555,49 @@
           "enum": [
             "deny"
           ]
+        }
+      ]
+    },
+    "Principal": {
+      "description": "Whoever an agent was acting for when it created something.\n\nSerialised as a tagged enum so the wire form says which kind it is rather than leaving readers to guess from the shape of an opaque string:\n\n```toml [owner] kind = \"group\" id = \"support\" ```",
+      "oneOf": [
+        {
+          "description": "A named user, matching `UserConfig::name`.\n\nThe name rather than a UUID, because that is how users are addressed everywhere else in the configuration, and two identifier schemes for one entity is how references rot.",
+          "type": "object",
+          "required": [
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "user"
+              ]
+            }
+          }
+        },
+        {
+          "description": "A group, by its stable `UserGroup::id`.\n\nThe id and not the display name: a group is renamed far more often than it is dissolved, and a rename must not orphan what it owns.\n\nThis is also how a rotating duty is expressed — \"on-call\", \"compliance\" — as a group whose membership changes rather than as a kind of its own. A duty is a set of people that varies over time, which is precisely what a group already is, and giving it a second representation would mean two membership mechanisms to keep in step.",
+          "type": "object",
+          "required": [
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "group"
+              ]
+            }
+          }
         }
       ]
     },

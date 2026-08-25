@@ -1661,7 +1661,27 @@ pub struct AgentManifest {
     /// Description of what this agent does.
     pub description: String,
     /// Author identifier.
+    ///
+    /// Free text, supplied by whoever wrote the manifest, and treated as
+    /// provenance rather than authority — see [`AgentManifest::owner`] for
+    /// why the two are separate fields and which one wins.
     pub author: String,
+    /// Who this agent belongs to (#7744).
+    ///
+    /// Distinct from [`author`](Self::author), which any client can set to
+    /// any string when it posts a manifest. `owner` is stamped by the server
+    /// from the authenticated caller and is not part of the edit surface, so
+    /// it answers "whose agent is this" in a way `author` cannot: an
+    /// unauthenticated claim is not ownership, it is a label.
+    ///
+    /// `None` for every agent created before this existed, and for anything
+    /// created with no caller to attribute it to and no
+    /// `KernelConfig::default_owner` declared. Absent means unowned, not
+    /// owned-by-nobody-in-particular — and unowned agents keep falling back
+    /// to the historical `author` match for access, because a stored record
+    /// that predates ownership must not become unreachable on upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::principal::Principal>,
     /// Path to the agent module (WASM or Python file).
     pub module: String,
     /// Scheduling mode.
@@ -2220,6 +2240,7 @@ impl Default for AgentManifest {
             version: crate::VERSION.to_string(),
             description: String::new(),
             author: String::new(),
+            owner: None,
             module: "builtin:chat".to_string(),
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),
@@ -2275,6 +2296,80 @@ impl Default for AgentManifest {
             reconcile_orphans: OrphanPolicy::default(),
             async_tasks: AsyncTasksConfig::default(),
         }
+    }
+}
+
+impl AgentManifest {
+    /// Whether `user_name` may claim this agent as theirs, given the group ids
+    /// they belong to (`AuthManager::groups_for_user`).
+    ///
+    /// One function rather than an `owner`/`author` comparison repeated at
+    /// each call site, because there are nine of them across the API crate and
+    /// a rule that has to be restated nine times is a rule that will disagree
+    /// with itself. Callers that hold no group membership can pass an empty
+    /// set; that under-grants for a group-owned agent, which is the safe
+    /// direction to be wrong in.
+    ///
+    /// Three cases, in order:
+    ///
+    /// - Owned by a user — the stamped name decides, and `author` is ignored
+    ///   entirely. A client that posts `author = "someone-else"` alongside its
+    ///   own credential changes nothing here, which is the point of the field.
+    /// - Owned by a group — membership decides. Without this, recording a
+    ///   group as the owner would lock every non-admin out of the agent,
+    ///   making `Principal::Group` a way to lose an agent rather than to share
+    ///   one.
+    /// - Unowned — fall back to the historical `author` string match. Agents
+    ///   that predate ownership must keep working, and the fallback is no
+    ///   weaker than what it replaces because it *is* what it replaces.
+    pub fn is_owned_by(
+        &self,
+        user_name: &str,
+        group_ids: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        match &self.owner {
+            Some(crate::principal::Principal::User(name)) => name.eq_ignore_ascii_case(user_name),
+            // Group ids compare exactly, unlike user names: both sides come
+            // from `config.toml` declarations rather than from a login form,
+            // and `AuthManager` already keys its group map on the exact id.
+            Some(crate::principal::Principal::Group(id)) => group_ids.contains(id),
+            None => self.author.eq_ignore_ascii_case(user_name),
+        }
+    }
+
+    /// Whether this agent matches an `?owner=` list filter.
+    ///
+    /// Accepts the qualified `kind:id` form that [`Principal::label`] emits
+    /// (`user:paco`, `group:support`) so a caller can ask for exactly one
+    /// principal, and a bare name for the unqualified case, which keeps the
+    /// pre-existing `?owner=<name>` contract working. A bare name matches a
+    /// user principal or, for an unowned agent, the legacy `author` string —
+    /// the same two things `is_owned_by` accepts, so list and detail cannot
+    /// disagree about whose agent it is.
+    ///
+    /// [`Principal::label`]: crate::principal::Principal::label
+    pub fn matches_owner_filter(&self, filter: &str) -> bool {
+        if let Some(id) = filter.strip_prefix("group:") {
+            return matches!(&self.owner, Some(crate::principal::Principal::Group(g)) if g == id);
+        }
+        let name = filter.strip_prefix("user:").unwrap_or(filter);
+        match &self.owner {
+            Some(crate::principal::Principal::User(owner)) => owner.eq_ignore_ascii_case(name),
+            Some(crate::principal::Principal::Group(_)) => false,
+            // Unowned: the filter falls through to provenance, because that is
+            // the only attribution such an agent has.
+            None => !filter.starts_with("user:") && self.author.eq_ignore_ascii_case(name),
+        }
+    }
+
+    /// A short human-facing owner label (`user:paco`, `group:support`) for the
+    /// read surfaces, or `None` when the agent is unowned.
+    ///
+    /// Deliberately does not fall back to `author`: the surfaces must be able
+    /// to show "unowned" as a distinct state, or an operator can never tell
+    /// which agents still need attributing.
+    pub fn owner_label(&self) -> Option<String> {
+        self.owner.as_ref().map(|o| o.label())
     }
 }
 

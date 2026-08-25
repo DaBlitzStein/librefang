@@ -505,6 +505,27 @@ impl LibreFangKernel {
         }
         new_manifest.name = entry.manifest.name.clone();
 
+        // #7744 — ownership is not part of the edit surface.
+        //
+        // This is a whole-manifest replacement, so every field the caller
+        // sends lands verbatim. `owner` is a field on `AgentManifest` and
+        // therefore expressible in the `manifest_toml` a client posts to
+        // `PATCH /api/agents/{id}` — which would let anyone permitted to edit
+        // an agent reassign it, to themselves or to a group they are in. That
+        // is a bigger grant than editing: the edit rights would become the
+        // right to take the thing being edited.
+        //
+        // Overwritten unconditionally rather than only when the incoming value
+        // is `None`, which is the same treatment `name` gets two lines up and
+        // for the same reason: a field the caller cannot legitimately set must
+        // not be honoured when they set it anyway. Filling in only the absent
+        // case would let an explicit owner through, so the attempt would
+        // succeed precisely when it was deliberate.
+        //
+        // Enforced here rather than in the route so it holds for every caller
+        // of `update_manifest`, not only the HTTP one.
+        new_manifest.owner = entry.manifest.owner.clone();
+
         // Tags: unlike name (which has no dedicated rename API), tags now
         // have one — `AgentRegistry::update_tags` (#7742). Route a change
         // through it BEFORE `replace_manifest` so `entry.tags` and the

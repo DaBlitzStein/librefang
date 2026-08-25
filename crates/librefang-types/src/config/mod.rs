@@ -1940,6 +1940,12 @@ admin_role = "admin"
             version,
             description,
             author,
+            // Not an override of `default_owner` despite the resemblance:
+            // that config field is the fallback used when *stamping* a new
+            // agent, not a global default an agent restates. `owner` is
+            // stamped from the authenticated caller and preserved across
+            // edits, so it is identity, not settings.
+            owner,
             module,
             schedule,
             session_mode,

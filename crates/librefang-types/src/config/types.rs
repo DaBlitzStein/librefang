@@ -3676,6 +3676,23 @@ pub struct KernelConfig {
     /// nothing.
     #[serde(default, skip_serializing_if = "UserGroupMapping::is_empty")]
     pub user_group_mapping: UserGroupMapping,
+    /// Who owns things created with no authenticated caller to attribute them
+    /// to (#7744).
+    ///
+    /// The daemon's trusted loopback/no-auth mode has no credential to stamp,
+    /// and a deployment that runs that way still wants its agents to belong to
+    /// somebody. This is the operator saying who, explicitly — not the system
+    /// guessing, which is why there is no default value and why leaving it
+    /// unset is a supported answer rather than a misconfiguration.
+    ///
+    /// Applies **only at the moment something is created**. It never
+    /// retroactively reinterprets a stored record: an agent already on disk
+    /// with no owner stays unowned, because a config edit that silently
+    /// confiscated existing agents — revoking access from whoever the
+    /// historical `author` match grants it to today — would be a worse
+    /// failure than the ambiguity it set out to fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_owner: Option<crate::principal::Principal>,
     /// Maps platform-native channel roles (Telegram admin, Discord guild
     /// roles, Slack workspace roles) to LibreFang `UserRole`. Used by
     /// `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role`
@@ -6706,6 +6723,7 @@ impl Default for KernelConfig {
             users: Vec::new(),
             user_groups: Vec::new(),
             user_group_mapping: UserGroupMapping::default(),
+            default_owner: None,
             channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
             mcp_runtime_store: McpRuntimeStore::default(),

@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 /// kind = "group"
 /// id = "support"
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum Principal {
     /// A named user, matching `UserConfig::name`.

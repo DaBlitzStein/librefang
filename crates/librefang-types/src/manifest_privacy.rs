@@ -139,6 +139,16 @@ pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
         "author",
         FieldClass::Stripped(PrivacyCategory::OperatorMetadata),
     ),
+    // `owner` names a user or a group of *this* deployment (#7744). It is
+    // operator metadata for the same reason `author` is, and less portable
+    // still: an identifier that means something here means somebody else, or
+    // nobody, at whatever deployment imports the manifest. The importer stamps
+    // its own owner from its own authenticated caller, so carrying this one
+    // could only mislead.
+    (
+        "owner",
+        FieldClass::Stripped(PrivacyCategory::OperatorMetadata),
+    ),
     ("module", FieldClass::Portable),
     ("schedule", FieldClass::Portable),
     ("session_mode", FieldClass::Portable),
@@ -277,6 +287,7 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         version,
         description,
         author: _,
+        owner: _,
         module,
         schedule,
         session_mode,
@@ -340,6 +351,12 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         version,
         description,
         author: String::new(),
+        // Dropped for the same reason as `author`, and more urgently: an
+        // owner is an authorization fact about *this* deployment. Carried
+        // into a published manifest it would arrive at the importing
+        // deployment as a claim on a user or group name that means something
+        // different there, or nothing at all. The importer stamps its own.
+        owner: None,
         module,
         schedule,
         session_mode,
@@ -1133,6 +1150,9 @@ mod tests {
             description: "Reads sources and writes briefs.".to_string(),
             module: "builtin:chat".to_string(),
             author: "jane.doe@acme-internal.example".to_string(),
+            owner: Some(crate::principal::Principal::Group(
+                "acme-internal-platform-team".to_string(),
+            )),
             workspace: Some(PathBuf::from(
                 "/Users/janedoe/.librefang/workspaces/researcher-a1b2",
             )),
@@ -1225,7 +1245,7 @@ mod tests {
         manifest
     }
 
-    /// A manifest with every top-level `skip_serializing_if` field populated, so serializing it emits all 58 `AgentManifest` keys.
+    /// A manifest with every top-level `skip_serializing_if` field populated, so serializing it emits all 59 `AgentManifest` keys.
     /// Used only by the classification-coverage test.
     fn fully_populated_manifest() -> AgentManifest {
         let mut manifest = leaky_manifest();
@@ -1234,6 +1254,7 @@ mod tests {
             manifest.fallback_models.is_some()
                 && manifest.tool_exec_backend.is_some()
                 && manifest.context_engine.is_some()
+                && manifest.owner.is_some()
                 && !manifest.triggers.is_empty(),
             "fixture must populate every field carrying skip_serializing_if"
         );
@@ -1379,6 +1400,29 @@ mod tests {
         let json = rendered(&publishable);
         assert!(!json.contains("SENTINEL_RUNBOOK"));
         assert!(!json.contains("oncall@acme-internal.example"));
+    }
+
+    /// `owner` names a principal of the deployment the manifest came from, so
+    /// it must not ride along to another one (#7744). Asserted separately from
+    /// the `author` case because they are stripped for related but distinct
+    /// reasons — `author` leaks who a person is, `owner` leaks an
+    /// authorization fact that would be a false claim anywhere else.
+    #[test]
+    fn owner_does_not_survive_promotion() {
+        let leaky = leaky_manifest();
+        assert!(
+            leaky.owner.is_some(),
+            "the fixture must be owned, or this test proves nothing"
+        );
+
+        let publishable = sanitize_for_publication(&leaky);
+        assert_eq!(publishable.owner, None);
+
+        let rendered = rendered(&publishable);
+        assert!(
+            !rendered.contains("acme-internal-platform-team"),
+            "the owning group's id reached the published manifest: {rendered}"
+        );
     }
 
     #[test]
