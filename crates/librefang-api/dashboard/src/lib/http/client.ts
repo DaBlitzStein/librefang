@@ -24,6 +24,7 @@ export {
   listAgentEvents,
   listAgentSessions,
   listAgentTemplates,
+  getAgentType,
   listPromptVersions,
   listPromptsOverview,
   listExperiments,
@@ -44,6 +45,7 @@ export {
   // config & registry
   getFullConfig,
   getConfigSchema,
+  getConfigStatus,
   fetchRegistrySchema,
   getRawConfigToml,
   // goals
@@ -188,6 +190,9 @@ export type {
 // ---------------------------------------------------------------------------
 export {
   // agents
+  createAgentType,
+  updateAgentType,
+  deleteAgentType,
   spawnAgent,
   cloneAgent,
   stopAgent,
