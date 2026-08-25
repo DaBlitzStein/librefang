@@ -916,6 +916,7 @@ function DashboardApp() {
   const navLayout = useUIStore((s) => s.navLayout);
   const collapsedNavGroups = useUIStore((s) => s.collapsedNavGroups);
   const toggleNavGroup = useUIStore((s) => s.toggleNavGroup);
+  const pruneCollapsedNavGroups = useUIStore((s) => s.pruneCollapsedNavGroups);
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
   const [authNeeded, setAuthNeeded] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
@@ -1110,6 +1111,10 @@ function DashboardApp() {
       },
     ];
   }, [t, terminalEnabled]);
+
+  useEffect(() => {
+    pruneCollapsedNavGroups(new Set(navGroups.map((group) => group.key)));
+  }, [navGroups, pruneCollapsedNavGroups]);
 
   const currentPageLabel = useMemo(() => {
     const current = navGroups
