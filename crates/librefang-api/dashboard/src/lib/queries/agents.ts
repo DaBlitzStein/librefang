@@ -17,6 +17,7 @@ import {
   getAgentTools,
   getAgentSkills,
   getAgentTokenUsage,
+  getAgentMcpServers,
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -143,6 +144,12 @@ export const agentQueries = {
       queryFn: () => getAgentChannels(agentId),
       enabled: !!agentId,
     }),
+  agentMcpServers: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.mcpServers(agentId),
+      queryFn: () => getAgentMcpServers(agentId),
+      enabled: !!agentId,
+    }),
   toolsList: () =>
     queryOptions({
       queryKey: toolKeys.list(),
@@ -211,6 +218,10 @@ export function useAgentManifest(agentId: string, options: QueryOverrides = {}) 
 
 export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.channels(agentId), options));
+}
+
+export function useAgentMcpServers(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.agentMcpServers(agentId), options));
 }
 
 /** What this agent costs: injected footprint plus its recent calls.

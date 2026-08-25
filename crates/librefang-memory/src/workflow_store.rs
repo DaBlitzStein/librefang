@@ -22,7 +22,13 @@ pub struct WorkflowRunRow {
     pub id: String,
     pub workflow_id: String,
     pub workflow_name: String,
-    /// The agent that initiated the run (billed owner), if any.
+    /// #7714: the agent that asked for this run, when there was one — the
+    /// billed owner.
+    ///
+    /// A property of the run rather than of whichever agent executes a step,
+    /// so two owners driving the same shared step-agent type keep their
+    /// attribution apart. `None` for operator-initiated runs with no calling
+    /// agent, and for every row written before schema v48.
     pub owner_agent_id: Option<String>,
     pub state: String,
     pub input: String,
@@ -248,18 +254,20 @@ impl WorkflowStore {
                     id, workflow_id, workflow_name, state, input, output, error,
                     resume_token, pause_reason, paused_at, paused_step_index,
                     paused_variables, paused_current_input,
-                    step_results, started_at, completed_at, created_at, total_steps
+                    step_results, started_at, completed_at, created_at,
+                    owner_agent_id, total_steps
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11,
                     ?12, ?13,
-                    ?14, ?15, ?16, ?17, ?18
+                    ?14, ?15, ?16, ?17, ?18, ?19
                 ) ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
                     output = excluded.output,
                     error = excluded.error,
                     step_results = excluded.step_results,
                     completed_at = excluded.completed_at,
+                    owner_agent_id = excluded.owner_agent_id,
                     total_steps = excluded.total_steps",
                 rusqlite::params![
                     row.id,
@@ -279,6 +287,7 @@ impl WorkflowStore {
                     row.started_at,
                     row.completed_at,
                     row.created_at,
+                    row.owner_agent_id,
                     row.total_steps,
                 ],
             )
@@ -369,6 +378,56 @@ mod tests {
             completed_at: None,
             created_at: "2026-05-06T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn owner_agent_id_round_trips_and_survives_updates() {
+        // #7714: the owner is stamped once when the run is created and must
+        // still be there after the state transitions that follow, because
+        // every later write goes through the same `upsert_run` ON CONFLICT
+        // path and that clause deliberately does not reassign the owner.
+        let store = in_memory_store();
+        let mut row = sample_row("run-owned", "pending");
+        row.owner_agent_id = Some("11111111-1111-4111-8111-111111111111".to_string());
+        store.upsert_run(&row).unwrap();
+
+        let loaded = store.get_run("run-owned").unwrap().expect("row must exist");
+        assert_eq!(
+            loaded.owner_agent_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111"),
+            "the owner must round-trip through the store"
+        );
+
+        // A later state transition writes the row again. Real callers rebuild
+        // the row from the live run, but a caller that lost the owner must not
+        // be able to blank it out.
+        let mut finished = sample_row("run-owned", "completed");
+        finished.owner_agent_id = None;
+        store.upsert_run(&finished).unwrap();
+
+        let reloaded = store.get_run("run-owned").unwrap().expect("row must exist");
+        assert_eq!(
+            reloaded.state, "completed",
+            "the state transition must land"
+        );
+        assert_eq!(
+            reloaded.owner_agent_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111"),
+            "an update must not clear the owner recorded at creation"
+        );
+    }
+
+    #[test]
+    fn ownerless_run_round_trips_as_none() {
+        // An operator-initiated run has no calling agent. That must read back
+        // as "no owner" rather than as a synthetic or empty-string owner,
+        // because downstream billing distinguishes the two.
+        let store = in_memory_store();
+        store
+            .upsert_run(&sample_row("run-plain", "running"))
+            .unwrap();
+        let loaded = store.get_run("run-plain").unwrap().expect("row must exist");
+        assert_eq!(loaded.owner_agent_id, None);
     }
 
     #[test]

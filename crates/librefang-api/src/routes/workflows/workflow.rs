@@ -32,23 +32,9 @@ pub async fn create_workflow(
     let mut steps = Vec::new();
     for s in steps_json {
         let step_name = s["name"].as_str().unwrap_or("step").to_string();
-        let agent = if let Some(id) = s["agent_id"].as_str() {
-            StepAgent::ById { id: id.to_string() }
-        } else if let Some(name) = s["agent_name"].as_str() {
-            StepAgent::ByName {
-                name: name.to_string(),
-            }
-        } else if let Some(t) = s["type"].as_str() {
-            StepAgent::ByType {
-                template: t.to_string(),
-                fresh: s["fresh"].as_bool().unwrap_or(false),
-            }
-        } else {
-            return ApiErrorResponse::bad_request(format!(
-                "Step '{}' needs 'agent_id', 'agent_name', or 'type'",
-                step_name
-            ))
-            .into_json_tuple();
+        let agent = match parse_step_agent(s, &step_name) {
+            Ok(agent) => agent,
+            Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
         };
 
         let mode = parse_step_mode(&s["mode"], s);
@@ -63,16 +49,13 @@ pub async fn create_workflow(
             })
             .unwrap_or_default();
 
+        let required_skills = match parse_required_skills(s, &step_name) {
+            Ok(v) => v,
+            Err(e) => return ApiErrorResponse::bad_request(e).into_json_tuple(),
+        };
+
         steps.push(WorkflowStep {
             name: step_name,
-            required_skills: s["required_skills"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
             agent,
             prompt_template: s["prompt"].as_str().unwrap_or("{{input}}").to_string(),
             mode,
@@ -82,6 +65,7 @@ pub async fn create_workflow(
             inherit_context: s["inherit_context"].as_bool(),
             depends_on,
             session_mode: parse_step_session_mode(s),
+            required_skills,
         });
     }
 
@@ -350,25 +334,9 @@ pub async fn update_workflow(
         let mut parsed_steps = Vec::new();
         for s in steps_json {
             let step_name = s["name"].as_str().unwrap_or("step").to_string();
-            let agent = if let Some(aid) = s["agent_id"].as_str() {
-                StepAgent::ById {
-                    id: aid.to_string(),
-                }
-            } else if let Some(aname) = s["agent_name"].as_str() {
-                StepAgent::ByName {
-                    name: aname.to_string(),
-                }
-            } else if let Some(t) = s["type"].as_str() {
-                StepAgent::ByType {
-                    template: t.to_string(),
-                    fresh: s["fresh"].as_bool().unwrap_or(false),
-                }
-            } else {
-                return ApiErrorResponse::bad_request(format!(
-                    "Step '{}' needs 'agent_id', 'agent_name', or 'type'",
-                    step_name
-                ))
-                .into_json_tuple();
+            let agent = match parse_step_agent(s, &step_name) {
+                Ok(agent) => agent,
+                Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
             };
 
             let mode = parse_step_mode(&s["mode"], s);
@@ -383,16 +351,13 @@ pub async fn update_workflow(
                 })
                 .unwrap_or_default();
 
+            let required_skills = match parse_required_skills(s, &step_name) {
+                Ok(v) => v,
+                Err(e) => return ApiErrorResponse::bad_request(e).into_json_tuple(),
+            };
+
             parsed_steps.push(WorkflowStep {
                 name: step_name,
-                required_skills: s["required_skills"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
                 agent,
                 prompt_template: s["prompt"].as_str().unwrap_or("{{input}}").to_string(),
                 mode,
@@ -402,6 +367,7 @@ pub async fn update_workflow(
                 inherit_context: s["inherit_context"].as_bool(),
                 depends_on,
                 session_mode: parse_step_session_mode(s),
+                required_skills,
             });
         }
         parsed_steps
@@ -554,34 +520,7 @@ fn spawn_background_run(
             .workflow_engine()
             .execute_run(
                 run_id,
-                move |agent_ref| -> librefang_kernel::workflow::StepAgentResolution {
-                    use librefang_kernel::workflow::{StepAgent, StepAgentError};
-                    match agent_ref {
-                        StepAgent::ById { id } => {
-                            let agent_id: librefang_types::agent::AgentId =
-                                id.parse().map_err(|_| StepAgentError::NotFound)?;
-                            let entry = state_for_resolver
-                                .kernel
-                                .agent_registry()
-                                .get(agent_id)
-                                .ok_or(StepAgentError::NotFound)?;
-                            let inherit = entry.manifest.inherit_parent_context;
-                            Ok((agent_id, entry.name.clone(), inherit))
-                        }
-                        StepAgent::ByName { name } => {
-                            let entry = state_for_resolver
-                                .kernel
-                                .agent_registry()
-                                .find_by_name(name)
-                                .ok_or(StepAgentError::NotFound)?;
-                            let inherit = entry.manifest.inherit_parent_context;
-                            Ok((entry.id, entry.name.clone(), inherit))
-                        }
-                        StepAgent::ByType { template, fresh } => state_for_resolver
-                            .kernel
-                            .resolve_agent_by_type_or_spawn(template, None, *fresh),
-                    }
-                },
+                move |agent_ref| state_for_resolver.kernel.resolve_step_agent(agent_ref, None),
                 move |agent_id: librefang_types::agent::AgentId,
                       message: String,
                       session_mode_override: Option<librefang_types::agent::SessionMode>| {
@@ -606,11 +545,6 @@ fn spawn_background_run(
                             })
                             .map_err(|e| format!("{e}"))
                     }
-                },
-                |agent_id, required| {
-                    state
-                        .kernel
-                        .check_step_required_skills(agent_id, required)
                 },
             )
             .await;
@@ -788,11 +722,16 @@ pub async fn dry_run_workflow(
 
     match state.kernel.dry_run_workflow(workflow_id, input).await {
         Ok(steps) => {
-            let all_agents_found = steps.iter().all(|s| s.agent_found);
+            // A step whose `required_skills` the resolved agent cannot use
+            // will fail the moment a real run reaches it, so it counts against
+            // `valid` exactly as an unresolvable agent does (#7721).
+            let valid = steps
+                .iter()
+                .all(|s| s.agent_found && s.skill_error.is_none());
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
-                    "valid": all_agents_found,
+                    "valid": valid,
                     "steps": steps.iter().map(|s| serde_json::json!({
                         "step_name": s.step_name,
                         "agent_name": s.agent_name,
@@ -800,6 +739,7 @@ pub async fn dry_run_workflow(
                         "resolved_prompt": s.resolved_prompt,
                         "skipped": s.skipped,
                         "skip_reason": s.skip_reason,
+                        "skill_error": s.skill_error,
                     })).collect::<Vec<_>>(),
                 })),
             )
@@ -848,6 +788,11 @@ pub async fn get_workflow_run(
                 "error": run.error,
                 "started_at": run.started_at.to_rfc3339(),
                 "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
+                // #7714: the agent that asked for this run, `null` when an
+                // operator started it. Recording ownership is only useful if
+                // something can read it back, and this is the one endpoint
+                // that renders a single run in full.
+                "owner_agent_id": run.owner_agent_id.map(|a| a.to_string()),
                 "step_results": run.step_results.iter().map(|s| serde_json::json!({
                     "step_name": s.step_name,
                     "agent_id": s.agent_id,
@@ -895,8 +840,11 @@ pub async fn rerun_workflow_run(
 
     let engine = state.kernel.workflow_engine();
     // Read the workflow + input off the stored run rather than trusting the caller, so a re-run is always a faithful repeat of what executed.
-    let (workflow_id, input) = match engine.get_run(run_id).await {
-        Some(run) => (run.workflow_id, run.input),
+    // #7714: the owner is copied off the original run rather than re-derived.
+    // A re-run is a repeat of the same work on the same owner's behalf, and
+    // the operator who pressed re-run is not that owner.
+    let (workflow_id, input, owner) = match engine.get_run(run_id).await {
+        Some(run) => (run.workflow_id, run.input, run.owner_agent_id),
         None => {
             return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
                 .into_json_tuple();
@@ -904,7 +852,7 @@ pub async fn rerun_workflow_run(
     };
 
     // `create_run` returns None when the workflow definition is gone (e.g. it was deleted after the original run); surface that as a 404.
-    let new_run_id = match engine.create_run(workflow_id, input).await {
+    let new_run_id = match engine.create_run_owned(workflow_id, input, owner).await {
         Some(rid) => rid,
         None => {
             return ApiErrorResponse::not_found(format!(
@@ -1137,33 +1085,10 @@ pub async fn resume_workflow_run(
     let state_for_resolver = state.clone();
     let state_for_sender = state.clone();
 
-    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| -> librefang_kernel::workflow::StepAgentResolution {
-        use librefang_kernel::workflow::{StepAgent, StepAgentError};
-        match agent_ref {
-            StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId =
-                    id.parse().map_err(|_| StepAgentError::NotFound)?;
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .get(agent_id)
-                    .ok_or(StepAgentError::NotFound)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Ok((agent_id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByName { name } => {
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .find_by_name(name)
-                    .ok_or(StepAgentError::NotFound)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Ok((entry.id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByType { template, fresh } => state_for_resolver
-                .kernel
-                .resolve_agent_by_type_or_spawn(template, owner_for_resolver, *fresh),
-        }
+    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
+        state_for_resolver
+            .kernel
+            .resolve_step_agent(agent_ref, owner_for_resolver)
     };
 
     // Validate the token synchronously (quick state check) before spawning.
@@ -1274,9 +1199,6 @@ pub async fn resume_workflow_run(
                             })
                             .map_err(|e| format!("{e}"))
                     }
-                },
-                |agent_id, required| {
-                    state.kernel.check_step_required_skills(agent_id, required)
                 },
             )
             .await;
@@ -1433,33 +1355,10 @@ pub async fn operator_action_workflow_run(
     let payload = payload_opt.clone();
     let owner_for_resolver = state.kernel.workflow_engine().run_owner(run_id);
     let state_for_resolver = state.clone();
-    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| -> librefang_kernel::workflow::StepAgentResolution {
-        use librefang_kernel::workflow::{StepAgent, StepAgentError};
-        match agent_ref {
-            StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId =
-                    id.parse().map_err(|_| StepAgentError::NotFound)?;
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .get(agent_id)
-                    .ok_or(StepAgentError::NotFound)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Ok((agent_id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByName { name } => {
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .find_by_name(name)
-                    .ok_or(StepAgentError::NotFound)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Ok((entry.id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByType { template, fresh } => state_for_resolver
-                .kernel
-                .resolve_agent_by_type_or_spawn(template, owner_for_resolver, *fresh),
-        }
+    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
+        state_for_resolver
+            .kernel
+            .resolve_step_agent(agent_ref, owner_for_resolver)
     };
 
     // Drive the resolution in the background; respond 200 immediately.
@@ -1502,11 +1401,6 @@ pub async fn operator_action_workflow_run(
                             })
                             .map_err(|e| format!("{e}"))
                     }
-                },
-                |agent_id, required| {
-                    state_for_engine
-                        .kernel
-                        .check_step_required_skills(agent_id, required)
                 },
             )
             .await;

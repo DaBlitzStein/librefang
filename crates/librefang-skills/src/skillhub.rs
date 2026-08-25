@@ -21,12 +21,22 @@ use tracing::{info, warn};
 /// Default Skillhub API base URL.
 pub const DEFAULT_SKILLHUB_URL: &str = "https://skillhub.tencent.com/api/v1";
 
-/// Static skills index URL (Tencent COS).
-const SKILLHUB_INDEX_URL: &str =
+/// Default static skills index URL (Tencent COS).
+pub const DEFAULT_SKILLHUB_INDEX_URL: &str =
     "https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/skills.json";
 
-/// COS accelerate base URL for skill zip downloads.
-const SKILLHUB_COS_BASE: &str = "https://skillhub-1388575217.cos.accelerate.myqcloud.com";
+/// Default COS accelerate base URL for skill zip downloads.
+pub const DEFAULT_SKILLHUB_COS_BASE: &str =
+    "https://skillhub-1388575217.cos.accelerate.myqcloud.com";
+
+/// Environment variable for the Skillhub API base — search and skill detail.
+pub const ENV_SKILLHUB_URL: &str = "LIBREFANG_SKILLHUB_URL";
+
+/// Environment variable for the static skills index — browse, and the version lookup that install starts from.
+pub const ENV_SKILLHUB_INDEX_URL: &str = "LIBREFANG_SKILLHUB_INDEX_URL";
+
+/// Environment variable for the object-storage base that skill archives are downloaded from.
+pub const ENV_SKILLHUB_COS_URL: &str = "LIBREFANG_SKILLHUB_COS_URL";
 
 fn atomic_write_manifest(path: &Path, contents: &[u8]) -> Result<(), SkillError> {
     use std::io::Write;
@@ -202,6 +212,10 @@ pub struct SkillhubClient {
     http: reqwest::Client,
     /// Base API URL (e.g. `https://skillhub.tencent.com/api/v1`).
     base_url: String,
+    /// Static skills index URL — the source for browse and for the version install resolves.
+    index_url: String,
+    /// Object-storage base that skill archives are downloaded from.
+    cos_base: String,
 }
 
 impl SkillhubClient {
@@ -215,24 +229,24 @@ impl SkillhubClient {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("HTTP client build"),
-            base_url: base_url.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            index_url: crate::clawhub::env_url_or(
+                ENV_SKILLHUB_INDEX_URL,
+                DEFAULT_SKILLHUB_INDEX_URL,
+            ),
+            cos_base: crate::clawhub::env_url_or(ENV_SKILLHUB_COS_URL, DEFAULT_SKILLHUB_COS_BASE),
         }
     }
 
-    /// Create a Skillhub client with the default URL, or the operator's
-    /// override from the `LIBREFANG_SKILLHUB_URL` environment variable.
+    /// Create a Skillhub client from the configured Skillhub endpoints.
     ///
-    /// The shipped default (`skillhub.tencent.com`) has gone dark — see
-    /// #7387 — and no verified replacement API exists yet. This override
-    /// lets an operator point at their own mirror without recompiling, once
-    /// one exists, without LibreFang needing to ship a guess at its URL.
+    /// Skillhub is not one host: search and detail come from the API base, browse and install's version lookup come from a static index, and archives come from object storage.
+    /// All three are overridable — `LIBREFANG_SKILLHUB_URL`, `LIBREFANG_SKILLHUB_INDEX_URL`, `LIBREFANG_SKILLHUB_COS_URL` — because pointing only the API base at a mirror would leave browse and install still aimed at the dead host, which is the opposite of the recovery an override is for.
     pub fn with_defaults(cache_dir: PathBuf) -> Self {
-        let base_url = std::env::var("LIBREFANG_SKILLHUB_URL")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| DEFAULT_SKILLHUB_URL.to_string());
-        Self::new(&base_url, cache_dir)
+        Self::new(
+            &crate::clawhub::env_url_or(ENV_SKILLHUB_URL, DEFAULT_SKILLHUB_URL),
+            cache_dir,
+        )
     }
 
     // -- Delegated to ClawHubClient (compatible APIs) -----------------------
@@ -275,7 +289,7 @@ impl SkillhubClient {
             SkillError::Network(format!("Failed to read Skillhub search response: {e}"))
         })?;
 
-        parse_skillhub_search_body(&body, &self.base_url)
+        parse_skillhub_search_body(&body, &url)
     }
 
     /// Get detailed info about a specific skill.
@@ -297,8 +311,9 @@ impl SkillhubClient {
         // Step 1: Look up the version from the static index
         let index_resp = self
             .http
-            .get(SKILLHUB_INDEX_URL)
+            .get(&self.index_url)
             .header("User-Agent", "LibreFang/0.1")
+            .header("Accept", "application/json")
             .send()
             .await
             .map_err(|e| SkillError::Network(format!("Skillhub index fetch failed: {e}")))?;
@@ -308,11 +323,11 @@ impl SkillhubClient {
                 index_resp.status()
             )));
         }
-        let index_bytes = index_resp
+        let index_body = index_resp
             .bytes()
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read Skillhub index: {e}")))?;
-        let index: SkillhubIndexResponse = parse_skillhub_index_body(&index_bytes)?;
+        let index: SkillhubIndexResponse = parse_skillhub_index_body(&index_body, &self.index_url)?;
 
         let entry = index
             .skills
@@ -324,7 +339,7 @@ impl SkillhubClient {
         let version = &entry.version;
 
         // Step 2: Download zip from COS
-        let cos_url = format!("{SKILLHUB_COS_BASE}/skills/{slug}/{version}.zip",);
+        let cos_url = format!("{}/skills/{slug}/{version}.zip", self.cos_base);
         info!(slug, version = %version, "Downloading skill from Skillhub COS");
 
         let dl_resp = self
@@ -391,8 +406,9 @@ impl SkillhubClient {
     ) -> Result<SkillhubIndexResponse, SkillError> {
         let resp = self
             .http
-            .get(SKILLHUB_INDEX_URL)
+            .get(&self.index_url)
             .header("User-Agent", "LibreFang/0.1")
+            .header("Accept", "application/json")
             .send()
             .await
             .map_err(|e| SkillError::Network(format!("Skillhub index fetch failed: {e}")))?;
@@ -404,11 +420,11 @@ impl SkillhubClient {
             )));
         }
 
-        let bytes = resp
+        let body = resp
             .bytes()
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read Skillhub index: {e}")))?;
-        let mut data: SkillhubIndexResponse = parse_skillhub_index_body(&bytes)?;
+        let mut data: SkillhubIndexResponse = parse_skillhub_index_body(&body, &self.index_url)?;
 
         // Client-side sort
         match sort {
@@ -446,16 +462,19 @@ impl SkillhubClient {
 /// Split out from [`SkillhubClient::search`] so the parsing logic — including
 /// the SkillHub-native vs. ClawHub-compatible format fallback — is testable
 /// without a live network call.
-fn parse_skillhub_search_body(
-    body: &[u8],
-    base_url: &str,
-) -> Result<ClawHubSearchResponse, SkillError> {
+///
+/// The markup gate is spelled out here rather than delegated to
+/// [`crate::parse_marketplace_json`] because neither of the two parses below is
+/// the single deserialization that helper performs; the message is the same one
+/// it emits, so an operator sees one offline state whichever hub or endpoint
+/// went dark.
+fn parse_skillhub_search_body(body: &[u8], url: &str) -> Result<ClawHubSearchResponse, SkillError> {
+    // Markup first: both parses below fail on an HTML body, and the second one's
+    // `serde_json` complaint is exactly the cryptic "expected value at line 1 column 1"
+    // this check exists to replace (#7387).
     if crate::looks_like_markup(body) {
         return Err(SkillError::MarketplaceUnavailable(format!(
-            "Skillhub search: {base_url} returned a webpage instead of JSON — the marketplace \
-             API endpoint is unreachable or has changed. Search, browse, and skill detail \
-             lookups are unavailable until this is fixed; installing local skills is \
-             unaffected. If you have a working mirror, set LIBREFANG_SKILLHUB_URL to it."
+            "Skillhub search at {url} answered with a webpage instead of JSON — the marketplace is unreachable or has moved. Searching, browsing and installing from it are unavailable until it returns; skills already installed locally are unaffected."
         )));
     }
 
@@ -494,16 +513,11 @@ fn parse_skillhub_search_body(
 /// bucket answers with markup instead of JSON (same #7387 failure mode as
 /// [`parse_skillhub_search_body`], applied to `browse` and `install`'s
 /// version lookup).
-fn parse_skillhub_index_body(body: &[u8]) -> Result<SkillhubIndexResponse, SkillError> {
-    if crate::looks_like_markup(body) {
-        return Err(SkillError::MarketplaceUnavailable(format!(
-            "Skillhub index: {SKILLHUB_INDEX_URL} returned a webpage instead of JSON — the \
-             marketplace index is unreachable or has changed. Browse and install lookups are \
-             unavailable until this is fixed; installing local skills is unaffected."
-        )));
-    }
-    serde_json::from_slice(body)
-        .map_err(|e| SkillError::Network(format!("Skillhub index parse error: {e}")))
+fn parse_skillhub_index_body(
+    body: &[u8],
+    index_url: &str,
+) -> Result<SkillhubIndexResponse, SkillError> {
+    crate::parse_marketplace_json("Skillhub index", index_url, body)
 }
 
 /// URL query parameter encoding (`application/x-www-form-urlencoded`).
@@ -693,8 +707,8 @@ mod tests {
         let result = parse_skillhub_search_body(html, DEFAULT_SKILLHUB_URL);
         match result {
             Err(SkillError::MarketplaceUnavailable(msg)) => {
-                assert!(msg.contains(DEFAULT_SKILLHUB_URL));
-                assert!(msg.contains("LIBREFANG_SKILLHUB_URL"));
+                assert!(msg.contains(DEFAULT_SKILLHUB_URL), "{msg}");
+                assert!(msg.contains("webpage instead of JSON"), "{msg}");
             }
             other => panic!("expected MarketplaceUnavailable, got {other:?}"),
         }
@@ -720,14 +734,14 @@ mod tests {
     #[test]
     fn index_body_html_response_degrades_to_marketplace_unavailable() {
         let html = b"<html><body>not json</body></html>";
-        let result = parse_skillhub_index_body(html);
+        let result = parse_skillhub_index_body(html, DEFAULT_SKILLHUB_INDEX_URL);
         assert!(matches!(result, Err(SkillError::MarketplaceUnavailable(_))));
     }
 
     #[test]
     fn index_body_valid_json_still_parses() {
         let json = br#"{"total": 1, "skills": [{"slug": "rust"}]}"#;
-        let resp = parse_skillhub_index_body(json).unwrap();
+        let resp = parse_skillhub_index_body(json, DEFAULT_SKILLHUB_INDEX_URL).unwrap();
         assert_eq!(resp.total, 1);
         assert_eq!(resp.skills.len(), 1);
     }

@@ -3,8 +3,8 @@
 
 use super::error::{ToolError, ToolResult};
 use super::{
-    check_taint_outbound_text, current_agent_depth, require_kernel_typed, with_agent_call_depth,
-    AGENT_CALL_DEPTH,
+    caller_agent_id_missing, check_taint_outbound_text, current_agent_depth, require_kernel_typed,
+    with_agent_call_depth,
 };
 use crate::kernel_handle::prelude::*;
 use librefang_types::taint::TaintSink;
@@ -305,132 +305,10 @@ pub(super) async fn tool_agent_spawn(
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
 
-    // Ephemeral path: spawn a temporary worker, run task, return result directly
-    if input["ephemeral"].as_bool().unwrap_or(false) {
-        // Ephemeral spawn runs the agent loop inline on the caller's task, so
-        // each nesting level stacks another ~56 KB of future (#6659). Reject
-        // before we build the request, same as agent_send.
-        let max_depth = kh.max_agent_call_depth();
-        let current_depth = super::current_agent_depth();
-        if current_depth >= max_depth {
-            return Err(ToolError::PermissionDenied(format!(
-                "Inter-agent call depth exceeded (max {max_depth}). \
-                 A->B->C chain is too deep. Use the task queue or a permanent agent instead."
-            )));
-        }
-
-        let message = input["message"]
-            .as_str()
-            .ok_or(ToolError::MissingParameter("message"))?;
-
-        let spawn_sink = TaintSink::agent_message();
-        if let Some(violation) = check_taint_outbound_text(message, &spawn_sink) {
-            return Err(ToolError::PermissionDenied(format!(
-                "Taint violation (message): {violation}"
-            )));
-        }
-        // #6930 review: the ephemeral branch screened only `message`, while the
-        // permanent-spawn branch below screens `name` and `system_prompt` too.
-        // `resolve_ephemeral_manifest` assigns the requested `system_prompt`
-        // straight onto `manifest.model.system_prompt`, so tainted content (a
-        // tool result from an untrusted source) seeded the worker's system
-        // prompt without ever crossing the taint boundary. Screen the same
-        // fields here, with the same sink and error shape.
-        if let Some(system_prompt) = input["system_prompt"].as_str() {
-            if let Some(violation) = check_taint_outbound_text(system_prompt, &spawn_sink) {
-                return Err(ToolError::PermissionDenied(format!(
-                    "Taint violation (system_prompt): {violation}"
-                )));
-            }
-        }
-        if let Some(agent_type) = input["agent_type"].as_str() {
-            if let Some(violation) = check_taint_outbound_text(agent_type, &spawn_sink) {
-                return Err(ToolError::PermissionDenied(format!(
-                    "Taint violation (agent_type): {violation}"
-                )));
-            }
-        }
-
-        // Enforce parent's tool allowlist on the ephemeral worker, same as the
-        // permanent-agent path below. An unrestricted parent (None) passes
-        // through the caller's requested tools unfiltered.
-        let requested_tools: Option<Vec<String>> = input["tools"].as_array().map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        });
-        let tools = match (parent_allowed_tools, requested_tools) {
-            (Some(allowed), Some(ref req)) if !req.is_empty() => {
-                let filtered: Vec<String> = req
-                    .iter()
-                    .filter(|t| allowed.iter().any(|a| a == *t))
-                    .cloned()
-                    .collect();
-                if filtered.is_empty() && !req.is_empty() {
-                    return Err(ToolError::PermissionDenied(
-                        "None of the requested tools are allowed by the parent agent's tool list"
-                            .to_string(),
-                    ));
-                }
-                Some(filtered)
-            }
-            (Some(_), _) => None,
-            (None, tools) => tools,
-        };
-
-        let request = librefang_types::agent::EphemeralSpawnRequest {
-            system_prompt: input["system_prompt"].as_str().map(String::from),
-            agent_type: input["agent_type"].as_str().map(String::from),
-            model: input.get("model").and_then(|v| {
-                if let Some(s) = v.as_str() {
-                    // "provider/model" shorthand
-                    let mut parts = s.splitn(2, '/');
-                    let provider = parts.next().unwrap_or("default").to_string();
-                    let model = parts.next().unwrap_or("default").to_string();
-                    Some(librefang_types::agent::ModelConfig {
-                        provider,
-                        model,
-                        ..Default::default()
-                    })
-                } else {
-                    // Object form: accept ONLY provider/model. Do not
-                    // pass base_url / api_key_env through — a
-                    // prompt-injected agent could point the worker at an
-                    // attacker-controlled endpoint with a real env key
-                    // (#6930 review — credential-exfiltration
-                    // primitive).
-                    let obj = v.as_object()?;
-                    let provider = obj.get("provider")?.as_str()?.to_string();
-                    let model = obj.get("model")?.as_str()?.to_string();
-                    Some(librefang_types::agent::ModelConfig {
-                        provider,
-                        model,
-                        ..Default::default()
-                    })
-                }
-            }),
-            tools,
-            skills: input["skills"].as_array().map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            }),
-            message: message.to_string(),
-            max_iterations: input["max_iterations"].as_u64().map(|v| v as u32),
-        };
-
-        return kh
-            .spawn_ephemeral(request, parent_id)
-            .await
-            .map_err(ToolError::upstream);
-    }
-
     let name = input["name"]
         .as_str()
         .ok_or(ToolError::MissingParameter("name"))?;
-    let system_prompt = input["system_prompt"]
-        .as_str()
-        .ok_or(ToolError::MissingParameter("system_prompt"))?;
+    let system_prompt = input["system_prompt"].as_str();
 
     let spawn_sink = TaintSink::agent_message();
     if let Some(violation) = check_taint_outbound_text(name, &spawn_sink) {
@@ -438,18 +316,44 @@ pub(super) async fn tool_agent_spawn(
             "Taint violation (name): {violation}"
         )));
     }
-    if let Some(violation) = check_taint_outbound_text(system_prompt, &spawn_sink) {
-        return Err(ToolError::PermissionDenied(format!(
-            "Taint violation (system_prompt): {violation}"
-        )));
+    if let Some(prompt) = system_prompt {
+        if let Some(violation) = check_taint_outbound_text(prompt, &spawn_sink) {
+            return Err(ToolError::PermissionDenied(format!(
+                "Taint violation (system_prompt): {violation}"
+            )));
+        }
     }
+
+    if input["ephemeral"].as_bool().unwrap_or(false) {
+        return tool_agent_spawn_ephemeral(
+            input,
+            kh,
+            name,
+            system_prompt,
+            parent_id,
+            parent_allowed_tools,
+        )
+        .await;
+    }
+
+    // Beyond this point the call builds a permanent agent, for which a system
+    // prompt is the manifest's only description of what the agent is. The
+    // schema no longer marks it required — an ephemeral worker spawned from an
+    // agent type gets its prompt from the template — so the permanent path
+    // reasserts it here, with the same error the schema used to produce.
+    let system_prompt = system_prompt.ok_or(ToolError::MissingParameter("system_prompt"))?;
 
     // Depth guard: prevent unbounded recursive spawn chains. Mirrors the
     // agent_send guard. Without this, a spawned agent calls agent_spawn to
     // create another, which spawns another — burning tokens indefinitely.
+    //
+    // The ephemeral branch above deliberately does not pass through here: the
+    // kernel checks the same counter inside `spawn_ephemeral_worker` and
+    // surfaces `CapabilityDenied`, and two copies of one check eventually stop
+    // agreeing. This one guards the permanent path, which has no kernel-side
+    // equivalent.
     let max_depth = kh.max_agent_call_depth();
-    let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
-    if current_depth >= max_depth {
+    if current_agent_depth() >= max_depth {
         return Err(ToolError::PermissionDenied(format!(
             "Agent spawn depth exceeded (max {max_depth}). \
              Too many nested agent_spawn calls."
@@ -560,6 +464,110 @@ pub(super) async fn tool_agent_spawn(
 
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
+    ))
+}
+
+/// The `ephemeral: true` branch of `agent_spawn` (refs #6699).
+///
+/// Runs the task inline and returns the worker's answer, rather than returning an agent id: an ephemeral worker has no id worth handing back, because by the time this returns it no longer exists.
+///
+/// The caller agent is not optional here. Every safety property of the ephemeral path — spend billed to a real ledger, the spawning agent's `[resources]` quota enforced, a tool set that cannot exceed the spawner's own — is expressed in terms of the parent, so a callerless surface (the MCP HTTP bridge, the REST tool endpoint) is refused rather than given an unattributed worker.
+///
+/// Depth is *not* re-checked here. The kernel checks it inside `spawn_ephemeral_worker` and surfaces `CapabilityDenied`, which `ToolError::upstream` preserves; adding a second check against the same counter is how one of two copies eventually stops matching the other.
+async fn tool_agent_spawn_ephemeral(
+    input: &serde_json::Value,
+    kh: &Arc<dyn KernelHandle>,
+    name: &str,
+    system_prompt: Option<&str>,
+    parent_id: Option<&str>,
+    parent_allowed_tools: Option<&[String]>,
+) -> ToolResult {
+    let message = input["message"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("message"))?;
+    if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
+        return Err(ToolError::PermissionDenied(format!(
+            "Taint violation (message): {violation}"
+        )));
+    }
+
+    let parent = parent_id.ok_or_else(|| caller_agent_id_missing("agent_spawn"))?;
+    let parent_id: librefang_types::agent::AgentId =
+        parent.parse().map_err(|_| ToolError::InvalidParameter {
+            name: "agent_spawn",
+            reason: format!("calling agent id '{parent}' is not a UUID"),
+        })?;
+
+    let mut request =
+        librefang_types::ephemeral::EphemeralSpawnRequest::new(parent_id, name, message);
+    request.system_prompt = system_prompt.map(str::to_string);
+    request.agent_type = input["agent_type"].as_str().map(str::to_string);
+    if let Some(agent_type) = request.agent_type.as_deref() {
+        if let Some(violation) = check_taint_outbound_text(agent_type, &TaintSink::agent_message())
+        {
+            return Err(ToolError::PermissionDenied(format!(
+                "Taint violation (agent_type): {violation}"
+            )));
+        }
+    }
+
+    // An explicit tool list is honoured as-is; the kernel rejects any name the
+    // parent cannot itself call. When the model asks for no particular tools,
+    // fall back to the parent's own allowlist rather than to "everything":
+    // a restricted parent that says nothing must not hand its worker a wider
+    // set than it holds. `None` (unrestricted parent) stays `None`, which the
+    // kernel reads as "whatever the parent's manifest grants".
+    let requested: Option<Vec<String>> = match input["tools"].as_array() {
+        Some(arr) => Some(
+            arr.iter()
+                .enumerate()
+                .filter_map(|(i, v)| match v.as_str() {
+                    Some(s) => Some(s.to_string()),
+                    None => {
+                        warn!(index = i, "tools[{}]: non-string value, skipping", i);
+                        None
+                    }
+                })
+                .collect(),
+        ),
+        None => parent_allowed_tools.map(<[String]>::to_vec),
+    };
+    request.tools = requested;
+
+    // Only `provider` and `model` are read out of the caller's `model` object.
+    // `EphemeralModelOverride` cannot carry `base_url` or `api_key_env` — see
+    // its doc comment for why widening it would be a credential-exfiltration
+    // primitive rather than a convenience.
+    if let Some(model) = input["model"].as_object() {
+        request.model = Some(librefang_types::ephemeral::EphemeralModelOverride {
+            provider: model
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            model: model
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        });
+    } else if let Some(model) = input["model"].as_str() {
+        request.model = Some(librefang_types::ephemeral::EphemeralModelOverride {
+            provider: None,
+            model: Some(model.to_string()),
+        });
+    }
+
+    request.max_iterations = input["max_iterations"]
+        .as_u64()
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+
+    let result = kh
+        .spawn_ephemeral(request)
+        .await
+        .map_err(ToolError::upstream)?;
+
+    Ok(format!(
+        "Ephemeral worker '{}' finished in {} iteration(s).\n\n{}",
+        result.name, result.iterations, result.response
     ))
 }
 

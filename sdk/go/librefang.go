@@ -44,7 +44,6 @@ type Client struct {
 	Hands *HandsResource
 	Inbox *InboxResource
 	Mcp *McpResource
-	Media *MediaResource
 	Memory *MemoryResource
 	Models *ModelsResource
 	Network *NetworkResource
@@ -54,9 +53,7 @@ type Client struct {
 	Sessions *SessionsResource
 	Skills *SkillsResource
 	System *SystemResource
-	Tasks *TasksResource
 	Tools *ToolsResource
-	UserGroups *UserGroupsResource
 	Users *UsersResource
 	Webhooks *WebhooksResource
 	Workflows *WorkflowsResource
@@ -82,7 +79,6 @@ func New(baseURL string) *Client {
 		c.Hands = &HandsResource{client: c}
 		c.Inbox = &InboxResource{client: c}
 		c.Mcp = &McpResource{client: c}
-		c.Media = &MediaResource{client: c}
 		c.Memory = &MemoryResource{client: c}
 		c.Models = &ModelsResource{client: c}
 		c.Network = &NetworkResource{client: c}
@@ -92,9 +88,7 @@ func New(baseURL string) *Client {
 		c.Sessions = &SessionsResource{client: c}
 		c.Skills = &SkillsResource{client: c}
 		c.System = &SystemResource{client: c}
-		c.Tasks = &TasksResource{client: c}
 		c.Tools = &ToolsResource{client: c}
-		c.UserGroups = &UserGroupsResource{client: c}
 		c.Users = &UsersResource{client: c}
 		c.Webhooks = &WebhooksResource{client: c}
 		c.Workflows = &WorkflowsResource{client: c}
@@ -326,14 +320,6 @@ func (r *AgentsResource) ResetAgentIdentity(name string, query map[string]string
 	return r.client.request("POST", fmt.Sprintf("/api/agents/identities/%s/reset", name), nil, query)
 }
 
-func (r *AgentsResource) PurgeAgentData(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/agents/purge", data, nil)
-}
-
-func (r *AgentsResource) SpawnEphemeralAgent(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/agents/spawn-ephemeral", data, nil)
-}
-
 func (r *AgentsResource) GetAgent(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s", id), nil, nil)
 }
@@ -410,10 +396,6 @@ func (r *AgentsResource) AgentLogs(id string, query map[string]string) (interfac
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/logs", id), nil, query)
 }
 
-func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", id), nil, nil)
-}
-
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil, nil)
 }
@@ -442,14 +424,6 @@ func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (inter
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
 }
 
-func (r *AgentsResource) GetAgentModelRouting(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/model_routing", id), nil, nil)
-}
-
-func (r *AgentsResource) SetAgentModelRouting(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model_routing", id), data, nil)
-}
-
 func (r *AgentsResource) PushMessage(id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/push", id), data, nil)
 }
@@ -464,10 +438,6 @@ func (r *AgentsResource) ResumeAgent(id string) (interface{}, error) {
 
 func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", id), nil, nil)
-}
-
-func (r *AgentsResource) SaveAgentAsAgentType(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/save-as-agent-type", id), data, nil)
 }
 
 func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
@@ -540,10 +510,6 @@ func (r *AgentsResource) StopAgent(id string) (interface{}, error) {
 
 func (r *AgentsResource) SuspendAgent(id string) (interface{}, error) {
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/suspend", id), nil, nil)
-}
-
-func (r *AgentsResource) AgentTokenUsage(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/token-usage", id), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentTools(id string) (interface{}, error) {
@@ -838,22 +804,6 @@ func (r *GoalsResource) ListGoalTemplates() (interface{}, error) {
 	return r.client.request("GET", "/api/goals/templates", nil, nil)
 }
 
-func (r *GoalsResource) PauseGoalRun(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/goals/%s/pause", id), nil, nil)
-}
-
-func (r *GoalsResource) ResumeGoalRun(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/goals/%s/resume", id), data, nil)
-}
-
-func (r *GoalsResource) StartGoalRun(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/goals/%s/start", id), data, nil)
-}
-
-func (r *GoalsResource) StopGoalRun(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/goals/%s/stop", id), nil, nil)
-}
-
 // ── Hands Resource
 
 type HandsResource struct{ client *Client }
@@ -1008,38 +958,6 @@ func (r *McpResource) PatchMcpServerTaint(name string, data map[string]interface
 
 func (r *McpResource) ListMcpTaintRules() (interface{}, error) {
 	return r.client.request("GET", "/api/mcp/taint-rules", nil, nil)
-}
-
-// ── Media Resource
-
-type MediaResource struct{ client *Client }
-
-func (r *MediaResource) GenerateImage(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/media/image", data, nil)
-}
-
-func (r *MediaResource) GenerateMusic(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/media/music", data, nil)
-}
-
-func (r *MediaResource) ListMediaProviders() (interface{}, error) {
-	return r.client.request("GET", "/api/media/providers", nil, nil)
-}
-
-func (r *MediaResource) SynthesizeSpeech(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/media/speech", data, nil)
-}
-
-func (r *MediaResource) TranscribeAudio(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/media/transcribe", data, nil)
-}
-
-func (r *MediaResource) SubmitVideo(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/media/video", data, nil)
-}
-
-func (r *MediaResource) PollVideoTask(task_id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/media/video/%s", task_id), nil, query)
 }
 
 // ── Memory Resource
@@ -1598,30 +1516,6 @@ func (r *SkillsResource) GetTool(name string) (interface{}, error) {
 
 type SystemResource struct{ client *Client }
 
-func (r *SystemResource) ListAgentTypes() (interface{}, error) {
-	return r.client.request("GET", "/api/agent-types", nil, nil)
-}
-
-func (r *SystemResource) CreateAgentType(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/agent-types", data, nil)
-}
-
-func (r *SystemResource) GetAgentType(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agent-types/%s", name), nil, nil)
-}
-
-func (r *SystemResource) UpdateAgentType(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agent-types/%s", name), data, nil)
-}
-
-func (r *SystemResource) DeleteAgentType(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agent-types/%s", name), nil, nil)
-}
-
-func (r *SystemResource) GetAgentTypeToml(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agent-types/%s/toml", name), nil, nil)
-}
-
 func (r *SystemResource) AuditExport(query map[string]string) (interface{}, error) {
 	return r.client.request("GET", "/api/audit/export", nil, query)
 }
@@ -1770,7 +1664,7 @@ func (r *SystemResource) ListAgentTemplates() (interface{}, error) {
 	return r.client.request("GET", "/api/templates", nil, nil)
 }
 
-func (r *SystemResource) CreateTemplate(data map[string]interface{}) (interface{}, error) {
+func (r *SystemResource) CreateAgentType(data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", "/api/templates", data, nil)
 }
 
@@ -1778,11 +1672,11 @@ func (r *SystemResource) GetAgentTemplate(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/templates/%s", name), nil, nil)
 }
 
-func (r *SystemResource) UpdateTemplate(name string, data map[string]interface{}) (interface{}, error) {
+func (r *SystemResource) UpdateAgentType(name string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("PUT", fmt.Sprintf("/api/templates/%s", name), data, nil)
 }
 
-func (r *SystemResource) DeleteTemplate(name string) (interface{}, error) {
+func (r *SystemResource) DeleteAgentType(name string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/templates/%s", name), nil, nil)
 }
 
@@ -1798,32 +1692,12 @@ func (r *SystemResource) ApiVersions() (interface{}, error) {
 	return r.client.request("GET", "/api/versions", nil, nil)
 }
 
-// ── Tasks Resource
-
-type TasksResource struct{ client *Client }
-
-func (r *TasksResource) TaskQueuePostRoot(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/tasks", data, nil)
-}
-
 // ── Tools Resource
 
 type ToolsResource struct{ client *Client }
 
 func (r *ToolsResource) InvokeTool(name string, data map[string]interface{}, query map[string]string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/tools/%s/invoke", name), data, query)
-}
-
-// ── UserGroups Resource
-
-type UserGroupsResource struct{ client *Client }
-
-func (r *UserGroupsResource) ListUserGroups() (interface{}, error) {
-	return r.client.request("GET", "/api/user-groups", nil, nil)
-}
-
-func (r *UserGroupsResource) GetUserGroup(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/user-groups/%s", id), nil, nil)
 }
 
 // ── Users Resource

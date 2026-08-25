@@ -44,8 +44,10 @@ export interface AgentSkillItemProps {
   /** Disable the trailing affordance while a mutation is in flight. */
   busy?: boolean;
   /**
-   * Declared in the agent manifest but not installed yet. Shown as a
-   * distinct "pending activation" row instead of the generic fallback.
+   * Declared in the agent manifest but absent from the daemon's skill registry
+   * (#7713). The row keeps its remove affordance — the assignment is real and
+   * still editable — but is marked so the operator can tell "assigned and
+   * working" from "assigned and contributing nothing yet".
    */
   pending?: boolean;
 }
@@ -61,9 +63,12 @@ export function AgentSkillItem({
 }: AgentSkillItemProps) {
   const { t } = useTranslation();
   const trimmedDescription = description?.trim();
+  // A pending row's own description is the thing worth saying: whatever the
+  // registry would have told us about the skill is unavailable precisely
+  // because the skill is not there.
   const subtitle = pending
-    ? t("agents.detail.skill_pending", {
-        defaultValue: "Pending activation — available on the next skills reload",
+    ? t("agents.detail.skill_pending_desc", {
+        defaultValue: "not installed here — activates on the next skills reload",
       })
     : trimmedDescription && trimmedDescription.length > 0
       ? trimmedDescription
@@ -91,11 +96,22 @@ export function AgentSkillItem({
       data-testid="agent-skill-item"
     >
       <div className="min-w-0 flex-1">
-        <div
-          className="font-mono text-[12.5px] font-medium text-text-main truncate"
-          data-testid="agent-skill-item-name"
-        >
-          {name}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <div
+            className="font-mono text-[12.5px] font-medium text-text-main truncate"
+            data-testid="agent-skill-item-name"
+          >
+            {name}
+          </div>
+          {pending && (
+            <span
+              className="shrink-0 inline-flex items-center gap-1 rounded px-1 py-px font-mono text-[9.5px] uppercase tracking-[0.06em] text-amber-400 bg-amber-400/10 border border-amber-400/30"
+              data-testid="agent-skill-item-pending"
+            >
+              <Clock className="w-2.5 h-2.5" />
+              {t("agents.detail.skill_pending", { defaultValue: "pending" })}
+            </span>
+          )}
         </div>
         <div
           className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 line-clamp-2"
@@ -133,7 +149,11 @@ export function AgentSkillItem({
           data-testid="agent-skill-item-add"
         />
       ) : pending ? (
-        <Clock className="w-3.5 h-3.5 text-amber-500/80 shrink-0 mt-0.5" data-testid="agent-skill-item-pending" />
+        // Trailing affordance for the display-only row. The pending marker
+        // assertions target the inline badge next to the name (which renders in
+        // every mode), so this icon deliberately carries no test id — two
+        // elements sharing one would break `getByTestId` on a display-only row.
+        <Clock className="w-3.5 h-3.5 text-amber-500/80 shrink-0 mt-0.5" />
       ) : (
         <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
       )}

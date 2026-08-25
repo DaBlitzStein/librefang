@@ -3,7 +3,10 @@ import { listAgentTypes, getAgentType } from "../http/client";
 import { agentTypeKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
-const STALE_MS = 30_000;
+// Agent types are operator-authored documents on disk, not live state — nothing
+// changes them behind the dashboard's back, so there is no poll interval here.
+// The editor's mutations invalidate these keys directly.
+const STALE_MS = 60_000;
 
 export const agentTypeQueries = {
   list: () =>

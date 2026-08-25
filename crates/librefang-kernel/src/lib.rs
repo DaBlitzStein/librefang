@@ -9,6 +9,7 @@
 
 pub mod agent_identity_registry;
 pub mod agent_purge;
+pub mod agent_template;
 
 /// Re-exported so surfaces can show the same token estimate the compactor
 /// uses to decide when to fold history — one heuristic, no drift.
@@ -62,7 +63,7 @@ pub mod workflow;
 
 pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;
-pub use kernel::{SemanticMemoryAccess, SkillReloadOutcome};
+pub use kernel::{PendingSkillMcpDeclarations, SemanticMemoryAccess, SkillReloadOutcome};
 pub use kernel::{SYSTEM_CHANNEL_AUTONOMOUS, SYSTEM_CHANNEL_CRON, SYSTEM_CHANNEL_WEBUI};
 pub use kernel_api::KernelApi;
 

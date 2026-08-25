@@ -95,7 +95,6 @@ fn produce_then_operator(actions: Vec<OperatorAction>) -> Workflow {
         description: "hitl http test".to_string(),
         steps: vec![
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "produce".to_string(),
                 agent: StepAgent::ByName {
                     name: "producer".to_string(),
@@ -108,9 +107,9 @@ fn produce_then_operator(actions: Vec<OperatorAction>) -> Workflow {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "review".to_string(),
                 agent: StepAgent::ByName {
                     name: "_op".to_string(),
@@ -128,6 +127,7 @@ fn produce_then_operator(actions: Vec<OperatorAction>) -> Workflow {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ],
         created_at: chrono::Utc::now(),
@@ -159,7 +159,6 @@ async fn run_to_operator_pause(h: &Harness, wf: Workflow) -> WorkflowRunId {
                     Ok((format!("consumed:{prompt}"), 1u64, 1u64))
                 }
             },
-            |_, _| Ok(()),
         )
         .await
         .expect("execute_run pauses cleanly at the operator step");
@@ -379,7 +378,6 @@ async fn operator_http_non_operator_pause_is_409() {
         name: "plain".to_string(),
         description: String::new(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "s1".to_string(),
             agent: StepAgent::ByName {
                 name: "a".to_string(),
@@ -392,6 +390,7 @@ async fn operator_http_non_operator_pause_is_409() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -411,7 +410,6 @@ async fn operator_http_non_operator_pause_is_409() {
             |_i: AgentId, _p: String, _m: Option<SessionMode>| async {
                 Ok(("x".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await
         .expect("pauses");
@@ -518,7 +516,6 @@ async fn operator_http_inspect_non_operator_pause_is_409() {
         name: "plain".to_string(),
         description: String::new(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "s1".to_string(),
             agent: StepAgent::ByName {
                 name: "a".to_string(),
@@ -531,6 +528,7 @@ async fn operator_http_inspect_non_operator_pause_is_409() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -550,7 +548,6 @@ async fn operator_http_inspect_non_operator_pause_is_409() {
             |_i: AgentId, _p: String, _m: Option<SessionMode>| async {
                 Ok(("x".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await
         .expect("pauses");

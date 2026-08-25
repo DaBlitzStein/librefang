@@ -33,11 +33,6 @@ export {
   listPromptsOverview,
   listExperiments,
   getExperimentMetrics,
-  // agent types
-  createAgentType,
-  updateAgentType,
-  deleteAgentType,
-  spawnEphemeral,
   // analytics / usage / budget
   getUsageSummary,
   listUsageByAgent,
@@ -54,6 +49,7 @@ export {
   // config & registry
   getFullConfig,
   getConfigSchema,
+  getConfigStatus,
   fetchRegistrySchema,
   getRawConfigToml,
   // chat command catalog
@@ -149,6 +145,8 @@ export {
   // per-agent skill assignment — read (#4917)
   getAgentSkills,
   getAgentTypeToml,
+  // per-agent MCP server assignment — read (#7713)
+  getAgentMcpServers,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -206,9 +204,13 @@ export type {
 // Mutation functions (write)
 // ---------------------------------------------------------------------------
 export {
+  // agent types + ephemeral spawning
+  createAgentType,
+  updateAgentType,
+  deleteAgentType,
+  spawnEphemeral,
   // agents
   spawnAgent,
-  // agent types + ephemeral spawning
   cloneAgent,
   saveAgentAsAgentType,
   stopAgent,

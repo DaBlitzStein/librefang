@@ -1,5 +1,4 @@
 use librefang_types::agent::AgentManifest;
-use librefang_types::registry_paths::resolve_agent_types_dir;
 use regex_lite::Regex;
 use serde::Deserialize;
 use serde_json::Value;
@@ -248,6 +247,13 @@ fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidat
     candidates
 }
 
+/// Resolve the registry's agent-templates directory for hand `base` resolution.
+///
+/// Delegates to [`librefang_types::registry_paths::resolve_agent_templates_dir`], the single resolver shared with the runtime's fan-out and the hands registry, so a missing directory is reported once at error level instead of quietly dropping every `base = "<template>"` hand out of routing (#7767).
+fn registry_agents_dir(home_dir: &Path) -> Option<PathBuf> {
+    librefang_types::registry_paths::resolve_agent_templates_dir(&home_dir.join("registry"))
+}
+
 fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
     let mut seen = std::collections::HashSet::new();
     let mut candidates = Vec::new();
@@ -266,13 +272,13 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
     // routing scan — and routing happens on every inbound message dispatch,
     // so the warning floods the log.
     //
-    // `resolve_agent_types_dir` prefers the registry's canonical
-    // `agent-types/` name, falls back to the legacy `agents/` name with a
-    // warning, and errors loudly when neither exists — a registry rename
-    // must not silently zero out `agents_dir_arg`, or every hand using
+    // The shared resolver prefers the registry's canonical `agent-types/`
+    // name, falls back to the legacy `agents/` name with a warning, and
+    // reports a missing directory at error level — a registry rename must not
+    // silently zero out `agents_dir_arg`, or every hand using
     // `base = "<template>"` (e.g. `devteam`) drops out of routing with no
     // signal beyond the downstream per-hand parse warning.
-    let agents_dir = resolve_agent_types_dir(&home_dir.join("registry"));
+    let agents_dir = registry_agents_dir(home_dir);
     let agents_dir_arg: Option<&Path> = agents_dir.as_deref();
 
     for hands_dir in &dirs {
@@ -1175,6 +1181,32 @@ fn dedupe(values: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Routing must resolve the agent-templates directory through the shared resolver so it cannot drift from the runtime fan-out and the hands registry, and so its absence is reported rather than dropping every `base = "<template>"` hand from routing in silence (#7767).
+    #[test]
+    fn registry_agents_dir_delegates_to_the_shared_resolver() {
+        let tmp = tempdir().unwrap();
+        let home_dir = tmp.path();
+        let registry_root = home_dir.join("registry");
+        std::fs::create_dir_all(registry_root.join("hands")).unwrap();
+
+        assert_eq!(registry_agents_dir(home_dir), None);
+        assert_eq!(
+            registry_agents_dir(home_dir),
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_root),
+        );
+
+        std::fs::create_dir_all(registry_root.join("agents")).unwrap();
+
+        assert_eq!(
+            registry_agents_dir(home_dir),
+            Some(registry_root.join("agents"))
+        );
+        assert_eq!(
+            registry_agents_dir(home_dir),
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_root),
+        );
+    }
 
     #[test]
     fn poisoned_router_state_lock_recovers_and_remains_usable() {

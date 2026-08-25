@@ -79,6 +79,8 @@ pub(crate) mod tool_name {
     pub const CRON_CANCEL: &str = "cron_cancel";
     pub const CRON_ENABLE: &str = "cron_enable";
     pub const CHANNEL_SEND: &str = "channel_send";
+    pub const CHANNEL_DM: &str = "channel_dm";
+    pub const CHANNEL_MEMBERS: &str = "channel_members";
     pub const HAND_LIST: &str = "hand_list";
     pub const HAND_ACTIVATE: &str = "hand_activate";
     pub const HAND_STATUS: &str = "hand_status";
@@ -355,7 +357,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::AGENT_SPAWN.to_string(),
-                description: "Spawn a new agent (permanent or ephemeral). Permanent: creates a persistent agent, returns ID. Ephemeral: runs a task in an isolated worker with no persistence, returns the result directly.".to_string(),
+                description: "Create an agent. Two shapes: the default creates a PERMANENT agent (workspace, database record, its own lifetime) and returns its ID and name — use it when the agent should still exist tomorrow. Set ephemeral to true instead to run a WORKER: it performs one task with the tools you give it, hands back the answer in this same tool result, and then vanishes leaving no agent, no workspace and no record. Prefer the worker for anything task-shaped — research a question, process a file, draft something — and reach for a permanent agent only when you need a durable collaborator.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -365,75 +367,57 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         },
                         "name": {
                             "type": "string",
-                            "description": "Unique name for the new agent (permanent spawn only)."
+                            "description": "Permanent: unique name for the new agent — ensure it does not conflict with existing agents. Ephemeral: a short label for the mission (e.g. \"research\"); it does not have to be unique and a uid suffix is appended for you."
                         },
                         "system_prompt": {
                             "type": "string",
-                            "description": "The system prompt / mission for the agent."
+                            "description": "The system prompt. Required for a permanent agent. Optional for a worker: omit it to inherit your own persona, or to take the prompt from agent_type."
+                        },
+                        "ephemeral": {
+                            "type": "boolean",
+                            "description": "Run a throwaway worker instead of creating a permanent agent. Requires message. Returns the worker's answer directly, not an agent ID."
                         },
                         "message": {
                             "type": "string",
-                            "description": "The task message to execute (ephemeral spawn only)."
+                            "description": "Ephemeral only, and required for it: the task the worker should perform."
                         },
                         "agent_type": {
                             "type": "string",
-                            "description": "Named agent type template (ephemeral spawn only). Provides default system_prompt, model, and tools."
+                            "description": "Ephemeral only: name of an existing agent type whose template supplies the worker's prompt, model and tools."
                         },
-                        "model": {
-                            "type": "string",
-                            "description": "Model override as 'provider/model' (ephemeral spawn only)."
+                        "max_iterations": {
+                            "type": "integer",
+                            "description": "Ephemeral only: cap the worker's reasoning turns. Values above the operator's configured ceiling are clamped down to it."
                         },
                         "tools": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Tool names to enable."
-                        },
-                        "skills": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Skill names to enable (ephemeral spawn only)."
-                        },
-                        "max_iterations": {
-                            "type": "integer",
-                            "description": "Max LLM iterations before forced return (ephemeral spawn only)."
+                            "description": "Select from all available tools, including MCP tools. Use the full tool names only. A worker can only be given tools you can call yourself, and naming one you cannot is an error rather than a silent omission."
                         },
                         "network": {
                             "type": "boolean",
-                            "description": "Whether to enable network access (permanent spawn only)."
+                            "description": "Permanent only: whether to enable network access for the new agent (required to be true when web_fetch is in tools)"
                         },
                         "shell": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
+                            "description": "Permanent only: preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
                         },
                         "profile": {
                             "type": "string",
-                            "description": "Model profile name to use for this spawn (e.g. 'coder', 'architect', 'quick'). When set, overrides the parent agent's model. When omitted and the ModelRouter is enabled, the router picks the best profile based on task complexity."
+                            "description": "Permanent only: model profile name to use for this spawn (e.g. 'coder', 'architect', 'quick'). When set, overrides the parent agent's model. When omitted and the ModelRouter is enabled, the router picks the best profile based on task complexity."
                         },
                         "model_override": {
                             "type": "object",
-                            "description": "Raw model/provider override. Use when you need a specific model not covered by profiles. Keys: provider (string), model (string), context_window (integer, optional).",
+                            "description": "Permanent only: raw model/provider override. Use when you need a specific model not covered by profiles. Keys: provider (string), model (string), context_window (integer, optional).",
                             "properties": {
                                 "provider": { "type": "string" },
                                 "model": { "type": "string" },
                                 "context_window": { "type": "integer" }
                             }
-                        },
-                        "ephemeral": {
-                            "type": "boolean",
-                            "description": "When true, the spawned agent runs a single turn and is killed immediately after — no workspace persistence, no session reuse. Mirrors Claude Code disposable workers. Default false (persistent agent)."
                         }
                     },
-                    "oneOf": [
-                        {
-                            "required": ["message"],
-                            "description": "Ephemeral spawn: message is the task to execute."
-                        },
-                        {
-                            "required": ["name", "system_prompt"],
-                            "description": "Permanent spawn: name and system_prompt define the new agent."
-                        }
-                    ]
+                    "required": ["name"]
                 }),
             },
             ToolDefinition {
@@ -1064,6 +1048,29 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 }),
             },
             ToolDefinition {
+                name: tool_name::CHANNEL_DM.to_string(),
+                description: "Deliver a message privately to ONE member of the group conversation you are currently in, instead of posting where everyone can read it. Use it to tell a single person their task is done, or to return a result only they asked for. The recipient must be a member the daemon has seen speak in this conversation — call channel_members for the user_id. Only available while handling an inbound channel message; the channel, the conversation and the bot account all come from that message and cannot be overridden. Platform limits: Slack opens a DM with any workspace member, but Telegram and Discord bots cannot message a user who has never started a chat with them, and that send fails rather than falling back to the group.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string", "description": "The text to deliver privately to that one member." },
+                        "user_id": { "type": "string", "description": "Platform user id of the member to reach (Slack 'U…', Telegram numeric id, WhatsApp participant JID), as returned by channel_members. Not the conversation id." }
+                    },
+                    "required": ["message", "user_id"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::CHANNEL_MEMBERS.to_string(),
+                description: "List the known members of a group conversation on a channel: the platform user_id, display_name, and username of everyone the daemon has seen speak there. Use it to answer \"who is in this channel?\", to attribute a request to the person who made it when handing work to an external system, and to obtain the platform user id needed to address one member individually. Both arguments default to the conversation the current message arrived on, so during message handling this can be called with no arguments; a direct message has no roster. Read-only.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "channel": { "type": "string", "description": "Channel type to read the roster of (e.g. 'slack', 'telegram', 'discord', 'whatsapp'). Omit while handling an inbound message to use the channel it arrived on." },
+                        "chat_id": { "type": "string", "description": "Platform conversation id (Slack channel id, Telegram chat_id, WhatsApp group JID). Omit while handling an inbound message to use the current conversation — naming a different conversation on that same channel is refused." }
+                    }
+                }),
+            },
+            ToolDefinition {
                 name: tool_name::HAND_LIST.to_string(),
                 description: "List available Hands (curated autonomous packages) and their activation status.".to_string(),
                 input_schema: serde_json::json!({
@@ -1325,57 +1332,50 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::WORKFLOW_CREATE.to_string(),
-                description: "Create a new workflow and save it. The workflow appears in the dashboard and is available for workflow_run, workflow_start, and workflow_list. Use agent_find first to discover available agents for each step.".to_string(),
+                description: "Define and register a new multi-step workflow so it can be run later with workflow_run / workflow_start. Use this when the same multi-agent sequence is worth repeating; for a one-off, send the agents messages directly instead. The workflow becomes available immediately and outlives the conversation. Names are unique across the daemon: a name already in use is rejected rather than overwritten, so call workflow_list first if you are unsure. Returns {id, name, description, step_count, has_input_schema}.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Unique workflow name. Only [A-Za-z0-9_-] allowed, max 64 chars. Used as the filename."
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "What this workflow does and when to use it."
-                        },
+                        "name": { "type": "string", "description": "Unique name, 1-64 characters of letters, digits, '_' and '-'. This is how the workflow is addressed afterwards (e.g. 'nightly-report')." },
+                        "description": { "type": "string", "description": "What the workflow does, for whoever reads workflow_list later" },
                         "steps": {
                             "type": "array",
-                            "description": "The workflow steps in execution order. Maximum 50 steps.",
+                            "minItems": 1,
                             "maxItems": 50,
+                            "description": "The steps, in execution order. Sequential by default; declare depends_on to run them as a DAG instead.",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "name": { "type": "string", "description": "Step name for display and variable referencing." },
-                                    "agent": { "type": ["string", "object"], "description": "Agent name, UUID, or { \"type\": \"<template>\" } to auto-spawn from an agent type when no instance exists." },
-                                    "prompt_template": { "type": "string", "description": "The prompt sent to the agent. Use {{input}} for the previous step's output, {{var_name}} for named variables, and {{param}} for workflow input parameters." },
-                                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps this step depends on. When set, steps execute in DAG order instead of sequentially." },
-                                    "required_skills": { "type": "array", "items": { "type": "string" }, "description": "Skills the resolved agent (or spawned agent type) must provide; a missing skill fails the step with a clear error." },
-                                    "output_var": { "type": "string", "description": "When set, this step's output is stored as a named variable accessible in later steps via {{name}}." },
-                                    "mode": { "type": "string", "enum": ["sequential", "fan_out", "collect"], "description": "Execution mode. Default: sequential. (conditional / loop / wait / approval require workflow-toml authoring until the object-form schema lands.)" },
-                                    "timeout_secs": { "type": "integer", "description": "Max seconds for this step. Default: 120. Maximum: 3600.", "maximum": 3600 },
-                                    "error_mode": { "type": "string", "enum": ["fail", "skip"], "description": "What to do on failure. Default: fail. (retry requires workflow-toml authoring until the object-form schema lands.)" }
+                                    "name": { "type": "string", "description": "Step name, unique within the workflow. Other steps reference it in depends_on." },
+                                    "agent": { "description": "Which agent runs this step. A bare string is the agent's name (agent_list shows what exists). The object forms carry exactly one routing key: {\"name\": \"researcher\"} by name, {\"id\": \"<uuid>\"} by instance UUID, or {\"type\": \"researcher\"} by agent type — find-or-spawn, which reuses a registered agent of that name and otherwise spawns the template of that name, so the workflow stands on its own on an instance where nothing is pre-registered." },
+                                    "prompt_template": { "type": "string", "description": "Prompt for this step. {{input}} interpolates the previous step's output; {{var}} interpolates a workflow input parameter or an earlier step's output_var." },
+                                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps that must finish first. Any step may be named, including one declared later. Omit for straight-line execution." },
+                                    "output_var": { "type": "string", "description": "Store this step's output under this name so later steps can reference it as {{name}}" },
+                                    "mode": { "description": "Sequencing for this step: the string \"sequential\" (default), \"fan_out\" to run in parallel with the following fan_out steps, or \"collect\" to gather them. Richer nodes take a tagged object, e.g. {\"conditional\": {\"condition\": \"APPROVED\"}}." },
+                                    "error_mode": { "description": "What to do when this step fails: \"fail\" (default, abort the run), \"skip\" (continue without it), or {\"retry\": {\"max_retries\": 3}}." },
+                                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Wall-clock limit for this step (default 120, ceiling 3600)" },
+                                    "required_skills": { "type": "array", "items": { "type": "string" }, "description": "Skills the resolved agent must actually be able to use. Checked right after agent resolution and before the prompt is built, so an unmet requirement fails the run with an error naming the skill and the fix, and bills no LLM call. Omit unless the step cannot work without them." },
+                                    "session_mode": { "type": "string", "enum": ["persistent", "new"], "description": "Session this step's invocation uses: \"persistent\" reuses the target agent's long-running session, \"new\" mints a fresh one. Omit to defer to the agent's own setting." },
+                                    "inherit_context": { "type": "boolean", "description": "Set false to suppress parent-workflow context injection for this step regardless of the agent's setting. Omit to defer to the agent." }
                                 },
                                 "required": ["name", "agent", "prompt_template"]
                             }
                         },
                         "input_schema": {
                             "type": "array",
-                            "description": "Declared input parameters so callers know what to pass in workflow_run.",
+                            "description": "Parameters callers pass to workflow_run. Each becomes a {{name}} placeholder available to every step's prompt_template.",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "name": { "type": "string" },
-                                    "description": { "type": "string" },
-                                    "type": { "type": "string", "enum": ["string", "number", "boolean", "file", "image", "agent_id"] },
-                                    "required": { "type": "boolean" }
+                                    "name": { "type": "string", "description": "Parameter name, as referenced by {{name}} in a prompt_template" },
+                                    "param_type": { "type": "string", "enum": ["string", "number", "boolean", "file", "image", "agent_id"], "description": "Value type (default 'string'). Note the key is param_type, not type — this is the same spelling workflow_describe reports back." },
+                                    "required": { "type": "boolean", "description": "Whether callers must supply it (default true)" },
+                                    "description": { "type": "string", "description": "What the parameter means, shown by workflow_describe" }
                                 },
-                                "required": ["name", "type"]
+                                "required": ["name"]
                             }
                         },
-                        "total_timeout_secs": {
-                            "type": "integer",
-                            "description": "Max wall-clock seconds for the entire workflow run. Maximum: 86400.",
-                            "maximum": 86400
-                        }
+                        "total_timeout_secs": { "type": "integer", "minimum": 1, "maximum": 86400, "description": "Wall-clock limit for the whole run (ceiling 86400 = 24h). Omit to use the daemon default." }
                     },
                     "required": ["name", "steps"]
                 }),

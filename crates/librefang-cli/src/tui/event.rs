@@ -1017,6 +1017,55 @@ pub fn spawn_run_workflow(
     });
 }
 
+/// Why the workflow creator's raw `steps` field could not become a request body.
+///
+/// Kept separate from its rendered message so the parser stays a pure
+/// function the unit tests can exercise without initialising the locale
+/// bundles.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StepsJsonError {
+    /// The operator advanced past the steps field without typing anything.
+    Empty,
+    /// The text is not JSON at all; carries serde's position-bearing message.
+    NotJson(String),
+    /// Valid JSON, but a scalar or an object where the API wants an array.
+    NotArray,
+}
+
+impl StepsJsonError {
+    fn message(&self) -> String {
+        match self {
+            StepsJsonError::Empty => crate::i18n::t("tui-event-workflow-steps-empty"),
+            StepsJsonError::NotJson(detail) => {
+                crate::i18n::t_args("tui-event-workflow-steps-invalid", &[("error", detail)])
+            }
+            StepsJsonError::NotArray => crate::i18n::t("tui-event-workflow-steps-not-array"),
+        }
+    }
+}
+
+/// Turn the creator's free-text `steps` field into the array
+/// `POST /api/workflows` expects.
+///
+/// The wizard collects the steps as a raw JSON string, and that string used
+/// to be forwarded as a JSON *string*. `create_workflow` reads
+/// `req["steps"].as_array()`, so every submission was rejected with
+/// `Missing 'steps' array` and the TUI could not create a workflow at all.
+/// Parsing here also turns a typo into a message naming the position of the
+/// mistake instead of a bare HTTP failure.
+pub(crate) fn parse_workflow_steps_json(raw: &str) -> Result<serde_json::Value, StepsJsonError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(StepsJsonError::Empty);
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|e| StepsJsonError::NotJson(e.to_string()))?;
+    if !value.is_array() {
+        return Err(StepsJsonError::NotArray);
+    }
+    Ok(value)
+}
+
 /// Create a workflow in background.
 pub fn spawn_create_workflow(
     backend: BackendRef,
@@ -1027,13 +1076,25 @@ pub fn spawn_create_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
+            let steps = match parse_workflow_steps_json(&steps_json) {
+                Ok(steps) => steps,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(e.message()));
+                    return;
+                }
+            };
             let client =
                 make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             // The API requires `steps` to be an ARRAY. Sending the raw string
             // made every creation fail with 400 "Missing 'steps' array" while
-            // the arm below still reported success.
-            let steps: serde_json::Value = match serde_json::from_str(&steps_json) {
+            // still reporting success to the operator.
+            //
+            // Serialised from the parsed steps rather than re-read from the
+            // raw text: `parse_workflow_steps_json` above has already rejected
+            // the malformed cases with a message that names what is wrong,
+            // and re-parsing here would replace that with a generic one.
+            let steps: serde_json::Value = match serde_json::to_value(&steps) {
                 Ok(v @ serde_json::Value::Array(_)) => v,
                 _ => {
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
@@ -1062,16 +1123,26 @@ pub fn spawn_create_workflow(
                             .as_str()
                             .or_else(|| body["message"].as_str())
                             .unwrap_or("");
-                        let _ = tx.send(AppEvent::FetchError(format!(
-                            "Create workflow: {status} {detail}"
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-workflow-create-failed",
+                            &[("status", &status.to_string()), ("detail", detail)],
                         )));
                         return;
                     }
-                    let id = body["id"].as_str().unwrap_or("created").to_string();
+                    // `create_workflow` answers with `workflow_id`; reading
+                    // `id` meant every success reported the placeholder.
+                    let id = body["workflow_id"]
+                        .as_str()
+                        .or_else(|| body["id"].as_str())
+                        .unwrap_or("created")
+                        .to_string();
                     let _ = tx.send(AppEvent::WorkflowCreated(id));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Create workflow: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-workflow-create-failed",
+                        &[("status", "-"), ("detail", &e.to_string())],
+                    )));
                 }
             }
         }
@@ -2522,23 +2593,73 @@ fn is_safe_template_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Directory the in-process backend reads agent types from.
-///
-/// Installed agent types live flat as `~/.librefang/agent-types/<name>.toml` (see `librefang_types::registry_paths::installed_agent_types_dir`), which is exactly what `GET /api/agent-types` — and its deprecated `/api/templates` alias — serves, so the two backends stay in agreement.
-fn templates_dir() -> std::path::PathBuf {
+fn workspace_agents_dir() -> std::path::PathBuf {
+    librefang_kernel::config::librefang_home()
+        .join("workspaces")
+        .join("agents")
+}
+
+/// Operator-authored agent types, one flat `{name}.toml` each — the same directory
+/// `POST`/`PUT /api/templates` writes (#7740).
+fn agent_types_dir() -> std::path::PathBuf {
     librefang_types::registry_paths::installed_agent_types_dir(
-        &crate::commands::common::cli_librefang_home(),
+        &librefang_kernel::config::librefang_home(),
     )
+}
+
+/// Resolve one agent type's manifest path, agent-types first.
+///
+/// Mirrors the precedence `GET /api/templates/{name}` uses, so the in-process backend
+/// and the daemon backend spawn from the same document for the same row.
+fn local_agent_type_path(name: &str) -> Option<std::path::PathBuf> {
+    let own = agent_types_dir().join(format!("{name}.toml"));
+    if own.is_file() {
+        return Some(own);
+    }
+    let workspace = workspace_agents_dir().join(name).join("agent.toml");
+    workspace.is_file().then_some(workspace)
 }
 
 /// Read the agent types on disk.
 /// The in-process backend has no HTTP surface to ask, so it reads the same directory `GET /api/agent-types` serves.
 fn local_agent_templates() -> Vec<TemplateInfo> {
-    let dir = templates_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
+    // Same two sources, and the same precedence, as `GET /api/templates`.
     let mut out = Vec::new();
+    collect_agent_type_files(&agent_types_dir(), &mut out);
+    collect_workspace_agent_manifests(&workspace_agents_dir(), &mut out);
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// Read `agent-types/{name}.toml` — the documents the write verbs own.
+fn collect_agent_type_files(dir: &std::path::Path, out: &mut Vec<TemplateInfo>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_safe_template_name(name) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        push_template_info(name.to_string(), &content, &path, out);
+    }
+}
+
+/// Read `workspaces/agents/{name}/agent.toml` — every live agent is spawnable-from too.
+fn collect_workspace_agent_manifests(dir: &std::path::Path, out: &mut Vec<TemplateInfo>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let manifest_path = entry.path();
         if !manifest_path.is_file()
@@ -2558,24 +2679,31 @@ fn local_agent_templates() -> Vec<TemplateInfo> {
         let Ok(content) = std::fs::read_to_string(&manifest_path) else {
             continue;
         };
-        match toml::from_str::<librefang_types::agent::AgentManifest>(&content) {
-            Ok(manifest) => out.push(TemplateInfo {
-                name,
-                description: manifest.description,
-                category: templates::MANIFEST_CATEGORY.to_string(),
-                provider: manifest.model.provider,
-                model: manifest.model.model,
-                source: TemplateSource::Manifest,
-            }),
-            // Naming the file turns "my agent type vanished" into a one-line diagnosis instead of a silent absence.
-            Err(e) => tracing::warn!(
-                "skipping agent template {}: invalid manifest: {e}",
-                manifest_path.display()
-            ),
-        }
+        push_template_info(name, &content, &manifest_path, out);
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+}
+
+fn push_template_info(
+    name: String,
+    content: &str,
+    path: &std::path::Path,
+    out: &mut Vec<TemplateInfo>,
+) {
+    match toml::from_str::<librefang_types::agent::AgentManifest>(content) {
+        Ok(manifest) => out.push(TemplateInfo {
+            name,
+            description: manifest.description,
+            category: templates::MANIFEST_CATEGORY.to_string(),
+            provider: manifest.model.provider,
+            model: manifest.model.model,
+            source: TemplateSource::Manifest,
+        }),
+        // Naming the file turns "my agent type vanished" into a one-line diagnosis instead of a silent absence.
+        Err(e) => tracing::warn!(
+            "skipping agent template {}: invalid manifest: {e}",
+            path.display()
+        ),
+    }
 }
 
 fn parse_api_templates(body: &serde_json::Value) -> Vec<TemplateInfo> {
@@ -2641,7 +2769,7 @@ pub fn spawn_fetch_template_toml(backend: BackendRef, name: String, tx: mpsc::Se
                         .and_then(|resp| resp.text().ok())
                 }
                 BackendRef::InProcess(_) => {
-                    std::fs::read_to_string(templates_dir().join(format!("{name}.toml"))).ok()
+                    local_agent_type_path(&name).and_then(|p| std::fs::read_to_string(p).ok())
                 }
             }
         };
@@ -4604,6 +4732,51 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    /// The workflow creator's raw `steps` field must reach the API as a JSON
+    /// array. It used to be forwarded as a JSON string, which
+    /// `create_workflow` rejects with `Missing 'steps' array` — the wizard
+    /// could not create anything.
+    #[test]
+    fn workflow_steps_json_parses_into_an_array() {
+        let steps = parse_workflow_steps_json(
+            r#"[{"name":"draft","agent_name":"writer","prompt":"{{input}}","session_mode":"new"}]"#,
+        )
+        .expect("a JSON array must parse");
+        let array = steps.as_array().expect("must stay an array");
+        assert_eq!(array.len(), 1);
+        assert_eq!(array[0]["agent_name"], "writer");
+        assert_eq!(
+            array[0]["session_mode"], "new",
+            "the per-step session override must survive the parse untouched"
+        );
+    }
+
+    #[test]
+    fn workflow_steps_json_tolerates_surrounding_whitespace() {
+        assert!(parse_workflow_steps_json("  [ ]  \n").is_ok());
+    }
+
+    #[test]
+    fn workflow_steps_json_rejects_the_shapes_the_api_would_reject() {
+        assert_eq!(
+            parse_workflow_steps_json("   "),
+            Err(StepsJsonError::Empty),
+            "an untouched field must be named as empty, not sent as a doomed request"
+        );
+        assert_eq!(
+            parse_workflow_steps_json(r#"{"name":"draft"}"#),
+            Err(StepsJsonError::NotArray),
+            "a bare step object is the likeliest typo and must be caught here"
+        );
+        assert!(
+            matches!(
+                parse_workflow_steps_json("[{name: draft}]"),
+                Err(StepsJsonError::NotJson(_))
+            ),
+            "malformed JSON must carry serde's message rather than a bare failure"
+        );
+    }
 
     /// The TUI's sweep loops must survive the call that spawned them.
     ///

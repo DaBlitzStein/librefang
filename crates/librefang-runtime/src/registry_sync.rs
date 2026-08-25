@@ -919,6 +919,56 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// The fan-out must reach the agent-template pre-install through the shared resolver, not its own `join("agents")`, so a missing directory is reported once rather than skipping the block in silence (#7767).
+    #[test]
+    fn fanout_agent_templates_goes_through_the_shared_resolver() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let registry_cache = home_dir.join("registry");
+        let template_src = registry_cache.join("agents").join("hello-world");
+        std::fs::create_dir_all(&template_src).unwrap();
+        std::fs::write(template_src.join("agent.toml"), "name = \"hello-world\"\n").unwrap();
+
+        assert_eq!(
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_cache),
+            Some(registry_cache.join("agents")),
+            "the shared resolver is what the fan-out reads",
+        );
+
+        fanout_registry_content(&home_dir, &registry_cache);
+
+        assert!(
+            home_dir
+                .join("workspaces")
+                .join("agents")
+                .join("hello-world")
+                .join("agent.toml")
+                .exists(),
+            "a resolved agents directory pre-installs its templates",
+        );
+    }
+
+    #[test]
+    fn fanout_agent_templates_is_a_noop_when_the_agents_dir_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let registry_cache = home_dir.join("registry");
+        std::fs::create_dir_all(registry_cache.join("workflows")).unwrap();
+
+        assert_eq!(
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_cache),
+            None,
+            "a checkout without `agents/` resolves to nothing, and the resolver reports it",
+        );
+
+        fanout_registry_content(&home_dir, &registry_cache);
+
+        assert!(
+            !home_dir.join("workspaces").join("agents").exists(),
+            "nothing is pre-installed when the directory cannot be resolved",
+        );
+    }
+
     #[test]
     fn poisoned_registry_sync_lock_recovers_and_remains_exclusive() {
         let mutex = Mutex::new(());

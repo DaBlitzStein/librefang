@@ -117,7 +117,6 @@ memory_write = ["self.*"]
         description: "Tests agent resolution by name".to_string(),
         steps: vec![
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "step-alpha".to_string(),
                 agent: StepAgent::ByName {
                     name: "agent-alpha".to_string(),
@@ -130,9 +129,9 @@ memory_write = ["self.*"]
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "step-beta".to_string(),
                 agent: StepAgent::ByName {
                     name: "agent-beta".to_string(),
@@ -145,6 +144,7 @@ memory_write = ["self.*"]
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ],
         created_at: chrono::Utc::now(),
@@ -220,7 +220,6 @@ memory_write = ["self.*"]
         name: "by-id-test".to_string(),
         description: "".to_string(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "step1".to_string(),
             agent: StepAgent::ById {
                 id: agent_id.to_string(),
@@ -233,6 +232,7 @@ memory_write = ["self.*"]
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -365,7 +365,6 @@ async fn test_workflow_e2e_with_groq() {
         description: "E2E integration test workflow".to_string(),
         steps: vec![
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "analyze".to_string(),
                 agent: StepAgent::ByName {
                     name: "wf-analyst".to_string(),
@@ -378,9 +377,9 @@ async fn test_workflow_e2e_with_groq() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "summarize".to_string(),
                 agent: StepAgent::ByName {
                     name: "wf-writer".to_string(),
@@ -393,6 +392,7 @@ async fn test_workflow_e2e_with_groq() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ],
         created_at: chrono::Utc::now(),
@@ -472,7 +472,6 @@ async fn workflow_describe_returns_explicit_input_schema() {
         name: "publish-article".to_string(),
         description: "Draft + cover image + post".to_string(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "draft".to_string(),
             agent: StepAgent::ByName {
                 name: "writer".to_string(),
@@ -485,6 +484,7 @@ async fn workflow_describe_returns_explicit_input_schema() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -551,7 +551,6 @@ async fn workflow_describe_auto_detects_from_template_placeholders() {
         description: "Old-style flow with no input_schema block".to_string(),
         steps: vec![
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "step-1".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -564,9 +563,9 @@ async fn workflow_describe_auto_detects_from_template_placeholders() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "step-2".to_string(),
                 agent: StepAgent::ByName {
                     name: "a".to_string(),
@@ -579,6 +578,7 @@ async fn workflow_describe_auto_detects_from_template_placeholders() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ],
         created_at: chrono::Utc::now(),
@@ -632,7 +632,6 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
         name: "explicit".to_string(),
         description: "".to_string(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "s".to_string(),
             agent: StepAgent::ByName {
                 name: "a".to_string(),
@@ -645,6 +644,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -666,7 +666,6 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
         name: "implicit".to_string(),
         description: "".to_string(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "s".to_string(),
             agent: StepAgent::ByName {
                 name: "a".to_string(),
@@ -679,6 +678,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -694,7 +694,6 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
         name: "none".to_string(),
         description: "".to_string(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "s".to_string(),
             agent: StepAgent::ByName {
                 name: "a".to_string(),
@@ -707,6 +706,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -770,7 +770,6 @@ async fn workflow_engine_substitutes_input_schema_vars_into_step_prompt() {
         name: "publish-with-cover".to_string(),
         description: "Rich-input workflow for #4982 regression".to_string(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "draft".to_string(),
             agent: librefang_kernel::workflow::StepAgent::ByName {
                 name: "writer".to_string(),
@@ -783,6 +782,7 @@ async fn workflow_engine_substitutes_input_schema_vars_into_step_prompt() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -835,9 +835,7 @@ async fn workflow_engine_substitutes_input_schema_vars_into_step_prompt() {
     };
     let resolver =
         |_a: &librefang_kernel::workflow::StepAgent| Ok((AgentId::new(), "stub".to_string(), true));
-    let result = engine
-        .execute_run(run_id, resolver, sender, |_, _| Ok(()))
-        .await;
+    let result = engine.execute_run(run_id, resolver, sender).await;
     assert!(result.is_ok(), "engine.execute_run failed: {:?}", result);
 
     let prompts = captured.lock().unwrap();

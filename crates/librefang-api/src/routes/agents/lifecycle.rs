@@ -337,6 +337,7 @@ async fn spawn_agent_inner(
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Ephemeral worker result", body = crate::types::JsonObject),
+        (status = 403, description = "Inter-agent call depth exceeded"),
         (status = 429, description = "Provider budget exhausted"),
         (status = 500, description = "Ephemeral spawn failed")
     )
@@ -344,12 +345,12 @@ async fn spawn_agent_inner(
 pub async fn spawn_ephemeral_agent(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<librefang_types::agent::EphemeralSpawnRequest>,
+    Json(req): Json<librefang_types::ephemeral::EphemeralSpawnRequest>,
 ) -> axum::response::Response {
     let l = super::resolve_lang(lang.as_ref());
     let start = std::time::Instant::now();
 
-    match state.kernel.spawn_ephemeral_detailed(req, None).await {
+    match state.kernel.spawn_ephemeral(req).await {
         Ok(result) => {
             let latency_ms = start.elapsed().as_millis() as u64;
             (
@@ -366,11 +367,17 @@ pub async fn spawn_ephemeral_agent(
         Err(e) => {
             tracing::warn!("Ephemeral spawn failed: {e}");
             let t = ErrorTranslator::new(l);
-            // Surface the quota message (safe, no internal detail); scrub
-            // everything else to a generic 500 — same policy as spawn_agent.
+            // Surface the quota and depth-refusal messages (safe, no internal
+            // detail); scrub everything else to a generic 500 — same policy as
+            // spawn_agent. The kernel handle deliberately preserves both typed
+            // variants across the trait boundary (see `spawn_ephemeral`), so
+            // flattening them here would report a self-imposed limit as a crash.
             let (status, code, msg) = match &e {
                 librefang_types::error::LibreFangError::QuotaExceeded(m) => {
                     (StatusCode::TOO_MANY_REQUESTS, "quota_exceeded", m.clone())
+                }
+                librefang_types::error::LibreFangError::CapabilityDenied(m) => {
+                    (StatusCode::FORBIDDEN, "capability_denied", m.clone())
                 }
                 _ => (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1226,7 +1233,12 @@ pub async fn get_agent(
             .with_code("agent_not_found")
             .into_response();
     }
-    let pending = state.kernel.pending_skill_and_mcp_declarations(agent_id);
+    // `ErrorTranslator` holds a `!Send` FluentBundle, so it must not be alive across the await below (#7713 added the first await to this handler).
+    drop(t);
+    let pending = state
+        .kernel
+        .pending_skill_and_mcp_declarations(agent_id)
+        .await;
 
     let dm = {
         let dm_override = state
@@ -1292,8 +1304,8 @@ pub async fn get_agent(
             },
             "skills": entry.manifest.skills,
             "skills_mode": skill_assignment_mode(&entry.manifest),
-            // Declared-but-unavailable skills/MCP servers (retained in the
-            // manifest, activate on the next skills reload / MCP reconnect).
+            // Declared-but-unusable halves of the two allowlists (#7713). Always present, `[]` when everything resolves.
+            // A skill is pending until it is installed and the registry reloaded; an MCP server until a connection is live, so a configured-and-unreachable server stays listed here.
             "pending_skills": pending.skills,
             "pending_mcp_servers": pending.mcp_servers,
             "schedule": format_schedule_mode(&entry.manifest.schedule),

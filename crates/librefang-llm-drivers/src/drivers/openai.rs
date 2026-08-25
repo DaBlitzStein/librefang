@@ -36,14 +36,23 @@ pub struct OpenAIDriver {
     /// Cache of uploaded file IDs for Moonshot/Kimi (hash of bytes → file_id).
     /// Avoids re-uploading the same file across agent loop iterations.
     moonshot_file_cache: std::sync::Arc<tokio::sync::Mutex<HashMap<[u8; 32], String>>>,
-    /// Model names known to reject `reasoning_effort` with a 400 from this
-    /// provider (one driver instance = one base_url / gateway, so caching by
-    /// model alone already scopes to the provider+model combination). Set
-    /// the first time a request for a given model hits that rejection (see
-    /// the strip-and-retry branch in `complete`/`stream`); once cached,
-    /// Models that answered `reasoning_effort` with a hard 400, mapped to when
-    /// they did. `build_request` omits the field for a muted model up front so
-    /// the same combination never round-trips a second guaranteed rejection.
+    /// Models that answered `reasoning_effort` with a hard 400 from this
+    /// endpoint, mapped to when they did (#7769). `build_request` omits the
+    /// field for a muted model up front so the same combination never
+    /// round-trips a second guaranteed rejection.
+    ///
+    /// Whether a model can reason and whether the gateway in front of it will
+    /// forward the field are different questions, and only the second decides
+    /// the outcome — litellm strips the parameter and 400s before the model
+    /// ever sees it, and the error names the adapter rather than the model. No
+    /// static table answers that, so the driver discovers it: the first
+    /// rejection strips the field and retries (see the strip-and-retry branch
+    /// in `complete`/`stream`), and the model is recorded here.
+    ///
+    /// Keyed by model alone because one driver instance is one `base_url`, so
+    /// the provider half of the pair is already fixed. Deliberately
+    /// per-instance and in-memory — a persisted negative cache would keep
+    /// suppressing the field long after a gateway was reconfigured.
     ///
     /// The mute is temporary, not a conviction: entries expire after
     /// [`REASONING_EFFORT_MUTE_TTL`]. A gateway's parameter support is
@@ -163,6 +172,28 @@ impl OpenAIDriver {
             emit_caller_trace_headers: true,
             max_retries: 3,
         }
+    }
+
+    /// Whether `reasoning_effort` is currently withheld for `model` because
+    /// this endpoint already rejected it.
+    ///
+    /// Entries older than the mute TTL are pruned lazily here, so the mute
+    /// self-heals without a daemon restart once the operator has reconfigured
+    /// the gateway — see the field doc on `reasoning_effort_unsupported`.
+    fn reasoning_effort_rejected(&self, model: &str) -> bool {
+        let now = std::time::Instant::now();
+        self.reasoning_effort_unsupported
+            .retain(|_, at| now.duration_since(*at) < self.reasoning_effort_mute_ttl);
+        self.reasoning_effort_unsupported.contains_key(model)
+    }
+
+    /// Record that this endpoint rejected `reasoning_effort` for `model`.
+    ///
+    /// Re-recording an already-muted model restarts its TTL, which is the
+    /// intended reading: the rejection was observed again just now.
+    fn record_reasoning_effort_rejected(&self, model: &str) {
+        self.reasoning_effort_unsupported
+            .insert(model.to_string(), std::time::Instant::now());
     }
 
     /// True if this provider is Moonshot/Kimi and requires reasoning_content on assistant messages with tool_calls.
@@ -913,18 +944,6 @@ impl OpenAIDriver {
     ///
     /// Shared between `complete()` and `stream()`.  The caller sets
     /// `stream` / `stream_options` on the returned struct before sending.
-    /// Whether `reasoning_effort` is currently withheld for this model.
-    ///
-    /// Entries older than the mute TTL are pruned lazily here, so the mute
-    /// self-heals without a daemon restart once the operator has reconfigured
-    /// the gateway — see the field doc on `reasoning_effort_unsupported`.
-    fn is_reasoning_effort_muted(&self, model: &str) -> bool {
-        let now = std::time::Instant::now();
-        self.reasoning_effort_unsupported
-            .retain(|_, at| now.duration_since(*at) < self.reasoning_effort_mute_ttl);
-        self.reasoning_effort_unsupported.contains_key(model)
-    }
-
     fn build_request(&self, request: &CompletionRequest) -> Result<OaiRequest, LlmError> {
         use librefang_types::model_catalog::ReasoningEchoPolicy;
         let echo_policy = self.effective_reasoning_echo_policy(request);
@@ -1237,12 +1256,9 @@ impl OpenAIDriver {
             },
             // Request extended thinking when the caller configured a budget (#6398).
             // Emitted only under the default `None` echo policy: `EmptyString` (Kimi) disables thinking wire-side above, and `Strip` / `Echo` models (DeepSeek R1 / V4) reason by default without an opt-in — this API family rejects requests with unexpected reasoning fields (see the R1 `reasoning_content` note above), so nothing extra is sent to them.
-            // Also withheld once this model has already 400'd on the field
-            // (`reasoning_effort_unsupported`) — no point round-tripping a
-            // second guaranteed rejection for a combination we already know
-            // the gateway/adapter will not accept.
+            // A gateway that already rejected the field for this model is not asked again (#7769) — the answer is deterministic, so re-sending it only buys a 400 and a retry on every turn.
             reasoning_effort: if echo_policy == ReasoningEchoPolicy::None
-                && !self.is_reasoning_effort_muted(&request.model)
+                && !self.reasoning_effort_rejected(&request.model)
             {
                 request
                     .thinking
@@ -1421,28 +1437,18 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
 
-                // Gateway/adapter rejected `reasoning_effort` as unsupported
-                // for this provider+model combination — confirmed live
-                // against a litellm gateway: `litellm.UnsupportedParamsError:
-                // openai does not support parameters: ['reasoning_effort']`
-                // when the underlying model group's adapter is
-                // `openai`-shaped but the model itself doesn't accept the
-                // field. This is deterministic (the same request 400s again
-                // every time), so strip the field, remember the model so
-                // `build_request` omits it up front on future calls, and
-                // retry immediately.
+                // A gateway that will not forward `reasoning_effort` rejects the request before the model sees it (#7769) — confirmed live against a litellm gateway: `litellm.UnsupportedParamsError: openai does not support parameters: ['reasoning_effort']` when the underlying model group's adapter is `openai`-shaped but the model itself does not accept the field.
+                // The answer is deterministic, so strip the field, remember the model so `build_request` omits it from here on, and retry — the same shape as the `temperature` strip above.
                 if status == 400
                     && oai_request.reasoning_effort.is_some()
-                    && crate::llm_errors::is_unsupported_reasoning_effort_error(&body)
+                    && crate::llm_driver::llm_errors::is_unsupported_reasoning_effort_error(&body)
                     && attempt < max_retries
                 {
-                    warn!(
-                        model = %oai_request.model,
-                        "Provider rejected reasoning_effort as unsupported; retrying without it"
-                    );
+                    warn!(model = %oai_request.model, "Gateway rejected reasoning_effort, retrying without it");
                     oai_request.reasoning_effort = None;
-                    self.reasoning_effort_unsupported
-                        .insert(oai_request.model.clone(), std::time::Instant::now());
+                    self.record_reasoning_effort_rejected(&oai_request.model);
+                    // Same small backoff as the sibling parameter strips, so a
+                    // misconfigured request cannot tight-loop.
                     tokio::time::sleep(std::time::Duration::from_millis(
                         100 * (attempt as u64 + 1),
                     ))
@@ -1879,23 +1885,21 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
 
-                // Gateway/adapter rejected `reasoning_effort` as unsupported —
+                // Gateway rejected `reasoning_effort` as unsupported (#7769) —
                 // see the identical, more-commented branch in `complete()`
                 // for why this is deterministic and safe to strip-and-retry.
                 if status == 400
                     && oai_request.reasoning_effort.is_some()
-                    && crate::llm_errors::is_unsupported_reasoning_effort_error(&body)
+                    && crate::llm_driver::llm_errors::is_unsupported_reasoning_effort_error(&body)
                     && attempt < max_retries
                 {
-                    warn!(
-                        model = %oai_request.model,
-                        "Provider rejected reasoning_effort as unsupported; retrying without it (stream)"
-                    );
+                    warn!(model = %oai_request.model, "Gateway rejected reasoning_effort, retrying without it (stream)");
                     oai_request.reasoning_effort = None;
-                    self.reasoning_effort_unsupported
-                        .insert(oai_request.model.clone(), std::time::Instant::now());
+                    self.record_reasoning_effort_rejected(&oai_request.model);
+                    // Same small backoff as the sibling parameter strips, so a
+                    // misconfigured request cannot tight-loop.
                     tokio::time::sleep(std::time::Duration::from_millis(
-                        100 * (attempt + 1) as u64,
+                        100 * (attempt as u64 + 1),
                     ))
                     .await;
                     continue;

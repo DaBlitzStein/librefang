@@ -75,6 +75,7 @@ import {
   useAgentSkills,
   useAgentManifest,
   useAgentChannels,
+  useAgentMcpServers,
   usePromptVersions,
   useTools,
   useAgentTokenUsage,
@@ -869,6 +870,13 @@ export function AgentsPage() {
   // blank for almost every agent.
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
   const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "tools",
+  });
+  // Per-agent MCP server assignment (#7713). The Tools tab is where MCP grants
+  // are explained, and it is the only place a declared-but-unconnected server
+  // can be shown at all: a server with no connection contributes no tools, so
+  // it forms no tool group and would otherwise be invisible on this page.
+  const tabAgentMcpQuery = useAgentMcpServers(detailAgent?.id ?? "", {
     enabled: !!detailAgent && agentTab === "tools",
   });
   // Per-agent skill assignment (#4917) — backs the inline assign/unassign
@@ -1824,6 +1832,11 @@ export function AgentsPage() {
       .slice()
       .sort();
     const available: string[] = (skillsData?.available ?? []).slice().sort();
+    // Assigned names the registry does not have (#7713): declared-but-uninstalled
+    // skills, retained in the manifest and activating on the next skills reload.
+    // Marked in place rather than listed separately — they are genuinely
+    // assigned, they just contribute nothing until the skill is installed.
+    const pendingSkills = new Set(skillsData?.pending ?? []);
     // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — every
     // registry skill usable, the default), or 'allowlist' (manifest pins a
     // set). Prefer the live query's mode; fall back to the detail payload.
@@ -1831,9 +1844,6 @@ export function AgentsPage() {
       skillsData?.mode ?? (agent as AgentDetail).skills_mode;
     const skillsDisabled =
       skillsData?.disabled ?? skillsMode === "none";
-    // Declared-but-uninstalled skills: retained in the manifest, activate on
-    // the next skills reload. Rendered as pending rows in the assigned grid.
-    const pendingSkills: string[] = (skillsData?.pending ?? []).slice().sort();
     // The persisted allowlist as the server currently has it: the pinned set
     // in allowlist mode, empty in all-mode (an empty allowlist === all-mode on
     // write). `draft` is the locally-staged copy — `skillsDraft` is null until
@@ -2056,7 +2066,7 @@ export function AgentsPage() {
                       action="remove"
                       onRemove={() => removeSkill(s)}
                       busy={mutating}
-                      pending={pendingSkills.includes(s)}
+                      pending={pendingSkills.has(s)}
                     />
                   ))}
                 </div>
@@ -2308,6 +2318,15 @@ export function AgentsPage() {
       }
     };
 
+    // Declared MCP servers with no live connection (#7713). The kernel derives
+    // this from the connection pool rather than the configured server list, so a
+    // server that is configured here and simply unreachable is included — which
+    // is the case worth surfacing, since it looks identical to a healthy one
+    // everywhere else on this page.
+    const pendingMcpServers: string[] = (tabAgentMcpQuery.data?.pending ?? [])
+      .slice()
+      .sort();
+
     const assignedGroups = sortedGroups.filter(
       ([name, tools]) => getGroupStatus(name, tools) !== "none",
     );
@@ -2389,6 +2408,39 @@ export function AgentsPage() {
                 : draft.length}
           </div>
         </div>
+
+        {pendingMcpServers.length > 0 && (
+          <div
+            className="rounded-md border border-amber-400/30 bg-amber-400/5 p-3 flex items-start gap-3"
+            data-testid="agent-pending-mcp"
+          >
+            <Clock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[12.5px] font-medium text-text-main">
+                {t("agents.detail.mcp_pending_title", {
+                  defaultValue: "MCP servers not connected",
+                })}
+              </div>
+              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                {t("agents.detail.mcp_pending_desc", {
+                  defaultValue:
+                    "Granted in agent.toml but no live connection, so they contribute no tools. Check the server on the MCP page; the grant activates as soon as it connects.",
+                })}
+              </div>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {pendingMcpServers.map((name) => (
+                  <span
+                    key={name}
+                    className="font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main"
+                    data-testid="agent-pending-mcp-item"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {isLoading ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">

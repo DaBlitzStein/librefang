@@ -1130,7 +1130,6 @@ impl WorkflowRunner for DispatchCapture {
         &self,
         _workflow_id: &str,
         _input: &str,
-        _caller_agent_id: Option<&str>,
     ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
         if self.deny_workflow_run {
             return Err(librefang_kernel_handle::KernelOpError::CapabilityDenied(

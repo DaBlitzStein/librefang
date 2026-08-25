@@ -125,11 +125,37 @@ describe("AgentSkillItem", () => {
     expect(onRemove).not.toHaveBeenCalled();
   });
 
-  it("shows the pending-activation hint instead of 'installed' when pending", () => {
+  it("shows the pending hint instead of 'installed' on a display-only row", () => {
     render(<AgentSkillItem name="ghost-skill" pending />);
     expect(
       screen.getByTestId("agent-skill-item-description").textContent,
-    ).toContain("Pending activation");
+    ).toContain("not installed here");
     expect(screen.getByTestId("agent-skill-item-pending")).toBeTruthy();
+  });
+
+  // #7713 — a skill named in the manifest that the registry does not have.
+  it("marks a pending skill and says why, while keeping it removable", () => {
+    const onRemove = vi.fn();
+    render(
+      <AgentSkillItem
+        name="ghost-skill"
+        description="stale description from a previous install"
+        action="remove"
+        onRemove={onRemove}
+        pending
+      />,
+    );
+
+    expect(screen.getByTestId("agent-skill-item-pending")).toBeTruthy();
+    expect(
+      screen.getByTestId("agent-skill-item-description").textContent,
+    ).toContain("not installed here");
+    // The assignment is real — the row must still offer the remove affordance.
+    expect(screen.getByTestId("agent-skill-item-remove")).toBeTruthy();
+  });
+
+  it("renders no pending marker for an installed skill", () => {
+    render(<AgentSkillItem name="web-search" description="Searches the web" />);
+    expect(screen.queryByTestId("agent-skill-item-pending")).toBeNull();
   });
 });

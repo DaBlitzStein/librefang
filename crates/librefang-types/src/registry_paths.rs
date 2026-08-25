@@ -8,16 +8,24 @@
 //! every site that resolves this directory has to work with both names
 //! simultaneously, with no window where a fresh sync comes up empty.
 //!
-//! Before this module existed, each call site did a bare
-//! `registry_cache.join("agents")` + `.exists()` check. The day the registry
-//! renames, that check silently returns `false`, the caller's `if` block is
-//! skipped, and a fresh install ends up with zero preinstalled agent
-//! templates — no error, no warning, nothing in the logs to point at why.
-//! [`resolve_agent_types_dir`] is the single place that fixes this: prefer
-//! the canonical new name, fall back to the legacy name with a one-shot
+//! The source directory is read from three places — the runtime's post-sync
+//! fan-out, the hands registry's `base = "<template>"` resolution, and the
+//! kernel router's hand scan. Each used to open-code
+//! `registry_cache.join("agents")` plus an existence check and skip its whole
+//! block on a miss, so a checkout that arrived without the directory (or that
+//! had already been renamed) disabled agent types with no error, no log, and
+//! no way to tell that state apart from "the registry ships no agent types"
+//! (#7767). [`resolve_agent_types_dir`] is the single place that fixes this:
+//! prefer the canonical new name, fall back to the legacy name with a
 //! warning, and log loudly (not silently return "not found") when neither
-//! directory exists — that last case is exactly the failure mode that used
-//! to vanish without a trace.
+//! directory exists — that last case is exactly the failure mode that used to
+//! vanish without a trace.
+//!
+//! Both signals are edge-triggered. The router resolves this directory on
+//! every inbound message dispatch, so an unconditional log would flood rather
+//! than inform: a path is logged when it first fails to resolve (or first
+//! falls back to the legacy name) and becomes eligible again only after it has
+//! resolved cleanly, so a genuine recovery-then-regression is still reported.
 //!
 //! [`installed_agent_types_dir`] resolves the other side: where THIS
 //! installation keeps its own live agent-type manifests
@@ -38,20 +46,38 @@
 //! files between two unrelated domains on the operator's behalf is exactly
 //! what this fix is trying to stop doing.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-/// Canonical (post-rename) name of the agent-templates directory inside a
+/// Canonical (post-rename) name of the agent-types directory inside a
 /// registry checkout.
 pub const AGENT_TYPES_DIR_NAME: &str = "agent-types";
 
 /// Legacy name, still served by the registry until the rename lands upstream.
 pub const LEGACY_AGENTS_DIR_NAME: &str = "agents";
 
-/// Resolve the agent-templates directory within a registry checkout.
+/// Historical alias for [`LEGACY_AGENTS_DIR_NAME`], kept so call sites that
+/// predate the rename keep compiling. New code should name the directory it
+/// actually means: [`AGENT_TYPES_DIR_NAME`] for the canonical one.
+pub const AGENT_TEMPLATES_DIR_NAME: &str = LEGACY_AGENTS_DIR_NAME;
+
+/// Registry checkouts already reported at error level for having neither
+/// candidate directory. Keyed on the checkout root so both candidate names
+/// collapse to one report.
+static REPORTED_MISSING: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// Registry checkouts already warned about for still serving the legacy
+/// directory name. Same edge-triggered discipline as [`REPORTED_MISSING`],
+/// for the same reason: the router hits this path per dispatch.
+static REPORTED_LEGACY: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// Resolve the agent-types directory within a registry checkout.
 ///
 /// `registry_cache` is the root of the checkout (e.g. `~/.librefang/registry`
 /// or the pinned test fixture directory) — the directory that directly
-/// contains `providers/`, `hands/`, `agent-types/` / `agents/`, etc.
+/// contains `providers/`, `hands/`, `agent-types/` / `agents/`, etc. It is
+/// the registry checkout itself, not the LibreFang home directory.
 ///
 /// Resolution order:
 /// 1. `{registry_cache}/agent-types/` — the canonical name. Used silently
@@ -59,42 +85,99 @@ pub const LEGACY_AGENTS_DIR_NAME: &str = "agents";
 ///    name always wins so a transitional registry state where upstream ships
 ///    both doesn't accidentally pin callers to the old one).
 /// 2. `{registry_cache}/agents/` — the legacy name. Used as a fallback with a
-///    single `tracing::warn!` so operators get a signal that the registry
-///    they're syncing from hasn't renamed yet, without flooding the log (this
-///    is called once per sync / cache rebuild by every caller, never once
-///    per agent or per routed message).
+///    `tracing::warn!` the first time a given checkout falls back, so
+///    operators get a signal that the registry they're syncing from hasn't
+///    renamed yet without flooding the log.
 /// 3. Neither exists — `tracing::error!` and `None`. This is the case that
 ///    used to be indistinguishable from "the registry genuinely ships no
-///    agent templates right now": callers must be able to tell "nothing to
-///    sync" apart from "the sync's fan-out silently skipped its block", and
-///    this log line is that signal.
+///    agent types right now": callers must be able to tell "nothing to sync"
+///    apart from "the sync's fan-out silently skipped its block", and this
+///    log line is that signal.
 pub fn resolve_agent_types_dir(registry_cache: &Path) -> Option<PathBuf> {
     let canonical = registry_cache.join(AGENT_TYPES_DIR_NAME);
     if canonical.is_dir() {
+        clear_missing_report(registry_cache);
+        clear_legacy_report(registry_cache);
         return Some(canonical);
     }
 
     let legacy = registry_cache.join(LEGACY_AGENTS_DIR_NAME);
     if legacy.is_dir() {
+        clear_missing_report(registry_cache);
+        report_legacy_fallback(registry_cache, &legacy);
+        return Some(legacy);
+    }
+
+    report_missing(registry_cache);
+    None
+}
+
+/// Historical name for [`resolve_agent_types_dir`], kept because the runtime
+/// fan-out, the hands registry, and the kernel router all reference it. It
+/// resolves the same directory: agent types shipped by a registry checkout,
+/// under whichever of the two names that checkout currently uses.
+pub fn resolve_agent_templates_dir(registry_root: &Path) -> Option<PathBuf> {
+    resolve_agent_types_dir(registry_root)
+}
+
+/// Record a miss and log it if this checkout was not already known to be
+/// missing both candidate directories.
+///
+/// Returns whether the miss was reported, which is what the unit tests below
+/// assert on: the set membership is the record that the error line was
+/// emitted.
+fn report_missing(registry_cache: &Path) -> bool {
+    let newly_missing = match REPORTED_MISSING.lock() {
+        Ok(mut reported) => reported.insert(registry_cache.to_path_buf()),
+        // A poisoned lock means another thread panicked mid-report; logging again is strictly better than staying silent about a degraded registry.
+        Err(poisoned) => poisoned.into_inner().insert(registry_cache.to_path_buf()),
+    };
+    if newly_missing {
+        let registry_cache_display = registry_cache.display();
+        tracing::error!(
+            registry_cache = %registry_cache_display,
+            tried_canonical = %registry_cache.join(AGENT_TYPES_DIR_NAME).display(),
+            tried_legacy = %registry_cache.join(LEGACY_AGENTS_DIR_NAME).display(),
+            "registry checkout has neither '{AGENT_TYPES_DIR_NAME}/' nor legacy '{LEGACY_AGENTS_DIR_NAME}/' — \
+             no agent types are available from this checkout, and hands declaring `base = \"<template>\"` \
+             will not resolve. This is not necessarily an empty registry: verify the sync actually ran \
+             and populated {registry_cache_display}, or re-run `librefang init` to re-sync it"
+        );
+    }
+    newly_missing
+}
+
+/// Forget a previously reported miss so a later regression is reported again.
+fn clear_missing_report(registry_cache: &Path) {
+    match REPORTED_MISSING.lock() {
+        Ok(mut reported) => reported.remove(registry_cache),
+        Err(poisoned) => poisoned.into_inner().remove(registry_cache),
+    };
+}
+
+/// Warn once per checkout that the legacy directory name is still in use.
+fn report_legacy_fallback(registry_cache: &Path, legacy: &Path) -> bool {
+    let newly_reported = match REPORTED_LEGACY.lock() {
+        Ok(mut reported) => reported.insert(registry_cache.to_path_buf()),
+        Err(poisoned) => poisoned.into_inner().insert(registry_cache.to_path_buf()),
+    };
+    if newly_reported {
         tracing::warn!(
             path = %legacy.display(),
             "registry checkout still serves the legacy '{LEGACY_AGENTS_DIR_NAME}/' directory name; \
              the canonical name is '{AGENT_TYPES_DIR_NAME}/' — this fallback exists for the \
              registry's in-progress rename and will keep working until it completes"
         );
-        return Some(legacy);
     }
+    newly_reported
+}
 
-    let registry_cache_display = registry_cache.display();
-    tracing::error!(
-        registry_cache = %registry_cache_display,
-        tried_canonical = %canonical.display(),
-        tried_legacy = %legacy.display(),
-        "registry checkout has neither '{AGENT_TYPES_DIR_NAME}/' nor legacy '{LEGACY_AGENTS_DIR_NAME}/' — \
-         no agent templates are available from this checkout. This is not necessarily an empty \
-         registry: verify the sync actually ran and populated {registry_cache_display}"
-    );
-    None
+/// Forget a previously warned legacy fallback so a regression warns again.
+fn clear_legacy_report(registry_cache: &Path) {
+    match REPORTED_LEGACY.lock() {
+        Ok(mut reported) => reported.remove(registry_cache),
+        Err(poisoned) => poisoned.into_inner().remove(registry_cache),
+    };
 }
 
 /// Directory name for this installation's own agent-type manifest store.
@@ -188,7 +271,7 @@ pub fn warn_on_agent_type_like_files_in_templates_dir(home_dir: &Path) {
 mod tests {
     use super::*;
     use std::io;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use tracing_subscriber::fmt::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -228,6 +311,18 @@ mod tests {
         f();
         let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         captured
+    }
+
+    /// Whether `registry_cache` is currently recorded as a reported miss.
+    ///
+    /// Reaching into the private static is deliberate: it is the same
+    /// condition that gates the `tracing::error!` call, so asserting on it
+    /// asserts the error-level signal fired.
+    fn was_reported(registry_cache: &Path) -> bool {
+        match REPORTED_MISSING.lock() {
+            Ok(reported) => reported.contains(registry_cache),
+            Err(poisoned) => poisoned.into_inner().contains(registry_cache),
+        }
     }
 
     #[test]
@@ -307,6 +402,86 @@ mod tests {
         assert!(
             logs.contains("agent-types") && logs.contains("agents"),
             "error must name both directories that were tried, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn missing_agents_dir_returns_none_and_reports_at_error_level() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        assert_eq!(resolve_agent_types_dir(root), None);
+        assert!(
+            was_reported(root),
+            "a missing agent-types directory must produce the error-level signal",
+        );
+    }
+
+    #[test]
+    fn repeated_misses_report_once_until_the_directory_comes_back() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let dir = root.join("agents");
+
+        assert!(report_missing(root), "the first miss is reported");
+        assert!(
+            !report_missing(root),
+            "a repeated miss is not reported again"
+        );
+
+        std::fs::create_dir_all(&dir).expect("create agents dir");
+        assert_eq!(resolve_agent_types_dir(root), Some(dir.clone()));
+        assert!(
+            !was_reported(root),
+            "a successful resolution clears the reported miss",
+        );
+
+        std::fs::remove_dir_all(&dir).expect("remove agents dir");
+        assert_eq!(resolve_agent_types_dir(root), None);
+        assert!(
+            was_reported(root),
+            "a regression after a recovery is reported again",
+        );
+    }
+
+    #[test]
+    fn present_agents_dir_resolves_without_reporting() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let dir = root.join("agents");
+        std::fs::create_dir_all(&dir).expect("create agents dir");
+
+        assert_eq!(resolve_agent_types_dir(root), Some(dir.clone()));
+        assert!(
+            !was_reported(root),
+            "the normal case must not emit an error line",
+        );
+    }
+
+    #[test]
+    fn a_file_named_agents_is_treated_as_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let dir = root.join("agents");
+        std::fs::write(&dir, b"not a directory").expect("write agents file");
+
+        assert_eq!(resolve_agent_types_dir(root), None);
+        assert!(
+            was_reported(root),
+            "a non-directory at the expected path is a miss, not a resolution",
+        );
+    }
+
+    #[test]
+    fn resolve_agent_templates_dir_is_an_alias_for_agent_types() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let canonical = tmp.path().join("agent-types");
+        std::fs::create_dir_all(&canonical).expect("create agent-types dir");
+
+        assert_eq!(
+            resolve_agent_templates_dir(tmp.path()),
+            resolve_agent_types_dir(tmp.path()),
+            "the historical name must resolve the same directory",
         );
     }
 

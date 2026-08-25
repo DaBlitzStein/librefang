@@ -19,13 +19,22 @@ export function useCreateAgentType() {
   });
 }
 
+/**
+ * Save an edit to an existing agent type.
+ *
+ * The body preserves every manifest field the operator did not touch (#7740):
+ * the editor round-trips the type's full `manifest_toml`, so an operator's
+ * `[[triggers]]`, `tool_allowlist`, `[compaction]` and the rest survive a save
+ * rather than being flattened to the handful of fields a form can show.
+ */
 export function useUpdateAgentType() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ name, body }: { name: string; body: AgentTypeInput }) =>
       updateAgentType(name, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentTypeKeys.all });
+    onSuccess: (_data, { name }) => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
     },
   });
 }

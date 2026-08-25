@@ -147,8 +147,11 @@ pub(super) async fn tool_workflow_run(
     // A nesting-depth refusal arrives as `CapabilityDenied` (refs #6659) and must stay a policy error rather than becoming `Upstream`.
     // Two reasons, the same ones spelled out in `tool_agent_send`: `Upstream` lifts to a 5xx-class `ToolExecution` that reads as a downstream crash to retry logic, and `PermissionDenied` classifies as `ToolExecutionStatus::Denied` — a soft failure — so a capped agent that keeps trying does not burn through `MAX_CONSECUTIVE_ALL_FAILED` and lose the turn to an abort.
     // Every other kernel failure stays `Upstream`.
+    // #7714: `run_workflow_owned` records the caller as the run's owner so
+    // the run carries attribution even though the step agent it resolves may
+    // be a canonical instance shared with every other owner of that type.
     let (run_id, output) = kh
-        .run_workflow(workflow_id, &input_str, caller_agent_id)
+        .run_workflow_owned(workflow_id, &input_str, caller_agent_id)
         .await
         .map_err(|e| match e {
             librefang_types::error::LibreFangError::CapabilityDenied(msg) => {
@@ -325,6 +328,67 @@ pub(super) async fn tool_workflow_cancel(
 }
 
 // ---------------------------------------------------------------------------
+// workflow_create — define a new workflow from a conversation (#6934)
+// ---------------------------------------------------------------------------
+
+/// Register a new workflow from an agent-authored definition.
+///
+/// This handler stays deliberately thin.
+/// It checks only the two things it can name a parameter for — a payload missing `name` or `steps` — and forwards the spec to the kernel, which owns every real check: name legality, the resource ceilings, `Workflow::validate()`, and the atomic name reservation.
+/// Splitting those across the two layers is how the tool schema and the enforced rule drift apart, and the kernel is the only side that can make the uniqueness check atomic with the insert.
+///
+/// The whole `input` object is forwarded rather than a rebuilt subset, so a field added to the kernel-side spec is reachable from the tool the moment it exists.
+pub(super) async fn tool_workflow_create(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> ToolResult {
+    if !input["name"].is_string() {
+        return Err(ToolError::MissingParameter("name"));
+    }
+    let steps = input
+        .get("steps")
+        .ok_or(ToolError::MissingParameter("steps"))?;
+    if !steps.is_array() {
+        return Err(ToolError::InvalidParameter {
+            name: "steps",
+            reason: "must be an array of step objects".to_string(),
+        });
+    }
+
+    let kh = require_kernel_typed(kernel)?;
+    // `InvalidInput` (a spec that cannot become a workflow) and `Conflict` (the name is taken) both describe something the model can fix on its next turn, so the kernel's message is relayed as the reason rather than being flattened into an opaque upstream failure.
+    let summary = kh
+        .create_workflow(input, caller_agent_id)
+        .await
+        .map_err(|e| match e {
+            // The kernel's reason already names the offending field, so it is relayed whole rather than pinned to one schema parameter that may not be the one at fault.
+            librefang_types::error::LibreFangError::InvalidInput(reason) => {
+                ToolError::InvalidParameter {
+                    name: "workflow",
+                    reason,
+                }
+            }
+            librefang_types::error::LibreFangError::Conflict(reason) => {
+                ToolError::InvalidParameter {
+                    name: "name",
+                    reason,
+                }
+            }
+            other => ToolError::upstream(other),
+        })?;
+
+    Ok(serde_json::json!({
+        "id": summary.id,
+        "name": summary.name,
+        "description": summary.description,
+        "step_count": summary.step_count,
+        "has_input_schema": summary.has_input_schema,
+    })
+    .to_string())
+}
+
+// ---------------------------------------------------------------------------
 // workflow_describe — discover a workflow's input shape (#4982 — gap 2)
 // ---------------------------------------------------------------------------
 
@@ -368,115 +432,6 @@ pub(super) async fn tool_workflow_describe(
         "step_names": description.step_names,
         "input_schema": input_schema,
     }))?)
-}
-
-/// #6943 review: `workflow_create` sits in `ALWAYS_NATIVE_TOOLS`, so every
-/// agent has it regardless of configuration, and neither the tool's JSON
-/// schema (`definitions.rs`) nor the workflow engine enforced any ceiling
-/// on step count or timeout length before this fix. A schema `maxItems` /
-/// `maximum` is advisory only — the model driving the call can simply
-/// ignore it — so the real cap has to live here, in the handler that
-/// actually persists the workflow. Without it, a single `workflow_create`
-/// call could register an arbitrarily large step list or a
-/// `total_timeout_secs` up to the one-year panic-safety clamp in
-/// `crate::workflow::MAX_TIMEOUT_SECS`, tying up engine-tracked state and
-/// an async-task slot for as long as the caller likes — an unrate-limited
-/// resource-exhaustion vector.
-const MAX_WORKFLOW_STEPS: usize = 50;
-/// Per-step wall-clock ceiling enforced at creation time. One hour is
-/// generous for any legitimate step.
-const MAX_STEP_TIMEOUT_SECS: u64 = 60 * 60;
-/// Whole-workflow wall-clock ceiling enforced at creation time.
-const MAX_TOTAL_TIMEOUT_SECS: u64 = 24 * 60 * 60;
-
-pub(super) async fn tool_workflow_create(
-    input: &serde_json::Value,
-    kernel: Option<&std::sync::Arc<dyn crate::kernel_handle::KernelHandle>>,
-    caller_agent_id: Option<&str>,
-) -> ToolResult {
-    let kh = require_kernel_typed(kernel)?;
-    let name = input["name"]
-        .as_str()
-        .ok_or(ToolError::MissingParameter("name"))?;
-    let description = input["description"].as_str().unwrap_or("");
-
-    // Validate name — same rules as validate_template_name
-    if name.is_empty() || name.len() > 64 {
-        return Err(ToolError::InvalidParameter {
-            name: "name",
-            reason: "Workflow name must be 1-64 characters".to_string(),
-        });
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(ToolError::InvalidParameter {
-            name: "name",
-            reason: "Workflow name must be [A-Za-z0-9_-] only".to_string(),
-        });
-    }
-
-    let steps = input["steps"]
-        .as_array()
-        .ok_or(ToolError::InvalidParameter {
-            name: "steps",
-            reason: "steps must be an array".to_string(),
-        })?;
-
-    if steps.is_empty() {
-        return Err(ToolError::InvalidParameter {
-            name: "steps",
-            reason: "Workflow must have at least one step".to_string(),
-        });
-    }
-    if steps.len() > MAX_WORKFLOW_STEPS {
-        return Err(ToolError::InvalidParameter {
-            name: "steps",
-            reason: format!(
-                "Workflow may have at most {MAX_WORKFLOW_STEPS} steps (got {})",
-                steps.len()
-            ),
-        });
-    }
-    for step in steps {
-        if let Some(t) = step.get("timeout_secs").and_then(|v| v.as_u64()) {
-            if t > MAX_STEP_TIMEOUT_SECS {
-                return Err(ToolError::InvalidParameter {
-                    name: "steps",
-                    reason: format!(
-                        "step timeout_secs must be at most {MAX_STEP_TIMEOUT_SECS}s (got {t}s)"
-                    ),
-                });
-            }
-        }
-    }
-    if let Some(t) = input.get("total_timeout_secs").and_then(|v| v.as_u64()) {
-        if t > MAX_TOTAL_TIMEOUT_SECS {
-            return Err(ToolError::InvalidParameter {
-                name: "total_timeout_secs",
-                reason: format!(
-                    "total_timeout_secs must be at most {MAX_TOTAL_TIMEOUT_SECS}s (got {t}s)"
-                ),
-            });
-        }
-    }
-
-    // Serialize to workflow JSON the same shape the HTTP API expects
-    let workflow_json = serde_json::json!({
-        "name": name,
-        "description": description,
-        "steps": steps,
-        "input_schema": input.get("input_schema"),
-        "total_timeout_secs": input.get("total_timeout_secs"),
-    });
-
-    let workflow_json_str = serde_json::to_string(&workflow_json)
-        .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
-
-    kh.create_workflow(&workflow_json_str, caller_agent_id)
-        .await
-        .map_err(ToolError::upstream)
 }
 
 /// `agent_type_create` — write a new agent type (template) from the flat

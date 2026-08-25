@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentKeys,
+  agentTypeKeys,
   modelKeys,
   handKeys,
   workflowKeys,
@@ -38,7 +39,6 @@ import {
   userBudgetKeys,
   permissionPolicyKeys,
   promptsKeys,
-  agentTypeKeys,
 } from "./keys";
 
 describe("query key factories", () => {
@@ -191,6 +191,16 @@ describe("query key factories", () => {
       // Always same
       expect(configKeys.full()).toEqual(configKeys.full());
     });
+
+    it("status is anchored under configKeys.all so a config write invalidates it", () => {
+      // A save that flips the daemon into managed mode must not leave a stale
+      // `writable: true` behind, and every config mutation invalidates
+      // `configKeys.all` — which only reaches this key while it stays nested.
+      expect(configKeys.status()).toEqual(["config", "status"]);
+      expect(configKeys.status().slice(0, configKeys.all.length)).toEqual(
+        configKeys.all,
+      );
+    });
   });
 
   describe("approvalKeys", () => {
@@ -261,6 +271,27 @@ describe("query key factories", () => {
       const a = modelKeys.list({ provider: "openai" });
       const b = modelKeys.list({ provider: "anthropic" });
       expect(a).not.toEqual(b);
+    });
+  });
+
+  describe("agentTypeKeys", () => {
+    it("hierarchy is anchored so invalidating `all` reaches list and detail", () => {
+      expect(agentTypeKeys.all).toEqual(["agentTypes"]);
+      expect(agentTypeKeys.lists()).toEqual(["agentTypes", "list"]);
+      expect(agentTypeKeys.list()).toEqual(["agentTypes", "list"]);
+      expect(agentTypeKeys.details()).toEqual(["agentTypes", "detail"]);
+      expect(agentTypeKeys.detail("coder")).toEqual([
+        "agentTypes",
+        "detail",
+        "coder",
+      ]);
+      const prefix = agentTypeKeys.all;
+      expect(agentTypeKeys.lists().slice(0, prefix.length)).toEqual(prefix);
+      expect(agentTypeKeys.detail("coder").slice(0, prefix.length)).toEqual(prefix);
+    });
+
+    it("does not collide with agentKeys, which owns a different domain", () => {
+      expect(agentTypeKeys.all).not.toEqual(agentKeys.all);
     });
   });
 
@@ -403,6 +434,7 @@ describe("query key factories", () => {
   describe("all factories exist", () => {
     const factories = [
       agentKeys,
+      agentTypeKeys,
       modelKeys,
       providerKeys,
       channelKeys,
@@ -536,24 +568,9 @@ describe("query key factories", () => {
   });
 
   describe("agentTypeKeys (#7742)", () => {
-    it("exposes the standard all / lists() / details() / detail hierarchy", () => {
-      expect(agentTypeKeys.all).toEqual(["agent-types"]);
-      expect(agentTypeKeys.lists()).toEqual(["agent-types", "list"]);
-      expect(agentTypeKeys.details()).toEqual(["agent-types", "detail"]);
-      expect(agentTypeKeys.detail("coder")).toEqual([
-        "agent-types",
-        "detail",
-        "coder",
-      ]);
-    });
-
-    it("all sub-keys are anchored on agentTypeKeys.all", () => {
+    it("details() is anchored on agentTypeKeys.all", () => {
       const prefix = agentTypeKeys.all;
-      expect(agentTypeKeys.lists().slice(0, prefix.length)).toEqual(prefix);
       expect(agentTypeKeys.details().slice(0, prefix.length)).toEqual(prefix);
-      expect(agentTypeKeys.detail("coder").slice(0, prefix.length)).toEqual(
-        prefix,
-      );
     });
 
     it("details() prefixes detail(name) and is disjoint from lists()", () => {

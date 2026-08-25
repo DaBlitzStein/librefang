@@ -60,13 +60,7 @@ pub async fn skillhub_search(
         Err(e) => {
             let msg = format!("{e}");
             tracing::warn!("Skillhub search failed: {msg}");
-            let status = if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if is_marketplace_unavailable(&e) {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
+            let status = marketplace_error_status(&e, StatusCode::BAD_GATEWAY);
             (
                 status,
                 Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
@@ -126,12 +120,10 @@ pub async fn skillhub_browse(
         Err(e) => {
             let msg = format!("{e}");
             tracing::warn!("Skillhub browse failed: {msg}");
-            let status = if is_marketplace_unavailable(&e) {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
-            (status, Json(serde_json::json!({"items": [], "error": msg})))
+            (
+                marketplace_error_status(&e, StatusCode::BAD_GATEWAY),
+                Json(serde_json::json!({"items": [], "error": msg})),
+            )
         }
     }
 }
@@ -197,13 +189,9 @@ pub async fn skillhub_skill_detail(
             )
         }
         Err(e) => {
-            let status = if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if is_marketplace_unavailable(&e) {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::NOT_FOUND
-            };
+            // `404` is only honest for a slug the hub says it does not have.
+            // When the hub itself is not answering as a marketplace, saying "not found" invents a fact about the skill (#7387).
+            let status = marketplace_error_status(&e, StatusCode::NOT_FOUND);
             (status, Json(serde_json::json!({"error": format!("{e}")})))
         }
     }
@@ -299,16 +287,16 @@ pub async fn skillhub_install(
             let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
-            } else if matches!(e, librefang_skills::SkillError::YamlParse(_)) {
-                StatusCode::BAD_REQUEST
-            } else if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if is_marketplace_unavailable(&e) {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
-                StatusCode::BAD_GATEWAY
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+                // A dead marketplace used to fall through to the `500`, whose body is then scrubbed to "Internal server error" — the one case where the operator most needs the text (#7387).
+                marketplace_error_status(
+                    &e,
+                    if matches!(e, librefang_skills::SkillError::Network(_)) {
+                        StatusCode::BAD_GATEWAY
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    },
+                )
             };
             tracing::warn!("Skillhub install failed: {msg}");
             // See ClawHub install above: 500 catch-all scrubbed

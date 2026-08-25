@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 51;
+const SCHEMA_VERSION: u32 = 54;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -225,6 +225,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // which is backward compatible with every existing row and a no-op for
     // single-user agents.
     run_step!(47, migrate_v47);
+    // v48: add `workflow_runs.owner_agent_id` so a resumed or restored run keeps
+    // the agent it bills to (workflow step agents bill to the run owner).
     run_step!(48, migrate_v48);
     // v49 (#6504 follow-up): persist workflow_runs.total_steps so a run
     // recovered after a daemon restart reports real progress instead of
@@ -237,6 +239,34 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // wrong for one of them. NULL keeps the global, which is what every
     // existing row means.
     run_step!(51, migrate_v51);
+
+    // v52..v54 splice a second migration ladder onto this one.
+    //
+    // Upstream numbered two migrations 48 and 49 — the same two slots this
+    // ladder had already spent on `workflow_runs.owner_agent_id` and
+    // `workflow_runs.total_steps`. `run_step!` gates on `pragma user_version`,
+    // so a database that already reports 51 would skip an upstream step
+    // renumbered *below* its current version and silently come up missing the
+    // column. Upstream's two steps are therefore appended above this ladder's
+    // high-water mark rather than merged into it, and v54 reconciles the one
+    // column a database that climbed the *other* ladder would be missing.
+
+    // v52 (#7756): add `memories.last_decayed_at` so confidence decay charges
+    // each interval of idle time exactly once instead of re-applying the whole
+    // elapsed idle span on every hourly tick. NULL on pre-migration rows, which
+    // the read path treats as "clock starts at accessed_at".
+    run_step!(52, migrate_v52);
+
+    // v53 (#7714): add `usage_events.billed_agent_id` so a spawned worker's
+    // spend rolls up to the agent that spawned it. NULL on every pre-migration
+    // row, which bills to `agent_id` exactly as before. It also re-asserts
+    // `workflow_runs.owner_agent_id`, which v48 above already added — the
+    // column guard makes that a no-op on this ladder and the real add on the
+    // other one.
+    run_step!(53, migrate_v53);
+
+    // v54: reconcile the splice. See `migrate_v54`.
+    run_step!(54, migrate_v54);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -903,6 +933,10 @@ fn migrate_v47(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// V48: Add `owner_agent_id` to `workflow_runs` so resumed/restored runs
 /// keep their billed owner (workflow step agents bill to the run owner).
+///
+/// [`migrate_v53`] re-asserts the same column for a database that climbed
+/// upstream's ladder instead of this one; the column guard makes whichever
+/// of the two runs second a no-op.
 fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !try_column_exists(conn, "workflow_runs", "owner_agent_id")? {
         conn.execute(
@@ -918,15 +952,8 @@ fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// Version 49: persist `workflow_runs.total_steps`.
-///
-/// The workflow_runs table (v37) never stored the run's step count, so
-/// `row_to_workflow_run` hardcoded `total_steps: 0` on reload — a run
-/// recovered after a daemon restart reported "step X of 0" in the API and
-/// dashboard (#6504). Store the actual value so progress survives a
-/// restart. `try_column_exists` keeps the ADD COLUMN idempotent.
-/// Give a session a parent, so a sub-agent run can hang off the session that
-/// asked for it instead of floating free (#7752).
+/// V50: Give a session a parent, so a sub-agent run can hang off the session
+/// that asked for it instead of floating free (#7752).
 ///
 /// Ephemeral worker runs used to write a `sessions` row under a throwaway
 /// agent id with no registry entry: unreachable, uncleanable, and produced on
@@ -942,6 +969,141 @@ fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// with `PRAGMA foreign_keys = ON`, which is per-connection, so relying on it
 /// would make orphan-cleanup depend on which connection did the delete. The
 /// cascade is done explicitly at the delete site instead, where it is visible.
+fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "sessions", "parent_session_id")? {
+        conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", [])?;
+    }
+    // Without this the cascade at delete time is a full scan of `sessions`
+    // on every parent deletion.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (50, datetime('now'), 'Sub-agent sessions hang off the session that spawned them (#7752)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 49: persist `workflow_runs.total_steps`.
+///
+/// The workflow_runs table (v37) never stored the run's step count, so
+/// `row_to_workflow_run` hardcoded `total_steps: 0` on reload — a run
+/// recovered after a daemon restart reported "step X of 0" in the API and
+/// dashboard (#6504). Store the actual value so progress survives a
+/// restart. `try_column_exists` keeps the ADD COLUMN idempotent.
+fn migrate_v49(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "workflow_runs", "total_steps")? {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (49, datetime('now'), 'Persist workflow_runs.total_steps so run progress survives restart')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v52 (#7756): Record when confidence decay last ran for each memory.
+///
+/// `decay_confidence` derived its exponent from `accessed_at` and wrote back
+/// only `confidence`, so nothing advanced between ticks.
+/// Every hourly run therefore re-applied the *entire* elapsed idle span to an
+/// already-decayed value, and the accumulated exponent grew quadratically in
+/// idle time rather than linearly — a row idle for `D` days accrued
+/// `24 * rate * D` per day instead of `rate`.
+/// A corpus configured for a ~70-day half-life collapsed to ~1e-3 in weeks.
+///
+/// `NULL` means "no decay tick has stamped this row yet", which is every row
+/// written before this migration.
+/// The read path falls back to `accessed_at` for those, so a pre-migration
+/// memory takes exactly the one-time decay its doc-commented formula always
+/// intended and no row jumps at the migration boundary.
+///
+/// Upstream numbered this 48; see the ladder in `run_migrations` for why it is
+/// appended here instead.
+fn migrate_v52(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "memories", "last_decayed_at")? {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN last_decayed_at TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (52, datetime('now'), 'Add memories.last_decayed_at so confidence decay charges each idle interval once (#7756)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v53 (#7714): Record who owns a workflow run, and who a call's spend bills to.
+///
+/// `workflow_runs.owner_agent_id` is the agent that asked for the run — the caller of `workflow_run` / `workflow_start`, the agent bound to the channel that issued the command, or the agent an API caller named.
+/// It is a property of the *run*, not of the agent that executes a step, which is what lets two owners drive the same shared step-agent type and still keep their attribution apart.
+/// [`migrate_v48`] already added it on this ladder, so the guard below is a no-op here and the real add for a database that climbed upstream's.
+///
+/// `usage_events.billed_agent_id` is the agent a call's cost rolls up to: a spawned worker's spend belongs on its spawner's budget line, not on the throwaway child's.
+/// It is deliberately a second column rather than a rewrite of `agent_id`: `agent_id` remains the quota subject that both the pre-call `check_quota` and the post-call `check_all_and_record` evaluate, so those two continue to ask about the same agent against that same agent's limits.
+/// Folding attribution into `agent_id` would have made the pre-call check read the child's history while the post-call check read the parent's, both against the child's ceiling.
+///
+/// `NULL` in either column means "no attribution recorded", which is every row written before this migration and every call with no owner or parent.
+///
+/// Upstream numbered this 49; see the ladder in `run_migrations` for why it is
+/// appended here instead.
+fn migrate_v53(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "workflow_runs", "owner_agent_id")? {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN owner_agent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !try_column_exists(conn, "usage_events", "billed_agent_id")? {
+        conn.execute(
+            "ALTER TABLE usage_events ADD COLUMN billed_agent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (53, datetime('now'), 'Add workflow_runs.owner_agent_id and usage_events.billed_agent_id for run ownership and spend rollup (#7714)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v54: Reconcile the two migration ladders spliced at v52.
+///
+/// A database that climbed upstream's ladder reports `user_version = 49` after
+/// applying upstream's 48 and 49. `run_step!` gates on that number, so it skips
+/// this ladder's own v48 and v49 — and v48's column (`owner_agent_id`) is
+/// re-added by [`migrate_v53`], but v49's (`workflow_runs.total_steps`) has no
+/// second home. Without it, `row_to_workflow_run` reads a column that does not
+/// exist and every workflow-run query fails.
+///
+/// Every statement here is guarded, so on a database that climbed *this*
+/// ladder the whole step is a no-op. It exists to make the splice safe in both
+/// directions rather than only the one production happens to be on.
+fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "workflow_runs", "total_steps")? {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (54, datetime('now'), 'Reconcile the spliced migration ladders: ensure workflow_runs.total_steps exists')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// V51: per-task claim TTL override (`task_queue.timeout_secs`).
 ///
 /// The stuck-task sweeper reclaims an `in_progress` row once it has been held
@@ -963,39 +1125,6 @@ fn migrate_v51(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (51, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
-        [],
-    )?;
-    Ok(())
-}
-
-fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !try_column_exists(conn, "sessions", "parent_session_id")? {
-        conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", [])?;
-    }
-    // Without this the cascade at delete time is a full scan of `sessions`
-    // on every parent deletion.
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)",
-        [],
-    )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (50, datetime('now'), 'Sub-agent sessions hang off the session that spawned them (#7752)')",
-        [],
-    )?;
-    Ok(())
-}
-
-fn migrate_v49(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !try_column_exists(conn, "workflow_runs", "total_steps")? {
-        conn.execute(
-            "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
-    }
-    conn.execute(
-        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (49, datetime('now'), 'Persist workflow_runs.total_steps so run progress survives restart')",
         [],
     )?;
     Ok(())
@@ -2602,6 +2731,126 @@ mod tests {
         assert_eq!(name, "Acme");
         assert_eq!(props, "{\"k\":1}");
         assert_eq!(peer, "", "a pre-v47 row migrates to the '' shared sentinel");
+    }
+
+    #[test]
+    fn test_migrate_v48_adds_last_decayed_at_column() {
+        // #7756: confidence decay needs to know when it last ran for a row.
+        // The column is nullable with no default so every pre-migration memory
+        // reads back NULL, which the decay pass treats as "charge from
+        // accessed_at" — no row jumps at the migration boundary.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "memories", "last_decayed_at"));
+
+        // A legacy-shaped INSERT that omits last_decayed_at leaves it NULL.
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted) \
+             VALUES ('legacy-mem', 'agent-1', 'c', 'conversation', 'agent_memory', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0)",
+            [],
+        )
+        .unwrap();
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT last_decayed_at FROM memories WHERE id = 'legacy-mem'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stamp, None,
+            "a pre-v48 memory row must read back NULL, not a synthetic timestamp"
+        );
+
+        // A second call is a no-op (column already present) and must not
+        // disturb the seeded row.
+        migrate_v48(&conn).unwrap();
+        let confidence: f64 = conn
+            .query_row(
+                "SELECT confidence FROM memories WHERE id = 'legacy-mem'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            confidence, 1.0,
+            "re-running migrate_v48 must not touch data"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v49_adds_owner_and_billed_agent_columns() {
+        // #7714: a run records who asked for it, and a usage row records whose
+        // budget line its cost belongs on. Both columns are nullable with no
+        // default, so every pre-migration row reads back NULL — an ownerless
+        // run stays ownerless and an unbilled usage row still bills to
+        // `agent_id`, which is exactly the pre-migration behaviour.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "workflow_runs", "owner_agent_id"));
+        assert!(column_exists(&conn, "usage_events", "billed_agent_id"));
+
+        // Legacy-shaped INSERTs that omit the new columns leave them NULL.
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, workflow_name, state, input, step_results, started_at) \
+             VALUES ('legacy-run', 'wf-1', 'wf', 'completed', 'in', '[]', '2026-07-19T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT owner_agent_id FROM workflow_runs WHERE id = 'legacy-run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            owner, None,
+            "a pre-v49 workflow run must read back an absent owner, not a synthetic one"
+        );
+
+        conn.execute(
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms) \
+             VALUES ('legacy-usage', 'agent-1', '2026-07-19T00:00:00+00:00', 'm', 'p', 1, 2, 0.5, 0, 10)",
+            [],
+        )
+        .unwrap();
+        let billed: Option<String> = conn
+            .query_row(
+                "SELECT billed_agent_id FROM usage_events WHERE id = 'legacy-usage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            billed, None,
+            "a pre-v49 usage row must read back NULL so it still bills to agent_id"
+        );
+
+        // A second call is a no-op (both columns already present) and must not
+        // disturb either seeded row.
+        migrate_v49(&conn).unwrap();
+        let (state, cost): (String, f64) = (
+            conn.query_row(
+                "SELECT state FROM workflow_runs WHERE id = 'legacy-run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT cost_usd FROM usage_events WHERE id = 'legacy-usage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            state, "completed",
+            "re-running migrate_v49 must not touch data"
+        );
+        assert_eq!(cost, 0.5, "re-running migrate_v49 must not touch data");
     }
 
     #[test]

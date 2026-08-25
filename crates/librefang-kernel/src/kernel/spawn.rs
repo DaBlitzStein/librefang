@@ -411,17 +411,18 @@ impl LibreFangKernel {
             .register(entry.clone())
             .map_err(KernelError::LibreFang)?;
 
-        // Surface declared-but-unavailable skills/MCP servers instead of a
-        // silent drop: the declaration stays in the manifest and activates on
-        // the next skills reload / MCP reconnect, but the operator should see
-        // the pending state at spawn time.
-        let pending = self.pending_skill_and_mcp_declarations(agent_id);
-        if !pending.skills.is_empty() || !pending.mcp_servers.is_empty() {
+        // A template can name skills and MCP servers that nothing on this
+        // instance provides. The declaration is kept verbatim and activates on
+        // the next skills reload / MCP connect, so this is not an error — but
+        // without a line in the log the operator's only clue is a step that
+        // quietly behaves differently than the template promised (#7713).
+        let unresolved = self.unresolved_declarations_at_spawn(&entry.manifest);
+        if !unresolved.skills.is_empty() || !unresolved.mcp_servers.is_empty() {
             warn!(
                 agent = %name,
-                pending_skills = ?pending.skills,
-                pending_mcp_servers = ?pending.mcp_servers,
-                "Agent spawned with skills/MCP servers that are not installed yet — declarations retained, they will activate on the next skills reload / MCP reconnect"
+                pending_skills = ?unresolved.skills,
+                pending_mcp_servers = ?unresolved.mcp_servers,
+                "Agent declares skills/MCP servers that are not installed or configured here — the declarations are retained and activate on the next skills reload / MCP connect"
             );
         }
 

@@ -47,6 +47,8 @@ import {
 } from "lucide-react";
 import { truncateId } from "../lib/string";
 import {
+  CANVAS_INPUT_CLASS,
+  CANVAS_LABEL_CLASS,
   parseCanvasImport,
   removeEdgeById,
   removeNodeAndCascadeEdges,
@@ -69,6 +71,16 @@ import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useWorkflows, useWorkflowTemplates, workflowQueries } from "../lib/queries/workflows";
 import { useAgents } from "../lib/queries/agents";
 import { useAgentTypes } from "../lib/queries/agentTypes";
+import { useSkills } from "../lib/queries/skills";
+import {
+  StepAgentBinding,
+  bindingFromNodeData,
+  bindingToNodeData,
+  isStepBound,
+  normalizeSessionMode,
+  stepAgentFields,
+  type StepAgentBindingValue,
+} from "../components/StepAgentBinding";
 import { useQueryClient } from "@tanstack/react-query";
 
 /** Shape of a node entry persisted into sessionStorage by the templates flow. */
@@ -83,7 +95,19 @@ type StoredCanvasNode = {
  *  attaches when rendering. Not on the canonical `WorkflowStep` because not
  *  every list endpoint hydrates it. */
 type LoadedWorkflowStep = WorkflowStep & {
-  agent?: { id?: string; name?: string; type?: string; fresh?: boolean };
+  /** `workflow_to_json` emits the step's binding as `{"agent_id": …}`,
+   *  `{"agent_name": …}` or `{"agent_type": …}` — the same field names the
+   *  create/update parser reads, not the `{id, name}` shape this used to
+   *  assume. Reading the wrong keys left every hydrated node unbound, so a
+   *  workflow without a saved layout round-tripped through the canvas as
+   *  zero steps. `fresh` rides alongside an `agent_type` binding and is
+   *  absent for the other two. */
+  agent?: {
+    agent_id?: string;
+    agent_name?: string;
+    agent_type?: string;
+    fresh?: boolean;
+  };
 };
 
 /**
@@ -95,8 +119,14 @@ type WorkflowStepBuild = {
   name: string;
   agent_id?: string;
   agent_name?: string;
-  type?: string;
+  agent_type?: string;
+  /** Spawn a new instance from `agent_type` rather than reusing a running one.
+   *  Omitted for the `agent_id` / `agent_name` bindings, which name an agent
+   *  directly and have nothing to spawn. */
   fresh?: boolean;
+  /** Per-step session override; omitted to defer to the agent manifest. */
+  session_mode?: "persistent" | "new";
+  /** Skills the step's agent must be able to use; omitted when none (#7721). */
   required_skills?: string[];
   prompt: string;
   timeout_secs: number;
@@ -212,7 +242,11 @@ function CustomNode({ data, type: nodeTypeKey, selected, t }: { data: CanvasNode
   const isEnd = data.nodeType === "end";
   const runState = data._runState;
   const needsAgent = AGENT_NODE_TYPES_SET.has(data.nodeType ?? "");
-  const missingAgent = needsAgent && !data.agentId;
+  // A step bound by `agent_name` alone is fully bound — the backend resolves
+  // it at run time — and so is one bound to an agent *type*, which resolves
+  // find-or-spawn (#7712). Neither may be flagged as unassigned, and the
+  // helper is what keeps that judgement in one place.
+  const missingAgent = needsAgent && !isStepBound(data);
   const KindIcon = NODE_KIND_ICON[data.nodeType ?? ""] ?? HelpCircle;
 
   // Status dot: pulsing color while running, success when done, warning
@@ -291,12 +325,12 @@ function CustomNode({ data, type: nodeTypeKey, selected, t }: { data: CanvasNode
       </div>
 
       {/* Inline meta strip — agent binding, missing warning, deps */}
-      {(data.agentName || missingAgent || (data.dependsOn && data.dependsOn.length > 0)) && (
+      {(data.agentName || data.agentType || missingAgent || (data.dependsOn && data.dependsOn.length > 0)) && (
         <div className="px-3 pb-2 flex items-center gap-2 flex-wrap text-[9px] font-mono">
-          {data.agentName && (
+          {(data.agentName || data.agentType) && (
             <span className="inline-flex items-center gap-1 text-text-dim/80">
               <span className="w-1 h-1 rounded-full bg-success" />
-              <span className="truncate max-w-[120px]">{data.agentName}</span>
+              <span className="truncate max-w-[120px]">{data.agentName || data.agentType}</span>
             </span>
           )}
           {missingAgent && (
@@ -615,8 +649,8 @@ function TemplateBrowser({
 }
 
 // Node configuration panel
-const inputClass = "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
-const labelClass = "text-[10px] font-bold text-text-dim uppercase";
+const inputClass = CANVAS_INPUT_CLASS;
+const labelClass = CANVAS_LABEL_CLASS;
 
 const AGENT_PANEL_WIDTH_KEY = "canvas.agentPanelWidth";
 const AGENT_PANEL_MIN_WIDTH = 300;
@@ -641,9 +675,10 @@ function useAgentPanelWidth(): [number, (next: number) => void] {
 }
 
 function NodeConfigPanel({
-  node, agents, onUpdate, onClose, onDelete, siblingNodes, width, onResize, t
+  node, agents, skills, onUpdate, onClose, onDelete, siblingNodes, width, onResize, t
 }: {
-  node: CanvasNode; agents: AgentItem[]; onUpdate: (id: string, data: CanvasNodeData) => void;
+  node: CanvasNode; agents: AgentItem[]; skills: string[];
+  onUpdate: (id: string, data: CanvasNodeData) => void;
   /** Avoids stuffing arbitrary fields onto ReactFlow's Node type. */
   siblingNodes?: Array<{ id: string; label: string }>;
   width: number; onResize: (next: number) => void;
@@ -654,9 +689,10 @@ function NodeConfigPanel({
   const agentTypes = agentTypesQuery.data ?? [];
   const [label, setLabel] = useState(d.label || "");
   const [description, setDescription] = useState(d.description || "");
-  const [agentId, setAgentId] = useState(d.agentId || "");
-  const [agentType, setAgentType] = useState(d.agentType || "");
-  const [fresh, setFresh] = useState(d.fresh || false);
+  const [binding, setBinding] = useState<StepAgentBindingValue>(() => bindingFromNodeData(d));
+  /** The node-data projection of the binding — one derivation shared by the
+   *  save path and the "is this step bound?" gate below. */
+  const boundAgent = useMemo(() => bindingToNodeData(binding, agents), [binding, agents]);
   const [prompt, setPrompt] = useState(d.prompt || d.description || "");
   const [mode, setMode] = useState<string>(d.stepMode || "sequential");
   const [errorMode, setErrorMode] = useState<string>(d.errorMode || "fail");
@@ -703,14 +739,13 @@ function NodeConfigPanel({
   const effectiveWidth = dragWidth ?? width;
 
   const handleSave = () => {
-    const agent = agents.find(a => a.id === agentId);
     onUpdate(node.id, {
       ...d,
       label, description,
-      agentId: agentType ? undefined : agentId || undefined,
-      agentName: agentType ? undefined : agent?.name || undefined,
-      agentType: agentType || undefined,
-      fresh: agentType ? fresh : undefined,
+      // One routing key per step (#7712): the chosen source's field is
+      // written and the other two are cleared, so no abandoned binding
+      // survives for `buildSteps` to pick between — in either direction.
+      ...boundAgent,
       prompt,
       stepMode: mode,
       errorMode,
@@ -725,7 +760,10 @@ function NodeConfigPanel({
     onClose();
   };
 
-  const hasAgent = !!agentId || !!agentType;
+  // Drives the rest of the panel: a step bound only by name, or only to a
+  // type, is as real as one bound to a live instance, so its prompt / mode /
+  // dependency fields must stay reachable.
+  const hasAgent = isStepBound(boundAgent);
 
   return (
     <motion.aside
@@ -769,28 +807,14 @@ function NodeConfigPanel({
         </div>
 
         {/* Agent binding */}
-        <div>
-          <label className={labelClass}>{t("canvas.assign_agent")}</label>
-          <select value={agentType ? "" : agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
-            <option value="">{t("canvas.no_agent")}</option>
-            {agents.map(a => (
-              <option key={a.id} value={a.id}>{a.name}{a.state === "Running" ? "" : ` (${a.state})`}</option>
-            ))}
-          </select>
-          <label className={labelClass}>{t("canvas.agent_type_label")}</label>
-          <select value={agentType} onChange={e => { setAgentType(e.target.value); if (e.target.value) setAgentId(""); }} className={inputClass}>
-            <option value="">{t("canvas.no_agent_type")}</option>
-            {(agentTypes ?? []).map(t => (
-              <option key={t.name} value={t.name}>{t.name}</option>
-            ))}
-          </select>
-          {agentType && (
-            <label className="flex items-center gap-2 text-sm text-text-dim">
-              <input type="checkbox" checked={fresh} onChange={e => setFresh(e.target.checked)} />
-              {t("canvas.fresh_label")}
-            </label>
-          )}
-        </div>
+        <StepAgentBinding
+          value={binding}
+          agents={agents}
+          agentTypes={agentTypes.map(type => type.name)}
+          skills={skills}
+          onChange={setBinding}
+          t={t}
+        />
 
         {/* Prompt */}
         {hasAgent && (
@@ -935,6 +959,13 @@ function CanvasPageInner() {
   const queryClient = useQueryClient();
   const agentsQuery = useAgents();
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
+  // Suggestions for a step's `required_skills` box.
+  // A workflow may require a skill this instance has not installed — that is a case the dry run is meant to report — so this list only autocompletes, it never restricts.
+  const skillsQuery = useSkills();
+  const skillNames = useMemo(
+    () => (skillsQuery.data ?? []).map(s => s.name).sort((a, b) => a.localeCompare(b)),
+    [skillsQuery.data],
+  );
   const workflowsQuery = useWorkflows();
   const workflows = useMemo(() => workflowsQuery.data ?? [], [workflowsQuery.data]);
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowItem | null>(null);
@@ -1469,19 +1500,33 @@ function CanvasPageInner() {
           // local lets TS narrow `nd` once instead of fighting `?.` in
           // every branch.
           const agentBinding: {
+            agentSource?: CanvasNodeData["agentSource"];
             agentId?: string;
             agentName?: string;
+            agentType?: string;
             prompt?: string;
           } = (() => {
             if (nd?.agentId) {
               return {
+                agentSource: "instance",
                 agentId: nd.agentId,
                 agentName: nd.agentName || availableAgents.find(a => a.id === nd.agentId)?.name || nd.agentId,
                 prompt: nd.prompt || rawPrompt,
               };
             }
+            // A template that binds a step to an agent *type* already answers
+            // "which agent runs this" — overwriting it with the default agent
+            // would discard the template author's choice (#7712). The same is
+            // true of a name binding, which the backend resolves at run time.
+            if (nd?.agentType) {
+              return { agentSource: "type", agentType: nd.agentType, prompt: nd.prompt || rawPrompt };
+            }
+            if (nd?.agentName) {
+              return { agentSource: "name", agentName: nd.agentName, prompt: nd.prompt || rawPrompt };
+            }
             if (needsAgent && defaultAgent) {
               return {
+                agentSource: "instance",
                 agentId: defaultAgent.id,
                 agentName: defaultAgent.name,
                 prompt: rawPrompt + langSuffix,
@@ -1545,7 +1590,29 @@ function CanvasPageInner() {
         id: `node-${idx}`,
         type: "custom",
         position: { x: 80 + idx * 260, y: 100 },
-        data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent", agentId: s.agent?.id, agentName: s.agent?.name, agentType: s.agent?.type, fresh: s.agent?.fresh },
+        data: {
+          label: s.name,
+          prompt: s.prompt_template || "",
+          nodeType: "agent",
+          agentId: s.agent?.agent_id,
+          agentName: s.agent?.agent_name,
+          agentType: s.agent?.agent_type,
+          fresh: s.agent?.fresh === true ? true : undefined,
+          // Record which key the backend sent so the panel can leave the
+          // binding again; precedence matches `stepAgentPayload`.
+          agentSource: s.agent?.agent_id
+            ? "instance"
+            : s.agent?.agent_type
+              ? "type"
+              : s.agent?.agent_name
+                ? "name"
+                : undefined,
+          sessionMode: normalizeSessionMode(s.session_mode) || undefined,
+          requiredSkills:
+            Array.isArray(s.required_skills) && s.required_skills.length > 0
+              ? s.required_skills
+              : undefined,
+        },
       }));
       const hasDag = steps.some((step) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
       if (hasDag) {
@@ -1830,7 +1897,7 @@ function CanvasPageInner() {
 
   // Build backend steps from nodes: only nodes bound to a real agent are steps
   const buildSteps = useCallback((nodeList: CanvasNode[]) => {
-    const stepNodes = nodeList.filter(n => n.data.agentId || n.data.agentName || n.data.agentType);
+    const stepNodes = nodeList.filter(n => isStepBound(n.data));
     const dependencyOptions = stepNodes.map((node, idx) => ({
       id: node.id,
       label: node.data.label || `Step ${idx + 1}`,
@@ -1838,12 +1905,10 @@ function CanvasPageInner() {
     return stepNodes
       .map((n, idx) => {
         const d = n.data;
+        // Exactly one routing key per step (#7712) — see `stepAgentPayload`.
         const step: WorkflowStepBuild = {
           name: d.label || `Step ${idx + 1}`,
-          agent_id: d.agentType ? undefined : d.agentId,
-          agent_name: d.agentType ? undefined : d.agentName,
-          type: d.agentType,
-          fresh: d.agentType ? d.fresh || false : undefined,
+          ...stepAgentFields(d),
           prompt: d.prompt || d.description || "",
           timeout_secs: d.timeoutSecs || 120,
         };
@@ -2020,7 +2085,9 @@ function CanvasPageInner() {
       ...n,
       data: {
         ...n.data,
-        _runState: n.data.agentId ? "running" : undefined,
+        // Same bound-step predicate `buildSteps` uses, so a step bound by
+        // name or by type animates during a run instead of sitting inert.
+        _runState: isStepBound(n.data) ? "running" : undefined,
       }
     })));
 
@@ -2549,7 +2616,7 @@ function CanvasPageInner() {
                       onClick={() => setExpandedDryStep(expandedDryStep === i ? null : i)}>
                       {step.skipped
                         ? <SkipForward className="w-3 h-3 text-text-dim/40 shrink-0" />
-                        : step.agent_found
+                        : step.agent_found && !step.skill_error
                           ? <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
                           : <AlertCircle className="w-3 h-3 text-warning shrink-0" />}
                       <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
@@ -2562,6 +2629,8 @@ function CanvasPageInner() {
                     {expandedDryStep === i && (
                       <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
                         {!step.agent_found && <p className="text-[10px] text-warning mt-2">{t("canvas.agent_not_found")}</p>}
+                        {/* The kernel's own mismatch text names the step, the agent, the missing skill and the fix (#7721), so it is shown verbatim rather than flattened into a generic "invalid step" line. */}
+                        {step.skill_error && <p className="text-[10px] text-warning mt-2">{step.skill_error}</p>}
                         {step.skip_reason && <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>}
                         <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("canvas.resolved_prompt")}</p>
                         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-20 overflow-y-auto bg-surface rounded-lg p-2">
@@ -2642,6 +2711,7 @@ function CanvasPageInner() {
                 .filter(n => n.id !== editingNode.id && AGENT_NODE_TYPES_SET.has(n.data.nodeType ?? ""))
                 .map(n => ({ id: n.id, label: n.data.label || n.id }))}
               agents={agents}
+              skills={skillNames}
               width={agentPanelWidth}
               onResize={setAgentPanelWidth}
               onUpdate={handleNodeUpdate} onClose={() => setEditingNode(null)}

@@ -277,7 +277,6 @@ async fn resume_with_wrong_token_returns_401() {
             |_id: AgentId, _msg: String, _sm: Option<librefang_types::agent::SessionMode>| async {
                 Ok(("done".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await
         .expect("execute_run should pause cleanly");
@@ -474,7 +473,6 @@ async fn pause_then_resume_via_http_completes_workflow() {
             |_id: AgentId, _msg: String, _sm: Option<librefang_types::agent::SessionMode>| async {
                 Ok(("done".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await
         .expect("execute_run should pause cleanly");

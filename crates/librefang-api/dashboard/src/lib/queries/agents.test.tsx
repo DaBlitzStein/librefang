@@ -83,7 +83,16 @@ describe("useAgentSessions", () => {
 
 describe("useAgentTypeOptions", () => {
   it("should fetch by default when enabled is not provided", async () => {
-    const mockTemplates = [{ name: "Test Template", description: "Test description" }];
+    const mockTemplates = [
+      {
+        name: "Test Template",
+        description: "Test description",
+        provider: "anthropic",
+        model: "claude-sonnet-4",
+        source: "agent-type" as const,
+        editable: true,
+      },
+    ];
     vi.mocked(httpClient.listAgentTypeOptions).mockResolvedValue(mockTemplates);
 
     const { result } = renderHook(() => useAgentTypeOptions(), {
@@ -108,7 +117,16 @@ describe("useAgentTypeOptions", () => {
   });
 
   it("should fetch when enabled is true", async () => {
-    const mockTemplates = [{ name: "Test Template", description: "Test description" }];
+    const mockTemplates = [
+      {
+        name: "Test Template",
+        description: "Test description",
+        provider: "anthropic",
+        model: "claude-sonnet-4",
+        source: "agent-type" as const,
+        editable: true,
+      },
+    ];
     vi.mocked(httpClient.listAgentTypeOptions).mockResolvedValue(mockTemplates);
 
     const { result } = renderHook(() => useAgentTypeOptions({ enabled: true }), {

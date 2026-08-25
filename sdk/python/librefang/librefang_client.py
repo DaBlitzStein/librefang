@@ -57,7 +57,6 @@ class LibreFang:
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
         self.mcp = _McpResource(self)
-        self.media = _MediaResource(self)
         self.memory = _MemoryResource(self)
         self.models = _ModelsResource(self)
         self.network = _NetworkResource(self)
@@ -67,9 +66,7 @@ class LibreFang:
         self.sessions = _SessionsResource(self)
         self.skills = _SkillsResource(self)
         self.system = _SystemResource(self)
-        self.tasks = _TasksResource(self)
         self.tools = _ToolsResource(self)
-        self.user_groups = _UserGroupsResource(self)
         self.users = _UsersResource(self)
         self.webhooks = _WebhooksResource(self)
         self.workflows = _WorkflowsResource(self)
@@ -211,12 +208,6 @@ class _AgentsResource(_Resource):
     def reset_agent_identity(self, name: str, confirm: Any = None):
         return self._c._request("POST", f"/api/agents/identities/{name}/reset", None, query={"confirm": confirm})
 
-    def purge_agent_data(self, **data):
-        return self._c._request("POST", "/api/agents/purge", data)
-
-    def spawn_ephemeral_agent(self, **data):
-        return self._c._request("POST", "/api/agents/spawn-ephemeral", data)
-
     def get_agent(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}")
 
@@ -274,9 +265,6 @@ class _AgentsResource(_Resource):
     def agent_logs(self, id: str, n: Any = None, level: Any = None, offset: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/logs", None, query={"n": n, "level": level, "offset": offset})
 
-    def get_agent_manifest_toml(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/manifest")
-
     def get_agent_mcp_servers(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
 
@@ -298,12 +286,6 @@ class _AgentsResource(_Resource):
     def set_model(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/model", data)
 
-    def get_agent_model_routing(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/model_routing")
-
-    def set_agent_model_routing(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/model_routing", data)
-
     def push_message(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{id}/push", data)
 
@@ -315,9 +297,6 @@ class _AgentsResource(_Resource):
 
     def list_agent_runtime(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/runtime")
-
-    def save_agent_as_agent_type(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/save-as-agent-type", data)
 
     def get_agent_session(self, id: str, session_id: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/session", None, query={"session_id": session_id})
@@ -372,9 +351,6 @@ class _AgentsResource(_Resource):
 
     def suspend_agent(self, id: str):
         return self._c._request("PUT", f"/api/agents/{id}/suspend")
-
-    def agent_token_usage(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/token-usage")
 
     def get_agent_tools(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/tools")
@@ -609,18 +585,6 @@ class _GoalsResource(_Resource):
     def list_goal_templates(self):
         return self._c._request("GET", "/api/goals/templates")
 
-    def pause_goal_run(self, id: str):
-        return self._c._request("POST", f"/api/goals/{id}/pause")
-
-    def resume_goal_run(self, id: str, **data):
-        return self._c._request("POST", f"/api/goals/{id}/resume", data)
-
-    def start_goal_run(self, id: str, **data):
-        return self._c._request("POST", f"/api/goals/{id}/start", data)
-
-    def stop_goal_run(self, id: str):
-        return self._c._request("POST", f"/api/goals/{id}/stop")
-
 
 # ── Hands Resource ─────────────────────────────────────────────
 
@@ -743,32 +707,6 @@ class _McpResource(_Resource):
 
     def list_mcp_taint_rules(self):
         return self._c._request("GET", "/api/mcp/taint-rules")
-
-
-# ── Media Resource ─────────────────────────────────────────────
-
-class _MediaResource(_Resource):
-
-    def generate_image(self, **data):
-        return self._c._request("POST", "/api/media/image", data)
-
-    def generate_music(self, **data):
-        return self._c._request("POST", "/api/media/music", data)
-
-    def list_media_providers(self):
-        return self._c._request("GET", "/api/media/providers")
-
-    def synthesize_speech(self, **data):
-        return self._c._request("POST", "/api/media/speech", data)
-
-    def transcribe_audio(self, **data):
-        return self._c._request("POST", "/api/media/transcribe", data)
-
-    def submit_video(self, **data):
-        return self._c._request("POST", "/api/media/video", data)
-
-    def poll_video_task(self, task_id: str, provider: Any = None):
-        return self._c._request("GET", f"/api/media/video/{task_id}", None, query={"provider": provider})
 
 
 # ── Memory Resource ────────────────────────────────────────────
@@ -1205,24 +1143,6 @@ class _SkillsResource(_Resource):
 
 class _SystemResource(_Resource):
 
-    def list_agent_types(self):
-        return self._c._request("GET", "/api/agent-types")
-
-    def create_agent_type(self, **data):
-        return self._c._request("POST", "/api/agent-types", data)
-
-    def get_agent_type(self, name: str):
-        return self._c._request("GET", f"/api/agent-types/{name}")
-
-    def update_agent_type(self, name: str, **data):
-        return self._c._request("PUT", f"/api/agent-types/{name}", data)
-
-    def delete_agent_type(self, name: str):
-        return self._c._request("DELETE", f"/api/agent-types/{name}")
-
-    def get_agent_type_toml(self, name: str):
-        return self._c._request("GET", f"/api/agent-types/{name}/toml")
-
     def audit_export(self, format: Any = None, user: Any = None, action: Any = None, agent: Any = None, channel: Any = None, from_: Any = None, to: Any = None, limit: Any = None):
         return self._c._request("GET", "/api/audit/export", None, query={"format": format, "user": user, "action": action, "agent": agent, "channel": channel, "from": from_, "to": to, "limit": limit})
 
@@ -1334,16 +1254,16 @@ class _SystemResource(_Resource):
     def list_agent_templates(self):
         return self._c._request("GET", "/api/templates")
 
-    def create_template(self, **data):
+    def create_agent_type(self, **data):
         return self._c._request("POST", "/api/templates", data)
 
     def get_agent_template(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}")
 
-    def update_template(self, name: str, **data):
+    def update_agent_type(self, name: str, **data):
         return self._c._request("PUT", f"/api/templates/{name}", data)
 
-    def delete_template(self, name: str):
+    def delete_agent_type(self, name: str):
         return self._c._request("DELETE", f"/api/templates/{name}")
 
     def get_agent_template_toml(self, name: str):
@@ -1356,31 +1276,12 @@ class _SystemResource(_Resource):
         return self._c._request("GET", "/api/versions")
 
 
-# ── Tasks Resource ─────────────────────────────────────────────
-
-class _TasksResource(_Resource):
-
-    def task_queue_post_root(self, **data):
-        return self._c._request("POST", "/api/tasks", data)
-
-
 # ── Tools Resource ─────────────────────────────────────────────
 
 class _ToolsResource(_Resource):
 
     def invoke_tool(self, name: str, agent_id: Any = None, **data):
         return self._c._request("POST", f"/api/tools/{name}/invoke", data, query={"agent_id": agent_id})
-
-
-# ── UserGroups Resource ───────────────────────────────────────
-
-class _UserGroupsResource(_Resource):
-
-    def list_user_groups(self):
-        return self._c._request("GET", "/api/user-groups")
-
-    def get_user_group(self, id: str):
-        return self._c._request("GET", f"/api/user-groups/{id}")
 
 
 # ── Users Resource ─────────────────────────────────────────────

@@ -223,10 +223,33 @@ pub trait WorkflowRunner: Send + Sync {
         &self,
         workflow_id: &str,
         input: &str,
+    ) -> Result<(String, String), KernelOpError> {
+        let _ = (workflow_id, input);
+        Err(KernelOpError::unavailable("Workflow engine"))
+    }
+
+    /// Owner-aware variant of [`Self::run_workflow`] (#7714).
+    ///
+    /// `caller_agent_id` is the agent that invoked the `workflow_run` tool.
+    /// The kernel records it on the run as the run's owner, which is what lets
+    /// two owners drive the same shared step-agent type and still keep their
+    /// attribution apart.
+    ///
+    /// `&str` rather than `AgentId` for trait-object compatibility, matching
+    /// [`Self::start_workflow_async_tracked`]; the kernel parses it and treats
+    /// an unparseable or absent value as an ownerless run.
+    ///
+    /// The default impl forwards to [`Self::run_workflow`] and drops the
+    /// owner, so an implementor that has not adopted ownership keeps its
+    /// current behaviour.
+    async fn run_workflow_owned(
+        &self,
+        workflow_id: &str,
+        input: &str,
         caller_agent_id: Option<&str>,
     ) -> Result<(String, String), KernelOpError> {
-        let _ = (workflow_id, input, caller_agent_id);
-        Err(KernelOpError::unavailable("Workflow engine"))
+        let _ = caller_agent_id;
+        self.run_workflow(workflow_id, input).await
     }
 
     /// List all registered workflow definitions, sorted by name for determinism.
@@ -292,24 +315,33 @@ pub trait WorkflowRunner: Send + Sync {
         Err(KernelOpError::unavailable("Workflow engine"))
     }
 
+    /// Create and register a new workflow from an agent-authored spec (#6934).
+    ///
+    /// `spec` is the tool payload as received — `{ name, description, steps[], input_schema?, total_timeout_secs? }`.
+    /// It is passed through as JSON rather than as a typed struct because the workflow types live in `librefang-kernel`, which the runtime cannot depend on; the kernel deserializes it into its own `Workflow` so the wire shape can never drift from the struct the engine executes.
+    ///
+    /// Note that this is **not** the `POST /api/workflows` body: that endpoint has its own hand-written parser over different field names (`agent_id` / `agent_name` / `prompt`), while this path deserializes the canonical workflow shape (`agent` / `prompt_template`) — the same one `*.workflow.toml` files use.
+    ///
+    /// Every check lives on the kernel side of this boundary — name legality, resource caps, `Workflow::validate()`, and the uniqueness of the name — because the caller is an LLM and a JSON-schema constraint is advice it is free to ignore.
+    ///
+    /// `caller_agent_id` is recorded on the registration log line so a workflow an agent synthesized can be traced back to the turn that produced it.
+    /// It is a trace, not an authorization gate: no ownership model exists for workflows yet, and inventing one here would put the policy in the wrong layer.
+    ///
+    /// Errors: `InvalidInput` for a spec that cannot become a valid workflow, `Conflict` when the name is already registered, `Unavailable` when no workflow engine is wired.
+    async fn create_workflow(
+        &self,
+        spec: &serde_json::Value,
+        caller_agent_id: Option<&str>,
+    ) -> Result<WorkflowSummary, KernelOpError> {
+        let _ = (spec, caller_agent_id);
+        Err(KernelOpError::unavailable("Workflow engine"))
+    }
+
     /// Cancel a running or paused workflow run by its UUID string.
     /// Returns `Ok(())` on success, or an error describing why cancellation
     /// failed (not found, already in a terminal state, etc.).
     async fn cancel_workflow_run(&self, run_id: &str) -> Result<(), KernelOpError> {
         let _ = run_id;
-        Err(KernelOpError::unavailable("Workflow engine"))
-    }
-
-    /// Create a new workflow from a JSON definition (same shape as
-    /// `POST /api/workflows`). Writes the `.workflow.toml` file to
-    /// `~/.librefang/workflows/` and registers it in the engine.
-    /// Returns the created workflow id on success.
-    async fn create_workflow(
-        &self,
-        workflow_json: &str,
-        caller_agent_id: Option<&str>,
-    ) -> Result<String, KernelOpError> {
-        let _ = (workflow_json, caller_agent_id);
         Err(KernelOpError::unavailable("Workflow engine"))
     }
 }

@@ -87,29 +87,6 @@ pub trait KernelApi: KernelHandle + Send + Sync {
 
     fn agent_registry(&self) -> &AgentRegistry;
     fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry>;
-    /// Find-or-spawn for workflow steps that reference an agent type:
-    /// reuse the registered agent with that name, else load the template
-    /// manifest (`agent-types/` then `workspaces/agents/`) and spawn it
-    /// top-level. `Ok((agent_id, agent_name, inherit_parent_context))` on
-    /// success; `Err(StepAgentError::NotFound)` when no template exists and
-    /// no agent is registered; `Err(StepAgentError::SpawnRejected)` when a
-    /// template was found but the spawn was refused, carrying the reason.
-    /// Sync — callable from the resolver closures the workflow engine
-    /// injects.
-    fn resolve_agent_by_type_or_spawn(
-        &self,
-        template: &str,
-        owner: Option<AgentId>,
-        fresh: bool,
-    ) -> crate::workflow::StepAgentResolution;
-    /// Check that a workflow step's required skills are satisfiable by the
-    /// resolved agent (#7721) — see
-    /// `LibreFangKernel::check_step_required_skills`.
-    fn check_step_required_skills(
-        &self,
-        agent_id: AgentId,
-        required: &[String],
-    ) -> Result<(), String>;
     fn approvals(&self) -> &ApprovalManager;
     fn audit(&self) -> &Arc<AuditLog>;
     fn auth_manager(&self) -> &AuthManager;
@@ -148,6 +125,36 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn tts(&self) -> &librefang_runtime::tts::TtsEngine;
     fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext;
     fn workflow_engine(&self) -> &WorkflowEngine;
+
+    // ====================================================================
+    // Workflow step agent resolution (#7712)
+    // ====================================================================
+
+    /// Resolve a workflow step's agent reference for a real run, returning
+    /// `(agent id, agent name, inherit_parent_context)`.
+    ///
+    /// Every workflow driver in the API layer routes through this rather than
+    /// re-implementing the `match` over [`StepAgent`]: the variants are a
+    /// kernel-side policy (in particular `ByType`'s find-or-spawn, which the
+    /// API layer has no way to perform), and a driver carrying its own copy
+    /// silently reports "agent not found" for any variant it has not been
+    /// taught about.
+    fn resolve_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+        owner: Option<librefang_types::agent::AgentId>,
+    ) -> crate::workflow::StepAgentResolution;
+
+    /// Resolve a workflow step's agent reference **without** side effects,
+    /// for dry runs and previews.
+    ///
+    /// Identical to [`Self::resolve_step_agent`] except that a `type`
+    /// reference with no registered instance is previewed from its template
+    /// instead of spawned — a dry run is documented as side-effect free.
+    fn preview_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> crate::workflow::StepAgentResolution;
 
     // ====================================================================
     // Autonomous goal runner (#5744)
@@ -396,18 +403,25 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         schedule: librefang_types::agent::ScheduleMode,
     ) -> KernelResult<()>;
+    /// Update tool filters.
+    /// Every argument is a tri-state: `None` leaves the stored value alone, `Some(_)` writes it.
+    /// `disabled` is the `tools_disabled` master switch (#7742).
     fn set_agent_tool_filters(
         &self,
         agent_id: AgentId,
         capabilities_tools: Option<Vec<String>>,
         allowlist: Option<Vec<String>>,
         blocklist: Option<Vec<String>>,
+        disabled: Option<bool>,
     ) -> KernelResult<()>;
     fn list_running_sessions(&self, agent_id: AgentId) -> Vec<RunningSessionSnapshot>;
     fn running_session_ids(&self) -> std::collections::HashSet<SessionId>;
     fn verify_signed_manifest(&self, signed_json: &str) -> KernelResult<String>;
     fn available_tools(&self, agent_id: AgentId) -> Arc<Vec<ToolDefinition>>;
-    fn pending_skill_and_mcp_declarations(
+    /// Skills and MCP servers the agent declares but cannot use right now (#7713).
+    ///
+    /// Async because the MCP half is resolved against the live connection pool, not the configured server list — a server that is configured and unreachable must read as pending.
+    async fn pending_skill_and_mcp_declarations(
         &self,
         agent_id: AgentId,
     ) -> crate::kernel::PendingSkillMcpDeclarations;
@@ -770,32 +784,23 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         message: &str,
         blocks: Vec<librefang_types::message::ContentBlock>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    /// `thinking_override` carries the conversation's `/think` preference (`None` = agent/global default). Channel turns resolve it per conversation, so it has to ride the send call rather than be read off the agent (#7140).
     async fn send_message_with_sender_context(
         &self,
         agent_id: AgentId,
         message: &str,
         sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    /// Multimodal counterpart of [`KernelApi::send_message_with_sender_context`]; `thinking_override` has the same per-conversation meaning.
     async fn send_message_with_blocks_and_sender(
         &self,
         agent_id: AgentId,
         message: &str,
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
-    /// Like [`Self::send_message_with_blocks_and_sender`] with a per-turn
-    /// extended-thinking override. Default implementation ignores the
-    /// override and delegates to the base method.
-    async fn send_message_with_blocks_and_sender_thinking(
-        &self,
-        agent_id: AgentId,
-        message: &str,
-        blocks: Vec<librefang_types::message::ContentBlock>,
-        sender: librefang_channels::types::SenderContext,
-        _thinking_override: Option<bool>,
-    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_with_blocks_and_sender(self, agent_id, message, blocks, sender).await
-    }
     async fn send_message_streaming_with_sender_context_and_routing(
         self: Arc<Self>,
         agent_id: AgentId,
@@ -885,21 +890,6 @@ impl KernelApi for LibreFangKernel {
     fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
         <Self as crate::AgentSubsystemApi>::identities_ref(self)
     }
-    fn resolve_agent_by_type_or_spawn(
-        &self,
-        template: &str,
-        owner: Option<AgentId>,
-        fresh: bool,
-    ) -> crate::workflow::StepAgentResolution {
-        LibreFangKernel::resolve_agent_by_type_or_spawn(self, template, owner, fresh)
-    }
-    fn check_step_required_skills(
-        &self,
-        agent_id: AgentId,
-        required: &[String],
-    ) -> Result<(), String> {
-        LibreFangKernel::check_step_required_skills(self, agent_id, required)
-    }
     fn approvals(&self) -> &ApprovalManager {
         <Self as crate::GovernanceSubsystemApi>::approvals(self)
     }
@@ -979,6 +969,19 @@ impl KernelApi for LibreFangKernel {
     }
     fn workflow_engine(&self) -> &WorkflowEngine {
         <Self as crate::WorkflowSubsystemApi>::engine_ref(self)
+    }
+    fn resolve_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+        owner: Option<librefang_types::agent::AgentId>,
+    ) -> crate::workflow::StepAgentResolution {
+        LibreFangKernel::resolve_step_agent(self, agent_ref, owner)
+    }
+    fn preview_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> crate::workflow::StepAgentResolution {
+        LibreFangKernel::preview_step_agent(self, agent_ref)
     }
 
     fn start_goal_run(
@@ -1276,8 +1279,16 @@ impl KernelApi for LibreFangKernel {
         capabilities_tools: Option<Vec<String>>,
         allowlist: Option<Vec<String>>,
         blocklist: Option<Vec<String>>,
+        disabled: Option<bool>,
     ) -> KernelResult<()> {
-        Self::set_agent_tool_filters(self, agent_id, capabilities_tools, allowlist, blocklist)
+        Self::set_agent_tool_filters(
+            self,
+            agent_id,
+            capabilities_tools,
+            allowlist,
+            blocklist,
+            disabled,
+        )
     }
     fn list_running_sessions(&self, agent_id: AgentId) -> Vec<RunningSessionSnapshot> {
         Self::list_running_sessions(self, agent_id)
@@ -1291,11 +1302,11 @@ impl KernelApi for LibreFangKernel {
     fn available_tools(&self, agent_id: AgentId) -> Arc<Vec<ToolDefinition>> {
         Self::available_tools(self, agent_id)
     }
-    fn pending_skill_and_mcp_declarations(
+    async fn pending_skill_and_mcp_declarations(
         &self,
         agent_id: AgentId,
     ) -> crate::kernel::PendingSkillMcpDeclarations {
-        Self::pending_skill_and_mcp_declarations(self, agent_id)
+        Self::pending_skill_and_mcp_declarations(self, agent_id).await
     }
 
     async fn send_message(
@@ -1773,8 +1784,16 @@ impl KernelApi for LibreFangKernel {
         agent_id: AgentId,
         message: &str,
         sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_with_sender_context(self, agent_id, message, &sender).await
+        Self::send_message_with_sender_context_and_thinking(
+            self,
+            agent_id,
+            message,
+            &sender,
+            thinking_override,
+        )
+        .await
     }
     async fn send_message_with_blocks_and_sender(
         &self,
@@ -1782,18 +1801,9 @@ impl KernelApi for LibreFangKernel {
         message: &str,
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: librefang_channels::types::SenderContext,
-    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_with_blocks_and_sender(self, agent_id, message, blocks, &sender).await
-    }
-    async fn send_message_with_blocks_and_sender_thinking(
-        &self,
-        agent_id: AgentId,
-        message: &str,
-        blocks: Vec<librefang_types::message::ContentBlock>,
-        sender: librefang_channels::types::SenderContext,
         thinking_override: Option<bool>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_with_blocks_and_sender_thinking(
+        Self::send_message_with_blocks_and_sender(
             self,
             agent_id,
             message,
@@ -1813,12 +1823,15 @@ impl KernelApi for LibreFangKernel {
         tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
         tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
     )> {
-        LibreFangKernel::send_message_streaming_with_sender_context_and_routing(
+        // The no-override form is the thinking-aware one with `None`: a caller
+        // that did not resolve a `/think` preference keeps the agent's default.
+        LibreFangKernel::send_message_streaming_with_sender_context_routing_and_thinking(
             &self,
             agent_id,
             message,
             kernel_handle,
             &sender,
+            None,
         )
         .await
     }

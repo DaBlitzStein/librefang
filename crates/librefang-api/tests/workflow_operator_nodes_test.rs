@@ -35,7 +35,7 @@
 //!   tracker). The executor will wire there once the dependency lands.
 //!
 //! The tests run the workflow engine directly (no HTTP) via
-//! `kernel.workflow_engine().execute_run(..., |_, _| Ok(()))` with a mock
+//! `kernel.workflow_engine().execute_run(...)` with a mock
 //! `agent_resolver` / `send_message` pair — matching the kernel-only
 //! pattern used by `workflow_pause_resume_test.rs::resume_with_wrong_token_returns_401`.
 //! No agent is dispatched for operator nodes, so the mock sender is
@@ -78,7 +78,6 @@ fn workflow_with_op_step(name: &str, mode: StepMode) -> Workflow {
         name: name.to_string(),
         description: "operator-node integration test".to_string(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "op_step".to_string(),
             agent: StepAgent::ByName {
                 name: "_operator_placeholder".to_string(),
@@ -91,6 +90,7 @@ fn workflow_with_op_step(name: &str, mode: StepMode) -> Workflow {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -140,7 +140,6 @@ async fn wait_step_completes_after_duration_and_skips_agent_dispatch() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -198,7 +197,6 @@ async fn wait_step_zero_duration_completes_immediately() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     assert!(result.is_ok(), "Wait(0) must succeed: {result:?}");
@@ -260,7 +258,6 @@ async fn gate_step_passes_and_routes_onwards() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     assert!(result.is_ok(), "Gate pass must succeed: {result:?}");
@@ -313,7 +310,6 @@ async fn gate_step_fails_and_halts_workflow_with_recorded_reason() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     let err = result.expect_err("Gate must halt failing runs");
@@ -402,7 +398,6 @@ async fn gate_step_completed_when_field_omitted_compares_whole_input() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     assert!(result.is_ok(), "Gate (root, Eq) must pass: {result:?}");
@@ -438,7 +433,6 @@ async fn approval_step_is_noop_with_warn_and_completes() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     assert!(result.is_ok(), "Approval stub must succeed: {result:?}");
@@ -483,7 +477,6 @@ async fn transform_step_renders_tera_template_and_replaces_current_input() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     assert!(result.is_ok(), "Transform must succeed: {result:?}");
@@ -531,7 +524,6 @@ async fn transform_step_missing_variable_halts_workflow_with_recorded_reason() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     let err = result.expect_err("Transform with missing variable must halt");
@@ -596,7 +588,6 @@ async fn transform_step_oversize_output_halts_workflow_with_recorded_reason() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     let err = result.expect_err("oversize transform must halt");
@@ -639,7 +630,6 @@ async fn wait_step_over_cap_halts_before_sleep() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     let elapsed = start.elapsed();
@@ -712,7 +702,6 @@ fn transform_step_syntax_error_caught_by_workflow_validate_at_load_time() {
 ///           workflow naturally completes here).
 fn branch_skip_workflow(literal: &str, target_name: &str, target_template: &str) -> Workflow {
     let step = |name: &str, code: &str, mode: StepMode| WorkflowStep {
-        required_skills: Vec::new(),
         name: name.to_string(),
         agent: StepAgent::ByName {
             name: "_operator_placeholder".to_string(),
@@ -725,6 +714,7 @@ fn branch_skip_workflow(literal: &str, target_name: &str, target_template: &str)
         inherit_context: None,
         depends_on: vec![],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     Workflow {
         id: WorkflowId::new(),
@@ -807,7 +797,6 @@ async fn branch_step_arm_hit_routes_to_target_and_skips_intermediate_steps() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     assert!(result_a.is_ok(), "Run A must succeed: {result_a:?}");
@@ -867,7 +856,6 @@ async fn branch_step_arm_hit_routes_to_target_and_skips_intermediate_steps() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     assert!(result_b.is_ok(), "Run B must succeed: {result_b:?}");
@@ -919,7 +907,6 @@ async fn branch_step_no_arm_match_halts_workflow_with_recorded_reason() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     let err = result.expect_err("Branch with no matching arm must halt");
@@ -980,7 +967,6 @@ async fn branch_step_no_match_solo_halts_workflow() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     let err = result.expect_err("solo Branch with no match must halt");
@@ -1008,7 +994,6 @@ async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
     // No depends_on anywhere → sequential path, so topo sort (and its
     // duplicate-name guard) is skipped.
     let step = |name: &str, code: &str, mode: StepMode| WorkflowStep {
-        required_skills: Vec::new(),
         name: name.to_string(),
         agent: StepAgent::ByName {
             name: "_operator_placeholder".to_string(),
@@ -1021,6 +1006,7 @@ async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
         inherit_context: None,
         depends_on: vec![],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     let workflow = Workflow {
         id: WorkflowId::new(),
@@ -1082,7 +1068,6 @@ async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
                 #[allow(unreachable_code)]
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
-            |_, _| Ok(()),
         )
         .await;
     let err = result.expect_err("ambiguous branch target must halt");
@@ -1144,7 +1129,6 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
     // the kernel-unit cases). The presence of `depends_on` is what
     // triggers the rule.
     let producer = WorkflowStep {
-        required_skills: Vec::new(),
         name: "producer".to_string(),
         agent: StepAgent::ByName {
             name: "_producer".to_string(),
@@ -1157,9 +1141,9 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
         inherit_context: None,
         depends_on: vec![],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     let op = WorkflowStep {
-        required_skills: Vec::new(),
         name: "op".to_string(),
         agent: StepAgent::ByName {
             name: "_operator_placeholder".to_string(),
@@ -1172,6 +1156,7 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
         inherit_context: None,
         depends_on: vec!["producer".to_string()],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     let wf = Workflow {
         id: WorkflowId::new(),
@@ -1214,7 +1199,6 @@ async fn dry_run_reports_operator_nodes_as_found_with_synthetic_agent_names() {
     // step (the agent resolver is allowed to fail for that one — we
     // assert the operator nodes specifically).
     let mk = |name: &str, mode: StepMode| WorkflowStep {
-        required_skills: Vec::new(),
         name: name.to_string(),
         agent: StepAgent::ByName {
             name: "_op_placeholder".to_string(),
@@ -1227,6 +1211,7 @@ async fn dry_run_reports_operator_nodes_as_found_with_synthetic_agent_names() {
         inherit_context: None,
         depends_on: vec![],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     let wf = Workflow {
         id: WorkflowId::new(),
@@ -1334,7 +1319,6 @@ async fn dry_run_marks_unparseable_transform_template_as_skipped() {
         name: "dry-run-bad-transform".to_string(),
         description: "dry_run surfaces template syntax errors".to_string(),
         steps: vec![WorkflowStep {
-            required_skills: Vec::new(),
             name: "bad-transform".to_string(),
             agent: StepAgent::ByName {
                 name: "_op_placeholder".to_string(),
@@ -1350,6 +1334,7 @@ async fn dry_run_marks_unparseable_transform_template_as_skipped() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -1408,7 +1393,6 @@ async fn dry_run_transform_advances_current_input_for_downstream_previews() {
         description: "Transform output must flow into downstream {{input}}".to_string(),
         steps: vec![
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "uppercase".to_string(),
                 agent: StepAgent::ByName {
                     name: "_op_placeholder".to_string(),
@@ -1427,9 +1411,9 @@ async fn dry_run_transform_advances_current_input_for_downstream_previews() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
-                required_skills: Vec::new(),
                 name: "after-transform".to_string(),
                 agent: StepAgent::ByName {
                     name: "_op_placeholder".to_string(),
@@ -1446,6 +1430,7 @@ async fn dry_run_transform_advances_current_input_for_downstream_previews() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ],
         created_at: chrono::Utc::now(),

@@ -14,6 +14,21 @@ export const autoDreamKeys = {
   status: () => [...autoDreamKeys.all, "status"] as const,
 };
 
+/**
+ * Operator-authored agent types (`/api/templates`).
+ *
+ * Kept separate from `agentKeys.templates()` deliberately: that key backs the
+ * read-only picker on the spawn form, while these back the editor, whose
+ * mutations must invalidate the detail as well as the list.
+ */
+export const agentTypeKeys = {
+  all: ["agentTypes"] as const,
+  lists: () => [...agentTypeKeys.all, "list"] as const,
+  list: () => [...agentTypeKeys.lists()] as const,
+  details: () => [...agentTypeKeys.all, "detail"] as const,
+  detail: (name: string) => [...agentTypeKeys.details(), name] as const,
+};
+
 export const agentKeys = {
   all: ["agents"] as const,
   lists: () => [...agentKeys.all, "list"] as const,
@@ -56,11 +71,10 @@ export const agentKeys = {
   // PUT only invalidates the skill read, not the tool read.
   skills: (agentId: string) =>
     [...agentKeys.all, "skills", agentId] as const,
-  // Per-agent MCP server grant (#6565 follow-up) — no dedicated GET hook
-  // reads this yet (the grant is read off `agentKeys.detail()`'s
-  // `mcp_servers` / `mcp_servers_mode` fields), but the mutation still
-  // invalidates this subtree for forward compatibility with a future
-  // `GET /agents/{id}/mcp_servers` hook.
+  // Per-agent MCP server assignment (#6565 follow-up, #7713) — backs the
+  // pending-server surface on the agent detail Tools tab. Its own subtree for
+  // the same reason `skills` is separate from `tools`: an MCP read must not be
+  // invalidated by a tool write.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
   // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest
@@ -75,13 +89,6 @@ export const agentKeys = {
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
   tokenUsage: (id: string) => [...agentKeys.detail(id), "token-usage"] as const,
-};
-
-export const agentTypeKeys = {
-  all: ["agent-types"] as const,
-  lists: () => [...agentTypeKeys.all, "list"] as const,
-  details: () => [...agentTypeKeys.all, "detail"] as const,
-  detail: (name: string) => [...agentTypeKeys.details(), name] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
@@ -524,6 +531,7 @@ export const configKeys = {
   all: ["config"] as const,
   full: () => [...configKeys.all, "full"] as const,
   schema: () => [...configKeys.all, "schema"] as const,
+  status: () => [...configKeys.all, "status"] as const,
   rawToml: () => [...configKeys.all, "rawToml"] as const,
 };
 

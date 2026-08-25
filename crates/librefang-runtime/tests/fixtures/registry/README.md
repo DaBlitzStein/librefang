@@ -8,8 +8,9 @@ Pinned snapshot of [librefang/librefang-registry](https://github.com/librefang/l
 - `agents/hello-world/agent.toml` — the template the default-agent dispatch path instantiates, kept under the registry's legacy directory name.
 - `agent-types/hello-world/agent.toml` — byte-identical copy under the registry's canonical (post-rename) directory name, added so tests exercise `librefang_types::registry_paths::resolve_agent_types_dir` resolving the "both present, new name wins" case even through the shared fixture-seeded home. See that module's own unit tests for the isolated legacy-only / canonical-only / neither-present cases.
 - `aliases.toml` — `model_catalog` alias-resolution tests.
+- `skills/workflow-creator/SKILL.md` — the one skill this repo has a stake in, because it teaches the builtin `workflow_create` tool and would go silently wrong if that tool's ceilings moved; `tests/workflow_creator_skill.rs` loads it and checks its prose against the live tool schema. The other sixty registry skills teach domains outside this codebase and are deliberately absent.
 
-Anything the tests don't read (channels, workflow templates, schema.toml, other agent templates, hand READMEs) is deliberately absent — don't re-add content without a test that needs it.
+Anything the tests don't read (channels, workflow templates, schema.toml, other agent templates, hand READMEs, the rest of `skills/`) is deliberately absent — don't re-add content without a test that needs it.
 
 Consumed by `librefang_runtime::registry_sync::seed_registry_fixture_for_tests`, which copies it into a test home's `registry/` cache and fans content out exactly like a real sync — no network, deterministic under `LIBREFANG_REGISTRY_OFFLINE=1`.
 

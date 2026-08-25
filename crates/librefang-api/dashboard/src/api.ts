@@ -628,6 +628,12 @@ export interface WorkflowStep {
   timeout_secs?: number;
   inherit_context?: boolean;
   depends_on?: string[];
+  /** Per-step `SessionMode` override. `null` / absent defers to the target
+   *  agent's manifest, which is how the API serializes an unset value. */
+  session_mode?: "persistent" | "new" | null;
+  /** Skill names the step's resolved agent must be able to use (#7721).
+   *  Empty when the step requires nothing; the API sorts and de-duplicates the list on persist. */
+  required_skills?: string[];
 }
 
 export interface WorkflowLastRunSummary {
@@ -1428,6 +1434,13 @@ export interface AgentDetail {
   tools_disabled?: boolean;
   /** `agent.toml: skills_disabled` — hard off switch for every skill. */
   skills_disabled?: boolean;
+  /** Declared skills the daemon's registry does not have (#7713).
+   *  The manifest keeps the name; it activates on the next skills reload. */
+  pending_skills?: string[];
+  /** Declared MCP servers with no live connection (#7713).
+   *  Derived from the live connection pool, not the configured server list, so a
+   *  server that is configured here and unreachable is listed rather than hidden. */
+  pending_mcp_servers?: string[];
   /** Human-readable schedule summary derived from manifest.schedule:
    *  'manual' for reactive, the cron expression, 'proactive', or
    *  'continuous · Ns'. Matches what `enrich_agent_json` puts on the
@@ -1695,12 +1708,37 @@ export interface AgentSkillsResponse {
   available: string[];
   mode: "all" | "allowlist" | "none";
   disabled: boolean;
-  /** Declared in the manifest but not installed yet (allowlist mode only). */
+  /** Assigned names the registry does not have — declared but not installed (#7713). */
   pending?: string[];
 }
 
 export async function getAgentSkills(agentId: string): Promise<AgentSkillsResponse> {
   return get<AgentSkillsResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+}
+
+/**
+ * Per-agent MCP server assignment, returned by `GET /api/agents/{id}/mcp_servers`.
+ *
+ * - `assigned`: the manifest allowlist (`agent.toml: mcp_servers`).
+ * - `available`: server names the daemon currently has connected tools for.
+ * - `mode`: `"all"` (`["*"]`), `"allowlist"` (a pinned set), or `"none"` (empty list — no server is granted).
+ * - `pending`: assigned names with no live connection (#7713). A server that is
+ *   configured but unreachable appears here, which is the whole point: it is
+ *   indistinguishable from a healthy one in the configured server list.
+ */
+export interface AgentMcpServersResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist" | "none";
+  pending?: string[];
+}
+
+export async function getAgentMcpServers(
+  agentId: string,
+): Promise<AgentMcpServersResponse> {
+  return get<AgentMcpServersResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/mcp_servers`,
+  );
 }
 
 /**
@@ -1758,16 +1796,57 @@ export async function listAgents(
   return data.items ?? [];
 }
 
-/** Lightweight agent-type option for the quick-spawn picker. See
- *  {@link AgentTypeSummary} / {@link AgentType} for the fuller shapes used
- *  by the Agent Types management page. */
-export interface AgentTypeOption {
+/**
+ * Where a catalog row comes from, and therefore whether this API can write it.
+ *
+ * `"agent-type"` is an operator-authored document under `agent-types/` that the
+ * write verbs own. `"agent"` is a live agent's own `agent.toml`, which is listed
+ * here because it is spawnable-from but is edited through `/api/agents` — the
+ * server refuses a `PUT`/`DELETE` aimed at one, so the editor must not offer the
+ * control in the first place (#7731).
+ */
+export type AgentTypeSource = "agent-type" | "agent";
+
+/** A catalog row from the agent-type list endpoint. Also the option shape the
+ *  quick-spawn picker renders — see {@link AgentTypeSummary} / {@link AgentType}
+ *  for the fuller shapes the Agent Types management page reads. */
+export interface AgentTemplate {
   name: string;
   description: string;
+  provider: string;
+  model: string;
+  source: AgentTypeSource;
+  editable: boolean;
 }
 
-export async function listAgentTypeOptions(): Promise<AgentTypeOption[]> {
-  const data = await get<{ templates: AgentTypeOption[] }>("/api/agent-types");
+/**
+ * The flat agent-type shape, as a **patch** (#7740).
+ *
+ * Every field is optional and the server treats absent and empty as different
+ * instructions: an omitted key keeps whatever is on disk, an empty string or
+ * empty array clears it. So a partial object is a legitimate save — send only
+ * what the form actually edits and everything else on the manifest survives.
+ */
+export interface AgentTypeSpec {
+  name?: string;
+  description?: string;
+  system_prompt?: string;
+  provider?: string;
+  model?: string;
+  tools?: string[];
+  skills?: string[];
+}
+
+export interface AgentTypeDetail {
+  name: string;
+  source: AgentTypeSource;
+  editable: boolean;
+  spec: AgentTypeSpec;
+  manifest_toml: string;
+}
+
+export async function listAgentTypeOptions(): Promise<AgentTemplate[]> {
+  const data = await get<{ templates: AgentTemplate[] }>("/api/agent-types");
   return data.templates ?? [];
 }
 
@@ -1775,11 +1854,6 @@ export async function getAgentTypeToml(name: string): Promise<string> {
   return getText(`/api/agent-types/${encodeURIComponent(name)}/toml`);
 }
 
-/** POST /api/agents/purge — remove every trace of an agent BY NAME.
- *
- * The counterpart to `deleteAgent` for agents that are already deleted: with
- * no roster entry there is no id to address them by, but the workspace
- * directory and agent-type template are still on disk. Idempotent. */
 /** What an agent costs: the static footprint every request carries, and the
  * calls it actually made. Token counts are estimates from the same heuristic
  * the compactor uses to decide when to fold history. */
@@ -1806,6 +1880,11 @@ export async function getAgentTokenUsage(agentId: string): Promise<AgentTokenUsa
   return get<AgentTokenUsage>(`/api/agents/${encodeURIComponent(agentId)}/token-usage`);
 }
 
+/** POST /api/agents/purge — remove every trace of an agent BY NAME.
+ *
+ * The counterpart to `deleteAgent` for agents that are already deleted: with
+ * no roster entry there is no id to address them by, but the workspace
+ * directory and agent-type template are still on disk. Idempotent. */
 export async function purgeAgentData(
   name: string,
 ): Promise<{ agent?: string; purged?: Record<string, boolean> }> {
@@ -2803,6 +2882,9 @@ export interface DryRunStepPreview {
   resolved_prompt: string;
   skipped: boolean;
   skip_reason?: string;
+  /** Why the resolved agent cannot satisfy the step's `required_skills` (#7721).
+   *  Present only for a mismatch, and it is a step-level failure: the run stops here, so the dry run reports `valid: false` even though `agent_found` is true. */
+  skill_error?: string | null;
 }
 
 /** Response from the dry-run endpoint. */
@@ -3257,6 +3339,9 @@ export interface MemoryConfigResponse {
     extraction_degraded_reason?: string | null;
     /** The out-of-process extractor command, when one is what runs. */
     extraction_sidecar_command?: string | null;
+    /** Whether an auto-memorized memory is recallable only from the session that produced it (#7605).
+     *  `false` restores the agent-wide pool, where one visitor's turn on a shared agent can be retrieved into another visitor's turn. */
+    session_scoped_recall?: boolean;
     max_retrieve?: number;
   };
   /**
@@ -3282,6 +3367,7 @@ export async function updateMemoryConfig(payload: {
     auto_memorize?: boolean;
     auto_retrieve?: boolean;
     extraction_model?: string;
+    session_scoped_recall?: boolean;
     max_retrieve?: number;
   };
 }): Promise<MemoryConfigResponse> {
@@ -3296,6 +3382,31 @@ export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
 
 export async function getFullConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>("/api/config");
+}
+
+/**
+ * Provenance of the effective configuration — where it was loaded from, and
+ * whether this daemon will accept a write to it (#6695).
+ *
+ * `writable` is the field to branch on. It is equivalent to
+ * `mode === "mutable"`, exposed separately by the server so a client uses a
+ * boolean rather than string-matching a mode name.
+ */
+export interface ConfigStatus {
+  /** `"mutable"` or `"managed"`. Widened to `string` so an unknown future mode does not break parsing — branch on `writable`, not on this. */
+  mode: string;
+  /** Absolute path the effective configuration was loaded from. */
+  source: string;
+  /** Whether the API will accept a write. */
+  writable: boolean;
+  /** `sha256:<hex>` over the file's raw bytes, or `null` when the file does not exist. */
+  checksum?: string | null;
+  /** RFC 3339 timestamp of the file's last modification, or `null` when unavailable. */
+  modified_at?: string | null;
+}
+
+export async function getConfigStatus(): Promise<ConfigStatus> {
+  return get<ConfigStatus>("/api/config/status");
 }
 
 /* ------------------------------------------------------------------ */

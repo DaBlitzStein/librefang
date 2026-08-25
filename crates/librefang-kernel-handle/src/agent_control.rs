@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use librefang_types::ephemeral::{EphemeralSpawnRequest, EphemeralSpawnResult};
 
 use super::*;
 
@@ -82,35 +83,6 @@ pub trait AgentControl: Send + Sync {
         // The kernel MUST override this with real enforcement
         let _ = parent_caps;
         self.spawn_agent(manifest_toml, parent_id).await
-    }
-
-    /// Spawn an ephemeral worker: no workspace, no DB persistence, auto-cleanup.
-    /// Returns the worker's final response text directly.
-    async fn spawn_ephemeral(
-        &self,
-        request: librefang_types::agent::EphemeralSpawnRequest,
-        parent_id: Option<&str>,
-    ) -> Result<String, KernelOpError> {
-        let _ = (request, parent_id);
-        Err(KernelOpError::unavailable("spawn_ephemeral"))
-    }
-
-    /// Like [`spawn_ephemeral`](Self::spawn_ephemeral), but returns the run's
-    /// metering (cost, iterations) alongside the response text. The default
-    /// delegates to `spawn_ephemeral`, so implementations that only wire the
-    /// text path still work — cost is `None` and iterations `0`. The kernel
-    /// overrides this to report real values.
-    async fn spawn_ephemeral_detailed(
-        &self,
-        request: librefang_types::agent::EphemeralSpawnRequest,
-        parent_id: Option<&str>,
-    ) -> Result<librefang_types::agent::EphemeralSpawnResult, KernelOpError> {
-        let response = self.spawn_ephemeral(request, parent_id).await?;
-        Ok(librefang_types::agent::EphemeralSpawnResult {
-            response,
-            cost_usd: None,
-            iterations: 0,
-        })
     }
 
     /// Send a message to another agent and get the response.
@@ -290,6 +262,24 @@ pub trait AgentControl: Send + Sync {
         _allowed_tools: Option<Vec<String>>,
     ) -> Result<String, KernelOpError> {
         Err(KernelOpError::unavailable("run_forked_agent_oneshot"))
+    }
+
+    /// Run an ephemeral worker turn on behalf of `request.parent_id` and return its result (refs #6699).
+    ///
+    /// The worker gets a caller-supplied system prompt (or an agent type's), a mission workspace that exists only for the duration of the run, and a tool set bounded by what the parent itself may call.
+    /// It leaves nothing behind: no registry entry, no persisted session, no workspace.
+    ///
+    /// Spend, resource quota and tool-call attribution all land on the parent — see [`EphemeralSpawnRequest::parent_id`] for why that is a hard requirement rather than a convenience.
+    ///
+    /// Nesting is bounded by the same `max_agent_call_depth` quota `agent_send` and `run_workflow` use, so a worker that spawns a worker cannot recurse without bound.
+    ///
+    /// Default: unavailable. The real kernel overrides; stubs and test handles keep the default so a caller learns the capability is absent instead of silently getting an empty answer.
+    async fn spawn_ephemeral(
+        &self,
+        request: EphemeralSpawnRequest,
+    ) -> Result<EphemeralSpawnResult, KernelOpError> {
+        let _ = request;
+        Err(KernelOpError::unavailable("spawn_ephemeral"))
     }
 
     /// Maximum inter-agent call depth (from config). Default: 5.

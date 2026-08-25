@@ -1610,25 +1610,17 @@ pub(crate) enum SecurityCommands {
         #[arg(long)]
         confirm: bool,
     },
-    /// Recover from a chain break by truncating only the broken entry
-    /// onward and resuming the chain with a re-anchor marker.
+    /// Repair a broken audit chain by severing the rows past the break, preserving them in an archive.
     ///
-    /// Unlike `audit-reset`, this preserves every entry before the break —
-    /// use it when `librefang security verify` reports a chain break you
-    /// have confirmed is legitimate (not tampering) and you want to keep
-    /// the pre-break forensic history instead of wiping the whole trail.
-    /// Requires `--confirm` and refuses to run while a daemon holds the
-    /// database.
+    /// Use instead of `audit-reset` whenever the pre-break history is worth keeping — which in a compliance or production environment is always.
+    /// Requires `--confirm` and refuses to run while a daemon holds the database.
     #[command(
-        long_about = "Recover from a hash-chain break WITHOUT losing pre-break history.\n\nDiagnoses `audit_entries` for the first chain break (a `prev_hash` or `hash` mismatch), reports the exact seq and the expected-vs-found values, then — with `--confirm` — deletes only the broken entry and anything after it and writes a `ChainReanchored` marker entry so the chain resumes cleanly. Everything before the break is untouched.\n\nRefuses to run if the daemon is still holding the database. Requires `--confirm`.\n\nExamples:\n  librefang security audit-reanchor\n  librefang security audit-reanchor --confirm --note \"confirmed benign after incident review\""
+        long_about = "Repair the audit trail after `librefang security verify` reports a chain break, without discarding history.\n\nA Merkle chain has one predecessor per row, so a repair has to sever one side of the break. This command archives the severed rows to `<data_dir>/audit-archive/` as JSON Lines before removing them, appends a `ChainReanchored` marker linked to the last row that still verified, and commits the archive's SHA-256 into that marker so the preserved copy is tamper-evident too. Rows below the break keep their original hashes.\n\nWithout `--confirm` it prints the break and what it would do, and exits non-zero. Refuses to run if the daemon is still holding the database.\n\nExamples:\n  librefang security audit-reanchor\n  librefang security audit-reanchor --confirm"
     )]
     AuditReanchor {
-        /// Required. Without this flag the command reports the diagnosed break (if any) and exits non-zero.
+        /// Required. Without this flag the command prints what it would do and exits non-zero.
         #[arg(long)]
         confirm: bool,
-        /// Optional operator note recorded in the reanchor marker's detail field.
-        #[arg(long, default_value = "")]
-        note: String,
     },
 }
 

@@ -50,6 +50,13 @@ impl Drop for Harness {
 }
 
 async fn boot(api_key: &str) -> Harness {
+    boot_with_mcp_servers(api_key, Vec::new()).await
+}
+
+async fn boot_with_mcp_servers(
+    api_key: &str,
+    mcp_servers: Vec<librefang_types::config::McpServerConfigEntry>,
+) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Seed the pinned registry fixture so the kernel boots with content, offline.
@@ -68,6 +75,7 @@ async fn boot(api_key: &str) -> Harness {
             extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
+        mcp_servers,
         ..KernelConfig::default()
     };
 
@@ -2414,20 +2422,23 @@ async fn test_patch_identity_empty_string_clears_a_single_field() {
 }
 
 // ---------------------------------------------------------------------------
-// Deferred skills/MCP resolution — declared-but-uninstalled skills surface
-// as pending and activate after a skills reload without re-spawning.
+// Declared-but-unavailable skills and MCP servers (#7713)
+//
+// A template can name a skill nobody installed or an MCP server that is not
+// reachable here. The declaration is kept verbatim, so without these fields
+// the operator's only signal is a step that quietly does nothing.
 // ---------------------------------------------------------------------------
 
-/// Spawn an agent whose manifest declares `ghost-skill` (not installed),
-/// verify the pending state is visible on both detail surfaces, install the
-/// skill on disk, reload, and verify it activated without a re-spawn.
+/// A skill named in the manifest but absent from the registry surfaces on both
+/// read routes, and clears once it is installed and the registry reloaded —
+/// with no re-spawn, so the agent id is unchanged throughout.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_pending_skill_surfaces_and_activates_after_reload() {
+async fn test_pending_skill_surfaces_then_clears_after_registry_reload() {
     let h = boot(TEST_TOKEN).await;
 
     let manifest_toml = r#"
 name = "pending-skills-agent"
-description = "agent with a declared-but-uninstalled skill"
+description = "declares a skill that is not installed here"
 skills = ["ghost-skill"]
 
 [model]
@@ -2447,38 +2458,32 @@ model = "test-model"
         StatusCode::CREATED,
         "spawn must succeed; body={body:?}"
     );
-    let id = body["agent_id"]
-        .as_str()
-        .expect("spawn response agent_id")
-        .to_string();
+    let id = body["agent_id"].as_str().expect("agent_id").to_string();
 
-    // Pending state visible on the agent detail payload.
     let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["skills"],
         serde_json::json!(["ghost-skill"]),
-        "declaration must be retained verbatim"
+        "the declaration must be retained verbatim"
     );
     assert_eq!(
         body["pending_skills"],
         serde_json::json!(["ghost-skill"]),
-        "uninstalled skill must surface as pending"
+        "an uninstalled skill must surface as pending on the detail payload"
     );
     assert_eq!(body["pending_mcp_servers"], serde_json::json!([]));
 
-    // ...and on the skills endpoint.
     let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["pending"],
         serde_json::json!(["ghost-skill"]),
-        "skills endpoint must list the pending skill"
+        "the skills route must list the same pending name"
     );
 
-    // Simulate installing the skill on disk, then reload.
-    let home = h.state.kernel.home_dir().to_path_buf();
-    let skill_dir = home.join("skills").join("ghost-skill");
+    // Install the skill on disk and reload the registry through the API.
+    let skill_dir = h.state.kernel.home_dir().join("skills").join("ghost-skill");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     std::fs::write(
         skill_dir.join("skill.toml"),
@@ -2507,66 +2512,60 @@ input_schema = { type = "object" }
     .await;
     assert_eq!(status, StatusCode::OK, "skills reload must succeed");
 
-    // Pending cleared; no re-spawn happened (same agent id).
     let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["pending_skills"],
         serde_json::json!([]),
-        "installed skill must clear the pending state"
+        "installing the skill must clear the pending state without a re-spawn"
     );
     let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["pending"], serde_json::json!([]));
 }
 
-// ---------------------------------------------------------------------------
-// PUT /api/agents/{id}/mcp_servers and PUT /api/agents/{id}/skills — a
-// pending (declared-but-not-installed) name must not block saving the
-// allowlist. Regression for the real bug report: a dashboard save failed
-// with `[400] Internal error: Unknown MCP server: fetch` whenever an
-// agent's `mcp_servers` allowlist contained a catalog-only name, because the
-// PUT payload always resends the full array (including already-declared
-// pending entries), so even an edit that only added new, valid servers hit
-// the first unrecognized name and 400'd the whole request.
-// ---------------------------------------------------------------------------
-
-/// Real-world regression: an agent carries `fetch` as a catalog-only pending
-/// declaration (never installed) alongside `memory`, which is configured.
-/// Saving a list that keeps `fetch` and adds two more *configured* names
-/// (`camoufox`, `sequential-thinking`) must return 200 with all four
-/// persisted and `fetch` still reported as pending.
+/// The MCP half, end to end: a configured server with no live connection reads
+/// as pending on both routes, and clears once it actually connects.
+///
+/// The server is present in `effective_mcp_servers` for the whole test, so a
+/// pending set derived from the configured snapshot would report `[]` at the
+/// first assertion and this test would fail.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_put_mcp_servers_accepts_pending_declaration_alongside_new_configured_entries() {
-    let h = boot(TEST_TOKEN).await;
+async fn test_pending_mcp_server_surfaces_until_the_connection_is_live() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    // Configure memory, camoufox, sequential-thinking (mirrors an operator's
-    // config.toml `[[mcp_servers]]` entries) — a direct push into the same
-    // in-memory list `config.toml` reload writes to, no install/connect
-    // side effects needed for the test.
-    for name in ["memory", "camoufox", "sequential-thinking"] {
-        h.state
-            .kernel
-            .effective_mcp_servers_ref()
-            .write()
-            .unwrap()
-            .push(librefang_types::config::McpServerConfigEntry {
-                name: name.to_string(),
-                template_id: None,
-                transport: None,
-                timeout_secs: 30,
-                env: Vec::new(),
-                headers: Vec::new(),
-                oauth: None,
-                taint_scanning: true,
-                taint_policy: None,
-            });
-    }
+    let backend = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&backend)
+        .await;
+
+    let server = librefang_types::config::McpServerConfigEntry {
+        name: "ghost-mcp".to_string(),
+        template_id: None,
+        transport: Some(librefang_types::config::McpTransportEntry::HttpCompat {
+            base_url: backend.uri(),
+            headers: Vec::new(),
+            tools: vec![librefang_types::config::HttpCompatToolConfig {
+                name: "probe".to_string(),
+                path: "/probe".to_string(),
+                ..Default::default()
+            }],
+        }),
+        timeout_secs: 5,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    };
+    let h = boot_with_mcp_servers(TEST_TOKEN, vec![server]).await;
 
     let manifest_toml = r#"
 name = "pending-mcp-agent"
-description = "agent with fetch pending + memory configured"
-mcp_servers = ["memory", "fetch"]
+description = "declares an MCP server that has not connected yet"
+mcp_servers = ["ghost-mcp"]
 
 [model]
 provider = "ollama"
@@ -2585,217 +2584,51 @@ model = "test-model"
         StatusCode::CREATED,
         "spawn must succeed; body={body:?}"
     );
-    let id = body["agent_id"]
-        .as_str()
-        .expect("spawn response agent_id")
-        .to_string();
+    let id = body["agent_id"].as_str().expect("agent_id").to_string();
 
-    // Precondition: fetch is pending (catalog-only, from the seeded registry
-    // fixture — never added to `effective_mcp_servers`).
-    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/mcp_servers"))).await;
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["pending"], serde_json::json!(["fetch"]));
-
-    let (status, body) = send(
-        h.app.clone(),
-        put_json(
-            &format!("/api/agents/{id}/mcp_servers"),
-            serde_json::json!({"mcp_servers": ["memory", "fetch", "camoufox", "sequential-thinking"]}),
-            Some(TEST_TOKEN),
-        ),
-    )
-    .await;
     assert_eq!(
-        status,
-        StatusCode::OK,
-        "adding new configured servers alongside an existing pending declaration must \
-         succeed, not 400 on the pending name; body={body:?}"
+        body["mcp_servers"],
+        serde_json::json!(["ghost-mcp"]),
+        "the declaration must be retained verbatim"
     );
+    assert_eq!(
+        body["pending_mcp_servers"],
+        serde_json::json!(["ghost-mcp"]),
+        "a configured server with no live connection must surface as pending"
+    );
+    assert_eq!(body["pending_skills"], serde_json::json!([]));
 
     let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/mcp_servers"))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body["assigned"],
-        serde_json::json!(["memory", "fetch", "camoufox", "sequential-thinking"])
-    );
     assert_eq!(
         body["pending"],
-        serde_json::json!(["fetch"]),
-        "fetch must still be reported as pending — it was never installed/connected"
+        serde_json::json!(["ghost-mcp"]),
+        "the mcp_servers route must list the same pending name"
     );
-}
-
-/// A name absent from `config.toml`, the connected servers, and the MCP
-/// catalog is genuinely unknown and must still be rejected — with a 400 and
-/// a message that does not read as a server fault.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_put_mcp_servers_rejects_unknown_name_with_400_not_internal_error() {
-    let h = boot(TEST_TOKEN).await;
-    let id = spawn_named(&h.state, "unknown-mcp-put-agent");
-
-    let (status, body) = send(
-        h.app.clone(),
-        put_json(
-            &format!("/api/agents/{id}/mcp_servers"),
-            serde_json::json!({"mcp_servers": ["totally-made-up-server"]}),
-            Some(TEST_TOKEN),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let msg = body["error"].as_str().expect("error message present");
-    assert!(
-        !msg.contains("Internal error"),
-        "a validation failure must not read as a server fault, got: {msg}"
-    );
-    assert!(
-        msg.contains("totally-made-up-server"),
-        "message must name the rejected server, got: {msg}"
-    );
-}
-
-/// Skills-side mirror: a skill directory that exists on disk (has a
-/// `skill.toml`) but is not loaded into the running registry is a
-/// legitimate pending declaration — saving it must return 200.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_put_skills_accepts_on_disk_unloaded_pending_name() {
-    let h = boot(TEST_TOKEN).await;
-    let id = spawn_named(&h.state, "pending-skill-put-agent");
-
-    let home = h.state.kernel.home_dir().to_path_buf();
-    let skill_dir = home.join("skills").join("unloaded-put-skill");
-    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
-    std::fs::write(
-        skill_dir.join("skill.toml"),
-        r#"
-[skill]
-name = "unloaded-put-skill"
-version = "0.1.0"
-description = "on-disk, not loaded"
-
-[runtime]
-type = "python"
-entry = "main.py"
-"#,
-    )
-    .expect("write skill.toml");
-
-    let (status, body) = send(
-        h.app.clone(),
-        put_json(
-            &format!("/api/agents/{id}/skills"),
-            serde_json::json!({"skills": ["unloaded-put-skill"]}),
-            Some(TEST_TOKEN),
-        ),
-    )
-    .await;
     assert_eq!(
-        status,
-        StatusCode::OK,
-        "an on-disk-but-unloaded skill must be accepted as pending; body={body:?}"
+        body["available"],
+        serde_json::json!([]),
+        "nothing is available while the server has not connected"
     );
 
-    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    Arc::clone(&h.state.kernel).connect_mcp_servers().await;
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["assigned"], serde_json::json!(["unloaded-put-skill"]));
-    assert_eq!(body["pending"], serde_json::json!(["unloaded-put-skill"]));
-}
-
-/// A skill name absent from both the loaded registry and disk is genuinely
-/// unknown and must still be rejected — with a 400 and a message that does
-/// not read as a server fault.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_put_skills_rejects_unknown_name_with_400_not_internal_error() {
-    let h = boot(TEST_TOKEN).await;
-    let id = spawn_named(&h.state, "unknown-skill-put-agent");
-
-    let (status, body) = send(
-        h.app.clone(),
-        put_json(
-            &format!("/api/agents/{id}/skills"),
-            serde_json::json!({"skills": ["totally-made-up-skill"]}),
-            Some(TEST_TOKEN),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let msg = body["error"].as_str().expect("error message present");
-    assert!(
-        !msg.contains("Internal error"),
-        "a validation failure must not read as a server fault, got: {msg}"
-    );
-    assert!(
-        msg.contains("totally-made-up-skill"),
-        "message must name the rejected skill, got: {msg}"
-    );
-}
-
-/// An operator-tuned agent can be promoted into a reusable agent type, and
-/// the promotion keeps the agent's own manifest fields rather than collapsing
-/// to the flat quick-create shape.
-#[tokio::test(flavor = "multi_thread")]
-async fn promoting_an_agent_creates_an_agent_type_with_its_manifest() {
-    let h = boot(TEST_TOKEN).await;
-    let agent_id = spawn_named(&h.state, "promote-source");
-
-    let promoted_name = format!("promoted-{}", uuid::Uuid::new_v4().simple());
-    let (status, body) = send(
-        h.app.clone(),
-        post_json(
-            &format!("/api/agents/{agent_id}/promote-to-type"),
-            serde_json::json!({"name": promoted_name}),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{body:?}");
-    assert_eq!(body["name"], promoted_name, "{body:?}");
-
-    let (status, body) = send(
-        h.app.clone(),
-        get(&format!("/api/templates/{promoted_name}")),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert_eq!(body["name"], promoted_name, "{body:?}");
-}
-
-/// Promoting onto the name of a live agent would shadow it in dual-source
-/// resolution — the same collision the create route rejects.
-#[tokio::test(flavor = "multi_thread")]
-async fn promoting_onto_a_live_agents_name_is_rejected() {
-    let h = boot(TEST_TOKEN).await;
-    let live_name = format!("live-{}", uuid::Uuid::new_v4().simple());
-    let first = spawn_named(&h.state, &live_name);
-
-    // Self-promotion under a DIFFERENT type name is a rename in place.
-    let type_name = format!("type-{}", uuid::Uuid::new_v4().simple());
-    let (status, _body) = send(
-        h.app.clone(),
-        post_json(
-            &format!("/api/agents/{first}/promote-to-type"),
-            serde_json::json!({"name": type_name}),
-        ),
-    )
-    .await;
     assert_eq!(
-        status,
-        StatusCode::CREATED,
-        "self-promotion must succeed: {_body:?}"
+        body["pending_mcp_servers"],
+        serde_json::json!([]),
+        "a live connection must clear the pending state without a re-spawn"
     );
 
-    // A second agent promoting onto the LIVE agent's name must be rejected.
-    let second = spawn_named(&h.state, "promote-source-2");
-    let (status, _body) = send(
-        h.app.clone(),
-        post_json(
-            &format!("/api/agents/{second}/promote-to-type"),
-            serde_json::json!({"name": live_name}),
-        ),
-    )
-    .await;
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/mcp_servers"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pending"], serde_json::json!([]));
     assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "promoting onto a live agent's name must be rejected: {_body:?}"
+        body["available"],
+        serde_json::json!(["ghost-mcp"]),
+        "the connected server must now be in the available pool"
     );
 }

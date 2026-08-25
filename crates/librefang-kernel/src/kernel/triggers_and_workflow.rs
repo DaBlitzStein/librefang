@@ -1237,6 +1237,22 @@ impl LibreFangKernel {
         input: String,
         owner: Option<AgentId>,
     ) -> KernelResult<(WorkflowRunId, String)> {
+        self.run_workflow_owned(workflow_id, input, owner).await
+    }
+
+    /// [`Self::run_workflow`], recording `owner` as the run's owning agent (#7714).
+    ///
+    /// `owner` is the agent that invoked the `workflow_run` tool. It is
+    /// stamped on the run at creation and never reassigned, so the resume and
+    /// operator-action paths carry it forward rather than re-deriving it from
+    /// whoever resumed. `None` produces an ownerless run, which is what an
+    /// operator-initiated run is.
+    pub async fn run_workflow_owned(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        owner: Option<AgentId>,
+    ) -> KernelResult<(WorkflowRunId, String)> {
         let cfg = self.config.load_full();
 
         // Bound nested workflow runs (refs #6659).
@@ -1299,39 +1315,17 @@ impl LibreFangKernel {
         let run_id = self
             .workflows
             .engine
-            .create_run(workflow_id, input)
+            .create_run_owned(workflow_id, input, owner)
             .await
             .ok_or_else(|| {
                 KernelError::LibreFang(LibreFangError::Internal("Workflow not found".to_string()))
             })?;
 
-        // Agent resolver: looks up by name or ID in the registry.
+        // Agent resolver: looks up by id or name in the registry, and
+        // find-or-spawns a `type` reference from its template (#7712).
         // Returns (AgentId, agent_name, inherit_parent_context).
         let resolver = |agent_ref: &StepAgent| -> StepAgentResolution {
-            match agent_ref {
-                StepAgent::ById { id } => {
-                    let agent_id: AgentId = id.parse().map_err(|_| StepAgentError::NotFound)?;
-                    let entry = self
-                        .agents
-                        .registry
-                        .get(agent_id)
-                        .ok_or(StepAgentError::NotFound)?;
-                    let inherit = entry.manifest.inherit_parent_context;
-                    Ok((agent_id, entry.name.clone(), inherit))
-                }
-                StepAgent::ByName { name } => {
-                    let entry = self
-                        .agents
-                        .registry
-                        .find_by_name(name)
-                        .ok_or(StepAgentError::NotFound)?;
-                    let inherit = entry.manifest.inherit_parent_context;
-                    Ok((entry.id, entry.name.clone(), inherit))
-                }
-                StepAgent::ByType { template, fresh } => {
-                    self.resolve_agent_by_type_or_spawn(template, owner, *fresh)
-                }
-            }
+            self.resolve_step_agent(agent_ref, None)
         };
 
         // Message sender: sends to agent and returns (output, in_tokens, out_tokens).
@@ -1396,12 +1390,9 @@ impl LibreFangKernel {
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(max_workflow_secs),
-            self.workflows.engine.execute_run(
-                run_id,
-                resolver,
-                send_message,
-                |agent_id, required| self.check_step_required_skills(agent_id, required),
-            ),
+            self.workflows
+                .engine
+                .execute_run(run_id, resolver, send_message),
         )
         .await
         .map_err(|_| {
@@ -1424,49 +1415,11 @@ impl LibreFangKernel {
         workflow_id: WorkflowId,
         input: String,
     ) -> KernelResult<Vec<DryRunStep>> {
-        let resolver = |agent_ref: &StepAgent| -> StepAgentResolution {
-            match agent_ref {
-                StepAgent::ById { id } => {
-                    let agent_id: librefang_types::agent::AgentId =
-                        id.parse().map_err(|_| StepAgentError::NotFound)?;
-                    let entry = self
-                        .agents
-                        .registry
-                        .get(agent_id)
-                        .ok_or(StepAgentError::NotFound)?;
-                    let inherit = entry.manifest.inherit_parent_context;
-                    Ok((agent_id, entry.name.clone(), inherit))
-                }
-                StepAgent::ByName { name } => {
-                    let entry = self
-                        .agents
-                        .registry
-                        .find_by_name(name)
-                        .ok_or(StepAgentError::NotFound)?;
-                    let inherit = entry.manifest.inherit_parent_context;
-                    Ok((entry.id, entry.name.clone(), inherit))
-                }
-                StepAgent::ByType { template, .. } => {
-                    // Dry runs must not mutate the registry — never
-                    // spawn here. Reuse an existing instance, or, when
-                    // the template exists on disk, report its name as
-                    // "will spawn on a real run".
-                    if let Some(entry) = self.agents.registry.find_by_name(template) {
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Ok((entry.id, entry.name.clone(), inherit))
-                    } else {
-                        let manifest = super::spawn::load_agent_manifest_from_template_dirs(
-                            &self.home_dir_boot,
-                            template,
-                        )
-                        .ok_or(StepAgentError::NotFound)?;
-                        let inherit = manifest.inherit_parent_context;
-                        let name = manifest.name.clone();
-                        Ok((librefang_types::agent::AgentId::new(), name, inherit))
-                    }
-                }
-            }
-        };
+        // `preview_step_agent`, not `resolve_step_agent`: a dry run is
+        // documented as side-effect free, so a `type` reference reports the
+        // agent the real run would use without spawning it (#7712).
+        let resolver =
+            |agent_ref: &StepAgent| -> StepAgentResolution { self.preview_step_agent(agent_ref) };
 
         self.workflows
             .engine
@@ -1562,34 +1515,14 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
             );
             return;
         };
-        let run_owner = kernel.workflows.engine.run_owner(run_id);
+        // The run's owner is not needed here: with `StepAgent::ByType` resolving
+        // find-or-spawn to one shared canonical instance, attribution rides on
+        // `WorkflowRun::owner_agent_id` / `UsageRecord::billed_agent_id` rather
+        // than on which agent the step resolves to (#7714).
         let resolver = {
             let kernel = kernel.clone();
             move |agent_ref: &StepAgent| -> StepAgentResolution {
-                match agent_ref {
-                    StepAgent::ById { id } => {
-                        let agent_id: AgentId = id.parse().map_err(|_| StepAgentError::NotFound)?;
-                        let entry = kernel
-                            .agents
-                            .registry
-                            .get(agent_id)
-                            .ok_or(StepAgentError::NotFound)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Ok((agent_id, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByName { name } => {
-                        let entry = kernel
-                            .agents
-                            .registry
-                            .find_by_name(name)
-                            .ok_or(StepAgentError::NotFound)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Ok((entry.id, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByType { template, fresh } => {
-                        kernel.resolve_agent_by_type_or_spawn(template, run_owner, *fresh)
-                    }
-                }
+                kernel.resolve_step_agent(agent_ref, None)
             }
         };
         let send_kernel = kernel.clone();
@@ -1646,7 +1579,6 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                 timeout_action,
                 resolver,
                 send_message,
-                |agent_id, required| kernel.check_step_required_skills(agent_id, required),
             )
             .await
         {
@@ -1656,6 +1588,33 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                 "Operator timeout auto-resolve failed"
             );
         }
+    }
+}
+
+/// Workflow-step required-skills gate (#7721). Same `Weak<LibreFangKernel>` reasoning as [`KernelOperatorBridge`]: the engine stores this behind a `OnceLock`, and a strong handle would cycle through `kernel.workflows.engine`.
+///
+/// A dropped kernel reports every requirement as unknown rather than passing the step — the gate exists to fail closed, and the only way to reach this state is a shutdown racing a run.
+struct KernelStepSkillGate {
+    kernel: Weak<LibreFangKernel>,
+}
+
+#[async_trait::async_trait]
+impl crate::workflow::StepSkillGate for KernelStepSkillGate {
+    async fn check_required_skills(
+        &self,
+        agent_id: AgentId,
+        required: &[String],
+    ) -> crate::workflow::RequiredSkillReport {
+        let Some(kernel) = self.kernel.upgrade() else {
+            let mut unknown = required.to_vec();
+            unknown.sort();
+            unknown.dedup();
+            return crate::workflow::RequiredSkillReport {
+                unknown,
+                ..Default::default()
+            };
+        };
+        kernel.classify_required_skills(agent_id, required)
     }
 }
 
@@ -1673,6 +1632,13 @@ impl LibreFangKernel {
                 kernel: Arc::downgrade(self),
             });
         self.workflows.engine.set_operator_hooks(notifier, driver);
+        // #7721: the required-skills gate needs the same kernel handle and the
+        // same once-per-boot install point, so it rides along here rather than
+        // adding a second post-boot hook site that a future caller could miss.
+        let skill_gate: Arc<dyn crate::workflow::StepSkillGate> = Arc::new(KernelStepSkillGate {
+            kernel: Arc::downgrade(self),
+        });
+        self.workflows.engine.set_step_skill_gate(skill_gate);
     }
 }
 

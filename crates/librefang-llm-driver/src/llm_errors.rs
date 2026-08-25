@@ -767,33 +767,44 @@ pub fn is_transient(message: &str) -> bool {
 // Unsupported-parameter rejection detection
 // ---------------------------------------------------------------------------
 
-/// Signals that a gateway/provider adapter rejected one or more request
-/// parameters it does not forward to the underlying model, rather than
-/// rejecting the request itself. Sourced from the shapes actually observed
-/// in the wild across the OpenAI-compatible driver family:
+/// Wire shapes an endpoint uses to say it will not accept a request
+/// *parameter* — as opposed to rejecting the request itself. Sourced from the
+/// shapes actually observed in the wild across the OpenAI-compatible driver
+/// family:
 ///
-/// - litellm: `litellm.UnsupportedParamsError: <adapter> does not support
-///   parameters: ['reasoning_effort'], for model=<model>` — confirmed live
-///   against a real litellm gateway (400, `reasoning_effort` param).
-/// - OpenAI's own error body carries `"code": "unsupported_parameter"`, and
-///   every OpenAI-compatible endpoint that mirrors OpenAI's error shape
+/// - litellm raises `UnsupportedParamsError` and renders it as
+///   `litellm.UnsupportedParamsError: <adapter> does not support parameters:
+///   ['reasoning_effort'], for model=<model>` — confirmed live against a real
+///   litellm gateway (400, `reasoning_effort` param).
+/// - OpenAI's own API returns the typed `unsupported_parameter` error code,
+///   and every OpenAI-compatible endpoint that mirrors OpenAI's error shape
 ///   (Azure, most self-hosted gateways) does too.
 /// - vLLM / FastAPI-based proxies that pass unknown kwargs straight to a
-///   Python constructor surface a bare `unexpected keyword argument` /
-///   `unrecognized request argument` TypeError instead of a structured code.
-const UNSUPPORTED_PARAMETER_SIGNALS: &[&str] = &[
+///   Python constructor surface the underlying `TypeError` as a bare
+///   `unexpected keyword argument` / `unrecognized request argument` instead
+///   of a structured code.
+///
+/// Matching those shapes rather than any one gateway's exact sentence is what
+/// keeps the check useful across the proxies LibreFang actually meets, which
+/// is also why it cannot be answered from a static model catalogue: whether a
+/// model can reason and whether the gateway in front of it will forward the
+/// field are different questions.
+const UNSUPPORTED_PARAM_PATTERNS: &[&str] = &[
     "unsupportedparamserror",      // litellm exception class name
-    "unsupported_parameter",       // OpenAI's own error code
-    "unsupported parameter",       // human-readable phrasing variant
     "does not support parameters", // litellm's UnsupportedParamsError message
     "does not support parameter",  // singular variant
+    "unsupported_parameter",       // OpenAI's own error code
+    "unsupported parameter",       // human-readable phrasing variant
     "unrecognized request argument",
     "unexpected keyword argument", // Python TypeError bubbling through a proxy
 ];
 
-/// True if `message` indicates the endpoint rejected a specific request
-/// parameter as unsupported, rather than rejecting the request as malformed,
-/// unauthenticated, or aimed at a nonexistent model.
+/// Whether an error body rejects a request parameter rather than the request's
+/// content.
+///
+/// Callers must gate this on an HTTP 400 themselves — the patterns are
+/// substrings of free-form provider text, and any other status carrying the
+/// same words is a different failure.
 ///
 /// This is a narrow, deliberately distinct signal from the general
 /// [`classify_error`] taxonomy (which buckets all such 400s under
@@ -802,22 +813,24 @@ const UNSUPPORTED_PARAMETER_SIGNALS: &[&str] = &[
 /// accepts. The same request to the same provider+model combination fails
 /// identically every time until the offending parameter is removed — it
 /// carries no information about whether the provider is reachable or
-/// healthy, so callers deciding whether to treat a failure as a provider-health
-/// signal (e.g. a circuit breaker) should exclude it. See
+/// healthy, so callers deciding whether to treat a failure as a
+/// provider-health signal (e.g. a circuit breaker) should exclude it. See
 /// `librefang-runtime::auth_cooldown::ProviderCooldown` and the exclusion in
 /// `librefang-runtime::agent_loop::retry`.
 pub fn is_unsupported_parameter_error(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    matches_any(&lower, UNSUPPORTED_PARAMETER_SIGNALS)
+    matches_any(&message.to_lowercase(), UNSUPPORTED_PARAM_PATTERNS)
 }
 
-/// Stricter version of [`is_unsupported_parameter_error`] for callers that
-/// need to know WHICH parameter was rejected before deciding what to strip
-/// and retry without — e.g. the OpenAI-compatible driver deciding whether to
-/// drop `reasoning_effort` specifically (as opposed to `temperature` or
-/// `max_tokens`, which have their own strip-and-retry branches already).
+/// Whether an unsupported-parameter rejection names `reasoning_effort`
+/// specifically.
+///
+/// Used by the OpenAI-compatible driver to decide it can strip that one field
+/// and retry, the way it already strips `temperature` and swaps `max_tokens`
+/// for `max_completion_tokens` — as opposed to a rejection naming some other
+/// parameter, which has no such branch.
 pub fn is_unsupported_reasoning_effort_error(message: &str) -> bool {
-    is_unsupported_parameter_error(message) && message.to_lowercase().contains("reasoning_effort")
+    let lower = message.to_lowercase();
+    lower.contains("reasoning_effort") && matches_any(&lower, UNSUPPORTED_PARAM_PATTERNS)
 }
 
 // ---------------------------------------------------------------------------
@@ -1557,5 +1570,50 @@ mod tests {
     fn cap_message_within_limit_returns_unchanged() {
         let input = "\u{4f60}\u{597d}";
         assert_eq!(cap_message(input, 10), input);
+    }
+
+    // ── Unsupported-parameter rejection (#7769) ────────────────────────────
+
+    /// The three shapes that actually occur: litellm's `UnsupportedParamsError`, OpenAI's typed `unsupported_parameter` code, and the bare Python `TypeError` a FastAPI / vLLM-style proxy leaks.
+    #[test]
+    fn unsupported_parameter_error_covers_the_shapes_that_occur() {
+        for body in [
+            "litellm.UnsupportedParamsError: openai does not support parameters: ['reasoning_effort'], for model=gpt-4o. Received Model Group=default",
+            r#"{"error":{"message":"Unsupported parameter: 'reasoning_effort'","code":"unsupported_parameter"}}"#,
+            "TypeError: create() got an unexpected keyword argument 'reasoning_effort'",
+        ] {
+            assert!(
+                is_unsupported_parameter_error(body),
+                "should classify as a parameter rejection: {body}"
+            );
+            assert!(
+                is_unsupported_reasoning_effort_error(body),
+                "should name reasoning_effort: {body}"
+            );
+        }
+    }
+
+    /// The 400s the circuit breaker must keep counting, and that the driver must not answer by stripping a field.
+    #[test]
+    fn unsupported_parameter_error_rejects_other_400s() {
+        for body in [
+            r#"{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}"#,
+            r#"{"error":{"message":"The model 'gpt-9' does not exist","code":"model_not_found"}}"#,
+            "Invalid JSON payload received. Unknown name \"messsages\"",
+            r#"{"error":{"code":"context_length_exceeded","message":"This model's maximum context length is 8192 tokens"}}"#,
+        ] {
+            assert!(
+                !is_unsupported_parameter_error(body),
+                "must not classify as a parameter rejection: {body}"
+            );
+        }
+    }
+
+    /// A rejection of some *other* parameter is still a parameter rejection, but stripping `reasoning_effort` would not answer it.
+    #[test]
+    fn unsupported_reasoning_effort_error_is_narrower_than_the_class() {
+        let body = r#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model","code":"unsupported_parameter"}}"#;
+        assert!(is_unsupported_parameter_error(body));
+        assert!(!is_unsupported_reasoning_effort_error(body));
     }
 }

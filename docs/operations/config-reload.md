@@ -108,6 +108,7 @@ classified differently — the row note spells out which is which.
 | `users` | H | RBAC user list — rebuilds the `AuthManager`. |
 | `user_groups` | H | User group declarations (#7745) — rebuilds the `AuthManager`. Membership is derived from config rather than stored, so a fresh snapshot is the whole reload: adding or removing a member takes effect on `POST /api/config/reload`, with no restart. |
 | `user_group_mapping` | H | Maps external group / role names onto local user-group ids (#7745). Rebuilds the `AuthManager` alongside `user_groups`. Resolution fails closed, so an entry naming an undeclared group grants nothing. |
+| `default_owner` | N | Principal stamped as the owner of anything created without a caller to attribute it to (#7744). Read from `config_ref()` at the moment an agent, workflow or run is stamped, so a bare config swap is the whole reload and the next thing created carries the new value. Deliberately **not** backfilled: already-stored owners are never revisited, so changing this re-points future ownership only — reassigning existing records is a separate, explicit operation. |
 | `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. |
 | `external_auth_proxy` | R | Acknowledges an external auth proxy is in front. |
 | `channel_role_mapping` | R | Maps platform-native channel roles to LibreFang roles. |
