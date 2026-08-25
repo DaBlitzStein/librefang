@@ -1,6 +1,7 @@
 // Curated Lucide entrypoint. Keep production builds tree-shakeable.
 // These internal paths are version-coupled, so package.json intentionally
 // pins lucide-react exactly and lucide.test.ts imports every mapping.
+export type { LucideIcon } from "lucide-react";
 export { default as Activity } from "lucide-react/dist/esm/icons/activity.mjs";
 export { default as AlertCircle } from "lucide-react/dist/esm/icons/circle-alert.mjs";
 export { default as AlertTriangle } from "lucide-react/dist/esm/icons/triangle-alert.mjs";
@@ -8,6 +9,7 @@ export { default as Archive } from "lucide-react/dist/esm/icons/archive.mjs";
 export { default as ArrowLeft } from "lucide-react/dist/esm/icons/arrow-left.mjs";
 export { default as ArrowRight } from "lucide-react/dist/esm/icons/arrow-right.mjs";
 export { default as ArrowsUpFromLine } from "lucide-react/dist/esm/icons/arrows-up-from-line.mjs";
+export { default as ArrowUpNarrowWide } from "lucide-react/dist/esm/icons/arrow-up-narrow-wide.mjs";
 export { default as BarChart3 } from "lucide-react/dist/esm/icons/chart-column.mjs";
 export { default as Bell } from "lucide-react/dist/esm/icons/bell.mjs";
 export { default as BookCopy } from "lucide-react/dist/esm/icons/book-copy.mjs";
@@ -66,10 +68,11 @@ export { default as History } from "lucide-react/dist/esm/icons/history.mjs";
 export { default as Home } from "lucide-react/dist/esm/icons/house.mjs";
 export { default as Hourglass } from "lucide-react/dist/esm/icons/hourglass.mjs";
 export { default as Image } from "lucide-react/dist/esm/icons/image.mjs";
+export { default as Info } from "lucide-react/dist/esm/icons/info.mjs";
 export { default as Kanban } from "lucide-react/dist/esm/icons/kanban.mjs";
 export { default as Key } from "lucide-react/dist/esm/icons/key.mjs";
-export { default as KeyRound } from "lucide-react/dist/esm/icons/key-round.mjs";
 export { default as Keyboard } from "lucide-react/dist/esm/icons/keyboard.mjs";
+export { default as KeyRound } from "lucide-react/dist/esm/icons/key-round.mjs";
 export { default as Languages } from "lucide-react/dist/esm/icons/languages.mjs";
 export { default as Layers } from "lucide-react/dist/esm/icons/layers.mjs";
 export { default as LayoutDashboard } from "lucide-react/dist/esm/icons/layout-dashboard.mjs";
@@ -83,7 +86,6 @@ export { default as Loader2 } from "lucide-react/dist/esm/icons/loader-circle.mj
 export { default as Lock } from "lucide-react/dist/esm/icons/lock.mjs";
 export { default as LogIn } from "lucide-react/dist/esm/icons/log-in.mjs";
 export { default as LogOut } from "lucide-react/dist/esm/icons/log-out.mjs";
-export type { LucideIcon } from "lucide-react";
 export { default as Mail } from "lucide-react/dist/esm/icons/mail.mjs";
 export { default as Maximize2 } from "lucide-react/dist/esm/icons/maximize-2.mjs";
 export { default as Menu } from "lucide-react/dist/esm/icons/menu.mjs";
@@ -156,7 +158,9 @@ export { default as UploadCloud } from "lucide-react/dist/esm/icons/cloud-upload
 export { default as User } from "lucide-react/dist/esm/icons/user.mjs";
 export { default as UserCheck } from "lucide-react/dist/esm/icons/user-check.mjs";
 export { default as UserCircle } from "lucide-react/dist/esm/icons/circle-user.mjs";
+export { default as UserRound } from "lucide-react/dist/esm/icons/user-round.mjs";
 export { default as Users } from "lucide-react/dist/esm/icons/users.mjs";
+export { default as Users2 } from "lucide-react/dist/esm/icons/users-2.mjs";
 export { default as Volume2 } from "lucide-react/dist/esm/icons/volume-2.mjs";
 export { default as Wallet } from "lucide-react/dist/esm/icons/wallet.mjs";
 export { default as Wand2 } from "lucide-react/dist/esm/icons/wand-sparkles.mjs";
