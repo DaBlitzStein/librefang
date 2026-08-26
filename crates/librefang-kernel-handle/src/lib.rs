@@ -128,7 +128,6 @@ pub trait KernelHandle:
     + ChannelSender
     + PromptStore
     + WorkflowRunner
-    + AgentTypeTools
     + GoalControl
     + ToolPolicy
     + ApiAuth
@@ -155,7 +154,6 @@ impl<T> KernelHandle for T where
         + ChannelSender
         + PromptStore
         + WorkflowRunner
-        + AgentTypeTools
         + GoalControl
         + ToolPolicy
         + ApiAuth
@@ -175,7 +173,7 @@ impl<T> KernelHandle for T where
 pub mod prelude {
     pub use super::{
         A2ARegistry, AcpFsBridge, AcpFsClient, AcpTerminalBridge, AcpTerminalClient,
-        AcpTerminalRunResult, AgentControl, AgentInfo, ApiAuth, ApiAuthSnapshot,
+        AcpTerminalRunResult, AgentControl, AgentInfo, AgentTypeSummary, ApiAuth, ApiAuthSnapshot,
         ApiUserConfigSnapshot, ApprovalGate, AsyncSendOutcome, CatalogQuery, ChannelSender,
         CronControl, DashboardRawConfig, EventBus, GoalControl, HandsControl, KernelHandle,
         KnowledgeGraph, MemoryAccess, PromptStore, SessionWriter, StepOutputSummary, TaskQueue,

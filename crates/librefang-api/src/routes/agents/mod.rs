@@ -22,6 +22,7 @@ use std::sync::{Arc, LazyLock};
 mod attachments;
 mod cloning;
 mod config;
+mod ephemeral;
 mod files;
 mod identity;
 mod lifecycle;
@@ -33,6 +34,7 @@ mod uploads;
 pub use attachments::*;
 pub use cloning::*;
 pub use config::*;
+pub use ephemeral::*;
 pub use files::*;
 pub use identity::*;
 pub use lifecycle::*;
@@ -63,6 +65,12 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route(
             "/agents/identities/{name}/reset",
             axum::routing::post(reset_agent_identity),
+        )
+        // Ephemeral worker spawn (#6699).
+        // A literal segment under `/agents`, so it is registered alongside the other literals rather than after `/agents/{id}`, where the name would be parsed as an agent id.
+        .route(
+            "/agents/spawn-ephemeral",
+            axum::routing::post(spawn_ephemeral_agent),
         )
         // Bulk agent operations (placed before /agents/{id} to avoid path conflicts)
         .route(

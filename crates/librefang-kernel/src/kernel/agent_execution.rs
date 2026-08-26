@@ -635,11 +635,10 @@ impl LibreFangKernel {
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
             if is_default_provider && is_default_model {
-                let override_guard = self
-                    .llm
-                    .default_model_override
-                    .read()
-                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                let override_guard = read_config_override(
+                    &self.llm.default_model_override,
+                    "default_model_override",
+                );
                 let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
                 if !dm.provider.is_empty() {
                     manifest.model.provider = dm.provider.clone();
@@ -1070,7 +1069,8 @@ impl LibreFangKernel {
             &self.llm.model_catalog.load(),
             &manifest.model,
             Some(session.context_window_tokens),
-        );
+        )
+        .map(|resolved| resolved.tokens);
 
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.

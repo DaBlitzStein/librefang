@@ -1845,6 +1845,23 @@ export interface AgentTypeDetail {
   manifest_toml: string;
 }
 
+/**
+ * The one reader for the agent-type catalog.
+ *
+ * There were three: this one, `listAgentTypeOptions`, and a `listAgentTypes`
+ * that read `data.items` on a route that answers `{ templates: [...] }` — so it
+ * returned `[]` with 34 types on disk and the page rendered blank with no error
+ * anywhere. Three readers for one endpoint is how one of them drifts unnoticed;
+ * the other two are aliases now.
+ *
+ * `/api/agent-types` and `/api/templates` are the same route under two
+ * spellings (#7722); the canonical one is used here.
+ */
+export async function listAgentTemplates(): Promise<AgentTemplate[]> {
+  const data = await get<{ templates?: AgentTemplate[] }>("/api/agent-types");
+  return data.templates ?? [];
+}
+
 export async function listAgentTypeOptions(): Promise<AgentTemplate[]> {
   const data = await get<{ templates: AgentTemplate[] }>("/api/agent-types");
   return data.templates ?? [];
@@ -1889,6 +1906,51 @@ export async function purgeAgentData(
   name: string,
 ): Promise<{ agent?: string; purged?: Record<string, boolean> }> {
   return post<{ agent?: string; purged?: Record<string, boolean> }>("/api/agents/purge", { name });
+}
+
+export async function deleteAgentType(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
+}
+
+/**
+ * One ephemeral worker run (#6699).
+ *
+ * `parent` is not a convenience field: an ephemeral worker has no registry entry,
+ * so it has no budget, no `[resources]` quota and no tool allowlist of its own.
+ * The parent supplies all three, is billed for the run, and caps the worker's
+ * tool set — the server refuses a request without one.
+ */
+export interface SpawnEphemeralRequest {
+  parent: string;
+  message: string;
+  label?: string;
+  agent_type?: string;
+  system_prompt?: string;
+  tools?: string[];
+  provider?: string;
+  model?: string;
+  max_iterations?: number;
+}
+
+/** What one ephemeral worker turn produced. The worker itself is already gone. */
+export interface SpawnEphemeralResult {
+  name: string;
+  response: string;
+  iterations: number;
+  cost_usd?: number;
+  tools: string[];
+}
+
+export async function spawnEphemeral(
+  body: SpawnEphemeralRequest,
+): Promise<SpawnEphemeralResult> {
+  // An ephemeral run is a full agent turn, so it outlives the default request
+  // timeout on anything but a trivial prompt.
+  return post<SpawnEphemeralResult>(
+    "/api/agents/spawn-ephemeral",
+    body,
+    getLongRunningTimeoutMs(),
+  );
 }
 
 export async function deleteAgent(agentId: string, purgeData = false): Promise<ApiActionResponse> {
@@ -1972,6 +2034,19 @@ export async function loadAgentSession(
 export interface SessionContextResponse {
   used_tokens: number;
   max_context_tokens: number;
+  /**
+   * Which layer of the precedence chain produced `max_context_tokens` (refs #7774):
+   * `agent_override`, `model_override`, `catalog`, `session_hint` or `fallback`.
+   */
+  max_context_tokens_source: string;
+  /**
+   * True when `max_context_tokens` is the runtime's own guess rather than a fact
+   * about the model, i.e. the source is `fallback`.
+   *
+   * Render the warning off this flag rather than comparing the source string —
+   * the set of source names can grow, the meaning of "assumed" cannot.
+   */
+  max_context_tokens_assumed: boolean;
   pct: number;
   model: string;
   pressure: string;
@@ -4127,11 +4202,13 @@ export async function spawnAgent(req: {
 
 /** List-row summary. The list endpoint returns only these fields; the full
  *  definition (system prompt, model, tools, skills) comes from the detail GET. */
-export interface AgentTypeSummary {
-  name: string;
-  description: string;
-  source: string;
-}
+/** @deprecated Use {@link AgentTemplate}.
+ *
+ * This was a local subset (`name`, `description`, `source`) written before the
+ * route reported `provider`, `model` and `editable`. Reading a row through it
+ * hid the three fields the picker needs to gate on, so it is now an alias
+ * rather than a second shape that can drift from the response again. */
+export type AgentTypeSummary = AgentTemplate;
 
 /** Full agent-type definition. Flat JSON, as returned by the detail GET and
  *  accepted by create/update. `model` is a model id string; `provider` is a
@@ -4176,66 +4253,25 @@ export interface AgentType {
  * clients) that never send `manifest_toml`. */
 export type AgentTypeInput = AgentType;
 
-export async function listAgentTypes(): Promise<AgentTypeSummary[]> {
-  // The route answers `{ templates: [...] }`, not the paginated `{ items }`
-  // shape. Reading `items` yielded `undefined` and the `?? []` turned that into
-  // an empty catalog: the page rendered blank while 34 types sat on disk, with
-  // no error anywhere to point at it.
-  const data = await get<{ templates?: AgentTypeSummary[] }>(
-    "/api/agent-types",
-  );
-  return data.templates ?? [];
+export async function listAgentTypes(): Promise<AgentTemplate[]> {
+  return listAgentTemplates();
 }
 
-export async function getAgentType(name: string): Promise<AgentType> {
-  return get<AgentType>(`/api/agent-types/${encodeURIComponent(name)}`);
+export async function getAgentType(name: string): Promise<AgentTypeDetail> {
+  return get<AgentTypeDetail>(`/api/agent-types/${encodeURIComponent(name)}`);
 }
 
 export async function createAgentType(
-  body: AgentTypeInput,
-): Promise<AgentType> {
-  return post<AgentType>("/api/agent-types", body);
+  spec: AgentTypeSpec,
+): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>("/api/agent-types", spec);
 }
 
 export async function updateAgentType(
   name: string,
-  body: AgentTypeInput,
-): Promise<AgentType> {
-  return put<AgentType>(`/api/agent-types/${encodeURIComponent(name)}`, body);
-}
-
-export async function deleteAgentType(name: string): Promise<ApiActionResponse> {
-  return del<ApiActionResponse>(`/api/agent-types/${encodeURIComponent(name)}`);
-}
-
-/** Result of a one-shot ephemeral run. `response` is the agent's reply text;
- *  `cost_usd` is null when the kernel could not compute it. */
-export interface EphemeralResult {
-  response: string;
-  cost_usd: number | null;
-  iterations: number;
-  latency_ms: number;
-}
-
-/** Request for `POST /api/agents/spawn-ephemeral`. `message` is required;
- *  `agent_type` or `system_prompt` supplies the base mission. */
-export interface EphemeralSpawnRequest {
-  message: string;
-  agent_type?: string;
-  system_prompt?: string;
-  tools?: string[];
-  skills?: string[];
-  max_iterations?: number;
-}
-
-export async function spawnEphemeral(
-  body: EphemeralSpawnRequest,
-): Promise<EphemeralResult> {
-  return post<EphemeralResult>(
-    "/api/agents/spawn-ephemeral",
-    body,
-    getLongRunningTimeoutMs(),
-  );
+  spec: AgentTypeSpec,
+): Promise<AgentTypeDetail> {
+  return put<AgentTypeDetail>(`/api/agent-types/${encodeURIComponent(name)}`, spec);
 }
 
 export async function getCommsTopology(): Promise<CommsTopology> {
@@ -5918,23 +5954,3 @@ export async function removePairedDevice(deviceId: string): Promise<void> {
 
 /** List-row summary. The list endpoint returns only these fields; the full
  *  definition (system prompt, model, tools, skills) comes from the detail GET. */
-/** Result of a one-shot ephemeral run. `response` is the agent's reply text;
- *  `cost_usd` is null when the kernel could not compute it. */
-export interface EphemeralResult {
-  response: string;
-  cost_usd: number | null;
-  iterations: number;
-  latency_ms: number;
-}
-
-/** Request for `POST /api/agents/spawn-ephemeral`. `message` is required;
- *  `agent_type` or `system_prompt` supplies the base mission. */
-export interface EphemeralSpawnRequest {
-  message: string;
-  agent_type?: string;
-  system_prompt?: string;
-  tools?: string[];
-  skills?: string[];
-  max_iterations?: number;
-}
-

@@ -59,8 +59,6 @@ struct Captures {
 
 // --- The mock kernel -------------------------------------------------------
 
-impl librefang_kernel_handle::AgentTypeTools for RosterKernel {}
-
 struct RosterKernel {
     /// `(user_id, display_name)` pairs the roster reports for any lookup.
     /// Empty models both a DM and a group nobody has spoken in.

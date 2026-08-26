@@ -4,34 +4,31 @@ import {
   updateAgentType,
   deleteAgentType,
   spawnEphemeral,
-  type AgentTypeInput,
-  type EphemeralSpawnRequest,
 } from "../http/client";
-import { agentTypeKeys } from "../queries/keys";
+import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
+import { agentTypeKeys, budgetKeys, usageKeys } from "../queries/keys";
 
 export function useCreateAgentType() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: AgentTypeInput) => createAgentType(body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentTypeKeys.all });
-    },
+    mutationFn: (spec: AgentTypeSpec) => createAgentType(spec),
+    onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
   });
 }
 
 /**
  * Save an edit to an existing agent type.
  *
- * The body preserves every manifest field the operator did not touch (#7740):
- * the editor round-trips the type's full `manifest_toml`, so an operator's
- * `[[triggers]]`, `tool_allowlist`, `[compaction]` and the rest survive a save
- * rather than being flattened to the handful of fields a form can show.
+ * `spec` is a patch: the server keeps every manifest field the object does not
+ * mention (#7740). Callers should send only what the form actually edits rather
+ * than reconstructing a full document, so an operator's `[[triggers]]`,
+ * `tool_allowlist`, `[compaction]` and the rest survive the save.
  */
 export function useUpdateAgentType() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, body }: { name: string; body: AgentTypeInput }) =>
-      updateAgentType(name, body),
+    mutationFn: ({ name, spec }: { name: string; spec: AgentTypeSpec }) =>
+      updateAgentType(name, spec),
     onSuccess: (_data, { name }) => {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
@@ -43,17 +40,27 @@ export function useDeleteAgentType() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (name: string) => deleteAgentType(name),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentTypeKeys.all });
-    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
   });
 }
 
-// A one-shot ephemeral run creates and tears down a transient worker with no
-// registry entry, so nothing in the agent-type list changes — no invalidation
-// needed. The result is returned to the caller for display.
+/**
+ * Run one ephemeral worker and return what it produced (#6699).
+ *
+ * The worker leaves nothing behind — no registry entry, no session, no
+ * workspace — so there is no agent list to refresh afterwards. What it does
+ * leave is spend on the *parent's* ledger, which is why usage and budget are
+ * the two domains invalidated here: a Quick Run that silently cost money and
+ * left the budget widget showing the pre-run figure is the exact surprise this
+ * feature must not produce.
+ */
 export function useSpawnEphemeral() {
+  const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: EphemeralSpawnRequest) => spawnEphemeral(body),
+    mutationFn: (body: SpawnEphemeralRequest) => spawnEphemeral(body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: usageKeys.all });
+      qc.invalidateQueries({ queryKey: budgetKeys.all });
+    },
   });
 }

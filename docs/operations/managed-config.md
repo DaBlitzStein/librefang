@@ -12,7 +12,7 @@ Managed mode makes that ownership explicit and enforces it server-side.
 
 | Variable | Effect | Default |
 |---|---|---|
-| `LIBREFANG_CONFIG_PATH` | Loads `config.toml` from this exact path instead of `$LIBREFANG_HOME/config.toml`. | unset — `$LIBREFANG_HOME/config.toml` |
+| `LIBREFANG_CONFIG_PATH` | Resolves `config.toml` to this exact path instead of `$LIBREFANG_HOME/config.toml`, for reads **and** writes. | unset — `$LIBREFANG_HOME/config.toml` |
 | `LIBREFANG_CONFIG_MODE` | `managed` locks the file. Any other value, including unset, empty, and a typo, means mutable. | unset — mutable |
 
 **They are independent on purpose.**
@@ -24,6 +24,24 @@ Defaulting a typo to the locked mode would take the dashboard away from a deploy
 
 **The mode is read from the process environment and never from the config file.**
 A `config_mode` key inside `config.toml` would let an API write unlock the very file it is being refused access to.
+
+## One resolution, recorded at boot
+
+The path is resolved exactly once, in `LibreFangKernel::boot`, and stored on the kernel as `config_path_boot`.
+Everything downstream reads it back through `KernelApi::config_path()`: the hot-reload path, the 30-second change watcher, the `source` field of `GET /api/config/status`, the `source` in every `423` body, and every route that persists into the file.
+The CLI resolves through the same helper (`librefang_kernel::config::default_config_path`), so `librefang config set` inside the pod writes the file the daemon will reload.
+`deploy/docker-entrypoint.sh` honours `LIBREFANG_CONFIG_PATH` too, which it did not until the Kubernetes overlay landed: it derived `$LIBREFANG_HOME/config.toml`, found that absent on a fresh PVC, and ran `librefang init` — which resolved the *mounted* file, took its upgrade branch because that file exists, and exited non-zero trying to merge new default sections into a read-only mount, on every boot.
+
+This is worth stating because it was not true before #6695.
+The loader honoured `LIBREFANG_CONFIG_PATH` while the writers re-derived `<home_dir>/config.toml`, so relocating the file produced a daemon that read the mount and wrote a second copy into `LIBREFANG_HOME` — one the next reload never looked at.
+Managed mode's refusal named the mounted file; a *mutable* deployment with the same mount silently drifted instead.
+
+Two consequences follow from the resolution order (`LIBREFANG_CONFIG_PATH` > `$LIBREFANG_HOME/config.toml` > `~/.librefang/config.toml`):
+
+- **The filename does not have to be `config.toml`.**
+  Three write paths used to reject anything else as an "invalid config file path" — a check that was meaningful when the path came from a request body and was pure obstruction once it came from the operator's own environment.
+- **A `home_dir` key inside the config file does not move the config file.**
+  It still relocates the data directory and everything else under the home, but the file cannot live at a path determined by its own contents; that is what used to send writes to a location the loader never read.
 
 ## What managed mode does
 
@@ -153,6 +171,13 @@ A pessimistic one would grey out every control on a daemon that is perfectly wri
 **Rollout, not in-place reload.**
 Change the ConfigMap, roll the StatefulSet — a checksum annotation on the pod template is the usual way to make the change trigger the rollout.
 
+`deploy/kubernetes/overlays/managed-config/` is that shape as a working kustomize overlay: `config.toml` rendered into a ConfigMap, mounted read-only at `/etc/librefang/` outside the PVC, both environment variables set, and a `checksum/config` annotation carrying the same `sha256:` string this endpoint reports.
+Pinning the annotation to the file's own digest rather than to kustomize's name-suffix hash makes the value that causes the rollout and the value that confirms it landed the same value, so `GET /api/config/status` answers "did my change reach the daemon?" with one string comparison.
+`scripts/check-k8s-manifests.py` recomputes the digest from the rendered ConfigMap and fails when the annotation is stale, because a stale annotation applies cleanly and rolls nothing.
+It also rejects `include = [...]` inside a managed ConfigMap: the checksum covers the primary file's bytes only, so an included file could change with the checksum unmoved, and the annotation this overlay is built around would stop meaning what it says.
+That settles the `include` question for the overlay's own scope without changing what the daemon computes — `include` is unaffected in a mutable deployment.
+The deployment procedure, the update procedure and the rollback procedure are in [`deploy/kubernetes/README.md`](../../deploy/kubernetes/README.md#managed-configuration).
+
 This is the only supported update path today, and it is chosen deliberately.
 In-place reload of a ConfigMap has to handle Kubernetes' atomic symlink swap without ever reading a half-written file, and then guarantee that an invalid new file never partially replaces the last valid effective configuration.
 A rollout works for restart-required fields too, which is the superset, so it is the contract worth supporting first.
@@ -180,10 +205,6 @@ Stated plainly rather than left to be discovered:
   This is the intended consequence of the lock rather than a limitation to work around — a password changed through the API would be reverted by the next rollout, which is a worse outcome than being told no.
   The guard runs *before* the current-password check, so the endpoint also stops being a password oracle in this mode.
 
-- **Kubernetes deployment tooling is not in the tree.**
-  There is no shipped ConfigMap / Secret manifest, and no checksum-annotation rollout example, even though the rollout described above is the supported update path.
-  The `checksum` on `GET /api/config/status` is the piece that makes such an annotation verifiable, and it exists; the manifests that would use it do not.
-
 - **Most of the guarded writers do not take `config_write_lock`**, so they can already race a `POST /api/config/set` in mutable mode — a pre-existing bug that predates managed mode and is orthogonal to it.
   The sidecar-channel routes are the exception: both acquire it around the rewrite (`routes/channels.rs`).
   The guarded provider routes do **not** take it, which is a narrower version of the same pre-existing race and is deliberately left alone rather than changed under a managed-mode fix.
@@ -198,5 +219,5 @@ Stated plainly rather than left to be discovered:
   The existing `WRITABLE_EXACT_PATHS` / `WRITABLE_SECTION_PREFIXES` allowlist is already a field-level model and is already load-bearing for security; layering a second, orthogonal ownership axis over it would produce a matrix where the interesting cases are the corners.
   Revisit when a deployment actually needs it.
 - **CLI writes are not gated.**
-  `librefang config set` and friends still write the file.
+  `librefang config set` and friends still write the file — the file the daemon loaded, since #6695, but they write it.
   An operator running the CLI inside the pod is doing so deliberately; managed mode is about the API and dashboard surface that a user reaches without shell access.

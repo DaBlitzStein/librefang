@@ -98,8 +98,18 @@ impl LibreFangKernel {
                     debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
                 }
             }
+            // Not a cosmetic warning: boot reconciliation re-syncs each agent from its on-disk
+            // `agent.toml` and overwrites the SQLite projection when the two differ, so a manifest
+            // that cannot be serialized freezes the file while the in-memory copy keeps accepting
+            // edits — and the next restart restores the frozen file over every one of them.
+            // Refs #7742.
             Err(error) => {
-                warn!(agent = %entry.name, "Failed to serialize manifest to TOML: {error}");
+                error!(
+                    agent = %entry.name,
+                    path = %toml_path.display(),
+                    "Failed to serialize manifest to TOML: {error}. \
+                     agent.toml is now stale; manifest edits will be lost on the next restart"
+                );
             }
         }
     }
@@ -558,21 +568,17 @@ impl LibreFangKernel {
 
     /// Update an agent's skill allowlist. Empty = all skills (backward compat).
     ///
-    /// A name is accepted when it is either currently loaded in the skill
-    /// registry, or present on disk under the skills directory but not (yet)
-    /// loaded (`SkillRegistry::unloaded_on_disk_dirs` — the same "exists but
-    /// not active" concept the Stable-mode freeze-safe reload path already
-    /// uses, see `reload_skills`). Either source means the declaration is
-    /// real; a name only on disk is a legitimate pending state — matching
-    /// what `spawn` already accepts and logs via
-    /// `pending_skill_and_mcp_declarations` (#7716/#7713) — not an error.
-    /// Accepting it here does not load or activate anything, it only
-    /// persists the allowlist entry. Unlike the MCP-server check below,
-    /// skills have no locally cached "catalog of everything that could be
-    /// installed" (skill content is not part of `registry_sync`'s copy set,
-    /// unlike the MCP catalog), so on-disk-but-unloaded is the only
-    /// additional source available; a name that is neither loaded nor on
-    /// disk is rejected as invalid input.
+    /// A name is accepted when it is loaded in the skill registry, or when it is the `[skill].name` of a directory that exists under the skills directory but has not been loaded (#7772).
+    /// The second case is a *pending declaration*, which the read side already treats as a normal state rather than an error: `pending_skill_and_mcp_declarations` reports it, the dashboard badges it, and `spawn` accepts a manifest carrying it without any equivalent check.
+    /// Rejecting it only here made the edit path stricter than the path that created the agent, so an agent could exist in a state its own editor refused to save — and because the dashboard PUTs the whole array, one inherited name took every unrelated edit down with it.
+    /// Accepting it persists the allowlist entry and nothing else: no skill is loaded or activated as a side effect.
+    ///
+    /// The pending set comes from [`SkillRegistry::unloaded_on_disk_manifest_names`], not from `unloaded_on_disk_dirs`.
+    /// Those two return different kinds of identifier — the registry is keyed by `manifest.skill.name`, while the directory report is keyed by `path.file_name()` — so for `skills/package-dir/skill.toml` declaring `name = "actual-skill"`, validating against directory names would reject `actual-skill`, the only value that can ever match, and accept `package-dir`, which matches nothing once the skill loads.
+    ///
+    /// Unlike the MCP check below, skills have no locally cached catalog of everything installable: skill content is not part of `registry_sync`'s copy set, so on-disk-but-unloaded is the only additional source available, and the criterion is narrower on purpose.
+    /// `"*"` is likewise not special here, again unlike `mcp_servers`: the skill path has no wildcard, and `skills = ["*"]` grants no skill tools at all, so it is just a name that matches nothing.
+    /// A name that is neither loaded nor on disk is rejected as `InvalidInput` — it is a typo in user input, not an internal fault, and the old `Internal` variant is why the dashboard rendered "Internal error" for it.
     pub fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()> {
         // Validate skill names if allowlist is non-empty
         if !skills.is_empty() {
@@ -582,15 +588,14 @@ impl LibreFangKernel {
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
             let loaded = registry.skill_names();
-            let on_disk_unloaded = registry.unloaded_on_disk_dirs();
+            let pending = registry.unloaded_on_disk_manifest_names();
             for name in &skills {
-                if loaded.iter().any(|n| n == name) || on_disk_unloaded.iter().any(|n| n == name) {
+                if loaded.iter().any(|n| n == name) || pending.iter().any(|n| n == name) {
                     continue;
                 }
                 return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
                     format!(
-                        "Unknown skill '{name}': not loaded and not found on disk under the \
-                     skills directory. Check the name for typos, or install it first."
+                        "Unknown skill '{name}': not loaded, and no skill under the skills directory declares that name. Check the spelling, or install the skill first."
                     ),
                 )));
             }
@@ -643,21 +648,15 @@ impl LibreFangKernel {
     }
 
     /// Update an agent's MCP server allowlist.
-    /// Empty disables MCP servers; `["*"]` enables all connected servers (#5855).
+    /// Empty disables MCP servers; `["*"]` enables all connected servers.
     ///
-    /// A name is accepted when it is configured in `config.toml`
-    /// (`effective_mcp_servers` — this also covers "configured but not yet
-    /// connected", which the previous check incorrectly rejected) OR present
-    /// in the locally cached MCP catalog synced from the registry
-    /// (`~/.librefang/mcp/catalog/`, `self.mcp_catalog_load()`). Either
-    /// source means the declaration is real; it is simply not
-    /// installed/connected on this instance yet — exactly the pending state
-    /// `spawn` already accepts and logs
-    /// (`pending_skill_and_mcp_declarations`, #7716/#7713). Accepting it here
-    /// does not install, connect, or configure anything — it only persists
-    /// the allowlist entry; installing stays the operator's explicit action
-    /// from the MCP settings surface. Only a name absent from both sources is
-    /// rejected as invalid input.
+    /// A name is accepted when it is configured in `config.toml` (`effective_mcp_servers`, which answers "did somebody write this down" — so a configured server that has not connected yet counts), or when it is present in the locally cached MCP catalog synced from the registry (`~/.librefang/mcp/catalog/`) (#7772).
+    /// The previous check built its accept-set by walking the MCP tools connected at that instant and resolving each back to a server, which is a strict subset of what is configured, never mind what is installed: it rejected a configured-but-not-yet-connected server and a catalog entry that is installed but not configured.
+    /// Since agent types are shared artefacts that declare what the agent *wants*, and `spawn` performs no equivalent check, a declaration this instance has not installed is a legitimate pending state — the same one `pending_skill_and_mcp_declarations` surfaces on the read side.
+    /// Accepting it persists the allowlist entry and nothing else: it does not install, connect, or touch `config.toml`.
+    ///
+    /// Only a name absent from both sources is rejected, as `InvalidInput` rather than `Internal`, so a typo stops being reported as a server fault.
+    /// Dropping the tool walk also removes the old lock guard: the whole check used to sit inside `if let Ok(mcp_tools) = self.mcp.mcp_tools.lock()`, so a poisoned lock skipped validation entirely instead of failing.
     pub fn set_agent_mcp_servers(
         &self,
         agent_id: AgentId,
@@ -676,45 +675,39 @@ impl LibreFangKernel {
 
         // Validate server names if allowlist is non-empty
         if !servers.is_empty() {
-            let configured_normalized: std::collections::HashSet<String> = self
+            let configured: std::collections::HashSet<String> = self
                 .mcp
                 .effective_mcp_servers
                 .read()
-                .map(|servers| {
-                    servers
+                .map(|configured| {
+                    configured
                         .iter()
                         .map(|s| librefang_runtime::mcp::normalize_name(&s.name))
                         .collect()
                 })
                 .unwrap_or_default();
             let catalog = self.mcp_catalog_load();
+            // Catalog entries carry an `id` from their manifest and are keyed by their file / directory name, and upstream does not guarantee the two agree. Accept either.
+            let catalog_ids: std::collections::HashSet<String> = catalog
+                .list()
+                .iter()
+                .map(|e| librefang_runtime::mcp::normalize_name(&e.id))
+                .collect();
             for name in &servers {
-                // `"*"` is the allowlist's own vocabulary, not a server name.
-                // `tools_and_skills` reads `["*"]` as "every connected MCP
-                // server" — the explicit opt-in that is distinct from the
-                // empty list — so it is the one entry that must never be
-                // looked up in the catalog. Validating it as a name rejected
-                // the only way to express "all of them" through this route,
-                // and an operator who picked that option from the dashboard
-                // got "Unknown MCP server '*'" for a value the kernel itself
-                // defines (#5855).
+                // `["*"]` is a documented value meaning "all connected servers" (`AgentManifest::mcp_servers`, and `available_tools` step 3 honours it), but it is not the name of anything, so the old accept-set never contained it and saving a wildcard allowlist failed with `Unknown MCP server: *`.
                 if name == "*" {
                     continue;
                 }
                 let normalized = librefang_runtime::mcp::normalize_name(name);
-                let in_catalog = catalog.get(name).is_some()
-                    || catalog
-                        .list()
-                        .iter()
-                        .any(|e| librefang_runtime::mcp::normalize_name(&e.id) == normalized);
-                if configured_normalized.contains(&normalized) || in_catalog {
+                if configured.contains(&normalized)
+                    || catalog_ids.contains(&normalized)
+                    || catalog.get(name).is_some()
+                {
                     continue;
                 }
                 return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
                     format!(
-                        "Unknown MCP server '{name}': not configured in config.toml and not \
-                     found in the installed MCP catalog. Check the name for typos, or \
-                     add/install it from the MCP settings surface first."
+                        "Unknown MCP server '{name}': not configured in config.toml and not present in the installed MCP catalog. Check the spelling, or add the server from the MCP settings surface first."
                     ),
                 )));
             }

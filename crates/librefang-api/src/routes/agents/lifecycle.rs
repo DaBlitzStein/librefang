@@ -328,71 +328,11 @@ async fn spawn_agent_inner(
     }
 }
 
-/// POST /api/agents/spawn-ephemeral — Run a throwaway worker (no workspace,
-/// no DB, no registry entry) for a single turn and return its result.
-#[utoipa::path(
-    post,
-    path = "/api/agents/spawn-ephemeral",
-    tag = "agents",
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, description = "Ephemeral worker result", body = crate::types::JsonObject),
-        (status = 403, description = "Inter-agent call depth exceeded"),
-        (status = 429, description = "Provider budget exhausted"),
-        (status = 500, description = "Ephemeral spawn failed")
-    )
-)]
-pub async fn spawn_ephemeral_agent(
-    State(state): State<Arc<AppState>>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<librefang_types::ephemeral::EphemeralSpawnRequest>,
-) -> axum::response::Response {
-    let l = super::resolve_lang(lang.as_ref());
-    let start = std::time::Instant::now();
-
-    match state.kernel.spawn_ephemeral(req).await {
-        Ok(result) => {
-            let latency_ms = start.elapsed().as_millis() as u64;
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "response": result.response,
-                    "cost_usd": result.cost_usd,
-                    "iterations": result.iterations,
-                    "latency_ms": latency_ms,
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::warn!("Ephemeral spawn failed: {e}");
-            let t = ErrorTranslator::new(l);
-            // Surface the quota and depth-refusal messages (safe, no internal
-            // detail); scrub everything else to a generic 500 — same policy as
-            // spawn_agent. The kernel handle deliberately preserves both typed
-            // variants across the trait boundary (see `spawn_ephemeral`), so
-            // flattening them here would report a self-imposed limit as a crash.
-            let (status, code, msg) = match &e {
-                librefang_types::error::LibreFangError::QuotaExceeded(m) => {
-                    (StatusCode::TOO_MANY_REQUESTS, "quota_exceeded", m.clone())
-                }
-                librefang_types::error::LibreFangError::CapabilityDenied(m) => {
-                    (StatusCode::FORBIDDEN, "capability_denied", m.clone())
-                }
-                _ => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ephemeral_spawn_failed",
-                    t.t("api-error-internal"),
-                ),
-            };
-            (
-                status,
-                Json(serde_json::json!({ "error": msg, "code": code, "type": code })),
-            )
-                .into_response()
-        }
-    }
-}
+// `spawn_ephemeral_agent` lives in `ephemeral.rs` (#6699): that handler takes
+// an explicit `parent`, resolves it by id or name, and enforces the caller's
+// ownership of it. This module's older parentless variant answered the same
+// route, so keeping both left the route ambiguous and the ownership check
+// bypassable depending on which one `pub use` resolved to.
 
 // `validate_bulk_size` lives at `routes/mod.rs` so non-agent bulk handlers
 // (approvals, users, workflows) can reuse the same guard before they reach

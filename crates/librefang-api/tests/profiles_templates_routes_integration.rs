@@ -11,19 +11,12 @@
 //!
 //! ### Templates and `LIBREFANG_HOME`
 //!
-//! `list_agent_templates` lists ONLY `librefang_home()/agent-types/`
-//! (source = "template"); it used to also merge in
-//! `librefang_home()/workspaces/agents/` (source = "agent"), which made
-//! every live agent show up as an uneditable, undeletable "agent type" —
-//! fixed by dropping that merge (the fix's own changelog fragment has the
-//! full rationale). `get_agent_template` / `get_agent_template_toml`
-//! (the detail routes, not the list) still fall back to
-//! `workspaces/agents/<name>/agent.toml` when no template file matches, on
-//! purpose — kept for callers that already resolve a name that way.
-//! `librefang_home` honours the `LIBREFANG_HOME` env var. We pin a single
-//! tempdir for the whole test binary via `OnceLock` and serialise the
-//! template tests behind a `Mutex` so unique-name fixtures can coexist
-//! without env-var races.
+//! `list_agent_templates` / `get_agent_template` / `get_agent_template_toml`
+//! all read from `librefang_home()/workspaces/agents/`, where `librefang_home`
+//! honours the `LIBREFANG_HOME` env var. We pin a single tempdir for the
+//! whole test binary via `OnceLock`. Every harness passes through that
+//! initializer before kernel boot, and template mutations are serialised
+//! behind a `Mutex` so unique-name fixtures cannot overlap.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -47,6 +40,11 @@ struct Harness {
 }
 
 async fn boot() -> Harness {
+    // All tests in this binary pass through the same OnceLock before any
+    // kernel boot can read LIBREFANG_HOME. This closes the initialization
+    // race between the pure profile tests and the filesystem template tests.
+    let _ = templates_root();
+
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
         // Minimal default model so kernel boot is happy. Same shape as
         // `users_test.rs::boot`.
@@ -107,17 +105,18 @@ async fn profiles_list_returns_six_known_profiles() {
     let (status, body) = get_json(&h, "/api/profiles").await;
     assert_eq!(status, StatusCode::OK);
     let arr = body.as_array().expect("array");
-    let names: Vec<&str> = arr.iter().map(|v| v["name"].as_str().unwrap()).collect();
+    let mut names: Vec<&str> = arr.iter().map(|v| v["name"].as_str().unwrap()).collect();
+    names.sort_unstable();
     // Pin the registered set so a refactor that drops a profile is loud.
     assert_eq!(
         names,
         vec![
-            "minimal",
-            "coding",
-            "research",
-            "messaging",
             "automation",
+            "coding",
             "full",
+            "messaging",
+            "minimal",
+            "research",
         ],
         "profile registration drift: {body}"
     );
@@ -170,10 +169,11 @@ fn librefang_home_root() -> &'static std::path::Path {
     static HOME: OnceLock<TempDir> = OnceLock::new();
     let dir = HOME.get_or_init(|| {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Safety: env mutation. Setting it once, before any concurrent
-        // test reads, is the standard pattern in this workspace's
-        // env-var-driven tests; see `crates/librefang-llm-drivers` etc.
-        // The unsafe block is only required on Rust 2024+.
+        // NOTE: set_var is process-global. Every test in this binary calls
+        // templates_root before boot, so OnceLock completes this mutation
+        // before any kernel can read LIBREFANG_HOME.
+        // TODO(edition-2024): wrap this call in an unsafe block when the
+        // workspace migrates from edition 2021.
         std::env::set_var("LIBREFANG_HOME", tmp.path());
         tmp
     });
@@ -203,11 +203,25 @@ fn templates_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn write_template(name: &str, body: &str) {
+struct TemplateFixture {
+    name: String,
+}
+
+impl Drop for TemplateFixture {
+    fn drop(&mut self) {
+        remove_template(&self.name);
+    }
+}
+
+fn write_template(name: &str, body: &str) -> TemplateFixture {
     let root = templates_root();
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).expect("create template dir");
+    let fixture = TemplateFixture {
+        name: name.to_string(),
+    };
     std::fs::write(dir.join("agent.toml"), body).expect("write agent.toml");
+    fixture
 }
 
 fn remove_template(name: &str) {
@@ -215,6 +229,12 @@ fn remove_template(name: &str) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Seed an agent-type file (`agent-types/<name>.toml`), the writable source the
+/// listing reports as `source = "agent-type"` / `editable = true`.
+///
+/// Distinct from [`write_template`], which seeds a *workspace agent* manifest:
+/// the listing merges both, so a test that means "an agent type" has to write
+/// the agent-type file or it asserts on the wrong row.
 fn write_real_template(name: &str, body: &str) {
     let root = real_templates_root();
     std::fs::create_dir_all(&root).expect("create templates dir");
@@ -223,6 +243,24 @@ fn write_real_template(name: &str, body: &str) {
 
 fn remove_real_template(name: &str) {
     let _ = std::fs::remove_file(real_templates_root().join(format!("{name}.toml")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_fixture_cleans_up_during_unwind() {
+    let _g = templates_lock().lock().await;
+    let unique = "tmpl_unwind_cleanup";
+
+    let unwind = std::panic::catch_unwind(|| {
+        let _fixture = write_template(unique, "not parsed by this guard test");
+        assert!(templates_root().join(unique).exists());
+        panic!("exercise fixture unwind cleanup");
+    });
+
+    assert!(unwind.is_err(), "fixture test must exercise unwinding");
+    assert!(
+        !templates_root().join(unique).exists(),
+        "template fixture must be removed while unwinding"
+    );
 }
 
 fn minimal_manifest_toml(name: &str, description: &str) -> String {
@@ -251,7 +289,7 @@ async fn templates_list_includes_seeded_template() {
     let _ = librefang_home_root();
 
     let unique = "tmpl_list_alpha";
-    write_real_template(
+    let _fixture = write_template(
         unique,
         &minimal_manifest_toml("alpha", "Alpha test template"),
     );
@@ -271,43 +309,6 @@ async fn templates_list_includes_seeded_template() {
         .find(|r| r["name"] == unique)
         .unwrap_or_else(|| panic!("seeded template missing from list: {body}"));
     assert_eq!(row["description"], "Alpha test template", "{body}");
-    assert_eq!(row["source"], "template", "{body}");
-
-    remove_real_template(unique);
-}
-
-/// Regression test for the "Agent Types page is uneditable" bug: a
-/// workspace agent (source = "agent") must NOT appear in the list — every
-/// row the list returns has to be a real, editable/deletable template file
-/// — while the detail GET's dual-source fallback keeps resolving it by
-/// name, unchanged (point 4 of the fix: detail/toml routes are untouched).
-#[tokio::test(flavor = "multi_thread")]
-async fn templates_list_excludes_workspace_agents() {
-    let _g = templates_lock().lock().await;
-    let _ = templates_root();
-
-    let unique = "tmpl_list_excludes_workspace_agent";
-    write_template(
-        unique,
-        &minimal_manifest_toml("workspace-agent-alpha", "A live agent, not a template"),
-    );
-
-    let h = boot().await;
-    let (status, body) = get_json(&h, "/api/templates").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let templates = body["templates"].as_array().expect("templates array");
-    assert!(
-        !templates.iter().any(|r| r["name"] == unique),
-        "a workspace agent must not be listed as an agent type: {body}"
-    );
-
-    // The detail GET still resolves it — point 4 of the fix keeps this
-    // fallback for backward compatibility.
-    let (detail_status, detail_body) = get_json(&h, &format!("/api/templates/{unique}")).await;
-    assert_eq!(detail_status, StatusCode::OK, "{detail_body}");
-    assert_eq!(detail_body["source"], "agent", "{detail_body}");
-
-    remove_template(unique);
 }
 
 /// The TUI templates screen renders provider/model per row and gates spawning on whether that provider is configured.
@@ -417,7 +418,7 @@ async fn templates_get_known_template_returns_manifest() {
 
     let unique = "tmpl_get_bravo";
     let toml_body = minimal_manifest_toml("bravo", "Bravo description");
-    write_template(unique, &toml_body);
+    let _fixture = write_template(unique, &toml_body);
 
     let h = boot().await;
     let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
@@ -433,8 +434,6 @@ async fn templates_get_known_template_returns_manifest() {
             .unwrap_or(false),
         "manifest_toml must round-trip the raw file: {body}"
     );
-
-    remove_template(unique);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -471,7 +470,7 @@ async fn templates_toml_returns_plaintext_for_known_template() {
 
     let unique = "tmpl_toml_charlie";
     let toml_body = minimal_manifest_toml("charlie", "Charlie raw");
-    write_template(unique, &toml_body);
+    let _fixture = write_template(unique, &toml_body);
 
     let h = boot().await;
     let (status, headers, bytes) = get(&h, &format!("/api/templates/{unique}/toml")).await;
@@ -493,8 +492,6 @@ async fn templates_toml_returns_plaintext_for_known_template() {
         body_str.contains("Charlie raw"),
         "raw TOML must include description: {body_str:?}"
     );
-
-    remove_template(unique);
 }
 
 #[tokio::test(flavor = "multi_thread")]

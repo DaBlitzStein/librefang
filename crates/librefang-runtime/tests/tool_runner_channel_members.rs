@@ -12,8 +12,6 @@ use std::sync::{Arc, Mutex};
 /// Every `(channel, chat_id)` pair the tool asked the kernel about.
 type RosterCallLog = Arc<Mutex<Vec<(String, String)>>>;
 
-impl librefang_kernel_handle::AgentTypeTools for RosterKernel {}
-
 struct RosterKernel {
     calls: RosterCallLog,
 }

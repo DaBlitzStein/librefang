@@ -20,6 +20,7 @@ export {
   // agents
   listAgents,
   // agent types
+  listAgentTemplates,
   listAgentTypes,
   getAgentType,
   getAgentDetail,
@@ -57,6 +58,7 @@ export {
   // goals
   listGoals,
   listGoalTemplates,
+  getGoalRun,
   // hands
   listHands,
   listActiveHands,
@@ -196,8 +198,8 @@ export type {
   AgentType,
   AgentTypeSummary,
   AgentTypeInput,
-  EphemeralResult,
-  EphemeralSpawnRequest,
+  SpawnEphemeralRequest,
+  SpawnEphemeralResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -277,7 +279,6 @@ export {
   stopGoalRun,
   pauseGoalRun,
   resumeGoalRun,
-  getGoalRun,
   // hands
   activateHand,
   deactivateHand,

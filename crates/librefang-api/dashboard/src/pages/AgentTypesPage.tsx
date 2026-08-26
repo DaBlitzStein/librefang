@@ -1,494 +1,579 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Boxes, Plus, Pencil, Trash2, Zap, Loader2 } from "lucide-react";
-import type { TomlTable } from "smol-toml";
-import { PageHeader } from "../components/ui/PageHeader";
-import { CardSkeleton } from "../components/ui/Skeleton";
-import { EmptyState } from "../components/ui/EmptyState";
-import { Card } from "../components/ui/Card";
-import { Badge } from "../components/ui/Badge";
-import { Button } from "../components/ui/Button";
-import { Modal } from "../components/ui/Modal";
-import { ConfirmDialog } from "../components/ui/ConfirmDialog";
-import { MarkdownContent } from "../components/ui/MarkdownContent";
-import { toastErr } from "../lib/errors";
-import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
-import { AgentManifestForm } from "../components/AgentManifestForm";
+import { Link } from "@tanstack/react-router";
+import { Edit2, LayoutTemplate, Lock, Play, Plus, Trash2 } from "lucide-react";
+import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
+import { useAgentType, useAgentTypes } from "../lib/queries/agentTypes";
+import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
-import { useChannels } from "../lib/queries/channels";
-import { useTools } from "../lib/queries/agents";
-import { useProviders } from "../lib/queries/providers";
-import { useModels } from "../lib/queries/models";
-import { useMcpServers } from "../lib/queries/mcp";
-import { isProviderAvailable } from "../lib/status";
-import {
-  emptyManifestExtras,
-  emptyManifestForm,
-  parseManifestToml,
-  serializeManifestForm,
-  validateManifestForm,
-  type ManifestExtras,
-  type ManifestFormState,
-} from "../lib/agentManifest";
-import type {
-  AgentTypeInput,
-  AgentTypeSummary,
-  EphemeralResult,
-} from "../api";
-import { useAgentTypes, useAgentType } from "../lib/queries/agentTypes";
-import { useSystemStatus } from "../lib/queries/runtime";
 import {
   useCreateAgentType,
-  useUpdateAgentType,
   useDeleteAgentType,
   useSpawnEphemeral,
+  useUpdateAgentType,
 } from "../lib/mutations/agentTypes";
+import { PageHeader } from "../components/ui/PageHeader";
+import { ListSkeleton } from "../components/ui/Skeleton";
+import { ErrorState } from "../components/ui/ErrorState";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
+import { Modal } from "../components/ui/Modal";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
+import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 
-const TEXTAREA_CLASS =
-  "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-mono leading-relaxed resize-y disabled:opacity-50 focus:outline-none focus:border-brand";
+/**
+ * The subset of an agent type this editor writes.
+ *
+ * `name` is absent on purpose: it identifies the document and the `PUT` route
+ * takes it from the URL, so the form cannot rename a type out from under itself.
+ */
+interface FormState {
+  description: string;
+  system_prompt: string;
+  provider: string;
+  model: string;
+  tools: string[];
+  skills: string[];
+}
 
-// `channels` is a plain `AgentManifest` top-level field, but it is NOT part
-// of `ManifestFormState` — `AgentManifestForm` has no channels widget
-// because the live-agent editor (AgentsPage) manages channels through its
-// own dedicated `ChannelsSection`, which talks to the agent-only
-// `/agents/{id}/channels` endpoint (there is no running instance for a
-// agent type to reach). Agent types have nothing to reach either, so this page
-// tracks the allowlist as its own draft and folds it back into
-// `extras.topLevel` right before serializing — it round-trips through
-// `parseManifestToml`/`serializeManifestForm` exactly like every other
-// extras entry the form doesn't own.
-const asChannelsArray = (v: unknown): string[] =>
-  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
-
-const withChannelsExtra = (topLevel: TomlTable, channels: string[]): TomlTable => {
-  if (channels.length === 0) {
-    const { channels: _drop, ...rest } = topLevel;
-    return rest;
-  }
-  return { ...topLevel, channels };
+const EMPTY_FORM: FormState = {
+  description: "",
+  system_prompt: "",
+  provider: "",
+  model: "",
+  tools: [],
+  skills: [],
 };
+
+function formFromSpec(spec: AgentTypeSpec): FormState {
+  return {
+    description: spec.description ?? "",
+    system_prompt: spec.system_prompt ?? "",
+    provider: spec.provider ?? "",
+    model: spec.model ?? "",
+    tools: spec.tools ?? [],
+    skills: spec.skills ?? [],
+  };
+}
+
+const inputClass =
+  "w-full rounded-lg border border-border-subtle bg-main/40 px-2.5 py-1.5 text-[13px] " +
+  "text-text-main placeholder:text-text-dim/50 focus:border-brand/50 focus:outline-none";
+
+/**
+ * Union the catalog with what the type already references, so an identifier the
+ * registry does not know about (a skill installed on another host, a tool from a
+ * plugin that has not loaded yet) still renders as a chip instead of vanishing
+ * from the form and, with it, from the saved document.
+ */
+function mergeCatalog(
+  catalog: { name: string; description?: string }[] | undefined,
+  selected: string[],
+): { options: string[]; meta: Record<string, { description?: string }> } {
+  const meta: Record<string, { description?: string }> = {};
+  const options = new Set<string>();
+  for (const entry of catalog ?? []) {
+    options.add(entry.name);
+    if (entry.description) meta[entry.name] = { description: entry.description };
+  }
+  for (const name of selected) options.add(name);
+  return { options: [...options].sort(), meta };
+}
+
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1">
+      <label className="block text-[11px] font-semibold uppercase tracking-wide text-text-dim">
+        {label}
+      </label>
+      {children}
+      {hint && <p className="text-[11px] text-text-dim/70">{hint}</p>}
+    </div>
+  );
+}
+
+function AgentTypeEditor({
+  name,
+  onClose,
+}: {
+  /** `null` opens the create form; a string opens the editor for that type. */
+  name: string | null;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const isCreate = name === null;
+
+  const detail = useAgentType(name ?? "", { enabled: !isCreate });
+  const toolsQuery = useTools();
+  const skillsQuery = useSkills();
+  const createMutation = useCreateAgentType();
+  const updateMutation = useUpdateAgentType();
+
+  const [newName, setNewName] = useState("");
+  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+
+  const spec = detail.data?.spec;
+  useEffect(() => {
+    setForm(spec ? formFromSpec(spec) : EMPTY_FORM);
+  }, [spec]);
+
+  const toolFinder = useMemo(
+    () => mergeCatalog(toolsQuery.data, form.tools),
+    [toolsQuery.data, form.tools],
+  );
+  const skillFinder = useMemo(
+    () => mergeCatalog(skillsQuery.data, form.skills),
+    [skillsQuery.data, form.skills],
+  );
+
+  const saving = createMutation.isPending || updateMutation.isPending;
+  const update = (patch: Partial<FormState>) => setForm((prev) => ({ ...prev, ...patch }));
+
+  async function handleSave() {
+    // Send exactly the keys this form owns. The server merges them over the
+    // stored manifest, so everything it does not mention — triggers, compaction,
+    // MCP allowlists, session mode — survives the save untouched (#7740).
+    const payload: AgentTypeSpec = { ...form };
+    try {
+      if (isCreate) {
+        await createMutation.mutateAsync({ ...payload, name: newName.trim() });
+        addToast(t("agentTypes.created"), "success");
+      } else {
+        await updateMutation.mutateAsync({ name: name as string, spec: payload });
+        addToast(t("agentTypes.saved"), "success");
+      }
+      onClose();
+    } catch (err) {
+      addToast(toastErr(err, t("agentTypes.save_failed")), "error");
+    }
+  }
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      variant="panel-right"
+      size="lg"
+      overflowVisible
+      title={isCreate ? t("agentTypes.create_title") : t("agentTypes.edit_title", { name })}
+    >
+      {!isCreate && detail.isLoading ? (
+        <ListSkeleton rows={4} />
+      ) : !isCreate && detail.isError ? (
+        <ErrorState message={detail.error?.message} onRetry={() => void detail.refetch()} />
+      ) : (
+        <div className="space-y-4">
+          {isCreate && (
+            <Field label={t("agentTypes.name")} hint={t("agentTypes.name_hint")}>
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder={t("agentTypes.name_placeholder")}
+                className={inputClass}
+                autoFocus
+              />
+            </Field>
+          )}
+
+          <Field label={t("agentTypes.description")}>
+            <input
+              type="text"
+              value={form.description}
+              onChange={(e) => update({ description: e.target.value })}
+              className={inputClass}
+            />
+          </Field>
+
+          <Field label={t("agentTypes.system_prompt")} hint={t("agentTypes.system_prompt_hint")}>
+            <textarea
+              value={form.system_prompt}
+              onChange={(e) => update({ system_prompt: e.target.value })}
+              rows={6}
+              className={`${inputClass} font-mono resize-y`}
+            />
+          </Field>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={t("agentTypes.provider")} hint={t("agentTypes.provider_hint")}>
+              <input
+                type="text"
+                value={form.provider}
+                onChange={(e) => update({ provider: e.target.value })}
+                placeholder={t("agentTypes.inherit_placeholder")}
+                className={inputClass}
+              />
+            </Field>
+            <Field label={t("agentTypes.model")} hint={t("agentTypes.model_hint")}>
+              <input
+                type="text"
+                value={form.model}
+                onChange={(e) => update({ model: e.target.value })}
+                placeholder={t("agentTypes.inherit_placeholder")}
+                className={inputClass}
+              />
+            </Field>
+          </div>
+
+          <Field label={t("agentTypes.tools")} hint={t("agentTypes.tools_hint")}>
+            <MultiSelectCmdk
+              options={toolFinder.options}
+              optionMeta={toolFinder.meta}
+              value={form.tools}
+              onChange={(next) =>
+                update({ tools: typeof next === "function" ? next(form.tools) : next })
+              }
+              placeholder={t("agentTypes.tools_search")}
+              allowFreeText
+            />
+          </Field>
+
+          <Field label={t("agentTypes.skills")} hint={t("agentTypes.skills_hint")}>
+            <MultiSelectCmdk
+              options={skillFinder.options}
+              optionMeta={skillFinder.meta}
+              value={form.skills}
+              onChange={(next) =>
+                update({ skills: typeof next === "function" ? next(form.skills) : next })
+              }
+              placeholder={t("agentTypes.skills_search")}
+              allowFreeText
+            />
+          </Field>
+
+          <p className="rounded-lg border border-border-subtle bg-main/30 px-3 py-2 text-[11px] text-text-dim">
+            {t("agentTypes.preserved_note")}
+          </p>
+
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="ghost" onClick={onClose} disabled={saving}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => void handleSave()}
+              isLoading={saving}
+              disabled={isCreate && newName.trim() === ""}
+            >
+              {t("common.save")}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/**
+ * Run an agent type once, on the spot, and show what came back (#6699).
+ *
+ * The run is an *ephemeral worker*: no agent is registered, no session is
+ * persisted, and the mission workspace is deleted when the turn ends. The only
+ * thing that outlives it is the text below and the spend on the parent's ledger
+ * — which is why picking the parent is a deliberate choice here and not a
+ * hidden default. The parent is billed for the run, its `[resources]` quota is
+ * the one enforced, and its own tool set is the ceiling on the worker's.
+ */
+function QuickRunModal({
+  type,
+  onClose,
+}: {
+  type: AgentTemplate;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const agents = useAgents();
+  const spawn = useSpawnEphemeral();
+
+  const [parent, setParent] = useState("");
+  const [task, setTask] = useState("");
+  const [result, setResult] = useState<SpawnEphemeralResult | null>(null);
+
+  const candidates = useMemo(
+    () => (agents.data ?? []).filter((a) => !a.is_hand),
+    [agents.data],
+  );
+
+  // Preselect the first agent so the common case is two fields, not three.
+  // Guarded on `parent` staying empty so a refetch never moves a choice the
+  // operator already made.
+  useEffect(() => {
+    if (parent === "" && candidates.length > 0) setParent(candidates[0].id);
+  }, [candidates, parent]);
+
+  async function run() {
+    try {
+      const res = await spawn.mutateAsync({
+        parent,
+        message: task,
+        agent_type: type.name,
+        label: type.name,
+      });
+      setResult(res);
+    } catch (err) {
+      addToast(toastErr(err, t("agentTypes.quick_run_failed")), "error");
+    }
+  }
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      variant="panel-right"
+      size="lg"
+      title={t("agentTypes.quick_run_title", { name: type.name })}
+    >
+      <div className="space-y-4">
+        <Field label={t("agentTypes.quick_run_parent")} hint={t("agentTypes.quick_run_parent_hint")}>
+          {agents.isLoading ? (
+            <ListSkeleton rows={1} />
+          ) : candidates.length === 0 ? (
+            <p className="text-[12px] text-text-dim">{t("agentTypes.quick_run_no_agents")}</p>
+          ) : (
+            <select
+              value={parent}
+              onChange={(e) => setParent(e.target.value)}
+              className={inputClass}
+            >
+              {candidates.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+
+        <Field label={t("agentTypes.quick_run_task")}>
+          <textarea
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+            rows={5}
+            placeholder={t("agentTypes.quick_run_task_placeholder")}
+            className={`${inputClass} resize-y`}
+            autoFocus
+          />
+        </Field>
+
+        {result && (
+          <div className="space-y-2 rounded-xl border border-border-subtle bg-main/30 px-3 py-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-text-dim">
+                {t("agentTypes.quick_run_result")}
+              </span>
+              <Badge variant="default">{result.name}</Badge>
+              <span className="text-[11px] text-text-dim">
+                {t("agentTypes.quick_run_meta", {
+                  iterations: result.iterations,
+                  tools: result.tools.length,
+                })}
+              </span>
+              {typeof result.cost_usd === "number" && (
+                <span className="text-[11px] text-text-dim">
+                  {t("agentTypes.quick_run_cost", { cost: result.cost_usd.toFixed(4) })}
+                </span>
+              )}
+            </div>
+            <p className="whitespace-pre-wrap break-words text-[13px] text-text-main">
+              {result.response}
+            </p>
+            <p className="text-[11px] text-text-dim/70">
+              {t("agentTypes.quick_run_ephemeral_note")}
+            </p>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="ghost" onClick={onClose} disabled={spawn.isPending}>
+            {t("common.close")}
+          </Button>
+          <Button
+            variant="primary"
+            leftIcon={<Play className="h-3.5 w-3.5" />}
+            onClick={() => void run()}
+            isLoading={spawn.isPending}
+            disabled={parent === "" || task.trim() === ""}
+          >
+            {t("agentTypes.quick_run_submit")}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function AgentTypeRow({
+  type,
+  onQuickRun,
+  onEdit,
+  onDelete,
+}: {
+  type: AgentTemplate;
+  onQuickRun: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-xl border border-border-subtle bg-surface px-3 py-2.5">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-[13px] font-semibold text-text-main">{type.name}</span>
+          {type.provider && type.model && (
+            <Badge variant="default">{`${type.provider} / ${type.model}`}</Badge>
+          )}
+        </div>
+        {type.description && (
+          <p className="mt-0.5 truncate text-[12px] text-text-dim">{type.description}</p>
+        )}
+      </div>
+
+      <div className="flex shrink-0 items-center gap-1">
+        {/* Quick Run is offered on every row, editable or not. Spawnability and
+            writability are different questions: a workspace-sourced row is a live
+            agent's manifest this API refuses to edit, but the spawn engine resolves
+            it by name just as happily as an operator-authored type (#6699). */}
+        <button
+          type="button"
+          onClick={onQuickRun}
+          className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
+          aria-label={t("agentTypes.quick_run")}
+          title={t("agentTypes.quick_run")}
+        >
+          <Play className="h-3.5 w-3.5" />
+        </button>
+
+        {/* A workspace-sourced row is a live agent's own manifest. The write verbs
+            refuse it by design, so rendering Edit/Delete here would offer a control
+            that cannot succeed — point at the surface that can instead (#7731). */}
+        {type.editable ? (
+          <>
+            <button
+              type="button"
+              onClick={onEdit}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-text-main"
+              aria-label={t("agentTypes.edit")}
+              title={t("agentTypes.edit")}
+            >
+              <Edit2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={onDelete}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-error/10 hover:text-error"
+              aria-label={t("agentTypes.delete")}
+              title={t("agentTypes.delete")}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </>
+        ) : (
+          <Link
+            to="/agents"
+            className="flex items-center gap-1 rounded-lg border border-border-subtle px-2 py-1 text-[11px] text-text-dim hover:text-text-main"
+            title={t("agentTypes.managed_elsewhere_hint")}
+          >
+            <Lock className="h-3 w-3" />
+            {t("agentTypes.managed_elsewhere")}
+          </Link>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function AgentTypesPage() {
   const { t } = useTranslation();
-  // Same as the running-agent editor: name what `"default"` resolves to.
-  const systemStatusQuery = useSystemStatus();
-  const { data: types, isLoading, isFetching, refetch } = useAgentTypes();
-  const skillsQuery = useSkills();
-  const toolsQuery = useTools();
-  const channelsQuery = useChannels();
-  const providersQuery = useProviders();
+  const addToast = useUIStore((s) => s.addToast);
+  const types = useAgentTypes();
+  const deleteMutation = useDeleteAgentType();
 
-  const channelOptions = useMemo(
-    () => (channelsQuery.data ?? []).map((c: { name: string }) => c.name),
-    [channelsQuery.data],
-  );
-  const skillCatalog = useMemo(
-    () =>
-      (skillsQuery.data ?? []).map((s: { name: string; description?: string }) => ({
-        name: s.name,
-        description: s.description,
-      })),
-    [skillsQuery.data],
-  );
-  const toolCatalog = useMemo(
-    () =>
-      (toolsQuery.data ?? []).map((td: { name: string; description?: string }) => ({
-        name: td.name,
-        description: td.description,
-      })),
-    [toolsQuery.data],
-  );
-  const configuredProviders = useMemo(
-    () => (providersQuery.data ?? []).filter((p) => isProviderAvailable(p.auth_status)),
-    [providersQuery.data],
-  );
-  const providerOptions = useMemo(
-    () => configuredProviders.map((p) => ({ name: p.id })),
-    [configuredProviders],
-  );
+  const [editing, setEditing] = useState<{ name: string | null } | null>(null);
+  const [quickRun, setQuickRun] = useState<AgentTemplate | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
-  const createType = useCreateAgentType();
-  const updateType = useUpdateAgentType();
-  const deleteType = useDeleteAgentType();
-  const spawn = useSpawnEphemeral();
-
-  // Create/edit dialog. `editing` is null while creating, or the type name
-  // while editing (the name field is locked on edit so the PUT path stays
-  // stable). The full-manifest form is seeded from the detail fetch's
-  // `manifest_toml` below (#7742 parity with the running-agent editor).
-  const [formOpen, setFormOpen] = useState(false);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
-  const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
-  const [formChannels, setFormChannels] = useState<string[]>([]);
-  const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
-  const [parseError, setParseError] = useState<string | null>(null);
-
-  // Detail fetch that backs the edit form. Disabled until a name is selected.
-  const detail = useAgentType(editing ?? "");
-  // Track which type we've loaded so a re-render can't clobber in-progress edits.
-  const loadedFor = useRef<string | null>(null);
-  useEffect(() => {
-    if (!editing || !detail.data || loadedFor.current === editing) return;
-    const toml = detail.data.manifest_toml;
-    if (!toml) {
-      // Nothing to seed from — leave the blank form in place rather than
-      // throwing, so an unexpected response shape doesn't crash the drawer.
-      loadedFor.current = editing;
-      return;
-    }
-    const parsed = parseManifestToml(toml);
-    if (parsed.ok) {
-      setFormState(parsed.form);
-      setFormExtras(parsed.extras);
-      setFormChannels(asChannelsArray(parsed.extras.topLevel.channels));
-      setParseError(null);
-    } else {
-      setParseError(
-        parsed.message === "json_schema_unsafe_integer"
-          ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message,
-      );
-    }
-    loadedFor.current = editing;
-  }, [editing, detail.data, t]);
-
-  // Model catalog for the form's provider/model pickers — filtered by
-  // whichever provider is currently selected, gated to while the dialog
-  // is open so it isn't polled at page load.
-  const modelsQuery = useModels(
-    { provider: formState.model.provider },
-    { enabled: formOpen && !!formState.model.provider.trim() },
-  );
-  const modelOptions = useMemo(
-    () =>
-      (modelsQuery.data?.models ?? []).map((m) => ({ provider: m.provider, id: m.id })),
-    [modelsQuery.data?.models],
-  );
-  const mcpServersQuery = useMcpServers({ enabled: formOpen, refetchInterval: false });
-  const mcpCatalog = useMemo(
-    () => (mcpServersQuery.data?.configured ?? []).map((s) => ({ name: s.name })),
-    [mcpServersQuery.data],
-  );
-
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
-
-  // Quick-run dialog.
-  const [runTarget, setRunTarget] = useState<string | null>(null);
-  const [runMessage, setRunMessage] = useState("");
-  const [runResult, setRunResult] = useState<EphemeralResult | null>(null);
-
-  function openCreate() {
-    setEditing(null);
-    loadedFor.current = null;
-    setFormState(emptyManifestForm());
-    setFormExtras(emptyManifestExtras());
-    setFormChannels([]);
-    setFormErrors(new Set());
-    setParseError(null);
-    setFormOpen(true);
-  }
-
-  function openEdit(type: AgentTypeSummary) {
-    setEditing(type.name);
-    loadedFor.current = null;
-    setFormState(emptyManifestForm());
-    setFormExtras(emptyManifestExtras());
-    setFormChannels([]);
-    setFormErrors(new Set());
-    setParseError(null);
-    setFormOpen(true);
-  }
-
-  function submitForm() {
-    const errors = validateManifestForm(formState);
-    setFormErrors(new Set(errors));
-    if (errors.length > 0) return;
-    const extrasToSend: ManifestExtras = {
-      ...formExtras,
-      topLevel: withChannelsExtra(formExtras.topLevel, formChannels),
-    };
-    const manifest_toml = serializeManifestForm(formState, extrasToSend);
-    const input: AgentTypeInput = { name: formState.name.trim(), manifest_toml };
-    if (!input.name) return;
-    if (editing) {
-      updateType.mutate(
-        { name: editing, body: input },
-        {
-          onSuccess: () => setFormOpen(false),
-          onError: (e) => toastErr(e, t("agentTypes.edit")),
-        },
-      );
-    } else {
-      createType.mutate(input, {
-        onSuccess: () => setFormOpen(false),
-        onError: (e) => toastErr(e, t("agentTypes.create")),
-      });
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    try {
+      await deleteMutation.mutateAsync(pendingDelete);
+      addToast(t("agentTypes.deleted"), "success");
+    } catch (err) {
+      addToast(toastErr(err, t("agentTypes.delete_failed")), "error");
+    } finally {
+      setPendingDelete(null);
     }
   }
-
-  function openRun(type: AgentTypeSummary) {
-    setRunTarget(type.name);
-    setRunMessage("");
-    setRunResult(null);
-  }
-
-  function submitRun() {
-    if (!runTarget || !runMessage.trim()) return;
-    spawn.mutate(
-      { agent_type: runTarget, message: runMessage.trim() },
-      {
-        onSuccess: (res) => setRunResult(res),
-        onError: (e) => toastErr(e, t("agentTypes.quickRun")),
-      },
-    );
-  }
-
-  const formPending = createType.isPending || updateType.isPending;
-  const editLoading = !!editing && detail.isLoading;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <PageHeader
-        icon={<Boxes className="h-5 w-5" />}
+        icon={<LayoutTemplate className="h-4 w-4" />}
         title={t("agentTypes.title")}
-        isFetching={isFetching}
-        onRefresh={() => refetch()}
+        subtitle={t("agentTypes.subtitle")}
+        isFetching={types.isFetching}
+        onRefresh={() => void types.refetch()}
         actions={
-          <Button variant="primary" size="sm" onClick={openCreate}>
-            <Plus className="h-4 w-4" />
-            {t("agentTypes.create")}
+          <Button
+            variant="primary"
+            leftIcon={<Plus className="h-3.5 w-3.5" />}
+            onClick={() => setEditing({ name: null })}
+          >
+            {t("agentTypes.new")}
           </Button>
         }
       />
 
-      {isLoading ? (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <CardSkeleton />
-          <CardSkeleton />
-          <CardSkeleton />
-        </div>
-      ) : !types || types.length === 0 ? (
+      {types.isLoading ? (
+        <ListSkeleton rows={4} />
+      ) : types.isError ? (
+        <ErrorState message={types.error?.message} onRetry={() => void types.refetch()} />
+      ) : (types.data ?? []).length === 0 ? (
         <EmptyState
-          icon={<Boxes className="h-6 w-6" />}
-          title={t("agentTypes.noTypes")}
-          action={
-            <Button variant="primary" size="sm" onClick={openCreate}>
-              <Plus className="h-4 w-4" />
-              {t("agentTypes.create")}
-            </Button>
-          }
+          icon={<LayoutTemplate className="h-5 w-5" />}
+          title={t("agentTypes.empty_title")}
+          description={t("agentTypes.empty_description")}
         />
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {types.map((type) => (
-            <Card key={`${type.source}:${type.name}`} padding="md" className="flex flex-col gap-3">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <h3 className="truncate text-sm font-bold text-text-main">
-                    {type.name}
-                  </h3>
-                  {type.description && (
-                    <p className="mt-1 line-clamp-2 text-xs text-text-dim">
-                      {type.description}
-                    </p>
-                  )}
-                </div>
-                {type.source && <Badge variant="brand">{type.source}</Badge>}
-              </div>
-
-              {/* Every row this page lists now comes exclusively from
-                  `~/.librefang/templates/` (`source: "template"`) — the
-                  dashboard's agent-type list no longer merges in live
-                  agents from `~/.librefang/workspaces/agents/`, so every
-                  card is a real, editable/deletable template with no
-                  special-cased "managed elsewhere" state to branch on. */}
-              <div className="mt-auto flex items-center gap-2 pt-1">
-                <Button variant="primary" size="sm" onClick={() => openRun(type)}>
-                  <Zap className="h-3.5 w-3.5" />
-                  {t("agentTypes.quickRun")}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={t("agentTypes.edit")}
-                  onClick={() => openEdit(type)}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={t("agentTypes.delete")}
-                  onClick={() => setDeleteTarget(type.name)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            </Card>
+        <div className="space-y-2">
+          {(types.data ?? []).map((type) => (
+            <AgentTypeRow
+              key={`${type.source}:${type.name}`}
+              type={type}
+              onQuickRun={() => setQuickRun(type)}
+              onEdit={() => setEditing({ name: type.name })}
+              onDelete={() => setPendingDelete(type.name)}
+            />
           ))}
         </div>
       )}
 
-      {/* Create / edit dialog — full manifest editor (#7742), reusing
-          AgentManifestForm the same way the running-agent editor
-          (AgentsPage) does. Seeded from the detail GET's `manifest_toml`
-          and saved as a full-manifest replacement via
-          `PUT /api/agent-types/{name}` (or the create-time equivalent on
-          `POST /api/agent-types`) so every manifest field this form covers —
-          not just the old 7-field flat shape — round-trips intact. */}
-      <Modal
-        isOpen={formOpen}
-        onClose={() => setFormOpen(false)}
-        title={editing ? t("agentTypes.edit") : t("agentTypes.create")}
-        size="2xl"
-      >
-        {editLoading ? (
-          <div className="flex h-48 items-center justify-center">
-            <Loader2 className="h-5 w-5 animate-spin text-text-dim" />
-          </div>
-        ) : parseError ? (
-          <p className="text-xs text-error">
-            {t("agents.form.toml_parse_error", { msg: parseError })}
-          </p>
-        ) : (
-          <div className="space-y-4">
-            <div className="max-h-[65vh] overflow-y-auto pr-1 space-y-4">
-              <AgentManifestForm
-                  systemDefaultModel={{
-                    provider: systemStatusQuery.data?.default_provider,
-                    model: systemStatusQuery.data?.default_model,
-                  }}
-                value={formState}
-                onChange={setFormState}
-                providers={providerOptions}
-                models={modelOptions}
-                invalidFields={formErrors}
-                extras={formExtras}
-                skillCatalog={skillCatalog}
-                toolCatalog={toolCatalog}
-                mcpCatalog={mcpCatalog}
-                nameLocked={!!editing}
-              />
-              <div className="rounded-xl border border-border-subtle/60 bg-surface/40 p-3 space-y-2.5">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
-                  {t("agentTypes.channels")}
-                </p>
-                <MultiSelectCmdk
-                  options={channelOptions}
-                  value={formChannels}
-                  onChange={(next) => {
-                    const nextValue =
-                      typeof next === "function" ? next(formChannels) : next;
-                    setFormChannels(nextValue);
-                  }}
-                  placeholder={t("agentTypes.channelsPlaceholder")}
-                  allowFreeText
-                />
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 pt-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setFormOpen(false)}
-              >
-                {t("common.cancel", { defaultValue: "Cancel" })}
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                disabled={!formState.name.trim() || formPending}
-                onClick={submitForm}
-              >
-                {formPending && <Loader2 className="h-4 w-4 animate-spin" />}
-                {t("common.save", { defaultValue: "Save" })}
-              </Button>
-            </div>
-          </div>
-        )}
-      </Modal>
+      {editing && (
+        <AgentTypeEditor name={editing.name} onClose={() => setEditing(null)} />
+      )}
 
-      {/* Quick-run dialog */}
-      <Modal
-        isOpen={runTarget !== null}
-        onClose={() => setRunTarget(null)}
-        title={`${t("agentTypes.quickRun")} — ${runTarget ?? ""}`}
-        size="lg"
-      >
-        <div className="space-y-4">
-          <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-              {t("agentTypes.message")}
-            </label>
-            <textarea
-              value={runMessage}
-              rows={4}
-              disabled={spawn.isPending}
-              onChange={(e) => setRunMessage(e.target.value)}
-              className={TEXTAREA_CLASS}
-            />
-          </div>
-
-          {runResult && (
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                {t("agentTypes.result")}
-              </label>
-              <div className="max-h-[40vh] overflow-auto rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm">
-                <MarkdownContent>{runResult.response}</MarkdownContent>
-              </div>
-              <div className="flex flex-wrap gap-3 text-[11px] text-text-dim">
-                <span>
-                  {t("agentTypes.iterations")}: {runResult.iterations}
-                </span>
-                <span>
-                  {t("agentTypes.latency")}: {runResult.latency_ms} ms
-                </span>
-                {runResult.cost_usd !== null && (
-                  <span>
-                    {t("agentTypes.cost")}: ${runResult.cost_usd.toFixed(4)}
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" size="sm" onClick={() => setRunTarget(null)}>
-              {t("common.close", { defaultValue: "Close" })}
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={!runMessage.trim() || spawn.isPending}
-              onClick={submitRun}
-            >
-              {spawn.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Zap className="h-4 w-4" />
-              )}
-              {t("agentTypes.quickRun")}
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      {quickRun && <QuickRunModal type={quickRun} onClose={() => setQuickRun(null)} />}
 
       <ConfirmDialog
-        isOpen={deleteTarget !== null}
+        isOpen={pendingDelete !== null}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => void confirmDelete()}
         title={t("agentTypes.delete")}
-        message={t("agentTypes.confirmDelete")}
-        confirmLabel={t("agentTypes.delete")}
+        message={t("agentTypes.confirm_delete", { name: pendingDelete ?? "" })}
         tone="destructive"
-        onClose={() => setDeleteTarget(null)}
-        onConfirm={() => {
-          if (!deleteTarget) return;
-          deleteType.mutate(deleteTarget, {
-            onSuccess: () => setDeleteTarget(null),
-            onError: (e) => toastErr(e, t("agentTypes.delete")),
-          });
-        }}
       />
     </div>
   );

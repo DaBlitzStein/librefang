@@ -70,9 +70,9 @@ fn lock_kernel_state<'a, T>(
 /// [`LibreFangKernel::available_tools`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticMemoryAccess {
-    /// Reads the `memories` table (`memory_semantic_search`, `_stats`).
+    /// Reads the `memories` table (`memory_semantic_search`, `_stats`, `_duplicates`).
     Read,
-    /// Mutates the `memories` table (`memory_semantic_add`, `_forget`).
+    /// Mutates the `memories` table (`memory_semantic_add`, `_forget`, `_consolidate`).
     Write,
 }
 
@@ -351,6 +351,28 @@ impl LibreFangKernel {
             }
         });
 
+        // Self-consolidation opt-in (#7808).
+        //
+        // `memory_semantic_consolidate` merges near-duplicate groups across the
+        // agent's entire store and soft-deletes every member but the newest, in
+        // one unattended call. Unlike the gate above, an explicit
+        // `capabilities.tools` entry does NOT override this: naming a tool
+        // grants reach, and this switch grants permission to delete rows the
+        // caller never named. Requiring both keeps a `tools = ["memory_*"]`
+        // manifest — the ordinary way to grant memory access — from arming
+        // destructive maintenance as a side effect.
+        //
+        // Stripping it here keeps the prompt honest for the common case; the
+        // kernel handle refuses the call as well, because a tool name can reach
+        // dispatch without ever passing through this list.
+        if !entry.as_ref().is_some_and(|e| {
+            e.manifest
+                .proactive_memory
+                .resolve_allow_self_consolidation()
+        }) {
+            all_tools.retain(|t| t.name != "memory_semantic_consolidate");
+        }
+
         // Step 2: Add skill-provided tools (filtered by agent's skill allowlist,
         // then by declared tools). Skip entirely when skills are disabled.
         let skill_tools = if skills_disabled {
@@ -477,11 +499,8 @@ impl LibreFangKernel {
         // Step 5: Apply global tool_policy rules (deny/allow with glob patterns).
         // This filters tools based on the kernel-wide tool policy from config.toml.
         // Check hot-reloadable override first, then fall back to initial config.
-        let effective_policy = self
-            .tool_policy_override
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
+        let effective_policy =
+            read_config_override(&self.tool_policy_override, "tool_policy_override").clone();
         let effective_policy = effective_policy.as_ref().unwrap_or(&cfg.tool_policy);
         if !effective_policy.is_empty() {
             all_tools.retain(|t| {
@@ -1795,8 +1814,15 @@ impl LibreFangKernel {
     /// filtered by something other than `capabilities.tools`).
     pub fn semantic_memory_tool_access(name: &str) -> Option<SemanticMemoryAccess> {
         match name {
-            "memory_semantic_search" | "memory_semantic_stats" => Some(SemanticMemoryAccess::Read),
-            "memory_semantic_add" | "memory_semantic_forget" => Some(SemanticMemoryAccess::Write),
+            "memory_semantic_search"
+            | "memory_semantic_stats"
+            // `_duplicates` only groups and reports; it writes nothing (#7808).
+            | "memory_semantic_duplicates" => Some(SemanticMemoryAccess::Read),
+            "memory_semantic_add"
+            | "memory_semantic_forget"
+            // `_consolidate` soft-deletes, so it needs the write scope here and
+            // the per-agent opt-in in `available_tools` on top of it.
+            | "memory_semantic_consolidate" => Some(SemanticMemoryAccess::Write),
             _ => None,
         }
     }

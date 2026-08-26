@@ -46,6 +46,7 @@ mod workflow;
 use self::a2a::{tool_a2a_discover, tool_a2a_send};
 use self::agent::{
     tool_agent_find, tool_agent_kill, tool_agent_list, tool_agent_send, tool_agent_spawn,
+    tool_agent_type_create,
 };
 use self::artifact::tool_read_artifact;
 pub use self::canvas::sanitize_canvas_html;
@@ -78,7 +79,8 @@ use self::media::{
     tool_speech_to_text, tool_text_to_speech, tool_video_generate, tool_video_status,
 };
 use self::memory::{
-    tool_memory_list, tool_memory_recall, tool_memory_semantic_add, tool_memory_semantic_forget,
+    tool_memory_list, tool_memory_recall, tool_memory_semantic_add,
+    tool_memory_semantic_consolidate, tool_memory_semantic_duplicates, tool_memory_semantic_forget,
     tool_memory_semantic_search, tool_memory_semantic_stats, tool_memory_store,
 };
 use self::meta::{tool_meta_load, tool_meta_search};
@@ -117,8 +119,8 @@ use self::workflow::{
     build_workflow_run_result, prepare_workflow_input, resolve_workflow_input_artifacts,
 };
 use self::workflow::{
-    tool_agent_type_create, tool_workflow_cancel, tool_workflow_create, tool_workflow_describe,
-    tool_workflow_list, tool_workflow_run, tool_workflow_start, tool_workflow_status,
+    tool_workflow_cancel, tool_workflow_create, tool_workflow_describe, tool_workflow_list,
+    tool_workflow_run, tool_workflow_start, tool_workflow_status,
 };
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).

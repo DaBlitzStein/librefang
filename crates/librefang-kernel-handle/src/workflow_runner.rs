@@ -345,13 +345,3 @@ pub trait WorkflowRunner: Send + Sync {
         Err(KernelOpError::unavailable("Workflow engine"))
     }
 }
-
-#[async_trait]
-pub trait AgentTypeTools: Send + Sync {
-    /// Create an agent type (template) from the flat JSON shape shared with
-    /// `POST /api/templates` (#7722). Returns the normalized name on success.
-    async fn create_agent_type(&self, json: &str) -> Result<String, KernelOpError> {
-        let _ = json;
-        Err(KernelOpError::unavailable("Agent types"))
-    }
-}

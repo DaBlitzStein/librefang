@@ -2406,11 +2406,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn a2a_agents_text(&self) -> String {
-        let agents = self
-            .kernel
-            .a2a_agents()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let agents = crate::lock_a2a_agents(self.kernel.a2a_agents());
         if agents.is_empty() {
             return "No external A2A agents discovered.\nUse the dashboard or API to discover agents.".to_string();
         }
@@ -3202,7 +3198,7 @@ pub async fn reload_channels_from_disk(
     }
 
     // Re-read config from disk
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     let fresh_config = match kernel_load_config(Some(&config_path)) {
         Ok(cfg) => cfg,
         Err(e) => {

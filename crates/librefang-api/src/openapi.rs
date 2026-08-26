@@ -551,6 +551,8 @@ use crate::types;
         types::PushMessageRequest,
         crate::server::ChangePasswordRequest,
         routes::auto_dream::SetEnabledRequest,
+        routes::agents::SpawnEphemeralRequest,
+        routes::agents::SpawnEphemeralResponse,
         routes::agents::AgentStats24hView,
         routes::agents::AgentStatsPrevView,
         routes::agents::AgentEventRowView,

@@ -1126,7 +1126,6 @@ impl HandsControl for DispatchCapture {}
 impl A2ARegistry for DispatchCapture {}
 impl ChannelSender for DispatchCapture {}
 impl PromptStore for DispatchCapture {}
-impl crate::kernel_handle::AgentTypeTools for DispatchCapture {}
 #[async_trait::async_trait]
 impl WorkflowRunner for DispatchCapture {
     async fn run_workflow(
@@ -1842,7 +1841,6 @@ impl MemoryAccess for MirrorKernel {
     }
 }
 impl WikiAccess for MirrorKernel {}
-impl librefang_kernel_handle::AgentTypeTools for MirrorKernel {}
 #[async_trait::async_trait]
 impl KnowledgeGraph for MirrorKernel {
     async fn knowledge_add_entity(
@@ -2166,8 +2164,6 @@ struct ForceHumanCapturingKernel {
 
 // ---- BEGIN role-trait impls (split from former `impl KernelHandle for ApprovalKernel`, #3746) ----
 
-impl crate::kernel_handle::AgentTypeTools for ApprovalKernel {}
-
 #[async_trait::async_trait]
 impl AgentControl for ApprovalKernel {
     async fn spawn_agent(
@@ -2476,7 +2472,6 @@ impl MemoryAccess for ForceHumanCapturingKernel {
 }
 
 impl WikiAccess for ForceHumanCapturingKernel {}
-impl crate::kernel_handle::AgentTypeTools for ForceHumanCapturingKernel {}
 
 #[async_trait::async_trait]
 impl TaskQueue for ForceHumanCapturingKernel {

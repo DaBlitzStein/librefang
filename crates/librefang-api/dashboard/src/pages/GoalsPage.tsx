@@ -50,6 +50,100 @@ function parseTickIntervalSecs(raw: string): { value?: number; error?: "invalid"
   return { value: n };
 }
 
+type GoalRow = { goal: GoalItem; depth: number; hasChildren: boolean };
+
+export function buildGoalRows(
+  goals: GoalItem[],
+  expandedById: Record<string, boolean>,
+): GoalRow[] {
+  const roots: GoalItem[] = [];
+  const childrenByParent = new Map<string, GoalItem[]>();
+  const goalsById = new Map(goals.map((goal) => [goal.id, goal]));
+  for (const goal of goals) {
+    if (goal.parent_id && goalsById.has(goal.parent_id)) {
+      const children = childrenByParent.get(goal.parent_id) ?? [];
+      children.push(goal);
+      childrenByParent.set(goal.parent_id, children);
+    } else {
+      roots.push(goal);
+    }
+  }
+
+  const rows: GoalRow[] = [];
+  const visited = new Set<string>();
+  function walk(goal: GoalItem, depth: number) {
+    if (visited.has(goal.id)) return;
+    visited.add(goal.id);
+    const children = childrenByParent.get(goal.id) ?? [];
+    rows.push({ goal, depth, hasChildren: children.length > 0 });
+    if (expandedById[goal.id]) {
+      for (const child of children) walk(child, depth + 1);
+    }
+  }
+  for (const root of roots) walk(root, 0);
+  return rows;
+}
+
+export async function runIndependentBatch<T>(
+  items: readonly T[],
+  action: (item: T) => Promise<unknown>,
+) {
+  const settled = await Promise.allSettled(items.map((item) => action(item)));
+  const errors = settled.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  return {
+    total: items.length,
+    succeeded: items.length - errors.length,
+    failed: errors.length,
+    errors,
+  };
+}
+
+async function runSequentialBatch<T>(
+  items: readonly T[],
+  action: (item: T) => Promise<unknown>,
+) {
+  let succeeded = 0;
+  const errors: unknown[] = [];
+  for (const item of items) {
+    try {
+      await action(item);
+      succeeded += 1;
+    } catch (err) {
+      errors.push(err);
+    }
+  }
+  return {
+    total: items.length,
+    succeeded,
+    failed: items.length - succeeded,
+    errors,
+  };
+}
+
+export function progressForGoalStatus(status: string, current: number): number {
+  if (status === "completed") return 100;
+  if (status === "in_progress") return Math.max(current, 50);
+  return 0;
+}
+
+export function goalStatusBadgeVariant(status: string) {
+  if (status === "completed") return "success";
+  if (status === "in_progress") return "warning";
+  return "default";
+}
+
+function GoalStatusIcon({ status }: { status: string }) {
+  if (status === "completed") {
+    return <CheckCircle2 className="h-4 w-4 text-success" />;
+  }
+  if (status === "in_progress") {
+    return <Play className="h-4 w-4 text-warning" />;
+  }
+  return <Clock className="h-4 w-4 text-text-dim/40" />;
+}
+
 /**
  * Start / stop the autonomous long-horizon run for a single goal (#5744).
  * Only meaningful when the goal has an agent assigned — without one there is
@@ -215,6 +309,7 @@ export function GoalsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, agent_id: "", loop_engineering: false, verify_agent_id: "", tick_interval_secs: "" });
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   const agentsQuery = useAgents();
   const agents = agentsQuery.data ?? [];
@@ -246,25 +341,9 @@ export function GoalsPage() {
     [editDraft.tick_interval_secs],
   );
 
-  const runBatch = async <T,>(items: readonly T[], action: (item: T) => Promise<unknown>) => {
-    let succeeded = 0;
-    const errors: unknown[] = [];
-    for (const item of items) {
-      try {
-        await action(item);
-        succeeded += 1;
-      } catch (err) {
-        errors.push(err);
-      }
-    }
-
-    return {
-      total: items.length,
-      succeeded,
-      failed: items.length - succeeded,
-      errors,
-    };
-  };
+  // Upstream extracted this loop to the module-level `runSequentialBatch`
+  // during the same window; the local copy was byte-identical, so the alias
+  // keeps every call site below unchanged with one implementation behind it.
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -292,7 +371,9 @@ export function GoalsPage() {
   const handleApplyTemplate = async (tpl: GoalTemplate) => {
     setApplyingTemplate(tpl.id);
     try {
-      const result = await runBatch(tpl.goals, (goal) => createMutation.mutateAsync(goal));
+      const result = await runIndependentBatch(tpl.goals, (goal) =>
+        createMutation.mutateAsync(goal),
+      );
       if (result.failed === 0) {
         addToast(`${t("common.success")} (${result.succeeded}/${result.total})`, "success");
       } else {
@@ -368,7 +449,7 @@ export function GoalsPage() {
     const status = nextStatus(current);
     try {
       const goal = goals.find(g => g.id === id);
-      const progress = status === "completed" ? 100 : status === "in_progress" ? Math.max(goal?.progress ?? 0, 50) : 0;
+      const progress = progressForGoalStatus(status, goal?.progress ?? 0);
       await updateMutation.mutateAsync({ id, data: { status, progress } });
     } catch (err) {
       addToast(toastErr(err, t("common.error")), "error");
@@ -377,7 +458,11 @@ export function GoalsPage() {
 
   const handleClearAll = async () => {
     try {
-      const result = await runBatch(goals, (goal) => deleteMutation.mutateAsync(goal.id));
+      // Goal deletion cascades to descendants, so these requests must remain
+      // ordered rather than sharing the independent template-create batch.
+      const result = await runSequentialBatch(goals, (goal) =>
+        deleteMutation.mutateAsync(goal.id),
+      );
       if (result.failed === 0) {
         addToast(`${t("common.success")} (${result.succeeded}/${result.total})`, "success");
         setShowClearConfirm(false);
@@ -396,30 +481,10 @@ export function GoalsPage() {
     }
   };
 
-  const rows = useMemo(() => {
-    const roots: GoalItem[] = [];
-    const childrenByParent = new Map<string, GoalItem[]>();
-    const goalsById = new Map(goals.map(goal => [goal.id, goal]));
-    for (const goal of goals) {
-      if (goal.parent_id && goalsById.has(goal.parent_id)) {
-        const list = childrenByParent.get(goal.parent_id) ?? [];
-        list.push(goal);
-        childrenByParent.set(goal.parent_id, list);
-      } else roots.push(goal);
-    }
-    const result: { goal: GoalItem; depth: number; hasChildren: boolean }[] = [];
-    const visited = new Set<string>();
-    function walk(goal: GoalItem, depth: number) {
-      if (visited.has(goal.id)) return;
-      visited.add(goal.id);
-      const children = childrenByParent.get(goal.id) ?? [];
-      result.push({ goal, depth, hasChildren: children.length > 0 });
-      if (expandedById[goal.id]) for (const child of children) walk(child, depth + 1);
-    }
-    for (const root of roots) walk(root, 0);
-    for (const goal of goals) walk(goal, 0);
-    return result;
-  }, [expandedById, goals]);
+  const rows = useMemo(
+    () => buildGoalRows(goals, expandedById),
+    [expandedById, goals],
+  );
 
   const stats = useMemo(() => ({
     total: goals.length,
@@ -428,8 +493,6 @@ export function GoalsPage() {
     pending: goals.filter(g => g.status === "pending").length,
     pct: goals.length > 0 ? Math.round((goals.filter(g => g.status === "completed").length / goals.length) * 100) : 0,
   }), [goals]);
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
-
   const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-colors";
 
   const statusLabel = (status: string) => {
@@ -668,11 +731,6 @@ export function GoalsPage() {
                 {rows.map(r => {
                   const status = r.goal.status || "pending";
                   const progress = r.goal.progress ?? 0;
-                  const statusIcon = status === "completed"
-                    ? <CheckCircle2 className="h-4 w-4 text-success" />
-                    : status === "in_progress"
-                      ? <Play className="h-4 w-4 text-warning" />
-                      : <Clock className="h-4 w-4 text-text-dim/40" />;
                   return (
                     <div key={r.goal.id} className="rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-colors" style={{ marginLeft: `${r.depth * 16}px` }}>
                       {editingId === r.goal.id ? (
@@ -751,12 +809,12 @@ export function GoalsPage() {
                                 className="shrink-0 hover:scale-110 transition-transform"
                                 title={t("goals.toggle_reset")}
                               >
-                                {statusIcon}
+                                <GoalStatusIcon status={status} />
                               </button>
                               <span className={`text-sm font-bold truncate ${status === "completed" ? "line-through text-text-dim" : ""}`}>
                                 {r.goal.title}
                               </span>
-                              <Badge variant={status === "completed" ? "success" : status === "in_progress" ? "warning" : "default"} className="shrink-0">
+                              <Badge variant={goalStatusBadgeVariant(status)} className="shrink-0">
                                 {statusLabel(status)}
                               </Badge>
                               {r.goal.loop_engineering && (

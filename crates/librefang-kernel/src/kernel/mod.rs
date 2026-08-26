@@ -60,6 +60,34 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, error, info, instrument, warn};
 
+fn read_config_override<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    state: &'static str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "kernel config override read lock poisoned; recovering inner state"
+        );
+        lock.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn write_config_override<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    state: &'static str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "kernel config override write lock poisoned; recovering inner state"
+        );
+        lock.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
 /// Per-trait `kernel_handle::*` impls live in their own files under
 /// `kernel/handles/` to keep this file from doubling as a trait-impl
 /// dumping ground. The submodules are descendants of `kernel`, so they
@@ -789,6 +817,11 @@ pub(crate) struct RunningTask {
 pub struct LibreFangKernel {
     /// Boot-time home directory (immutable — cannot hot-reload).
     home_dir_boot: PathBuf,
+    /// Absolute path of the `config.toml` this kernel was booted from (immutable — cannot hot-reload).
+    ///
+    /// Resolved exactly once, in `boot` / `boot_with_config`, and read by every surface that re-reads or persists the configuration — hot-reload, the mtime watcher, and every API route that writes into the file (#6695).
+    /// Deriving it a second time from `home_dir_boot` is what let the daemon load `LIBREFANG_CONFIG_PATH` and then write somewhere else.
+    config_path_boot: PathBuf,
     /// Boot-time data directory (immutable — cannot hot-reload).
     data_dir_boot: PathBuf,
     /// Kernel configuration (atomically swappable for hot-reload).

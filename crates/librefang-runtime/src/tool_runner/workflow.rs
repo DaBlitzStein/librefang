@@ -434,24 +434,7 @@ pub(super) async fn tool_workflow_describe(
     }))?)
 }
 
-/// `agent_type_create` — write a new agent type (template) from the flat
-/// JSON shape shared with `POST /api/templates` (#7722).
-pub(super) async fn tool_agent_type_create(
-    input: &serde_json::Value,
-    kernel: Option<&std::sync::Arc<dyn crate::kernel_handle::KernelHandle>>,
-) -> ToolResult {
-    let kh = require_kernel_typed(kernel)?;
-    let name = input["name"]
-        .as_str()
-        .ok_or(ToolError::MissingParameter("name"))?;
-    let json = serde_json::to_string(input).map_err(|e| ToolError::InvalidParameter {
-        name: "input",
-        reason: format!("cannot re-serialize input: {e}"),
-    })?;
-
-    let created = kh
-        .create_agent_type(&json)
-        .await
-        .map_err(ToolError::upstream)?;
-    Ok(format!("Agent type '{name}' created: {created}"))
-}
+// `agent_type_create` lives in `agent.rs` (#7877): it is an agent-lifecycle
+// operation writing the manifest a later `agent_spawn` consumes, and it goes
+// through the typed `AgentTypeSpec` / `agent_type_store` path rather than
+// re-serializing the tool input to a JSON string.

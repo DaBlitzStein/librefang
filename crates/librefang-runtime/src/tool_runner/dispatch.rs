@@ -286,6 +286,20 @@ pub async fn execute_tool_raw(
             tool_memory_semantic_stats(input, *kernel, *caller_agent_id, *sender_id, *channel)
                 .await,
         ),
+        "memory_semantic_duplicates" => Some(
+            tool_memory_semantic_duplicates(input, *kernel, *caller_agent_id, *sender_id, *channel)
+                .await,
+        ),
+        "memory_semantic_consolidate" => Some(
+            tool_memory_semantic_consolidate(
+                input,
+                *kernel,
+                *caller_agent_id,
+                *sender_id,
+                *channel,
+            )
+            .await,
+        ),
         "wiki_get" => Some(tool_wiki_get(input, *kernel, *sender_id, *channel)),
         "wiki_search" => Some(tool_wiki_search(input, *kernel, *sender_id, *channel)),
         "wiki_write" => Some(tool_wiki_write(
@@ -1016,6 +1030,8 @@ pub async fn execute_tool_raw(
         "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
         "agent_list" => tool_agent_list(*kernel),
         "agent_kill" => tool_agent_kill(input, *kernel),
+        // Authoring an agent type is an agent-lifecycle operation — it writes the manifest a later `agent_spawn` consumes — so it sits with the inter-agent tools rather than with the workflow tools it was modelled on (#7722).
+        "agent_type_create" => tool_agent_type_create(input, *kernel).await,
 
         // Shared memory (`memory_*`) and wiki (`wiki_*`) tools are dispatched
         // before this match, through the typed `ToolError` boundary, so their
@@ -1249,7 +1265,6 @@ pub async fn execute_tool_raw(
         }
         "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
         "workflow_create" => tool_workflow_create(input, *kernel, *caller_agent_id).await,
-        "agent_type_create" => tool_agent_type_create(input, kernel.as_deref()).await,
 
         // Browser automation tools
         #[cfg(feature = "browser")]

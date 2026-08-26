@@ -275,10 +275,8 @@ pub async fn save_agent_as_agent_type(
     // config (the two coincide in normal deployments but are not
     // guaranteed to — `LIBREFANG_HOME` and `KernelConfig::home_dir` are
     // set independently).
-    let workspace_agent_path = crate::routes::system::librefang_home()
-        .join("workspaces")
-        .join("agents")
-        .join(&template_name);
+    let workspace_agent_path =
+        librefang_types::agent_type_store::workspace_agents_dir().join(&template_name);
     if workspace_agent_path.exists() && source.name != template_name {
         return (
             StatusCode::CONFLICT,

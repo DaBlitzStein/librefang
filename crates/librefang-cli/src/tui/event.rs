@@ -1,5 +1,6 @@
 //! Event system: crossterm polling, tick timer, streaming bridges.
 
+use crate::commands::automation::WorkflowRunOutcome;
 use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_kernel::McpSubsystemApi;
@@ -21,10 +22,11 @@ use super::screens::{
     hands::{HandInfo, HandInstanceInfo},
     logs::LogEntry,
     memory::{AgentEntry, KvPair},
+    models::ModelRow,
     peers::PeerInfo,
     security::SecurityFeature,
     sessions::SessionInfo,
-    settings::{ModelInfo, ProviderInfo, TestResult, ToolInfo},
+    settings::{BackupInfo, ModelInfo, ProviderInfo, TestResult, ToolInfo},
     skills::{ClawHubResult, McpServerInfo, SkillInfo},
     templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
@@ -129,15 +131,11 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
-    BackupsLoaded(Vec<crate::tui::screens::settings::BackupEntry>),
     AgentPurged(String),
     AgentTokenUsageLoaded(crate::tui::screens::agents::AgentTokenUsage),
     WorkflowParamsLoaded(Vec<crate::tui::screens::workflows::WorkflowParamField>),
     AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
     AgentWorkspacesUpdated(String),
-    BackupCreated(String),
-    BackupRestored(String),
-    BackupDeleted(String),
     MemoryConfigSaved(bool),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
@@ -196,21 +194,31 @@ pub enum AppEvent {
     ProviderKeyDeleted(String),
     /// Provider test result.
     ProviderTestResult(TestResult),
-    /// Model overrides fetched for the settings-models editor (#7774).
-    ModelOverridesLoaded {
-        model_key: String,
-        overrides: librefang_types::model_catalog::ModelOverrides,
-    },
-    /// Model overrides saved.
-    ModelOverridesSaved(String),
-    /// Model overrides reset (all overrides removed for the model).
-    ModelOverridesReset(String),
     /// The kernel-global `[capabilities]` routing block, loaded from
     /// `GET /api/config`.
     CapabilityRoutingLoaded(librefang_types::media::CapabilityRouting),
     /// One capability's routing was persisted; carries its label for the
     /// status line.
     CapabilityRoutingSaved(String),
+    /// Model catalogue loaded for the Models screen (refs #7774).
+    ModelCatalogLoaded(Vec<ModelRow>),
+    /// One model's operator capacity limits were persisted; carries the
+    /// `provider:model_id` override key.
+    ModelLimitsSaved(String),
+    /// One model's operator capacity limits were dropped back to the catalog.
+    ModelLimitsReset(String),
+    /// Backup archives listed.
+    BackupsLoaded(Vec<BackupInfo>),
+    /// A new archive was written.
+    BackupCreated(String),
+    /// An archive was deleted.
+    BackupDeleted(String),
+    /// A restore finished. `errors` counts entries the daemon could not write.
+    BackupRestored {
+        filename: String,
+        restored_files: u64,
+        errors: usize,
+    },
     /// Peers loaded.
     PeersLoaded(Vec<PeerInfo>),
     /// Config-declared user groups loaded (#7745).
@@ -278,6 +286,13 @@ pub enum AppEvent {
     },
     /// Agent model routing updated.
     AgentModelRoutingUpdated(String),
+    /// Agent channel allowlist loaded (for edit screen).
+    AgentChannelsLoaded {
+        assigned: Vec<String>,
+        available: Vec<String>,
+    },
+    /// Agent channel allowlist updated.
+    AgentChannelsUpdated(String),
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -964,6 +979,35 @@ pub fn spawn_fetch_workflow_runs(
     });
 }
 
+/// How long the daemon may hold the run request open before handing the run back as a background task.
+///
+/// Same reasoning as `WORKFLOW_RUN_WAIT_MS` in the `workflow run` command: `?wait=true` on its own ties the run's lifetime to the request, so a workflow slower than this thread's 60 s client timeout would be killed by the disconnect.
+/// 45 s leaves 15 s of that budget for the response itself.
+const WORKFLOW_RUN_WAIT_MS: u64 = 45_000;
+
+/// The wait has to expire before this thread's own client does, or a slow run comes back as a disconnect instead of the 202 the screen knows how to render.
+const _: () = assert!(
+    WORKFLOW_RUN_WAIT_MS < 60_000,
+    "spawn_run_workflow builds a 60 s client; a longer wait can never return 202"
+);
+
+/// Render one workflow-run response for the Workflows screen.
+///
+/// Reading `output` and nothing else meant a 202 (still running) and a 422 (the run failed) both rendered the generic "completed" line, so the screen announced success on every failure.
+/// The classification is shared with `librefang workflow run` so the two surfaces cannot drift apart again.
+fn workflow_run_result_message(status: reqwest::StatusCode, body: &serde_json::Value) -> String {
+    match crate::commands::automation::classify_workflow_run(status, body) {
+        WorkflowRunOutcome::Completed { output, .. } => output.to_string(),
+        WorkflowRunOutcome::Accepted { run_id } => {
+            crate::i18n::t_args("tui-event-workflow-still-running", &[("id", run_id)])
+        }
+        WorkflowRunOutcome::Failed { error } => crate::i18n::t_args(
+            "tui-event-workflow-run-failed",
+            &[("status", &status.to_string()), ("detail", error)],
+        ),
+    }
+}
+
 /// Run a workflow in background.
 pub fn spawn_run_workflow(
     backend: BackendRef,
@@ -982,27 +1026,17 @@ pub fn spawn_run_workflow(
             // the error.
             match client
                 .post(format!(
-                    "{base_url}/api/workflows/{workflow_id}/run?wait=true"
+                    "{base_url}/api/workflows/{workflow_id}/run?wait=true&timeout_ms={WORKFLOW_RUN_WAIT_MS}"
                 ))
                 .json(&serde_json::json!({"input": input}))
                 .send()
             {
                 Ok(resp) => {
+                    let status = resp.status();
                     let body: serde_json::Value = resp.json().unwrap_or_default();
-                    let result = if let Some(output) = body["output"].as_str() {
-                        output.to_string()
-                    } else if let Some(err) = body["error"].as_str() {
-                        crate::i18n::t_args("tui-event-error-prefixed", &[("error", err)])
-                    } else if let Some(run_id) = body["run_id"].as_str() {
-                        // Accepted but still running: say so, with the id.
-                        format!(
-                            "{} ({run_id})",
-                            crate::i18n::t("tui-event-workflow-completed")
-                        )
-                    } else {
-                        crate::i18n::t("tui-event-workflow-completed")
-                    };
-                    let _ = tx.send(AppEvent::WorkflowRunResult(result));
+                    let _ = tx.send(AppEvent::WorkflowRunResult(
+                        workflow_run_result_message(status, &body),
+                    ));
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::WorkflowRunResult(format!("Error: {e}")));
@@ -1898,6 +1932,123 @@ pub fn spawn_update_agent_model_routing(
     });
 }
 
+/// Fetch the channel allowlist for an agent (#7742).
+///
+/// `GET /api/agents/{id}/channels` had no client anywhere in the tree — not here, not in the
+/// dashboard — so assigning a channel to a running agent meant hand-editing `agent.toml`.
+/// The in-process branch reads the same two sources the HTTP handler does: the manifest for
+/// `assigned`, and `sidecar_channels` for the catalogue of `channel_type` strings to offer.
+pub fn spawn_fetch_agent_channels(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/agents/{agent_id}/channels"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let read = |key: &str| -> Vec<String> {
+                        body[key]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    let _ = tx.send(AppEvent::AgentChannelsLoaded {
+                        assigned: read("assigned"),
+                        available: read("available"),
+                    });
+                    return;
+                }
+            }
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-channels-fetch-failed",
+            )));
+        }
+        BackendRef::InProcess(kernel) => {
+            if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
+                let aid = librefang_types::agent::AgentId(uuid);
+                let assigned = kernel
+                    .agent_registry_ref()
+                    .get(aid)
+                    .map(|e| e.manifest.channels.clone())
+                    .unwrap_or_default();
+                let mut available: Vec<String> = kernel
+                    .config_ref()
+                    .sidecar_channels
+                    .iter()
+                    .map(|sc| sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()))
+                    .collect();
+                // A channel already on the manifest but no longer configured must still be
+                // offered, or opening the editor and saving would silently drop it.
+                for name in &assigned {
+                    if !available.contains(name) {
+                        available.push(name.clone());
+                    }
+                }
+                let _ = tx.send(AppEvent::AgentChannelsLoaded {
+                    assigned,
+                    available,
+                });
+            }
+        }
+    });
+}
+
+/// Update an agent's channel allowlist.
+///
+/// An empty list is a legitimate value, not a no-op: `AgentManifest::channels` treats empty as
+/// "every channel", so clearing the selection widens access rather than revoking it.
+pub fn spawn_update_agent_channels(
+    backend: BackendRef,
+    agent_id: String,
+    channels: Vec<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .put(format!("{base_url}/api/agents/{agent_id}/channels"))
+                .json(&serde_json::json!({"channels": channels}))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::AgentChannelsUpdated(agent_id));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-channels-update-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(kernel) => {
+            if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
+                let aid = librefang_types::agent::AgentId(uuid);
+                match kernel.set_agent_channels(aid, channels) {
+                    Ok(()) => {
+                        let _ = tx.send(AppEvent::AgentChannelsUpdated(agent_id));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-channels-update-error",
+                            &[("error", &e.to_string())],
+                        )));
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Fetch the fleet-wide prompts library (`GET /api/prompts/overview`).
 pub fn spawn_fetch_prompts(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
@@ -2130,103 +2281,6 @@ pub fn spawn_save_memory_config(
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
             let _ = tx.send(AppEvent::MemoryConfigSaved(ok));
-        }
-    });
-}
-
-pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/backups")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let mut items: Vec<crate::tui::screens::settings::BackupEntry> = body
-                        ["backups"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .map(|b| crate::tui::screens::settings::BackupEntry {
-                                    filename: b["filename"].as_str().unwrap_or("").to_string(),
-                                    size_bytes: b["size_bytes"].as_u64().unwrap_or(0),
-                                    created_at: b["created_at"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    items.sort_by(|a, b| b.filename.cmp(&a.filename));
-                    let _ = tx.send(AppEvent::BackupsLoaded(items));
-                }
-            }
-        }
-    });
-}
-
-pub fn spawn_create_backup(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            let ok = client
-                .post(format!("{base_url}/api/backup"))
-                .json(&serde_json::json!({}))
-                .send()
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            let _ = tx.send(AppEvent::BackupCreated(if ok {
-                "created".to_string()
-            } else {
-                "failed".to_string()
-            }));
-        }
-    });
-}
-
-pub fn spawn_restore_backup(
-    backend: BackendRef,
-    filename: String,
-    keep_config: bool,
-    components: Vec<String>,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            let ok = client
-                .post(format!("{base_url}/api/restore"))
-                .json(&serde_json::json!({
-                    "filename": filename,
-                    "keep_config": keep_config,
-                    "components": components,
-                }))
-                .send()
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            // Both arms land in the same status line, so both are translated.
-            // Only the failure arm trips the untranslated-literal check (the
-            // success arm is a single word), and shipping half a translated
-            // pair is how a screen ends up mixing two languages in one field.
-            let _ = tx.send(AppEvent::BackupRestored(if ok {
-                crate::i18n::t("tui-event-backup-restored")
-            } else {
-                crate::i18n::t("tui-event-backup-restore-failed")
-            }));
-        }
-    });
-}
-
-pub fn spawn_delete_backup(backend: BackendRef, filename: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            let ok = client
-                .delete(format!("{base_url}/api/backups/{}", filename))
-                .send()
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            let _ = tx.send(AppEvent::BackupDeleted(if ok {
-                "deleted".to_string()
-            } else {
-                "delete failed".to_string()
-            }));
         }
     });
 }
@@ -3037,13 +3091,22 @@ pub fn spawn_fetch_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 }
 
 /// Fetch settings models.
+///
+/// `GET /api/models` answers with `{ "models": [...], "total": n, "available": n }`.
+/// Reading the body as a bare array — which this did — yields `None` on every
+/// call, so the Settings > Models list rendered empty against a healthy daemon.
+/// The chat model picker below already reads `body["models"]`; this is the same
+/// shape.
+/// The cost keys are the API's own (`input_cost_per_m` / `output_cost_per_m`);
+/// the `cost_input` / `cost_output` names read here appear nowhere in the
+/// response, so the prices column was pinned to `$0.00/$0.00`.
 pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let models: Vec<ModelInfo> = body
+                    let models: Vec<ModelInfo> = body["models"]
                         .as_array()
                         .map(|arr| {
                             arr.iter()
@@ -3052,7 +3115,6 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                                     provider: m["provider"].as_str().unwrap_or("").to_string(),
                                     tier: m["tier"].as_str().unwrap_or("").to_string(),
                                     context_window: m["context_window"].as_u64().unwrap_or(0),
-                                    max_output_tokens: m["max_output_tokens"].as_u64().unwrap_or(0),
                                     // The API emits `input_cost_per_m` /
                                     // `output_cost_per_m` (see
                                     // routes/providers.rs::list_models), not
@@ -3064,9 +3126,6 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                                     // #7774.
                                     cost_input: m["input_cost_per_m"].as_f64().unwrap_or(0.0),
                                     cost_output: m["output_cost_per_m"].as_f64().unwrap_or(0.0),
-                                    context_window_is_estimated: m["context_window_is_estimated"]
-                                        .as_bool()
-                                        .unwrap_or(false),
                                 })
                                 .collect()
                         })
@@ -3079,6 +3138,198 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             let _ = tx.send(AppEvent::SettingsModelsLoaded(Vec::new()));
         }
     });
+}
+
+/// Fetch the model catalogue for the Models screen, with each entry's effective
+/// and catalog-declared capacity limits side by side (refs #7774).
+///
+/// `context_window` / `max_output_tokens` on the row are the values in force
+/// after the operator override; `limits_catalog` carries what the registry or a
+/// discovery probe declared. The screen needs both — the difference is what
+/// tells an operator a model has been corrected, and what a reset restores.
+pub fn spawn_fetch_model_catalog(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client.get(format!("{base_url}/api/models")).send() {
+                Ok(resp) => {
+                    if let Ok(body) = resp.json::<serde_json::Value>() {
+                        let mut models: Vec<ModelRow> = body["models"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .map(|m| ModelRow {
+                                        id: m["id"].as_str().unwrap_or("").to_string(),
+                                        provider: m["provider"].as_str().unwrap_or("").to_string(),
+                                        tier: m["tier"].as_str().unwrap_or("").to_string(),
+                                        context_window_effective: m["context_window"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        context_window_catalog: m["limits_catalog"]
+                                            ["context_window"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        max_output_tokens_effective: m["max_output_tokens"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        max_output_tokens_catalog: m["limits_catalog"]
+                                            ["max_output_tokens"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // The catalogue arrives in whatever order the providers
+                        // were merged in; a stable sort keeps the cursor from
+                        // landing on a different model after a refresh.
+                        models.sort_by(|a, b| {
+                            (a.provider.as_str(), a.id.as_str())
+                                .cmp(&(b.provider.as_str(), b.id.as_str()))
+                        });
+                        let _ = tx.send(AppEvent::ModelCatalogLoaded(models));
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-models-load-failed",
+                    )));
+                    let _ = tx.send(AppEvent::ModelCatalogLoaded(Vec::new()));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-models-not-available-in-process",
+            )));
+            let _ = tx.send(AppEvent::ModelCatalogLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Read the stored override document for one model, so a write can merge into
+/// it instead of replacing it.
+///
+/// `PUT /api/models/overrides/{id}` takes a whole `ModelOverrides` document and
+/// clears every field the body omits, so submitting only the two capacity
+/// limits would silently drop the temperature, top-p and reasoning-effort
+/// settings stored under the same key.
+fn read_model_overrides(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    key: &str,
+) -> serde_json::Value {
+    client
+        .get(format!("{base_url}/api/models/overrides/{key}"))
+        .send()
+        .ok()
+        .and_then(|resp| resp.json::<serde_json::Value>().ok())
+        .filter(|doc| doc.is_object())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Persist one model's operator capacity limits (refs #7774).
+///
+/// `None` for a limit removes that field, which lets the catalog answer again.
+/// Everything else already stored under the key is carried across untouched.
+pub fn spawn_save_model_limits(
+    backend: BackendRef,
+    key: String,
+    context_window: Option<u64>,
+    max_output_tokens: Option<u64>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let mut doc = read_model_overrides(&client, &base_url, &key);
+            set_or_clear(&mut doc, "context_window", context_window);
+            set_or_clear(&mut doc, "max_output_tokens", max_output_tokens);
+            match client
+                .put(format!("{base_url}/api/models/overrides/{key}"))
+                .json(&doc)
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::ModelLimitsSaved(key));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-model-limits-save-failed",
+                        &[("model", &key)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-models-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Drop one model's capacity-limit overrides so the catalog answers again.
+///
+/// Only the two limit fields are removed: the inference parameters under the
+/// same key are a different concern and this screen does not own them. When
+/// nothing is left, the whole entry is deleted so the file does not accumulate
+/// empty documents.
+pub fn spawn_reset_model_limits(backend: BackendRef, key: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let mut doc = read_model_overrides(&client, &base_url, &key);
+            set_or_clear(&mut doc, "context_window", None);
+            set_or_clear(&mut doc, "max_output_tokens", None);
+            let empty = doc.as_object().map(|o| o.is_empty()).unwrap_or(true);
+            let outcome = if empty {
+                client
+                    .delete(format!("{base_url}/api/models/overrides/{key}"))
+                    .send()
+            } else {
+                client
+                    .put(format!("{base_url}/api/models/overrides/{key}"))
+                    .json(&doc)
+                    .send()
+            };
+            match outcome {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::ModelLimitsReset(key));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-model-limits-reset-failed",
+                        &[("model", &key)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-models-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Write `value` into `doc`, or remove the key entirely when it is `None`.
+///
+/// Removing rather than writing `null` matters: the field is
+/// `skip_serializing_if = "Option::is_none"` on the way out, and leaving a
+/// `null` behind would round-trip as a set-but-empty override.
+fn set_or_clear(doc: &mut serde_json::Value, field: &str, value: Option<u64>) {
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    match value {
+        Some(v) => {
+            obj.insert(field.to_string(), serde_json::json!(v));
+        }
+        None => {
+            obj.remove(field);
+        }
+    }
 }
 
 /// Fetch settings tools.
@@ -3177,85 +3428,6 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
     });
 }
 
-/// Fetch the current `ModelOverrides` entity for a model (#7774) — the
-/// settings-models editor round-trips this before opening so a save only
-/// touching context_window / max_output_tokens doesn't drop other overrides
-/// (temperature, capability overrides, …) the PUT endpoint would otherwise
-/// silently clear.
-pub fn spawn_fetch_model_overrides(
-    backend: BackendRef,
-    model_key: String,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .get(format!("{base_url}/api/models/overrides/{model_key}"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let overrides = resp
-                        .json::<librefang_types::model_catalog::ModelOverrides>()
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::ModelOverridesLoaded {
-                        model_key,
-                        overrides,
-                    });
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-model-overrides-fetch-failed",
-                        &[("model", &model_key)],
-                    )));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::ModelOverridesLoaded {
-                model_key,
-                overrides: librefang_types::model_catalog::ModelOverrides::default(),
-            });
-        }
-    });
-}
-
-/// Persist a merged `ModelOverrides` entity for a model (#7774). The PUT
-/// endpoint replaces the whole entity, so the caller must have already
-/// merged in every field it wants to keep (see `spawn_fetch_model_overrides`).
-pub fn spawn_save_model_overrides(
-    backend: BackendRef,
-    model_key: String,
-    overrides: librefang_types::model_catalog::ModelOverrides,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .put(format!("{base_url}/api/models/overrides/{model_key}"))
-                .json(&overrides)
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::ModelOverridesSaved(model_key));
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-model-overrides-save-failed",
-                        &[("model", &model_key)],
-                    )));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-event-provider-key-management-not-available-in-process",
-            )));
-        }
-    });
-}
-
 /// Load the kernel-global `[capabilities]` block.
 ///
 /// Read from `GET /api/config` rather than a dedicated endpoint because the
@@ -3342,36 +3514,182 @@ pub fn spawn_save_capability_routing(
     });
 }
 
-/// Clear every override for a model (#7774) — mirrors the dashboard's
-/// "Reset" action, which also clears the whole entity, not just the
-/// context_window / max_output_tokens fields the TUI editor exposes.
-pub fn spawn_reset_model_overrides(
-    backend: BackendRef,
-    model_key: String,
-    tx: mpsc::Sender<AppEvent>,
-) {
+/// Read `GET /api/backups` into the rows the settings screen draws.
+///
+/// `created_at` and `components` are both `null` when the archive's
+/// `manifest.json` could not be read, so the file's own `modified_at` is the
+/// fallback timestamp and the component list stays empty — which the restore
+/// form reads as "restore everything", matching the endpoint's own default.
+fn parse_backup_list(body: &serde_json::Value) -> Vec<BackupInfo> {
+    body["backups"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|b| BackupInfo {
+                    filename: b["filename"].as_str().unwrap_or_default().to_string(),
+                    size_bytes: b["size_bytes"].as_u64().unwrap_or(0),
+                    created_at: b["created_at"]
+                        .as_str()
+                        .or_else(|| b["modified_at"].as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    components: b["components"]
+                        .as_array()
+                        .map(|c| {
+                            c.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fetch the backup archives the daemon holds.
+pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .delete(format!("{base_url}/api/models/overrides/{model_key}"))
-                .send()
-            {
+            match client.get(format!("{base_url}/api/backups")).send() {
                 Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::ModelOverridesReset(model_key));
+                    let body: serde_json::Value = resp.json().unwrap_or_default();
+                    let _ = tx.send(AppEvent::BackupsLoaded(parse_backup_list(&body)));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-model-overrides-reset-failed",
-                        &[("model", &model_key)],
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-backups-list-failed",
                     )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-event-provider-key-management-not-available-in-process",
+                "tui-event-backups-need-daemon",
             )));
+        }
+    });
+}
+
+/// Create a new backup archive.
+pub fn spawn_create_backup(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            // A backup walks the whole home directory, so it outlives the
+            // default client timeout on any non-trivial install.
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
+            match client.post(format!("{base_url}/api/backup")).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().unwrap_or_default();
+                    let filename = body["filename"].as_str().unwrap_or_default().to_string();
+                    let _ = tx.send(AppEvent::BackupCreated(filename));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-backup-create-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Delete one backup archive.
+pub fn spawn_delete_backup(backend: BackendRef, filename: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .delete(format!("{base_url}/api/backups/{filename}"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::BackupDeleted(filename));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-backup-delete-failed",
+                        &[("filename", &filename)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Restore one backup archive.
+///
+/// `body` is built by `settings::restore_request_body`, which is what decides
+/// whether `components` is present at all — the endpoint reads an absent field
+/// as "everything" and rejects `[]`, so the shape must not be reassembled here.
+pub fn spawn_restore_backup(
+    backend: BackendRef,
+    body: serde_json::Value,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let filename = body["filename"].as_str().unwrap_or_default().to_string();
+        match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                // Restoring decompresses and writes the whole archive, so it
+                // gets the same generous timeout the create side does.
+                let client =
+                    make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
+                match client
+                    .post(format!("{base_url}/api/restore"))
+                    .json(&body)
+                    .send()
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let payload: serde_json::Value = resp.json().unwrap_or_default();
+                        let _ = tx.send(AppEvent::BackupRestored {
+                            filename,
+                            restored_files: payload["restored_files"].as_u64().unwrap_or(0),
+                            errors: payload["errors"].as_array().map_or(0, |e| e.len()),
+                        });
+                    }
+                    // The daemon's own message carries why (an unknown
+                    // component name, a missing manifest), so it is preferred
+                    // over the generic failure line.
+                    Ok(resp) => {
+                        let payload: serde_json::Value = resp.json().unwrap_or_default();
+                        let message = payload["error"]["message"]
+                            .as_str()
+                            .or_else(|| payload["message"].as_str())
+                            .map(|m| m.to_string())
+                            .unwrap_or_else(|| {
+                                crate::i18n::t_args(
+                                    "tui-event-backup-restore-failed",
+                                    &[("filename", &filename)],
+                                )
+                            });
+                        let _ = tx.send(AppEvent::FetchError(message));
+                    }
+                    Err(_) => {
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-backup-restore-failed",
+                            &[("filename", &filename)],
+                        )));
+                    }
+                }
+            }
+            BackendRef::InProcess(_) => {
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                    "tui-event-backups-need-daemon",
+                )));
+            }
         }
     });
 }
@@ -4733,6 +5051,61 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
+    /// `GET /api/backups` nests its rows under `backups`, and the settings
+    /// screen reads `created_at` and `components` straight out of each one.
+    #[test]
+    fn backup_rows_parse_out_of_the_listing_envelope() {
+        let body = serde_json::json!({
+            "backups": [{
+                "filename": "librefang-backup-20260101-000000.zip",
+                "path": "/home/u/.librefang/backups/librefang-backup-20260101-000000.zip",
+                "size_bytes": 8192,
+                "modified_at": "2026-01-02T00:00:00Z",
+                "components": ["config", "skills"],
+                "librefang_version": "2026.8.19",
+                "created_at": "2026-01-01T00:00:00Z"
+            }],
+            "total": 1
+        });
+        let rows = parse_backup_list(&body);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, "librefang-backup-20260101-000000.zip");
+        assert_eq!(rows[0].size_bytes, 8192);
+        assert_eq!(
+            rows[0].created_at, "2026-01-01T00:00:00Z",
+            "the manifest timestamp must win over the file's mtime"
+        );
+        assert_eq!(rows[0].components, vec!["config", "skills"]);
+    }
+
+    /// An archive whose `manifest.json` could not be read reports `created_at`
+    /// and `components` as `null`. Falling back to the file's own mtime keeps
+    /// the row dated, and the empty component list is what makes the restore
+    /// form omit `components` — the endpoint's own "restore everything".
+    #[test]
+    fn a_manifestless_row_falls_back_to_the_file_mtime() {
+        let body = serde_json::json!({
+            "backups": [{
+                "filename": "hand-rolled.zip",
+                "size_bytes": 10,
+                "modified_at": "2026-03-04T05:06:07Z",
+                "components": null,
+                "librefang_version": null,
+                "created_at": null
+            }],
+            "total": 1
+        });
+        let rows = parse_backup_list(&body);
+        assert_eq!(rows[0].created_at, "2026-03-04T05:06:07Z");
+        assert!(rows[0].components.is_empty());
+    }
+
+    #[test]
+    fn an_empty_listing_parses_to_no_rows() {
+        let rows = parse_backup_list(&serde_json::json!({"backups": [], "total": 0}));
+        assert!(rows.is_empty());
+    }
+
     /// The workflow creator's raw `steps` field must reach the API as a JSON
     /// array. It used to be forwarded as a JSON string, which
     /// `create_workflow` rejects with `Missing 'steps' array` — the wizard
@@ -4750,6 +5123,54 @@ mod tests {
             array[0]["session_mode"], "new",
             "the per-step session override must survive the parse untouched"
         );
+    }
+
+    /// The Workflows screen used to read `output` and nothing else, so the generic "completed" line was printed for a 202 that had not finished and for a 422 that had failed.
+    /// A failure must never render as a completion.
+    #[test]
+    fn a_failed_run_is_not_rendered_as_completed() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            &serde_json::json!({"error": "workflow_failed", "detail": "step 'draft' timed out"}),
+        );
+
+        assert!(
+            message.contains("step 'draft' timed out"),
+            "the run's reason must reach the screen: {message}"
+        );
+        assert_ne!(
+            message,
+            crate::i18n::t("tui-event-workflow-completed"),
+            "a failed run must not render as a completed one"
+        );
+    }
+
+    #[test]
+    fn an_accepted_run_names_the_run_id_to_poll() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::ACCEPTED,
+            &serde_json::json!({"run_id": "3f1c-run", "status": "running"}),
+        );
+
+        assert!(
+            message.contains("3f1c-run"),
+            "a still-running launch must name the run so it stays traceable: {message}"
+        );
+        assert_ne!(
+            message,
+            crate::i18n::t("tui-event-workflow-completed"),
+            "a run that has not finished must not claim to have completed"
+        );
+    }
+
+    #[test]
+    fn a_finished_run_shows_its_output_verbatim() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::OK,
+            &serde_json::json!({"run_id": "3f1c-run", "output": "the summary"}),
+        );
+
+        assert_eq!(message, "the summary");
     }
 
     #[test]

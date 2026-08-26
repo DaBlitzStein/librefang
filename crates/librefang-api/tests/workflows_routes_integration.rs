@@ -790,6 +790,97 @@ async fn workflow_run_get_invalid_id_returns_400() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #7825 — `librefang workflow run` and the TUI both read `output` out of this route's response and never looked at the status, so a 202 that carries no `output` by design was reported as a failure and a 422 that failed was reported as a completion.
+// These pin the three shapes the callers now have to tell apart.
+//
+// A zero-step workflow is deterministic — its output is its input — so the run path is exercisable here without model credentials.
+// ---------------------------------------------------------------------------
+
+async fn create_zero_step_workflow(h: &Harness, name: &str) -> String {
+    let (status, body) = json_request(
+        h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({"name": name, "steps": []})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    body["workflow_id"]
+        .as_str()
+        .expect("workflow id")
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_run_without_wait_answers_202_carrying_no_output() {
+    let h = boot().await;
+    let wf_id = create_zero_step_workflow(&h, "run-shape-async").await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/{wf_id}/run"),
+        Some(serde_json::json!({"input": "hello"})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "{body:?}");
+    assert!(
+        body["run_id"].as_str().is_some_and(|s| !s.is_empty()),
+        "the async shape must still hand back a pollable run id: {body:?}"
+    );
+    assert!(
+        body["output"].is_null(),
+        "the async shape carries no output by design; a caller that gates success on `output` reads every launch as a failure: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_run_with_a_capped_wait_answers_200_carrying_the_output() {
+    let h = boot().await;
+    let wf_id = create_zero_step_workflow(&h, "run-shape-waited").await;
+
+    // `timeout_ms` is what keeps the run in its own spawned task, so a run slower than the wait survives the request being dropped.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/{wf_id}/run?wait=true&timeout_ms=30000"),
+        Some(serde_json::json!({"input": "hello"})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["output"], "hello", "{body:?}");
+    assert!(
+        body["run_id"].as_str().is_some_and(|s| !s.is_empty()),
+        "a finished run must still name itself: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_run_with_a_capped_wait_404s_for_an_unknown_workflow() {
+    let h = boot().await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows/00000000-0000-0000-0000-000000000000/run?wait=true&timeout_ms=30000",
+        Some(serde_json::json!({"input": "hello"})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(
+        body["message"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("not found"),
+        "the failure has to name the workflow, not arrive as a bare status: {body:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn workflow_save_as_template_unknown_returns_404() {
     let h = boot().await;
@@ -1161,6 +1252,19 @@ async fn cron_job_toggle_unknown_uuid_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_unknown_uuid_returns_404() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/cron/jobs/00000000-0000-0000-0000-000000000000",
+        Some(serde_json::json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // /api/workflow-templates
 // ---------------------------------------------------------------------------
@@ -1457,6 +1561,20 @@ async fn seed_cron_job(h: &Harness) -> String {
         .add_job(job, false)
         .expect("seed cron add_job");
     id.0.to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_rejects_malformed_agent_id_as_bad_request() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/cron/jobs/{id}"),
+        Some(serde_json::json!({"agent_id": "not-a-uuid"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

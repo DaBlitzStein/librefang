@@ -283,7 +283,6 @@ impl HandsControl for AclKernel {}
 impl A2ARegistry for AclKernel {}
 impl ChannelSender for AclKernel {}
 impl PromptStore for AclKernel {}
-impl librefang_kernel_handle::AgentTypeTools for AclKernel {}
 impl WorkflowRunner for AclKernel {}
 impl GoalControl for AclKernel {}
 impl ToolPolicy for AclKernel {}

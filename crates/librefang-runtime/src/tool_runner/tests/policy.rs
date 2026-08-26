@@ -1824,7 +1824,6 @@ impl MemoryAccess for SpawnCheckKernel {
 }
 
 impl WikiAccess for SpawnCheckKernel {}
-impl librefang_kernel_handle::AgentTypeTools for SpawnCheckKernel {}
 
 #[async_trait::async_trait]
 impl TaskQueue for SpawnCheckKernel {

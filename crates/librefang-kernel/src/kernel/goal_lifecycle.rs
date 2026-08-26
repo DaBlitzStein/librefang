@@ -242,8 +242,7 @@ impl LibreFangKernel {
             verify_max_retries,
             evaluator_model,
             tick_interval_secs,
-        );
-        true
+        )
     }
 
     /// Cancel an active goal run, discarding its resume checkpoint.
