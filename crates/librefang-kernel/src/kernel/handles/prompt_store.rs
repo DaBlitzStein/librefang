@@ -120,8 +120,9 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
-        // Propagate store's typed error so InvalidState surfaces as 400, not flattened to 500.
-        store.delete_version(id)
+        store.delete_version(id).map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Failed to delete version: {e}"))
+        })
     }
 
     fn set_active_prompt_version(

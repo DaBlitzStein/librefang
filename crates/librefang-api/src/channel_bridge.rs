@@ -632,47 +632,6 @@ fn resolve_no_pending_message(
     }
 }
 
-impl KernelBridgeAdapter {
-    /// Resolve a channel-binding store lookup to a live `AgentId` (#5671),
-    /// shared by `resolve_conversation_override` and `resolve_instance_default`.
-    ///
-    /// A lookup error, or a bound agent name that no longer resolves to a live
-    /// agent (renamed/removed), is logged and treated as "no binding" so the
-    /// bridge falls through to its legacy chain rather than dropping the message.
-    fn resolve_binding_lookup(
-        &self,
-        lookup: librefang_types::error::LibreFangResult<Option<String>>,
-        instance: &str,
-        conversation_id: Option<&str>,
-    ) -> Option<AgentId> {
-        let agent_name = match lookup {
-            Ok(Some(name)) => name,
-            Ok(None) => return None,
-            Err(e) => {
-                warn!(
-                    instance,
-                    conversation_id = ?conversation_id,
-                    error = %e,
-                    "channel binding lookup failed; falling back to legacy routing"
-                );
-                return None;
-            }
-        };
-        match self.kernel.agent_registry().find_by_name(&agent_name) {
-            Some(entry) => Some(entry.id),
-            None => {
-                warn!(
-                    instance,
-                    conversation_id = ?conversation_id,
-                    agent = %agent_name,
-                    "channel-bound agent not found in registry; falling back to legacy routing"
-                );
-                None
-            }
-        }
-    }
-}
-
 #[async_trait]
 impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String> {
@@ -953,38 +912,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     .map(|ov| ov.group_trigger_patterns.clone())
             })
             .unwrap_or_default()
-    }
-
-    async fn route_assistant_by_metadata_for_channel(
-        &self,
-        channel_type: &str,
-        text: &str,
-    ) -> Option<AgentId> {
-        // Candidate set: every non-hand agent whose channel allowlist admits
-        // this channel (empty allowlist = all channels). Hand the per-agent
-        // alias lists to the channels-crate scorer, which reuses the compiled
-        // regex cache and picks the single clear winner deterministically.
-        let candidates: Vec<(AgentId, Vec<String>)> = self
-            .kernel
-            .agent_registry()
-            .list()
-            .into_iter()
-            .filter(|e| !e.is_hand)
-            .filter(|e| {
-                e.manifest.channels.is_empty()
-                    || e.manifest.channels.iter().any(|c| c == channel_type)
-            })
-            .map(|e| {
-                let patterns = e
-                    .manifest
-                    .channel_overrides
-                    .as_ref()
-                    .map(|ov| ov.group_trigger_patterns.clone())
-                    .unwrap_or_default();
-                (e.id, patterns)
-            })
-            .collect();
-        librefang_channels::bridge::best_alias_match(text, &candidates)
     }
 
     async fn roster_upsert(
@@ -2019,34 +1946,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .unwrap_or_default()
     }
 
-    async fn resolve_conversation_override(
-        &self,
-        instance: &str,
-        conversation_id: &str,
-    ) -> Option<AgentId> {
-        // Upper binding level (#5671): an explicit per-conversation `/agent`
-        // override only. The instance default is resolved separately by
-        // `resolve_instance_default` so the bridge can rank the two levels
-        // around the #5323 sticky holder.
-        let lookup = self
-            .kernel
-            .memory_substrate()
-            .channel_bindings()
-            .conversation_binding(instance, conversation_id);
-        self.resolve_binding_lookup(lookup, instance, Some(conversation_id))
-    }
-
-    async fn resolve_instance_default(&self, instance: &str) -> Option<AgentId> {
-        // Lower binding level (#5671): the instance default seeded from
-        // `[[sidecar_channels]] agent`.
-        let lookup = self
-            .kernel
-            .memory_substrate()
-            .channel_bindings()
-            .instance_default(instance);
-        self.resolve_binding_lookup(lookup, instance, None)
-    }
-
     async fn authorize_channel_user(
         &self,
         channel_type: &str,
@@ -2419,28 +2318,6 @@ fn apply_channel_proxy<A>(
 // EmailCredentials + resolve_email_credentials removed alongside the
 // in-process adapter. See SIDECAR_CATALOG in routes/channels.rs.
 
-/// Seed the router's name->id cache used for binding resolution.
-///
-/// `identities` should enumerate *every defined* agent (the canonical identity
-/// registry), so a binding to an agent that has not been spawned yet still
-/// resolves; `spawned` overlays the live runtime set (which additionally
-/// carries hand-derived `<hand>:<role>` agents that are absent from the
-/// identity registry). Later inserts win, so passing `spawned` last lets the
-/// live id override the canonical one in the (refs #4614: identical) event they
-/// ever diverge.
-fn seed_router_agent_names(
-    router: &AgentRouter,
-    identities: impl IntoIterator<Item = (String, AgentId)>,
-    spawned: impl IntoIterator<Item = (String, AgentId)>,
-) {
-    for (name, id) in identities {
-        router.register_agent(name, id);
-    }
-    for (name, id) in spawned {
-        router.register_agent(name, id);
-    }
-}
-
 /// Start the channel bridge for all configured channels based on kernel config.
 ///
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
@@ -2745,37 +2622,10 @@ pub async fn start_channel_bridge_with_config(
     let bindings = kernel.list_bindings();
     if !bindings.is_empty() {
         // Register all known agents in the router's name cache for binding
-        // resolution. A binding references its target agent by *name*, so the
-        // router must be able to map every bindable name -> AgentId.
-        //
-        // The runtime `agent_registry()` only holds agents that have been
-        // *spawned* (`registry.register()` is called from the spawn path).
-        // Standalone agents that spawn lazily (e.g. first cron fire) — or any
-        // agent reconciled to Suspended after an unclean shutdown — are absent
-        // from it at bridge-startup, so seeding from `list_arcs()` alone leaves
-        // their channel bindings unresolvable: `resolve_binding` matches the
-        // peer_id but the name->id lookup misses, and inbound traffic silently
-        // falls through to the system default agent.
-        //
-        // The canonical identity registry maps *every defined* agent name to
-        // its canonical UUID (== the runtime id once spawned, refs #4614),
-        // independent of spawn state, so seed from it first. Then overlay the
-        // live spawned set, which also covers hand-derived agents (their
-        // namespaced `<hand>:<role>` names are not in the identity registry but
-        // are present once their hand is activated at boot).
-        seed_router_agent_names(
-            &router,
-            kernel
-                .agent_identities()
-                .list()
-                .into_iter()
-                .map(|(name, record)| (name, record.canonical_uuid)),
-            kernel
-                .agent_registry()
-                .list_arcs()
-                .into_iter()
-                .map(|entry| (entry.name.clone(), entry.id)),
-        );
+        // resolution. Read-only iteration; cheap Arc clones (#3569).
+        for entry in kernel.agent_registry().list_arcs() {
+            router.register_agent(entry.name.clone(), entry.id);
+        }
         router.load_bindings(&bindings);
         info!(count = bindings.len(), "Loaded agent bindings into router");
     }
@@ -3022,96 +2872,6 @@ mod tests {
     use super::*;
     use librefang_kernel::event_bus::EventBus;
 
-    // ── seed_router_agent_names: defined-but-unspawned agents ─────
-    //
-    // Regression for inbound channel bindings silently falling through
-    // to the system default agent. A binding references its target by
-    // *name*; the router can only honour it if that name is in its cache.
-    // Standalone agents spawn lazily (first cron fire) or reconcile to
-    // Suspended after an unclean shutdown, so at channel-bridge startup
-    // they are absent from the runtime `agent_registry` (`list_arcs`) —
-    // seeding from spawned agents alone leaves their bindings dead and
-    // inbound traffic lands on the default agent (which lacks all context).
-    // Seeding from the canonical identity registry (every *defined* agent)
-    // fixes it.
-    #[test]
-    fn seed_router_includes_defined_but_unspawned_agents() {
-        use librefang_channels::types::ChannelType;
-        use librefang_types::config::{AgentBinding, BindingMatchRule};
-
-        let unspawned = AgentId::new();
-        let default_agent = AgentId::new();
-        let room = "!room:example.org";
-        let binding = AgentBinding {
-            agent: "lifeos-health".to_string(),
-            match_rule: BindingMatchRule {
-                channel: Some("matrix".to_string()),
-                peer_id: Some(room.to_string()),
-                ..Default::default()
-            },
-        };
-
-        // Old behaviour: seed from the spawned set only. The lazily-spawned
-        // agent is absent, so the binding matches peer_id but the name->id
-        // lookup misses and resolution falls to the system default.
-        let mut buggy = AgentRouter::new();
-        buggy.set_default(default_agent);
-        seed_router_agent_names(&buggy, std::iter::empty(), std::iter::empty());
-        buggy.load_bindings(std::slice::from_ref(&binding));
-        assert_eq!(
-            buggy.resolve(&ChannelType::Matrix, room, None),
-            Some(default_agent),
-            "pre-fix: unspawned bound agent should fall through to default"
-        );
-
-        // Fixed behaviour: seed from the identity registry (every defined
-        // agent), even though nothing is spawned. The binding now resolves
-        // to the intended agent.
-        let mut fixed = AgentRouter::new();
-        fixed.set_default(default_agent);
-        seed_router_agent_names(
-            &fixed,
-            std::iter::once(("lifeos-health".to_string(), unspawned)),
-            std::iter::empty(),
-        );
-        fixed.load_bindings(std::slice::from_ref(&binding));
-        assert_eq!(
-            fixed.resolve(&ChannelType::Matrix, room, None),
-            Some(unspawned),
-            "post-fix: defined-but-unspawned bound agent resolves from identity registry"
-        );
-    }
-
-    // ── seed_router_agent_names: spawned overlays identity ────────
-    #[test]
-    fn seed_router_spawned_overlays_identity() {
-        use librefang_channels::types::ChannelType;
-        use librefang_types::config::{AgentBinding, BindingMatchRule};
-
-        let canonical = AgentId::new();
-        let live = AgentId::new();
-        let mut router = AgentRouter::new();
-        router.set_default(AgentId::new());
-        // Same name in both sets; spawned is applied last and must win.
-        seed_router_agent_names(
-            &router,
-            std::iter::once(("agent-x".to_string(), canonical)),
-            std::iter::once(("agent-x".to_string(), live)),
-        );
-        router.load_bindings(&[AgentBinding {
-            agent: "agent-x".to_string(),
-            match_rule: BindingMatchRule {
-                channel: Some("matrix".to_string()),
-                ..Default::default()
-            },
-        }]);
-        assert_eq!(
-            router.resolve(&ChannelType::Matrix, "anyone", None),
-            Some(live),
-            "spawned (live) id must override the canonical id for the same name"
-        );
-    }
-
     // ── resolve_no_pending_message ───────────────────────────────
     //
     // Telegram / Slack: a user double-tapping the `[Approve]` inline
@@ -3165,94 +2925,6 @@ mod tests {
         let mgr = fresh_approval_manager();
         let msg = resolve_no_pending_message(&mgr, "");
         assert!(msg.contains("No pending approval matching"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn resolve_binding_levels_read_seeded_bindings_through_real_substrate() {
-        // Injection-site guard (#5671): the real `KernelBridgeAdapter` must
-        // override `resolve_conversation_override` / `resolve_instance_default`
-        // to read the channel-binding store and resolve the bound name to a live
-        // `AgentId`. The trait defaults return `None`, so a missing/incorrect
-        // override would silently disable deterministic dispatch while the
-        // bridge's own unit tests (which use a mock handle that overrides the
-        // methods) stay green — exactly the default-None-disables-feature trap
-        // this test exists to catch. It also pins the provenance split: the
-        // instance default and the per-conversation override read distinct
-        // tables, so the dispatcher can rank them around the sticky holder.
-        use librefang_testing::MockKernelBuilder;
-
-        let (kernel, _tmp) = MockKernelBuilder::new().build();
-        // A fresh boot auto-spawns a default `assistant` agent.
-        let assistant = kernel
-            .agent_registry()
-            .find_by_name("assistant")
-            .expect("default assistant agent should exist after boot")
-            .id;
-
-        let adapter = KernelBridgeAdapter {
-            kernel: kernel.clone(),
-            started_at: Instant::now(),
-        };
-
-        // No binding of either level yet -> both fall through (None).
-        assert_eq!(
-            adapter.resolve_instance_default("tg-bot").await,
-            None,
-            "no instance default seeded yet"
-        );
-        assert_eq!(
-            adapter
-                .resolve_conversation_override("tg-bot", "peer-1")
-                .await,
-            None,
-            "no conversation override seeded yet"
-        );
-
-        // Seed an instance default directly (no sidecar subprocess) -> the
-        // lower level resolves it to the live agent id, but the upper level
-        // (conversation override) is still empty — they read distinct tables.
-        kernel
-            .memory_substrate()
-            .channel_bindings()
-            .seed_instance_default("tg-bot", "assistant")
-            .expect("seed must succeed");
-        assert_eq!(
-            adapter.resolve_instance_default("tg-bot").await,
-            Some(assistant),
-            "the kernel adapter must resolve the seeded instance default to the live agent id"
-        );
-        assert_eq!(
-            adapter
-                .resolve_conversation_override("tg-bot", "peer-1")
-                .await,
-            None,
-            "an instance default must NOT be visible to the conversation-override lookup"
-        );
-
-        // Seed a per-conversation override -> the upper level now resolves it.
-        kernel
-            .memory_substrate()
-            .channel_bindings()
-            .set_conversation_binding("tg-bot", "peer-1", "assistant", "user")
-            .expect("override seed must succeed");
-        assert_eq!(
-            adapter
-                .resolve_conversation_override("tg-bot", "peer-1")
-                .await,
-            Some(assistant),
-            "the kernel adapter must resolve the seeded conversation override to the live agent id"
-        );
-
-        // A binding pointing at a non-existent agent yields None (graceful
-        // fallback rather than dropping the message), at both levels.
-        kernel
-            .memory_substrate()
-            .channel_bindings()
-            .seed_instance_default("ghost-bot", "does-not-exist")
-            .unwrap();
-        assert_eq!(adapter.resolve_instance_default("ghost-bot").await, None);
-
-        kernel.shutdown();
     }
 
     #[test]

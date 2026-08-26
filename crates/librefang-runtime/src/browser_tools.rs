@@ -4,32 +4,20 @@
 //! (`crate::web_fetch::check_ssrf`, `crate::web_content::wrap_external_content`)
 //! stays next to the rest of the tool dispatchers in `tool_runner/` rather
 //! than mixed with the CDP/WebSocket transport in `browser.rs`.
-//!
-//! Migrated from `Result<String, String>` to `Result<String, ToolError>`
-//! (#3576): missing params map to `MissingParameter`, a blocked/invalid URL to
-//! `InvalidParameter`, and CDP transport / command failures to `Upstream` via
-//! `upstream_msg`. The dispatch boundary previously narrowed every error to
-//! `upstream_msg`; the typed variants now flow through `tool_result_from_typed`.
 
 use crate::browser::{BrowserCommand, BrowserManager};
-use crate::tool_runner::ToolError;
 
 pub async fn tool_browser_navigate(
     input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
-) -> Result<String, ToolError> {
-    let url = input["url"]
-        .as_str()
-        .ok_or(ToolError::MissingParameter("url"))?;
+) -> Result<String, String> {
+    let url = input["url"].as_str().ok_or("Missing 'url' parameter")?;
     // Browser navigation goes through CDP/WebSocket, not reqwest, so DNS-pinning
     // the resolved address is not possible here. We still call check_ssrf to
     // validate the URL scheme and reject IPs that resolve to internal/loopback
     // ranges; the SsrfResolution result is intentionally discarded.
-    let _ = crate::web_fetch::check_ssrf(url, &[]).map_err(|e| ToolError::InvalidParameter {
-        name: "url",
-        reason: e,
-    })?;
+    let _ = crate::web_fetch::check_ssrf(url, &[])?;
 
     let resp = mgr
         .send_command(
@@ -38,12 +26,9 @@ pub async fn tool_browser_navigate(
                 url: url.to_string(),
             },
         )
-        .await
-        .map_err(ToolError::upstream_msg)?;
+        .await?;
     if !resp.success {
-        return Err(ToolError::upstream_msg(
-            resp.error.unwrap_or_else(|| "Navigate failed".to_string()),
-        ));
+        return Err(resp.error.unwrap_or_else(|| "Navigate failed".to_string()));
     }
 
     let data = resp.data.unwrap_or_default();
@@ -62,10 +47,10 @@ pub async fn tool_browser_click(
     input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
-) -> Result<String, ToolError> {
+) -> Result<String, String> {
     let selector = input["selector"]
         .as_str()
-        .ok_or(ToolError::MissingParameter("selector"))?;
+        .ok_or("Missing 'selector' parameter")?;
 
     let resp = mgr
         .send_command(
@@ -74,12 +59,9 @@ pub async fn tool_browser_click(
                 selector: selector.to_string(),
             },
         )
-        .await
-        .map_err(ToolError::upstream_msg)?;
+        .await?;
     if !resp.success {
-        return Err(ToolError::upstream_msg(
-            resp.error.unwrap_or_else(|| "Click failed".to_string()),
-        ));
+        return Err(resp.error.unwrap_or_else(|| "Click failed".to_string()));
     }
 
     let data = resp.data.unwrap_or_default();
@@ -93,13 +75,11 @@ pub async fn tool_browser_type(
     input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
-) -> Result<String, ToolError> {
+) -> Result<String, String> {
     let selector = input["selector"]
         .as_str()
-        .ok_or(ToolError::MissingParameter("selector"))?;
-    let text = input["text"]
-        .as_str()
-        .ok_or(ToolError::MissingParameter("text"))?;
+        .ok_or("Missing 'selector' parameter")?;
+    let text = input["text"].as_str().ok_or("Missing 'text' parameter")?;
 
     let resp = mgr
         .send_command(
@@ -109,12 +89,9 @@ pub async fn tool_browser_type(
                 text: text.to_string(),
             },
         )
-        .await
-        .map_err(ToolError::upstream_msg)?;
+        .await?;
     if !resp.success {
-        return Err(ToolError::upstream_msg(
-            resp.error.unwrap_or_else(|| "Type failed".to_string()),
-        ));
+        return Err(resp.error.unwrap_or_else(|| "Type failed".to_string()));
     }
     Ok(format!("Typed into {selector}: {text}"))
 }
@@ -125,16 +102,14 @@ pub async fn tool_browser_screenshot(
     mgr: &BrowserManager,
     agent_id: &str,
     upload_dir: &std::path::Path,
-) -> Result<String, ToolError> {
+) -> Result<String, String> {
     let resp = mgr
         .send_command(agent_id, BrowserCommand::Screenshot)
-        .await
-        .map_err(ToolError::upstream_msg)?;
+        .await?;
     if !resp.success {
-        return Err(ToolError::upstream_msg(
-            resp.error
-                .unwrap_or_else(|| "Screenshot failed".to_string()),
-        ));
+        return Err(resp
+            .error
+            .unwrap_or_else(|| "Screenshot failed".to_string()));
     }
 
     let data = resp.data.unwrap_or_default();
@@ -167,15 +142,10 @@ pub async fn tool_browser_read_page(
     _input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
-) -> Result<String, ToolError> {
-    let resp = mgr
-        .send_command(agent_id, BrowserCommand::ReadPage)
-        .await
-        .map_err(ToolError::upstream_msg)?;
+) -> Result<String, String> {
+    let resp = mgr.send_command(agent_id, BrowserCommand::ReadPage).await?;
     if !resp.success {
-        return Err(ToolError::upstream_msg(
-            resp.error.unwrap_or_else(|| "ReadPage failed".to_string()),
-        ));
+        return Err(resp.error.unwrap_or_else(|| "ReadPage failed".to_string()));
     }
 
     let data = resp.data.unwrap_or_default();
@@ -192,7 +162,7 @@ pub async fn tool_browser_close(
     _input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
-) -> Result<String, ToolError> {
+) -> Result<String, String> {
     mgr.close_session(agent_id).await;
     Ok("Browser session closed.".to_string())
 }
@@ -202,18 +172,15 @@ pub async fn tool_browser_scroll(
     input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
-) -> Result<String, ToolError> {
+) -> Result<String, String> {
     let direction = input["direction"].as_str().unwrap_or("down").to_string();
     let amount = input["amount"].as_i64().unwrap_or(600) as i32;
 
     let resp = mgr
         .send_command(agent_id, BrowserCommand::Scroll { direction, amount })
-        .await
-        .map_err(ToolError::upstream_msg)?;
+        .await?;
     if !resp.success {
-        return Err(ToolError::upstream_msg(
-            resp.error.unwrap_or_else(|| "Scroll failed".to_string()),
-        ));
+        return Err(resp.error.unwrap_or_else(|| "Scroll failed".to_string()));
     }
     let data = resp.data.unwrap_or_default();
     Ok(format!(
@@ -227,10 +194,10 @@ pub async fn tool_browser_wait(
     input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
-) -> Result<String, ToolError> {
+) -> Result<String, String> {
     let selector = input["selector"]
         .as_str()
-        .ok_or(ToolError::MissingParameter("selector"))?;
+        .ok_or("Missing 'selector' parameter")?;
     let timeout_ms = input["timeout_ms"].as_u64().unwrap_or(5000);
 
     let resp = mgr
@@ -241,12 +208,9 @@ pub async fn tool_browser_wait(
                 timeout_ms,
             },
         )
-        .await
-        .map_err(ToolError::upstream_msg)?;
+        .await?;
     if !resp.success {
-        return Err(ToolError::upstream_msg(
-            resp.error.unwrap_or_else(|| "Wait timed out".to_string()),
-        ));
+        return Err(resp.error.unwrap_or_else(|| "Wait timed out".to_string()));
     }
     Ok(format!("Element found: {selector}"))
 }
@@ -256,10 +220,10 @@ pub async fn tool_browser_run_js(
     input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
-) -> Result<String, ToolError> {
+) -> Result<String, String> {
     let expression = input["expression"]
         .as_str()
-        .ok_or(ToolError::MissingParameter("expression"))?;
+        .ok_or("Missing 'expression' parameter")?;
 
     let resp = mgr
         .send_command(
@@ -268,13 +232,11 @@ pub async fn tool_browser_run_js(
                 expression: expression.to_string(),
             },
         )
-        .await
-        .map_err(ToolError::upstream_msg)?;
+        .await?;
     if !resp.success {
-        return Err(ToolError::upstream_msg(
-            resp.error
-                .unwrap_or_else(|| "JS execution failed".to_string()),
-        ));
+        return Err(resp
+            .error
+            .unwrap_or_else(|| "JS execution failed".to_string()));
     }
     let data = resp.data.unwrap_or_default();
     Ok(serde_json::to_string_pretty(&data["result"]).unwrap_or_else(|_| "null".to_string()))
@@ -285,15 +247,10 @@ pub async fn tool_browser_back(
     _input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
-) -> Result<String, ToolError> {
-    let resp = mgr
-        .send_command(agent_id, BrowserCommand::Back)
-        .await
-        .map_err(ToolError::upstream_msg)?;
+) -> Result<String, String> {
+    let resp = mgr.send_command(agent_id, BrowserCommand::Back).await?;
     if !resp.success {
-        return Err(ToolError::upstream_msg(
-            resp.error.unwrap_or_else(|| "Back failed".to_string()),
-        ));
+        return Err(resp.error.unwrap_or_else(|| "Back failed".to_string()));
     }
     let data = resp.data.unwrap_or_default();
     let title = data["title"].as_str().unwrap_or("(no title)");

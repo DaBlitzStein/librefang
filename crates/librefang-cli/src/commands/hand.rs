@@ -26,32 +26,16 @@ pub(crate) fn cmd_hand_install(path: &str) {
 
     if !toml_path.exists() {
         eprintln!(
-            "{}",
-            i18n::t_args(
-                "hand-install-error-no-toml",
-                &[(
-                    "path",
-                    &dir.canonicalize()
-                        .unwrap_or_else(|_| dir.to_path_buf())
-                        .display()
-                        .to_string()
-                )]
-            )
+            "Error: No HAND.toml found in {}",
+            dir.canonicalize()
+                .unwrap_or_else(|_| dir.to_path_buf())
+                .display()
         );
         std::process::exit(1);
     }
 
     let toml_content = std::fs::read_to_string(&toml_path).unwrap_or_else(|e| {
-        eprintln!(
-            "{}",
-            i18n::t_args(
-                "hand-install-error-read-toml",
-                &[
-                    ("path", &toml_path.display().to_string()),
-                    ("error", &e.to_string())
-                ]
-            )
-        );
+        eprintln!("Error reading {}: {e}", toml_path.display());
         std::process::exit(1);
     });
     let skill_content = std::fs::read_to_string(&skill_path).unwrap_or_default();
@@ -68,26 +52,18 @@ pub(crate) fn cmd_hand_install(path: &str) {
     );
 
     if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
-        eprintln!("{}", i18n::t_args("hand-error-prefix", &[("error", err)]));
+        eprintln!("Error: {err}");
         std::process::exit(1);
     }
 
     println!(
-        "{}",
-        i18n::t_args(
-            "hand-installed-success",
-            &[
-                ("name", body["name"].as_str().unwrap_or("?")),
-                ("id", body["id"].as_str().unwrap_or("?"))
-            ]
-        )
+        "Installed hand: {} ({})",
+        body["name"].as_str().unwrap_or("?"),
+        body["id"].as_str().unwrap_or("?"),
     );
     println!(
-        "{}",
-        i18n::t_args(
-            "hand-activate-hint",
-            &[("id", body["id"].as_str().unwrap_or("?"))]
-        )
+        "Use `librefang hand activate {}` to start it.",
+        body["id"].as_str().unwrap_or("?")
     );
 }
 
@@ -110,19 +86,10 @@ pub(crate) fn cmd_hand_list() {
     }
     if let Some(arr) = Some(&arr_val) {
         if arr.is_empty() {
-            println!("{}", i18n::t("hand-none-available"));
+            println!("No hands available.");
             return;
         }
-        let header_id = i18n::t("label-header-id");
-        let header_name = i18n::t("label-header-name");
-        let header_category = i18n::t("label-header-category");
-        let header_description = i18n::t("label-header-description");
-        let mut t = crate::table::Table::new(&[
-            &header_id,
-            &header_name,
-            &header_category,
-            &header_description,
-        ]);
+        let mut t = crate::table::Table::new(&["ID", "NAME", "CATEGORY", "DESCRIPTION"]);
         for h in arr {
             t.add_row(&[
                 h["id"].as_str().unwrap_or("?"),
@@ -137,8 +104,7 @@ pub(crate) fn cmd_hand_list() {
             ]);
         }
         t.print();
-        println!();
-        println!("{}", i18n::t("hand-list-activate-hint"));
+        println!("\nUse `librefang hand activate <id>` to activate a hand.");
     }
 }
 
@@ -147,19 +113,10 @@ pub(crate) fn cmd_hand_active() {
     let client = daemon_client();
     let arr = fetch_active_hand_instances(&base, &client);
     if arr.is_empty() {
-        println!("{}", i18n::t("hand-none-active"));
+        println!("No active hands.");
         return;
     }
-    let header_instance = i18n::t("label-header-instance");
-    let header_hand = i18n::t("label-header-hand");
-    let header_status = i18n::t("label-header-status");
-    let header_agent = i18n::t("label-header-agent");
-    let mut t = crate::table::Table::new(&[
-        &header_instance,
-        &header_hand,
-        &header_status,
-        &header_agent,
-    ]);
+    let mut t = crate::table::Table::new(&["INSTANCE", "HAND", "STATUS", "AGENT"]);
     for i in &arr {
         t.add_row(&[
             i["instance_id"].as_str().unwrap_or("?"),
@@ -190,34 +147,30 @@ pub(crate) fn cmd_hand_status(id: Option<&str>) {
         let instance_id = instance["instance_id"].as_str().unwrap_or("?");
         let agent_name = instance["agent_name"].as_str().unwrap_or("?");
 
-        ui::section(&i18n::t("hand-status-title"));
-        ui::kv(&i18n::t("label-hand"), hand_id);
-        ui::kv(&i18n::t("label-name"), name);
-        ui::kv(&i18n::t("label-instance"), instance_id);
-        ui::kv(&i18n::t("label-status"), status);
-        ui::kv(&i18n::t("label-agent"), agent_name);
+        ui::section("Hand Status");
+        ui::kv("Hand", hand_id);
+        ui::kv("Name", name);
+        ui::kv("Instance", instance_id);
+        ui::kv("Status", status);
+        ui::kv("Agent", agent_name);
         return;
     }
 
     let hand_body = daemon_json(client.get(format!("{base}/api/hands/{id}")).send());
     if hand_body.get("error").is_some() {
-        ui::error(&i18n::t_args("hand-not-found", &[("id", id)]));
+        ui::error(&format!(
+            "No active hand or installed hand found for '{id}'."
+        ));
         std::process::exit(1);
     }
 
-    ui::section(&i18n::t("hand-status-title"));
-    ui::kv(
-        &i18n::t("label-hand"),
-        hand_body["id"].as_str().unwrap_or(id),
-    );
-    ui::kv(
-        &i18n::t("label-name"),
-        hand_body["name"].as_str().unwrap_or(id),
-    );
-    ui::kv(&i18n::t("label-status"), &i18n::t("label-status-inactive"));
+    ui::section("Hand Status");
+    ui::kv("Hand", hand_body["id"].as_str().unwrap_or(id));
+    ui::kv("Name", hand_body["name"].as_str().unwrap_or(id));
+    ui::kv("Status", "inactive");
     if let Some(description) = hand_body["description"].as_str() {
         if !description.is_empty() {
-            ui::kv(&i18n::t("label-description"), description);
+            ui::kv("Description", description);
         }
     }
 }
@@ -234,27 +187,16 @@ pub(crate) fn cmd_hand_activate(id: &str) {
     );
     if body.get("instance_id").is_some() {
         println!(
-            "{}",
-            i18n::t_args(
-                "hand-activated-success",
-                &[
-                    ("id", id),
-                    ("instance", body["instance_id"].as_str().unwrap_or("?")),
-                    ("agent", body["agent_name"].as_str().unwrap_or("?"))
-                ]
-            )
+            "Hand '{}' activated (instance: {}, agent: {})",
+            id,
+            body["instance_id"].as_str().unwrap_or("?"),
+            body["agent_name"].as_str().unwrap_or("?"),
         );
     } else {
-        let err_fallback = i18n::t("error-unknown");
         eprintln!(
-            "{}",
-            i18n::t_args(
-                "hand-activate-failed",
-                &[
-                    ("id", id),
-                    ("error", body["error"].as_str().unwrap_or(&err_fallback))
-                ]
-            )
+            "Failed to activate hand '{}': {}",
+            id,
+            body["error"].as_str().unwrap_or("Unknown error")
         );
         std::process::exit(1);
     }
@@ -281,24 +223,17 @@ pub(crate) fn cmd_hand_deactivate(id: &str) {
                     .send(),
             );
             if body.get("status").is_some() {
-                println!(
-                    "{}",
-                    i18n::t_args("hand-deactivated-success", &[("id", id)])
-                );
+                println!("Hand '{id}' deactivated.");
             } else {
-                let err_fallback = i18n::t("error-unknown");
                 eprintln!(
-                    "{}",
-                    i18n::t_args(
-                        "label-failed-reason",
-                        &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
-                    )
+                    "Failed: {}",
+                    body["error"].as_str().unwrap_or("Unknown error")
                 );
                 std::process::exit(1);
             }
         }
         None => {
-            eprintln!("{}", i18n::t_args("hand-no-active-instance", &[("id", id)]));
+            eprintln!("No active instance found for hand '{id}'.");
             std::process::exit(1);
         }
     }
@@ -309,13 +244,7 @@ pub(crate) fn cmd_hand_info(id: &str) {
     let client = daemon_client();
     let body = daemon_json(client.get(format!("{base}/api/hands/{id}")).send());
     if body.get("error").is_some() {
-        eprintln!(
-            "{}",
-            i18n::t_args(
-                "hand-info-not-found",
-                &[("error", body["error"].as_str().unwrap_or(id))]
-            )
-        );
+        eprintln!("Hand not found: {}", body["error"].as_str().unwrap_or(id));
         std::process::exit(1);
     }
     println!(
@@ -333,9 +262,9 @@ pub(crate) fn cmd_hand_check_deps(id: &str) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&i18n::t_args(
-            "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
         ));
     } else {
         println!(
@@ -354,9 +283,9 @@ pub(crate) fn cmd_hand_install_deps(id: &str) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&i18n::t_args(
-            "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
         ));
     } else {
         ui::success(&i18n::t_args("hand-install-deps-success", &[("id", id)]));
@@ -388,15 +317,15 @@ pub(crate) fn cmd_hand_pause(id: &str) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&i18n::t_args(
-            "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
         ));
         std::process::exit(1);
     } else {
         ui::success(&i18n::t_args(
             "hand-paused",
-            &[("label", hand_label), ("instance_id", instance_id)],
+            &[("id", &format!("{hand_label} (instance: {instance_id})"))],
         ));
     }
 }
@@ -420,15 +349,15 @@ pub(crate) fn cmd_hand_resume(id: &str) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&i18n::t_args(
-            "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
         ));
         std::process::exit(1);
     } else {
         ui::success(&i18n::t_args(
             "hand-resumed",
-            &[("label", hand_label), ("instance_id", instance_id)],
+            &[("id", &format!("{hand_label} (instance: {instance_id})"))],
         ));
     }
 }
@@ -438,23 +367,23 @@ pub(crate) fn cmd_hand_settings(id: &str) {
     let client = daemon_client();
     let body = daemon_json(client.get(format!("{base}/api/hands/{id}/settings")).send());
     if body.get("error").is_some() {
-        ui::error(&i18n::t_args(
-            "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
         ));
         std::process::exit(1);
     }
     if let Some(config) = body.get("config").and_then(|c| c.as_object()) {
         if config.is_empty() {
-            ui::step(&i18n::t_args("hand-no-settings", &[("id", id)]));
+            ui::step(&format!("Hand '{id}' has no configurable settings."));
         } else {
-            ui::section(&i18n::t_args("hand-settings-title", &[("id", id)]));
+            ui::section(&format!("Settings for '{id}'"));
             for (k, v) in config {
                 println!("  {}: {}", k.bold(), v);
             }
         }
     } else {
-        ui::step(&i18n::t_args("hand-no-settings", &[("id", id)]));
+        ui::step(&format!("Hand '{id}' has no configurable settings."));
     }
 }
 
@@ -473,16 +402,13 @@ pub(crate) fn cmd_hand_set(id: &str, key: &str, value: &str) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&i18n::t_args(
-            "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
         ));
         std::process::exit(1);
     }
-    ui::success(&i18n::t_args(
-        "hand-set-setting-success",
-        &[("key", key), ("value", value), ("id", id)],
-    ));
+    ui::success(&format!("Set {key}={value} for hand '{id}'."));
 }
 
 pub(crate) fn cmd_hand_reload() {
@@ -490,22 +416,17 @@ pub(crate) fn cmd_hand_reload() {
     let client = daemon_client();
     let body = daemon_json(client.post(format!("{base}/api/hands/reload")).send());
     if body.get("error").is_some() {
-        ui::error(&i18n::t_args(
-            "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
         ));
         std::process::exit(1);
     }
     let added = body["added"].as_u64().unwrap_or(0);
     let updated = body["updated"].as_u64().unwrap_or(0);
     let total = body["total"].as_u64().unwrap_or(0);
-    ui::success(&i18n::t_args(
-        "hand-reloaded-summary",
-        &[
-            ("added", &added.to_string()),
-            ("updated", &updated.to_string()),
-            ("total", &total.to_string()),
-        ],
+    ui::success(&format!(
+        "Reloaded hands: {added} added, {updated} updated, {total} total."
     ));
 }
 
@@ -516,8 +437,8 @@ pub(crate) fn cmd_hand_chat(id: &str) {
     let resolved = match resolve_hand_instance(&active, id) {
         Some(instance) => instance,
         None => {
-            ui::error(&i18n::t_args("hand-no-active-instance", &[("id", id)]));
-            ui::hint(&i18n::t("hand-list-activate-hint"));
+            ui::error(&format!("No active hand instance found for '{id}'."));
+            ui::hint("Activate it first: librefang hand activate");
             std::process::exit(1);
         }
     };
@@ -534,14 +455,14 @@ pub(crate) fn cmd_hand_chat(id: &str) {
 
     println!(
         "{} {} {}",
-        i18n::t("label-chat-with").bold(),
+        "Chat with".bold(),
         hand_name.cyan().bold(),
-        i18n::t("hand-chat-quit-hint").dimmed()
+        "(type /quit to exit)".dimmed()
     );
     println!();
 
     loop {
-        print!("{} ", i18n::t("hand-chat-prompt-you").green().bold());
+        print!("{} ", "you >".green().bold());
         io::stdout().flush().unwrap();
         let mut line = String::new();
         if io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
@@ -565,13 +486,11 @@ pub(crate) fn cmd_hand_chat(id: &str) {
             ui::error(err);
             continue;
         }
-        let no_resp_fallback = i18n::t("label-no-response");
         let reply = body["response"]
             .as_str()
             .or_else(|| body["reply"].as_str())
-            .unwrap_or(&no_resp_fallback);
-        println!("{} {}", format!("{} >", hand_name).cyan().bold(), reply);
-        println!();
+            .unwrap_or("[no response]");
+        println!("{} {}\n", format!("{hand_name} >").cyan().bold(), reply);
     }
 }
 

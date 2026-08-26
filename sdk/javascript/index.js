@@ -304,10 +304,6 @@ class AgentsResource {
     return this._c._request("POST", `/api/agents/${id}/session/compact`);
   }
 
-  async getAgentSessionContext(id, query) {
-    return this._c._request("GET", `/api/agents/${id}/session/context`, undefined, query);
-  }
-
   async rebootSession(id) {
     return this._c._request("POST", `/api/agents/${id}/session/reboot`);
   }
@@ -484,30 +480,6 @@ class AuthResource {
     return this._c._request("POST", "/api/auth/logout");
   }
 
-  async authenticationOptions(data) {
-    return this._c._request("POST", "/api/auth/passkey/authentication-options", data, undefined);
-  }
-
-  async authenticationVerify(data) {
-    return this._c._request("POST", "/api/auth/passkey/authentication-verify", data, undefined);
-  }
-
-  async listCredentials() {
-    return this._c._request("GET", "/api/auth/passkey/credentials");
-  }
-
-  async revokeCredential(id) {
-    return this._c._request("DELETE", `/api/auth/passkey/credentials/${id}`);
-  }
-
-  async registrationOptions(data) {
-    return this._c._request("POST", "/api/auth/passkey/registration-options", data, undefined);
-  }
-
-  async registrationVerify(data) {
-    return this._c._request("POST", "/api/auth/passkey/registration-verify", data, undefined);
-  }
-
   async authProviders() {
     return this._c._request("GET", "/api/auth/providers");
   }
@@ -628,10 +600,6 @@ class ChannelsResource {
 
   async reloadChannels() {
     return this._c._request("POST", "/api/channels/reload");
-  }
-
-  async deleteSidecarChannel(name) {
-    return this._c._request("DELETE", `/api/channels/sidecar/${name}`);
   }
 
   async configureSidecarChannel(name, data) {

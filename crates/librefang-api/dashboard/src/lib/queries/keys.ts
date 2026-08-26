@@ -31,12 +31,6 @@ export const agentKeys = {
     [...agentKeys.all, "session", agentId] as const,
   session: (agentId: string, sessionId?: string | null) =>
     [...agentKeys.sessionSnapshots(agentId), sessionId ?? null] as const,
-  // Context-window usage snapshot for a session — backs the chat header
-  // indicator. Anchored under `sessionSnapshots` so it shares the same
-  // (agent, session) invalidation subtree, but kept on its own leaf so
-  // polling the indicator does not churn the heavy history snapshot cache.
-  sessionContext: (agentId: string, sessionId?: string | null) =>
-    [...agentKeys.sessionSnapshots(agentId), sessionId ?? null, "context"] as const,
   stats: (agentId: string) =>
     [...agentKeys.all, "stats", agentId] as const,
   events: (agentId: string, limit: number) =>
@@ -54,26 +48,6 @@ export const agentKeys = {
   // PUT only invalidates the skill read, not the tool read.
   skills: (agentId: string) =>
     [...agentKeys.all, "skills", agentId] as const,
-};
-
-// Central prompt repository (#6160). The fleet-wide overview
-// (`GET /api/prompts/overview`) is a genuinely new endpoint and gets its
-// own domain key. Per-agent version lists keep using
-// `agentKeys.promptVersions(agentId)` — that read hits the same
-// `/agents/{id}/prompts/versions` endpoint the existing prompt-version
-// hooks subscribe to, so caching it under one key avoids a duplicate
-// subscription to the same data.
-export const promptsKeys = {
-  all: ["prompts"] as const,
-  lists: () => [...promptsKeys.all, "list"] as const,
-  // The overview is the only fleet-wide list today; tag it with a distinguishing
-  // segment so `list()` is strictly more specific than `lists()`. This keeps the
-  // two-level invariant intact — `invalidateQueries({ queryKey: lists() })` still
-  // matches the overview, while a future `list(filters)` slots in as a sibling
-  // without a breaking rename of the current key.
-  list: () => [...promptsKeys.lists(), "overview"] as const,
-  details: () => [...promptsKeys.all, "detail"] as const,
-  detail: (agentId: string) => [...promptsKeys.details(), agentId] as const,
 };
 
 export const toolKeys = {
@@ -278,12 +252,6 @@ export const approvalKeys = {
 export const totpKeys = {
   all: ["totp"] as const,
   status: () => [...totpKeys.all, "status"] as const,
-};
-
-export const passkeyKeys = {
-  all: ["passkeys"] as const,
-  lists: () => [...passkeyKeys.all, "list"] as const,
-  list: () => [...passkeyKeys.lists()] as const,
 };
 
 export const memoryKeys = {

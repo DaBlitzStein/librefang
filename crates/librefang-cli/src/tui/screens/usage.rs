@@ -184,11 +184,7 @@ impl UsageState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut UsageState) {
-    let inner = widgets::render_screen_block(
-        f,
-        area,
-        &format!("{} {}", "\u{25b4}", crate::i18n::t("tui-usage-title")),
-    );
+    let inner = widgets::render_screen_block(f, area, "\u{25b4} Usage");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -210,16 +206,16 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut UsageState) {
     }
 
     f.render_widget(
-        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-usage-hints"))),
+        widgets::hint_bar("  [1] Summary  [2] By Model  [3] By Agent  [r] Refresh"),
         chunks[3],
     );
 }
 
 fn draw_sub_tabs(f: &mut Frame, area: Rect, active: UsageSub) {
     let tabs = [
-        (UsageSub::Summary, crate::i18n::t("tui-usage-tab-summary")),
-        (UsageSub::ByModel, crate::i18n::t("tui-usage-tab-model")),
-        (UsageSub::ByAgent, crate::i18n::t("tui-usage-tab-agent")),
+        (UsageSub::Summary, "1 Summary"),
+        (UsageSub::ByModel, "2 By Model"),
+        (UsageSub::ByAgent, "3 By Agent"),
     ];
     let mut spans = vec![Span::raw("  ")];
     for (i, (sub, label)) in tabs.iter().enumerate() {
@@ -231,12 +227,12 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: UsageSub) {
         }
         if *sub == active {
             spans.push(Span::styled(
-                format!(" {} {} ", "\u{25cf}", label),
+                format!(" \u{25cf} {label} "),
                 theme::tab_active(),
             ));
         } else {
             spans.push(Span::styled(
-                format!(" {} {} ", "\u{25cb}", label),
+                format!(" \u{25cb} {label} "),
                 theme::tab_inactive(),
             ));
         }
@@ -247,7 +243,7 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: UsageSub) {
 fn draw_summary(f: &mut Frame, area: Rect, state: &UsageState) {
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, &crate::i18n::t("tui-usage-loading")),
+            widgets::spinner(state.tick, "Loading usage data\u{2026}"),
             area,
         );
         return;
@@ -264,28 +260,28 @@ fn draw_summary(f: &mut Frame, area: Rect, state: &UsageState) {
     draw_stat_card(
         f,
         cols[0],
-        &crate::i18n::t("tui-usage-card-input"),
+        "Input Tokens",
         &format_tokens(state.summary.total_input_tokens),
         theme::BLUE,
     );
     draw_stat_card(
         f,
         cols[1],
-        &crate::i18n::t("tui-usage-card-output"),
+        "Output Tokens",
         &format_tokens(state.summary.total_output_tokens),
         theme::GREEN,
     );
     draw_stat_card(
         f,
         cols[2],
-        &crate::i18n::t("tui-usage-card-cost"),
+        "Total Cost",
         &format!("${:.4}", state.summary.total_cost_usd),
         theme::YELLOW,
     );
     draw_stat_card(
         f,
         cols[3],
-        &crate::i18n::t("tui-usage-card-calls"),
+        "API Calls",
         &format_tokens(state.summary.total_calls),
         theme::CYAN,
     );
@@ -338,11 +334,7 @@ fn draw_by_model(f: &mut Frame, area: Rect, state: &mut UsageState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<28} {:<14} {:<14} {:<10} {}",
-                crate::i18n::t("tui-usage-header-model"),
-                crate::i18n::t("tui-usage-header-input"),
-                crate::i18n::t("tui-usage-header-output"),
-                crate::i18n::t("tui-usage-header-cost"),
-                crate::i18n::t("tui-usage-header-calls")
+                "Model", "Input Tokens", "Output Tokens", "Cost", "Calls"
             ),
             theme::table_header(),
         )])),
@@ -350,13 +342,10 @@ fn draw_by_model(f: &mut Frame, area: Rect, state: &mut UsageState) {
     );
 
     if state.loading {
-        f.render_widget(
-            widgets::spinner(state.tick, &crate::i18n::t("tui-usage-loading-simple")),
-            chunks[1],
-        );
+        f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
     } else if state.by_model.is_empty() {
         f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-usage-empty")),
+            widgets::empty_state("No usage data. Send messages to see token stats."),
             chunks[1],
         );
     } else {
@@ -402,10 +391,7 @@ fn draw_by_agent(f: &mut Frame, area: Rect, state: &mut UsageState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<24} {:<16} {:<12} {}",
-                crate::i18n::t("tui-usage-header-agent"),
-                crate::i18n::t("tui-usage-header-total-tokens"),
-                crate::i18n::t("tui-usage-header-cost"),
-                crate::i18n::t("tui-usage-header-tool-calls")
+                "Agent", "Total Tokens", "Cost", "Tool Calls"
             ),
             theme::table_header(),
         )])),
@@ -413,13 +399,10 @@ fn draw_by_agent(f: &mut Frame, area: Rect, state: &mut UsageState) {
     );
 
     if state.loading {
-        f.render_widget(
-            widgets::spinner(state.tick, &crate::i18n::t("tui-usage-loading-simple")),
-            chunks[1],
-        );
+        f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
     } else if state.by_agent.is_empty() {
         f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-usage-empty")),
+            widgets::empty_state("No usage data. Send messages to see token stats."),
             chunks[1],
         );
     } else {

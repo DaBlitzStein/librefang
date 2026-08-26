@@ -68,19 +68,10 @@ pub(crate) fn cmd_security_audit(limit: usize, json: bool) {
         .or_else(|| body.as_array())
     {
         if arr.is_empty() {
-            println!("{}", i18n::t("monitoring-no-audit"));
+            println!("No audit entries.");
             return;
         }
-        let header_timestamp = i18n::t("label-header-timestamp");
-        let header_agent = i18n::t("label-header-agent");
-        let header_type = i18n::t("label-header-type");
-        let header_event = i18n::t("label-header-event");
-        let mut t = crate::table::Table::new(&[
-            &header_timestamp,
-            &header_agent,
-            &header_type,
-            &header_event,
-        ]);
+        let mut t = crate::table::Table::new(&["TIMESTAMP", "AGENT", "TYPE", "EVENT"]);
         for entry in arr {
             let agent_id = entry["agent_id"].as_str().unwrap_or("");
             let agent_col = if agent_id.len() > 16 {
@@ -155,54 +146,36 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     };
 
     if !confirm {
-        ui::error(&i18n::t("monitoring-audit-reset-destructive"));
+        ui::error("audit reset is destructive — re-run with `--confirm` to proceed");
         ui::blank();
-        println!("{}", i18n::t("monitoring-audit-reset-would-header"));
+        println!("  Would:");
         println!(
-            "{}",
-            i18n::t_args(
-                "monitoring-audit-reset-would-delete",
-                &[("path", &db_path.display().to_string())]
-            )
+            "    1. DELETE all rows from `audit_entries` in {}",
+            db_path.display()
         );
-        println!(
-            "{}",
-            i18n::t_args(
-                "monitoring-audit-reset-would-remove-anchor",
-                &[("path", &anchor_path.display().to_string())]
-            )
-        );
-        println!("{}", i18n::t("monitoring-audit-reset-would-restart"));
+        println!("    2. Remove anchor file {}", anchor_path.display());
+        println!("  The Merkle chain will restart from the next audit event.");
         std::process::exit(1);
     }
 
     // Refuse if daemon is running — SQLite writer lock would block or corrupt.
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
-            &i18n::t_args("monitoring-daemon-running-error", &[("url", &base)]),
-            &i18n::t("monitoring-daemon-running-error-fix"),
+            &format!("daemon is running at {base}; refusing to touch the audit database"),
+            "stop the daemon first: `librefang stop`",
         );
         std::process::exit(1);
     }
 
     if !db_path.exists() {
-        ui::error(&i18n::t_args(
-            "monitoring-db-not-found",
-            &[("path", &db_path.display().to_string())],
-        ));
+        ui::error(&format!("database not found at {}", db_path.display()));
         std::process::exit(1);
     }
 
     let conn = match rusqlite::Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => {
-            ui::error(&i18n::t_args(
-                "monitoring-db-open-failed",
-                &[
-                    ("path", &db_path.display().to_string()),
-                    ("error", &e.to_string()),
-                ],
-            ));
+            ui::error(&format!("failed to open {}: {e}", db_path.display()));
             std::process::exit(1);
         }
     };
@@ -221,12 +194,9 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
         match std::fs::remove_file(&anchor_path) {
             Ok(()) => true,
             Err(e) => {
-                ui::error(&i18n::t_args(
-                    "monitoring-anchor-remove-failed",
-                    &[
-                        ("path", &anchor_path.display().to_string()),
-                        ("error", &e.to_string()),
-                    ],
+                ui::error(&format!(
+                    "failed to remove anchor {}: {e}",
+                    anchor_path.display()
                 ));
                 std::process::exit(1);
             }
@@ -236,10 +206,7 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     };
 
     if let Err(e) = conn.execute("DELETE FROM audit_entries", []) {
-        ui::error(&i18n::t_args(
-            "monitoring-db-truncate-failed",
-            &[("error", &e.to_string())],
-        ));
+        ui::error(&format!("failed to truncate audit_entries: {e}"));
         std::process::exit(1);
     }
     drop(conn);
@@ -247,22 +214,15 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     // insert after an empty table naturally gets seq = 1. No sqlite_sequence
     // fiddling needed.
 
-    let anchor_detail = if anchor_removed {
-        i18n::t_args(
-            "monitoring-audit-reset-anchor-deleted",
-            &[("path", &anchor_path.display().to_string())],
-        )
-    } else {
-        i18n::t("monitoring-audit-reset-anchor-none")
-    };
-    ui::success(&i18n::t_args(
-        "monitoring-audit-reset-success",
-        &[
-            ("count", &rows_before.to_string()),
-            ("anchor_detail", &anchor_detail),
-        ],
+    ui::success(&format!(
+        "Audit trail reset: removed {rows_before} row(s) from audit_entries{}.",
+        if anchor_removed {
+            format!(", deleted anchor at {}", anchor_path.display())
+        } else {
+            " (no anchor file to remove)".to_string()
+        }
     ));
-    ui::hint(&i18n::t("monitoring-audit-reset-seed-fresh"));
+    ui::hint("The next daemon boot will seed a fresh Merkle chain from the current tip.");
 }
 
 pub(crate) fn cmd_memory_list(agent: &str, json: bool) {
@@ -287,15 +247,10 @@ pub(crate) fn cmd_memory_list(agent: &str, json: bool) {
         .or_else(|| body.as_array())
     {
         if arr.is_empty() {
-            println!(
-                "{}",
-                i18n::t_args("monitoring-no-memory", &[("agent", &agent)])
-            );
+            println!("No memory entries for agent '{agent}'.");
             return;
         }
-        let header_key = i18n::t("label-header-key");
-        let header_value = i18n::t("label-header-value");
-        let mut t = crate::table::Table::new(&[&header_key, &header_value]);
+        let mut t = crate::table::Table::new(&["KEY", "VALUE"]);
         for kv in arr {
             t.add_row(&[
                 kv["key"].as_str().unwrap_or("?"),
@@ -400,13 +355,10 @@ pub(crate) fn cmd_devices_list(json: bool) {
     }
     if let Some(arr) = body.as_array() {
         if arr.is_empty() {
-            println!("{}", i18n::t("monitoring-no-devices"));
+            println!("No paired devices.");
             return;
         }
-        let header_id = i18n::t("label-header-id");
-        let header_name = i18n::t("label-header-name");
-        let header_last_seen = i18n::t("label-last-seen");
-        let mut t = crate::table::Table::new(&[&header_id, &header_name, &header_last_seen]);
+        let mut t = crate::table::Table::new(&["ID", "NAME", "LAST SEEN"]);
         for d in arr {
             t.add_row(&[
                 d["id"].as_str().unwrap_or("?"),
@@ -484,25 +436,18 @@ pub(crate) fn cmd_webhooks_list(json: bool) {
         .or_else(|| body.as_array())
     {
         if arr.is_empty() {
-            println!("{}", i18n::t("monitoring-no-webhooks"));
+            println!("No webhooks configured.");
             return;
         }
-        let header_id = i18n::t("label-header-id");
-        let header_name = i18n::t("label-header-name");
-        let header_enabled = i18n::t("label-header-enabled");
-        let header_url = i18n::t("label-header-url");
-        let yes_str = i18n::t("label-yes");
-        let no_str = i18n::t("label-no");
-        let mut t =
-            crate::table::Table::new(&[&header_id, &header_name, &header_enabled, &header_url]);
+        let mut t = crate::table::Table::new(&["ID", "NAME", "ENABLED", "URL"]);
         for w in arr {
             t.add_row(&[
                 w["id"].as_str().unwrap_or("?"),
                 w["name"].as_str().unwrap_or("?"),
                 if w["enabled"].as_bool().unwrap_or(false) {
-                    &yes_str
+                    "yes"
                 } else {
-                    &no_str
+                    "no"
                 },
                 w["url"].as_str().unwrap_or(""),
             ]);

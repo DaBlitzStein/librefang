@@ -1765,7 +1765,10 @@ impl ScriptableContextEngine {
 
 /// Default plugin directory: `~/.librefang/plugins/`.
 pub fn plugins_dir() -> std::path::PathBuf {
-    crate::plugin_manager::librefang_home().join("plugins")
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".librefang")
+        .join("plugins")
 }
 
 /// Load a plugin manifest from `~/.librefang/plugins/<name>/plugin.toml`.

@@ -31,7 +31,7 @@ struct FreeProvider {
     name: &'static str,
     display: &'static str,
     env_var: &'static str,
-    hint_key: &'static str,
+    hint: &'static str,
     register_url: &'static str,
 }
 
@@ -40,21 +40,21 @@ const FREE_PROVIDERS: &[FreeProvider] = &[
         name: "groq",
         display: "Groq",
         env_var: "GROQ_API_KEY",
-        hint_key: "tui-guide-hint-groq",
+        hint: "free tier, blazing fast inference",
         register_url: "https://console.groq.com/keys",
     },
     FreeProvider {
         name: "gemini",
         display: "Gemini",
         env_var: "GEMINI_API_KEY",
-        hint_key: "tui-guide-hint-gemini",
+        hint: "free tier, generous quota (Google account)",
         register_url: "https://aistudio.google.com/apikey",
     },
     FreeProvider {
         name: "deepseek",
         display: "DeepSeek",
         env_var: "DEEPSEEK_API_KEY",
-        hint_key: "tui-guide-hint-deepseek",
+        hint: "5M free tokens for new accounts",
         register_url: "https://platform.deepseek.com/api_keys",
     },
 ];
@@ -376,7 +376,7 @@ fn draw_select(f: &mut Frame, area: Rect, state: &State) {
         .map(|p| {
             ListItem::new(Line::from(vec![
                 Span::styled(format!("  {}  ", p.display), theme::title_style()),
-                Span::styled(format!("— {}", i18n::t(p.hint_key)), theme::dim_style()),
+                Span::styled(format!("— {}", p.hint), theme::dim_style()),
             ]))
         })
         .collect();
@@ -429,10 +429,7 @@ fn draw_paste_key(f: &mut Frame, area: Rect, state: &State) {
             .borders(Borders::ALL)
             .border_set(ratatui::symbols::border::ROUNDED)
             .border_style(Style::default().fg(theme::BORDER))
-            .title(Span::styled(
-                i18n::t("tui-guide-label-apikey"),
-                theme::dim_style(),
-            )),
+            .title(Span::styled(" API Key ", theme::dim_style())),
     );
     f.render_widget(input, chunks[3]);
 }
@@ -466,10 +463,7 @@ fn draw_testing(f: &mut Frame, area: Rect, state: &State) {
     ];
     if let Some(warn) = &state.save_warn {
         lines.push(Line::from(Span::styled(
-            format!(
-                "  ⚠️ {}",
-                i18n::t_args("tui-guide-warn-env", &[("error", warn)])
-            ),
+            format!("  \u{26a0} .env: {warn}"),
             Style::default().fg(theme::YELLOW),
         )));
     }

@@ -139,37 +139,6 @@ const MAX_CONSECUTIVE_ALL_FAILED: u32 = 3;
 /// Used by channel_bridge to detect this case without fragile string matching.
 pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
 
-/// Strips control chars and caps length to bound metric cardinality.
-fn sanitize_agent_label(name: &str) -> String {
-    name.chars().filter(|c| !c.is_control()).take(64).collect()
-}
-
-/// Maps the loop result to a stable metric `reason` label; no `empty_response` branch (empty replies retry in-loop and land on `completed`).
-fn classify_exit_reason(result: &LibreFangResult<AgentLoopResult>) -> &'static str {
-    match result {
-        Ok(_) => "completed",
-        Err(LibreFangError::MaxIterationsExceeded(_)) => "max_iterations",
-        Err(LibreFangError::RepeatedToolFailures { .. }) => "repeated_tool_failures",
-        Err(LibreFangError::ContentFiltered { .. }) => "content_filtered",
-        Err(LibreFangError::Internal(msg))
-            if msg.starts_with(crate::loop_guard::CIRCUIT_BREAKER_MSG_PREFIX) =>
-        {
-            "circuit_break"
-        }
-        Err(_) => "error",
-    }
-}
-
-/// Increments the exit counter exactly once — called only by the instrumented wrappers, never from within the loop.
-fn record_agent_loop_exit(agent: &str, result: &LibreFangResult<AgentLoopResult>) {
-    metrics::counter!(
-        "librefang_agent_loop_exits_total",
-        "agent" => sanitize_agent_label(agent),
-        "reason" => classify_exit_reason(result),
-    )
-    .increment(1);
-}
-
 /// Notify the stream consumer that the LLM has finished producing text for
 /// this turn so the UI can unblock input before the agent loop's remaining
 /// post-processing (session persistence, proactive memory extraction) lands
@@ -207,18 +176,8 @@ pub(super) fn format_task_completion_text(
     let status_str = match &event.status {
         TaskStatus::Completed(value) => {
             let rendered = value.to_string();
-            // When the delegation spawn spilled the result to the artifact
-            // store, surface the real handle so the caller can read the
-            // full content instead of receiving a truncated preview that
-            // provokes a hallucinated hash.
-            if let Some(handle) = value.get("artifact_handle").and_then(|v| v.as_str()) {
-                let preview = librefang_types::truncate_str(&rendered, 300);
-                format!(
-                    "completed (full result spilled). Preview: {preview}\nUse read_artifact(\"{handle}\") to read the complete response.",
-                )
-            } else {
-                format!("completed. Output: {rendered}")
-            }
+            let preview = librefang_types::truncate_str(&rendered, 300);
+            format!("completed. Output: {preview}")
         }
         TaskStatus::Failed(msg) => {
             let preview = librefang_types::truncate_str(msg, 300);
@@ -382,73 +341,6 @@ pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &st
 // The span itself does not emit a log line; the level only gates creation.
 #[instrument(level = "warn", skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id, session.id = %session.id))]
 pub async fn run_agent_loop(
-    manifest: &AgentManifest,
-    user_message: &str,
-    session: &mut Session,
-    memory: &MemorySubstrate,
-    driver: Arc<dyn LlmDriver>,
-    available_tools: &[ToolDefinition],
-    kernel: Option<Arc<dyn KernelHandle>>,
-    skill_registry: Option<&SkillRegistry>,
-    mcp_connections: Option<&tokio::sync::Mutex<Vec<McpConnection>>>,
-    web_ctx: Option<&WebToolsContext>,
-    browser_ctx: Option<&crate::browser::BrowserManager>,
-    embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
-    workspace_root: Option<&Path>,
-    on_phase: Option<&PhaseCallback>,
-    media_engine: Option<&crate::media_understanding::MediaEngine>,
-    media_drivers: Option<&crate::media::MediaDriverCache>,
-    tts_engine: Option<&crate::tts::TtsEngine>,
-    docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
-    hooks: Option<&crate::hooks::HookRegistry>,
-    context_window_tokens: Option<usize>,
-    process_manager: Option<&crate::process_manager::ProcessManager>,
-    checkpoint_manager: Option<Arc<CheckpointManager>>,
-    process_registry: Option<&crate::process_registry::ProcessRegistry>,
-    user_content_blocks: Option<Vec<ContentBlock>>,
-    proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
-    context_engine: Option<&dyn ContextEngine>,
-    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
-    opts: &LoopOptions,
-) -> LibreFangResult<AgentLoopResult> {
-    let agent_label = manifest.name.clone();
-    let result = run_agent_loop_inner(
-        manifest,
-        user_message,
-        session,
-        memory,
-        driver,
-        available_tools,
-        kernel,
-        skill_registry,
-        mcp_connections,
-        web_ctx,
-        browser_ctx,
-        embedding_driver,
-        workspace_root,
-        on_phase,
-        media_engine,
-        media_drivers,
-        tts_engine,
-        docker_config,
-        hooks,
-        context_window_tokens,
-        process_manager,
-        checkpoint_manager,
-        process_registry,
-        user_content_blocks,
-        proactive_memory,
-        context_engine,
-        pending_messages,
-        opts,
-    )
-    .await;
-    record_agent_loop_exit(&agent_label, &result);
-    result
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_agent_loop_inner(
     manifest: &AgentManifest,
     user_message: &str,
     session: &mut Session,
@@ -793,9 +685,6 @@ async fn run_agent_loop_inner(
     // and stamps the matching `UsageRecord.provider` so billing rolls
     // up against the slot that did the work.
     let mut last_actual_provider: Option<String> = None;
-    // Model the last LLM call actually ran (#6134) — threaded into
-    // `AgentLoopResult.actual_model` so the kernel records the real model.
-    let mut last_actual_model: Option<String> = None;
     // Accumulate text content from intermediate tool_use iterations. A turn
     // that yields a tool_use response may also carry user-facing text (e.g.
     // "Looking that up for you..." before a memory_store call). Without this
@@ -1217,12 +1106,6 @@ async fn run_agent_loop_inner(
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
-            // #6117: forward the turn's inbound peer scope so subprocess
-            // drivers (claude-code) can re-expose it to the /mcp bridge and
-            // `channel_send` can reject cross-chat dispatch.
-            sender_user_id: sender_user_id.clone(),
-            sender_channel: sender_channel.clone(),
-            sender_chat_id: sender_chat_id.clone(),
             reasoning_echo_policy,
         };
         // The stripped-tools request has been built; restore tools for any
@@ -1251,12 +1134,6 @@ async fn run_agent_loop_inner(
         // back to the manifest-nominated provider.
         if let Some(ref p) = response.actual_provider {
             last_actual_provider = Some(p.clone());
-        }
-        // Track the model the call actually ran (#6134) — e.g. a CLI driver
-        // that resolves its own model. Stays None for drivers that honour the
-        // requested model, so billing falls back to the nominated model.
-        if let Some(ref m) = response.actual_model {
-            last_actual_model = Some(m.clone());
         }
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
@@ -1523,7 +1400,6 @@ async fn run_agent_loop_inner(
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
                         actual_provider: last_actual_provider.clone(),
-                        actual_model: last_actual_model.clone(),
                     },
                 )
                 .await;
@@ -1988,7 +1864,6 @@ async fn run_agent_loop_inner(
                         new_messages_start,
                         owner_notice: std::mem::take(&mut pending_owner_notice),
                         actual_provider: last_actual_provider.clone(),
-                        actual_model: last_actual_model.clone(),
                     });
                 }
                 // Model hit token limit — add partial response and continue

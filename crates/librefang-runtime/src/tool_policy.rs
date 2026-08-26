@@ -190,10 +190,8 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 const SUBAGENT_DENY_ALWAYS: &[&str] = &[
     "cron_create",
     "cron_cancel",
-    "cron_enable",
     "schedule_create",
     "schedule_delete",
-    "schedule_resume",
     "hand_activate",
     "hand_deactivate",
     "process_start",
