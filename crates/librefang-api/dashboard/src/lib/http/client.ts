@@ -51,6 +51,7 @@ export {
   // goals
   listGoals,
   listGoalTemplates,
+  getGoalRun,
   // hands
   listHands,
   listActiveHands,
@@ -193,6 +194,7 @@ export {
   createAgentType,
   updateAgentType,
   deleteAgentType,
+  spawnEphemeral,
   spawnAgent,
   cloneAgent,
   stopAgent,
@@ -251,7 +253,6 @@ export {
   deleteGoal,
   startGoalRun,
   stopGoalRun,
-  getGoalRun,
   // hands
   activateHand,
   deactivateHand,

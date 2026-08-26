@@ -326,6 +326,7 @@ automation-workflow-created-id =   ID: { $id }
 automation-workflow-create-failed = Не вдалося створити воркфлоу: { $error }
 automation-workflow-completed = Воркфлоу завершено!
 automation-workflow-run-id =   ID запуску: { $id }
+automation-workflow-still-running = Воркфлоу запущено; він ще виконується.
 automation-workflow-failed = Помилка воркфлоу: { $error }
 automation-trigger-none = Немає зареєстрованих тригерів.
 automation-trigger-invalid-pattern = Некоректний JSON шаблону: { $error }
@@ -1410,6 +1411,8 @@ chat-runner-press-esc-to-exit =   Натисніть Esc для виходу.
 
 # tui/event.rs
 tui-event-workflow-completed = Воркфлоу завершено
+tui-event-workflow-still-running = Воркфлоу запущено; ще виконується (запуск { $id })
+tui-event-workflow-run-failed = Запуск воркфлоу не вдався ({ $status }): { $detail }
 tui-event-workflow-exec-not-available-in-process = Виконання воркфлоу недоступне в інпроцес-режимі
 tui-event-workflow-create-not-available-in-process = Створення воркфлоу недоступне в інпроцес-режимі
 tui-event-workflow-steps-empty = Потрібні кроки: введіть JSON-масив об'єктів кроків
@@ -1423,10 +1426,13 @@ tui-event-agent-kill-failed = Не вдалося примусово зупин�
 tui-event-agent-invalid-id = Недійсний ID агента: { $agent_id }
 tui-event-skills-fetch-failed = Не вдалося отримати скіли
 tui-event-mcp-fetch-failed = Не вдалося отримати MCP-сервери
+tui-event-channels-fetch-failed = Не вдалося отримати канали
 tui-event-skills-update-failed = Не вдалося оновити скіли
 tui-event-skills-update-error = Оновлення скілів: { $error }
 tui-event-mcp-update-failed = Не вдалося оновити MCP-сервери
+tui-event-channels-update-failed = Не вдалося оновити канали
 tui-event-mcp-update-error = Оновлення MCP: { $error }
+tui-event-channels-update-error = Оновлення каналів: { $error }
 tui-event-session-delete-failed = Не вдалося видалити сесію { $session_id }
 tui-event-session-management-not-available-in-process = Управління сесіями недоступне в інпроцес-режимі
 tui-event-kv-save-failed = Не вдалося зберегти пару ключ-значення
@@ -1440,10 +1446,19 @@ tui-event-security-verification-complete = Верифікацію заверше
 tui-event-security-chain-not-applicable = Інпроцес-режим: ланцюжок незастосовний
 tui-event-provider-save-key-failed = Не вдалося зберегти ключ для { $name }
 tui-event-provider-key-management-not-available-in-process = Управління ключами провайдерів недоступне в інпроцес-режимі
+tui-event-backups-list-failed = Не вдалося завантажити резервні копії
+tui-event-backups-need-daemon = Для резервних копій потрібен запущений демон
+tui-event-backup-create-failed = Не вдалося створити резервну копію
+tui-event-backup-delete-failed = Не вдалося видалити резервну копію { $filename }
+tui-event-backup-restore-failed = Не вдалося відновити з { $filename }
 tui-event-provider-delete-key-failed = Не вдалося видалити ключ для { $name }
 tui-event-provider-connection-ok = З'єднання встановлено
 tui-event-provider-test-failed = Тест не пройшов
 tui-event-provider-test-not-available-in-process = Тестування провайдерів недоступне в інпроцес-режимі
+tui-event-models-load-failed = Не вдалося завантажити каталог моделей
+tui-event-models-not-available-in-process = Налаштування моделей потребує запущеного демона й недоступне в режимі in-process
+tui-event-model-limits-save-failed = Не вдалося зберегти ліміти для { $model }
+tui-event-model-limits-reset-failed = Не вдалося повернути ліміти для { $model }
 tui-event-hand-activation-failed = Не вдалося активувати
 tui-event-hand-activate-failed-error = Не вдалося активувати: { $error }
 tui-event-hand-activation-failed-error = Помилка активації: { $error }
@@ -1478,6 +1493,10 @@ tui-mod-skill-installed = Встановлено: { $name }
 tui-mod-skill-uninstalled = Видалено: { $name }
 tui-mod-key-saved-for = Ключ збережено для { $name }
 tui-mod-key-deleted-for = Ключ видалено для { $name }
+tui-mod-backup-created = Резервну копію створено: { $filename }
+tui-mod-backup-deleted = Резервну копію видалено: { $filename }
+tui-mod-backup-restored = Відновлено { $files } файлів з { $filename }. Перезапустіть демон, щоб застосувати всі зміни.
+tui-mod-backup-restored-with-errors = Відновлено { $files } файлів з { $filename }, { $errors } не вдалося. Перезапустіть демон, щоб застосувати всі зміни.
 tui-mod-hand-activated = Активовано: { $name }
 tui-mod-hand-deactivated = Деактивовано: { $id }
 tui-mod-hand-paused = Hands призупинено
@@ -1519,6 +1538,7 @@ tui-mod-agent-killed-status = Агента { $id } примусово зупин
 tui-mod-agent-kill-failed = Не вдалося примусово зупинити: { $error }
 tui-mod-agent-skills-updated = Скіли оновлено для агента { $id }.
 tui-mod-agent-mcp-updated = Сервери MCP оновлено для агента { $id }.
+tui-mod-agent-channels-updated = Канали оновлено для агента { $id }.
 tui-mod-ready = Готово
 tui-mod-setup = Налаштування
 tui-mod-workflow-created = Воркфлоу створено!
@@ -1530,6 +1550,7 @@ tui-tab-sessions = Сесії
 tui-tab-workflows = Потоки
 tui-tab-triggers = Тригери
 tui-tab-memory = Пам'ять
+tui-tab-models = Моделі
 tui-tab-skills = Скіли
 tui-tab-hands = Hands
 tui-tab-extensions = Ext
@@ -1585,6 +1606,34 @@ tui-sessions-loading = Завантаження сесій…
 tui-sessions-empty = Сесій ще немає. Почніть чат, щоб створити її.
 tui-sessions-delete-confirm = Видалити цю сесію? [y] Так  [будь-яка клавіша] Скасувати
 tui-sessions-hints = ↑↓ Навігація  Enter Відкрити  d Видалити  / Пошук  r Оновити
+
+# models.rs
+tui-models-title = Моделі
+tui-models-count =
+    { $count ->
+        [one] 1 модель
+        [few] { $count } моделі
+       *[other] { $count } моделей
+    }
+tui-models-header-model = Модель
+tui-models-header-provider = Провайдер
+tui-models-header-window = Вікно
+tui-models-header-catalog = Каталог
+tui-models-header-max-output = Макс. вивід
+tui-models-loading = Завантаження каталогу моделей…
+tui-models-empty = Немає моделей. Налаштуйте провайдера в Налаштуваннях або додайте модель через `librefang model add`.
+tui-models-window-unknown = невідоме
+tui-models-hints = ↑↓ Навігація  / Фільтр  e Редагувати ліміти  d Повернути до каталогу  r Оновити
+tui-models-status-no-override = Для цієї моделі немає перевизначення — нічого повертати.
+tui-models-status-saved = Ліміти для { $model } збережено
+tui-models-status-reset = { $model } повернуто до значень каталогу
+tui-models-field-context-window = Контекстне вікно
+tui-models-field-max-output = Макс. токенів виводу
+tui-models-field-cleared = (очищено — використовується каталог)
+tui-models-field-catalog-hint = каталог: { $value }
+tui-models-edit-explainer = Діє для кожного агента на цій моделі та зберігається після синхронізації реєстру.
+tui-models-edit-not-max-tokens = Контекстне вікно — це загальний бюджет моделі, а не ліміт виводу на одну відповідь.
+tui-models-edit-hints = Tab Змінити поле  0-9 Ввід  Enter Зберегти  Esc Скасувати
 
 # peers.rs
 tui-peers-title = Піри
@@ -1728,7 +1777,7 @@ tui-security-feat-prompt-name = Сканер ін'єкцій у промптах
 tui-security-feat-prompt-desc = Виявляє спроби обходу інструкцій та витоку даних
 
 # templates.rs
-tui-templates-title = Темплейти
+tui-templates-title = Типи Агентів
 tui-templates-cat-all = Всі
 tui-templates-cat-general = Загальні
 tui-templates-cat-development = Розробка
@@ -1736,12 +1785,12 @@ tui-templates-cat-research = Дослідження
 tui-templates-cat-writing = Письмо
 tui-templates-cat-business = Бізнес
 tui-templates-cat-custom = Власні
-tui-templates-header-template = Темплейт
+tui-templates-header-template = Тип агента
 tui-templates-header-category = Категорія
 tui-templates-header-provider-model = Провайдер/Модель
 tui-templates-header-description = Опис
-tui-templates-loading = Завантаження темплейтів…
-tui-templates-empty = Немає доступних темплейтів.
+tui-templates-loading = Завантаження типів агентів…
+tui-templates-empty = Немає доступних типів агентів.
 tui-templates-detail-provider =   Провайдер: { $provider }/{ $model }  
 tui-templates-hints =   [↑↓] Навігація  [Enter] Запустити Агента  [f] Фільтр категорій  [r] Оновити
 tui-templates-provider-not-configured = Провайдер '{ $provider }' не налаштований. Спочатку встановіть API-ключ у Налаштуваннях.
@@ -1864,6 +1913,22 @@ tui-settings-models-empty = Немає доступних моделей.
 tui-settings-tools-header-name = Назва інструменту
 tui-settings-tools-header-desc = Опис
 tui-settings-tools-empty = Немає доступних інструментів.
+tui-settings-tab-backups = 4 Резервні копії
+tui-settings-hints-backups =   [↑↓] Навігація  [c] Створити  [Enter] Відновити  [d] Видалити  [r] Оновити
+tui-settings-hints-restore =   [↑↓] Рух  [Space] Перемкнути  [Enter] Відновити  [Esc] Скасувати
+tui-settings-backups-header-filename = Архів
+tui-settings-backups-header-size = Розмір
+tui-settings-backups-header-created = Створено
+tui-settings-backups-header-components = Компоненти
+tui-settings-backups-loading = Завантаження резервних копій…
+tui-settings-backups-empty = Резервних копій ще немає. Натисніть [c], щоб створити.
+tui-settings-backups-creating = Створення резервної копії…
+tui-settings-backups-delete-confirm =   Видалити цю резервну копію? [y] Так  [будь-яка клавіша] Скасувати
+tui-settings-backups-restore-title = Відновлення { $filename }
+tui-settings-backups-restore-warning = Відновлення перезаписує наявний стан. Після нього перезапустіть демон.
+tui-settings-backups-restore-keep-config = Зберегти config.toml цієї машини (режим клону)
+tui-settings-backups-restore-all = Вибрано весь вміст архіву.
+tui-settings-backups-restore-none = Виберіть хоча б один компонент або натисніть [Esc], щоб скасувати.
 # chat.rs
 tui-chat-input-staged =   ({ $count } відкладено)
 tui-chat-hints-modelpicker =     [↑↓] Навігація  [Enter] Вибрати  [Esc] Закрити  [type] Фільтр
@@ -2023,6 +2088,7 @@ tui-agents-title-custom-prompt = Власний — Системний пром�
 tui-agents-title-custom-tools = Власний — Інструменти
 tui-agents-title-custom-skills = Власний — Скіли
 tui-agents-title-custom-mcp = Власний — MCP-сервери
+tui-agents-title-edit-channels = Редагування — Канали
 tui-agents-title-spawning = Створення...
 tui-agents-title-screen = Агенти
 tui-agents-title-detail = Деталі агента
@@ -2035,6 +2101,7 @@ tui-agents-prompt-tools =   Оберіть інструменти (Space для 
 tui-agents-prompt-skills =   Оберіть скіли (якщо нічого не вибрано = всі скіли):
 tui-agents-prompt-mcp =   Оберіть MCP-сервери (якщо нічого не вибрано = всі сервери):
 tui-agents-prompt-edit-skills =   Space для перемикання, Enter для збереження (нічого не вибрано = всі):
+tui-agents-prompt-edit-channels =   Space для перемикання, Enter для збереження (нічого не вибрано = усі канали):
 tui-agents-prompt-spawning =   Створення агента...
 tui-agents-label-no-agent-selected = Агента не обрано.
 tui-agents-label-none-available = (немає доступних)
@@ -2052,7 +2119,7 @@ tui-agents-opt-create-new = Створити нового агента
 
 tui-agents-hints-filter =   [Введення] Фільтр  [Enter] Застосувати  [Esc] Скасувати пошук
 tui-agents-hints-list =   [↑↓] Навігація  [Enter] Деталі  [/] Пошук  [Esc] Назад
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [c] Чат  [k] Зупинити  [Esc] Назад
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-hints-navigate =     [↑↓] Навігація  [Enter] Обрати  [Esc] Назад
 tui-agents-hints-input =     [Enter] Далі  [Esc] Назад
 tui-agents-hints-tools =     [↑↓] Навігація  [Space] Перемкнути  [Enter] Створити  [Esc] Назад
@@ -2078,8 +2145,10 @@ tui-agents-detail-parent =   Батьківський:
 tui-agents-detail-children =   Дочірні:  
 tui-agents-detail-skills =   Скіли:    
 tui-agents-detail-mcp =   MCP:      
+tui-agents-detail-channels =   Канали:   
 tui-agents-detail-all-skills = [Усі скіли]
 tui-agents-detail-all-servers = [Усі сервери]
+tui-agents-detail-all-channels = [Усі канали]
 tui-agents-detail-none = [Немає]
 tui-agents-default-desc = Власний агент { $name }
 tui-agents-default-prompt = Ви — { $name }, корисний помічник.

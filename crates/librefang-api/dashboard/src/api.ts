@@ -1730,6 +1730,41 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
+/**
+ * One ephemeral worker run (#6699).
+ *
+ * `parent` is not a convenience field: an ephemeral worker has no registry entry,
+ * so it has no budget, no `[resources]` quota and no tool allowlist of its own.
+ * The parent supplies all three, is billed for the run, and caps the worker's
+ * tool set — the server refuses a request without one.
+ */
+export interface SpawnEphemeralRequest {
+  parent: string;
+  message: string;
+  label?: string;
+  agent_type?: string;
+  system_prompt?: string;
+  tools?: string[];
+  provider?: string;
+  model?: string;
+  max_iterations?: number;
+}
+
+/** What one ephemeral worker turn produced. The worker itself is already gone. */
+export interface SpawnEphemeralResult {
+  name: string;
+  response: string;
+  iterations: number;
+  cost_usd?: number;
+  tools: string[];
+}
+
+export async function spawnEphemeral(
+  body: SpawnEphemeralRequest,
+): Promise<SpawnEphemeralResult> {
+  return post<SpawnEphemeralResult>("/api/agents/spawn-ephemeral", body);
+}
+
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
   // Refs #4614 — DELETE requires explicit confirmation. The dashboard
   // already wraps this call in a confirmation modal, so we send the
@@ -1788,6 +1823,19 @@ export async function loadAgentSession(
 export interface SessionContextResponse {
   used_tokens: number;
   max_context_tokens: number;
+  /**
+   * Which layer of the precedence chain produced `max_context_tokens` (refs #7774):
+   * `agent_override`, `model_override`, `catalog`, `session_hint` or `fallback`.
+   */
+  max_context_tokens_source: string;
+  /**
+   * True when `max_context_tokens` is the runtime's own guess rather than a fact
+   * about the model, i.e. the source is `fallback`.
+   *
+   * Render the warning off this flag rather than comparing the source string —
+   * the set of source names can grow, the meaning of "assumed" cannot.
+   */
+  max_context_tokens_assumed: boolean;
   pct: number;
   model: string;
   pressure: string;
