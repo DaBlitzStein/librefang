@@ -6,7 +6,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::i18n;
 use crate::ui;
 
 /// GitHub repository for release assets.
@@ -54,17 +53,11 @@ pub fn launch(path: &Path) {
                 .spawn()
             {
                 Ok(_) => {
-                    ui::success(&i18n::t("desktop-install-launched"));
+                    ui::success("Desktop app launched.");
                     return;
                 }
                 Err(e) => {
-                    ui::error(&i18n::t_args(
-                        "desktop-install-launch-fail",
-                        &[
-                            ("path", &app_bundle.to_string_lossy()),
-                            ("error", &e.to_string()),
-                        ],
-                    ));
+                    ui::error(&format!("Failed to launch {}: {e}", app_bundle.display()));
                 }
             }
             return;
@@ -77,27 +70,24 @@ pub fn launch(path: &Path) {
         .stderr(std::process::Stdio::null())
         .spawn()
     {
-        Ok(_) => ui::success(&i18n::t("desktop-install-launched")),
-        Err(e) => ui::error(&i18n::t_args(
-            "desktop-install-launch-fail-generic",
-            &[("error", &e.to_string())],
-        )),
+        Ok(_) => ui::success("Desktop app launched."),
+        Err(e) => ui::error(&format!("Failed to launch desktop app: {e}")),
     }
 }
 
 /// Prompt user to download and install the desktop app.
 /// Returns the installed binary path on success, `None` if cancelled or failed.
 pub fn prompt_and_install() -> Option<PathBuf> {
-    ui::hint(&i18n::t("desktop-install-not-installed"));
+    ui::hint("LibreFang Desktop is not installed.");
 
-    let answer = crate::prompt_input(&i18n::t("desktop-install-prompt"));
+    let answer = crate::prompt_input("  Download and install it now? [Y/n] ");
     if !answer.is_empty()
         && !answer.eq_ignore_ascii_case("y")
         && !answer.eq_ignore_ascii_case("yes")
     {
-        ui::hint(&i18n::t("desktop-install-skipped"));
-        ui::hint(&i18n::t("desktop-install-skipped-brew"));
-        ui::hint(&i18n::t("desktop-install-skipped-manual"));
+        ui::hint("Skipped. You can install it later:");
+        ui::hint("  brew install --cask librefang   (macOS)");
+        ui::hint("  Or download from https://github.com/librefang/librefang/releases");
         return None;
     }
 
@@ -107,13 +97,13 @@ pub fn prompt_and_install() -> Option<PathBuf> {
 // ── Download & Install ───────────────────────────────────────────────────────
 
 fn download_and_install() -> Option<PathBuf> {
-    ui::step(&i18n::t("desktop-install-fetching"));
+    ui::step("Fetching latest release info...");
 
     let asset_suffix = match platform_asset_suffix() {
         Some(s) => s,
         None => {
-            ui::error(&i18n::t("desktop-install-unsupported"));
-            ui::hint(&i18n::t("desktop-install-download-manual"));
+            ui::error("Unsupported platform for automatic desktop install.");
+            ui::hint("Download manually: https://github.com/librefang/librefang/releases");
             return None;
         }
     };
@@ -129,10 +119,7 @@ fn download_and_install() -> Option<PathBuf> {
     {
         Ok(r) => r,
         Err(e) => {
-            ui::error(&i18n::t_args(
-                "desktop-install-github-fail",
-                &[("error", &e.to_string())],
-            ));
+            ui::error(&format!("Failed to reach GitHub: {e}"));
             return None;
         }
     };
@@ -140,10 +127,7 @@ fn download_and_install() -> Option<PathBuf> {
     let body: serde_json::Value = match resp.json() {
         Ok(v) => v,
         Err(e) => {
-            ui::error(&i18n::t_args(
-                "desktop-install-parse-fail",
-                &[("error", &e.to_string())],
-            ));
+            ui::error(&format!("Failed to parse release info: {e}"));
             return None;
         }
     };
@@ -161,38 +145,26 @@ fn download_and_install() -> Option<PathBuf> {
     let size_bytes = asset["size"].as_u64().unwrap_or(0);
 
     let size_display = if size_bytes > 0 {
-        format!(
-            " {}",
-            i18n::t_args(
-                "format-size-mb",
-                &[("value", &format!("{:.1}", size_bytes as f64 / 1_048_576.0))]
-            )
-        )
+        format!(" ({:.1} MB)", size_bytes as f64 / 1_048_576.0)
     } else {
         String::new()
     };
 
-    ui::kv(
-        &i18n::t("desktop-install-kv-asset"),
-        &format!("{file_name}{size_display}"),
-    );
-    ui::step(&i18n::t("desktop-install-downloading"));
+    ui::kv("Asset", &format!("{file_name}{size_display}"));
+    ui::step("Downloading...");
 
     let tmp_dir = std::env::temp_dir().join("librefang-desktop-install");
     let _ = std::fs::create_dir_all(&tmp_dir);
     let tmp_file = tmp_dir.join(file_name);
 
     if let Err(e) = download_file(download_url, &tmp_file) {
-        ui::error(&i18n::t_args(
-            "desktop-install-download-fail",
-            &[("error", &e.to_string())],
-        ));
+        ui::error(&format!("Download failed: {e}"));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return None;
     }
 
-    ui::success(&i18n::t("desktop-install-download-complete"));
-    ui::step(&i18n::t("desktop-install-installing"));
+    ui::success("Download complete.");
+    ui::step("Installing...");
 
     let result = install_platform(&tmp_file);
 
@@ -201,14 +173,11 @@ fn download_and_install() -> Option<PathBuf> {
 
     match result {
         Ok(installed_path) => {
-            ui::success(&i18n::t("desktop-install-success"));
+            ui::success("LibreFang Desktop installed successfully.");
             Some(installed_path)
         }
         Err(e) => {
-            ui::error(&i18n::t_args(
-                "desktop-install-fail",
-                &[("error", &e.to_string())],
-            ));
+            ui::error(&format!("Installation failed: {e}"));
             None
         }
     }
@@ -221,20 +190,13 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
         .get(url)
         .header("User-Agent", "librefang-cli")
         .send()
-        .map_err(|e| i18n::t_args("desktop-install-error-http", &[("error", &e.to_string())]))?;
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
 
-    let mut file = std::fs::File::create(dest).map_err(|e| {
-        i18n::t_args(
-            "desktop-install-error-create",
-            &[
-                ("path", &dest.display().to_string()),
-                ("error", &e.to_string()),
-            ],
-        )
-    })?;
+    let mut file = std::fs::File::create(dest)
+        .map_err(|e| format!("Cannot create {}: {e}", dest.display()))?;
 
     resp.copy_to(&mut file)
-        .map_err(|e| i18n::t_args("desktop-install-error-write", &[("error", &e.to_string())]))?;
+        .map_err(|e| format!("Write error: {e}"))?;
     Ok(())
 }
 
@@ -341,7 +303,7 @@ fn install_platform(downloaded: &Path) -> Result<PathBuf, String> {
     return install_linux_appimage(downloaded);
 
     #[allow(unreachable_code)]
-    Err(i18n::t("desktop-install-unsupported-platform"))
+    Err("Unsupported platform".into())
 }
 
 #[cfg(target_os = "macos")]
@@ -354,17 +316,12 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
         .arg("/tmp/librefang-dmg-mount")
         .arg(dmg_path)
         .output()
-        .map_err(|e| {
-            i18n::t_args(
-                "desktop-install-error-hdiutil-attach",
-                &[("error", &e.to_string())],
-            )
-        })?;
+        .map_err(|e| format!("hdiutil attach failed: {e}"))?;
 
     if !output.status.success() {
-        return Err(i18n::t_args(
-            "desktop-install-error-hdiutil-attach",
-            &[("error", &String::from_utf8_lossy(&output.stderr))],
+        return Err(format!(
+            "hdiutil attach failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         ));
     }
 
@@ -375,18 +332,14 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
         let _ = Command::new("hdiutil")
             .args(["detach", "/tmp/librefang-dmg-mount", "-quiet"])
             .status();
-        return Err(i18n::t("desktop-install-error-app-not-found"));
+        return Err("LibreFang.app not found in DMG".into());
     }
 
     // Remove old installation if present
     let dest = Path::new("/Applications/LibreFang.app");
     if dest.exists() {
-        std::fs::remove_dir_all(dest).map_err(|e| {
-            i18n::t_args(
-                "desktop-install-error-remove-old",
-                &[("error", &e.to_string())],
-            )
-        })?;
+        std::fs::remove_dir_all(dest)
+            .map_err(|e| format!("Failed to remove old installation: {e}"))?;
     }
 
     // Copy .app bundle to /Applications
@@ -395,7 +348,7 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
         .arg(&app_src)
         .arg("/Applications/")
         .output()
-        .map_err(|e| i18n::t_args("desktop-install-error-cp", &[("error", &e.to_string())]))?;
+        .map_err(|e| format!("cp failed: {e}"))?;
 
     // Always detach
     let _ = Command::new("hdiutil")
@@ -403,9 +356,9 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
         .status();
 
     if !cp.status.success() {
-        return Err(i18n::t_args(
-            "desktop-install-error-copy-applications",
-            &[("error", &String::from_utf8_lossy(&cp.stderr))],
+        return Err(format!(
+            "Copy to /Applications failed: {}",
+            String::from_utf8_lossy(&cp.stderr)
         ));
     }
 
@@ -423,43 +376,35 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
 fn install_windows(installer_path: &Path) -> Result<PathBuf, String> {
     use std::process::Command;
 
-    ui::hint(&i18n::t("desktop-install-running-installer"));
+    ui::hint("Running installer...");
 
     // NSIS installer: run with /S for silent install
     let status = Command::new(installer_path)
         .arg("/S")
         .status()
-        .map_err(|e| {
-            i18n::t_args(
-                "desktop-install-error-run-installer",
-                &[("error", &e.to_string())],
-            )
-        })?;
+        .map_err(|e| format!("Failed to run installer: {e}"))?;
 
     if !status.success() {
-        return Err(i18n::t_args(
-            "desktop-install-error-installer-status",
-            &[("status", &status.to_string())],
-        ));
+        return Err(format!("Installer exited with: {status}"));
     }
 
     // NSIS installs to %LOCALAPPDATA%\LibreFang\
     let local =
-        std::env::var("LOCALAPPDATA").map_err(|_| i18n::t("desktop-install-error-localappdata"))?;
+        std::env::var("LOCALAPPDATA").map_err(|_| "Cannot determine %LOCALAPPDATA%".to_string())?;
     let bin = PathBuf::from(local).join("LibreFang").join("LibreFang.exe");
 
     if bin.exists() {
         Ok(bin)
     } else {
         // Fallback: check the standard desktop binary name next to CLI
-        Err(i18n::t("desktop-install-error-binary-not-found"))
+        Err("Installer completed but binary not found at expected location".into())
     }
 }
 
 #[cfg(target_os = "linux")]
 fn install_linux_appimage(appimage_path: &Path) -> Result<PathBuf, String> {
     let dest_dir = dirs::home_dir()
-        .ok_or_else(|| i18n::t("desktop-install-error-home-dir"))?
+        .ok_or_else(|| "Cannot determine home directory".to_string())?
         .join(".local/bin");
     install_linux_appimage_to(appimage_path, &dest_dir)
 }
@@ -470,23 +415,11 @@ fn install_linux_appimage(appimage_path: &Path) -> Result<PathBuf, String> {
 #[cfg_attr(not(test), cfg(target_os = "linux"))]
 #[allow(dead_code)]
 fn install_linux_appimage_to(appimage_path: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dest_dir).map_err(|e| {
-        i18n::t_args(
-            "desktop-install-error-create-dir",
-            &[
-                ("path", &dest_dir.display().to_string()),
-                ("error", &e.to_string()),
-            ],
-        )
-    })?;
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("Failed to create {}: {e}", dest_dir.display()))?;
 
     let dest = dest_dir.join("librefang-desktop");
-    std::fs::copy(appimage_path, &dest).map_err(|e| {
-        i18n::t_args(
-            "desktop-install-error-copy-appimage",
-            &[("error", &e.to_string())],
-        )
-    })?;
+    std::fs::copy(appimage_path, &dest).map_err(|e| format!("Failed to copy AppImage: {e}"))?;
 
     // Make executable
     #[cfg(unix)]
@@ -534,10 +467,7 @@ mod tests {
     //! routed through `tempfile::TempDir` so nothing escapes the tempdir.
 
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn desktop_binary_name_matches_platform() {
@@ -577,7 +507,6 @@ mod tests {
 
     #[test]
     fn which_lookup_finds_existing_binary_in_path() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
         let bin_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -605,7 +534,6 @@ mod tests {
 
     #[test]
     fn which_lookup_returns_none_when_missing() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
         let prev = std::env::var_os("PATH");
         unsafe {

@@ -66,59 +66,6 @@ const AGENT_UUID: &str = "11111111-1111-1111-1111-111111111111";
 const VERSION_ID: &str = "22222222-2222-2222-2222-222222222222";
 const EXPERIMENT_ID: &str = "33333333-3333-3333-3333-333333333333";
 
-// ----- repository overview -----
-
-#[tokio::test(flavor = "multi_thread")]
-async fn prompts_overview_returns_paginated_envelope() {
-    // The MockKernelBuilder seeds the default "assistant" agent, so the
-    // overview is non-empty. Assert the standard paginated envelope (200 +
-    // `items`/`total`/`offset`/`limit`) and that the seeded agent appears as
-    // one summary row with the expected shape: its live system prompt is
-    // surfaced, and with no rows in the prompt-version store it reports zero
-    // versions and no active version. This pins the cross-agent aggregation
-    // route wiring and its per-agent row contract.
-    let h = boot().await;
-    let (status, body) = json_request(&h, Method::GET, "/api/prompts/overview", None).await;
-    assert_eq!(status, StatusCode::OK, "body={body:?}");
-    let items = body["items"].as_array().expect("items is array");
-    assert!(
-        !items.is_empty(),
-        "expected at least the seeded agent: {body:?}"
-    );
-    assert_eq!(body["total"], items.len());
-    assert_eq!(body["offset"], 0);
-    assert!(body.get("limit").is_some(), "limit field present: {body:?}");
-
-    let row = &items[0];
-    // agent_id parses as a UUID; agent_name is non-empty.
-    let agent_id = row["agent_id"].as_str().expect("agent_id string");
-    assert!(
-        uuid::Uuid::parse_str(agent_id).is_ok(),
-        "agent_id must be a UUID: {row:?}"
-    );
-    assert!(
-        !row["agent_name"].as_str().unwrap_or_default().is_empty(),
-        "agent_name must be non-empty: {row:?}"
-    );
-    // The live system prompt is surfaced from the manifest.
-    assert!(
-        row["live_system_prompt"].is_string(),
-        "live_system_prompt must be present: {row:?}"
-    );
-    // No versions persisted for the seeded agent → zero count, null active.
-    assert_eq!(row["version_count"], 0, "row={row:?}");
-    assert_eq!(
-        row["active_version"],
-        serde_json::Value::Null,
-        "row={row:?}"
-    );
-    assert_eq!(
-        row["active_version_id"],
-        serde_json::Value::Null,
-        "row={row:?}"
-    );
-}
-
 // ----- prompt versions -----
 
 #[tokio::test(flavor = "multi_thread")]
@@ -268,85 +215,14 @@ async fn activate_prompt_version_with_agent_id_in_body_succeeds() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
-    // VERSION_ID is a synthetic constant that was never created in the
-    // (real, SQLite-backed) store, so set_active_version updates zero rows and
+    // The mock kernel has no real PromptStore, so activate writes succeed but
     // the subsequent read-back returns Ok(None). The handler falls back to the
     // legacy ack envelope. Assert the ack shape explicitly — the entity-return
-    // path from #4365 needs a version that was actually created first (see
-    // delete_active_prompt_version_returns_400).
+    // path from #4365 requires a real PromptStore-backed fixture to verify.
     assert_eq!(
         body["success"],
         serde_json::json!(true),
         "expected ack envelope {{success:true}}, got body={body:?}"
-    );
-}
-
-/// #6195: deleting the active (bound) prompt version must be refused at the
-/// HTTP layer with 400, and the version must survive. Drives the full
-/// create → activate → delete path through the real SQLite-backed store so
-/// the guard (`PromptStore::delete_version` → `InvalidState`) is exercised
-/// end to end, not just at the store layer.
-#[tokio::test(flavor = "multi_thread")]
-async fn delete_active_prompt_version_returns_400() {
-    let h = boot().await;
-    let create_path = format!("/api/agents/{AGENT_UUID}/prompts/versions");
-
-    // Create two versions so one can be made active while another remains.
-    let (status, first) = json_request(
-        &h,
-        Method::POST,
-        &create_path,
-        Some(serde_json::json!({"system_prompt": "First.", "description": "v1"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "create v1: {first:?}");
-    let first_id = first["id"].as_str().expect("v1 id").to_string();
-
-    let (status, second) = json_request(
-        &h,
-        Method::POST,
-        &create_path,
-        Some(serde_json::json!({"system_prompt": "Second.", "description": "v2"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "create v2: {second:?}");
-
-    // Activate the first version.
-    let (status, _) = json_request(
-        &h,
-        Method::POST,
-        &format!("/api/prompts/versions/{first_id}/activate"),
-        Some(serde_json::json!({"agent_id": AGENT_UUID})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Deleting the active version must be refused with 400.
-    let (status, body) = json_request(
-        &h,
-        Method::DELETE,
-        &format!("/api/prompts/versions/{first_id}"),
-        None,
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "deleting the active version must be refused: {body:?}"
-    );
-
-    // The version still exists — the refused delete was a no-op.
-    let (status, _) = json_request(
-        &h,
-        Method::GET,
-        &format!("/api/prompts/versions/{first_id}"),
-        None,
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the active version must survive the refused delete"
     );
 }
 

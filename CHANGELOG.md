@@ -5,125 +5,6 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
-## [2026.6.22] - 2026-06-22
-
-_45 PRs from 7 contributors since v2026.6.17-beta.20._
-
-### Highlights
-
-- **Context-window awareness** — a live usage indicator shows how much context remains, quota errors are classified honestly, and agents now guide you to open a new session when you hit a token or context limit.
-- **Dashboard agent management** — you can now edit and bind a system prompt directly from the agent detail drawer, remove a configured sidecar channel, and view agents grouped into Core Agents and Hands sections.
-- **Per-agent sidecar secrets & provider controls** — each agent instance can hold its own private credentials, and you can view and edit the provider max-token limit from the UI; the arbitrary 200k cap on agent max tokens has been removed.
-- **CoT pruning + streaming reliability** — chain-of-thought steps are pruned and developer-loop turns aggregated to keep sessions lean; streaming final answers now arrive as a fresh message instead of being lost on delivery.
-- **Confidential OAuth clients** — OAuth clients can now supply their `client_secret` via an env variable (`client_secret_env`), keeping secrets out of config files.
-
-### Added
-
-- Non-blocking agent_send via the async-task tracker (#6044) (@DaBlitzStein)
-- Global Auto-Dream on/off switch on the Memory tab (#6194) (@houko)
-- Edit + bind system prompt from the agent detail drawer (#6201) (@houko)
-- Remove a configured sidecar channel from the dashboard (#6202) (@houko)
-- Group the Agents list into Core Agents and Hands sections (#6205) (@houko)
-- Context-window usage indicator + honest quota-error classification (#6215) (@houko)
-- Per-instance sidecar secrets so each agent can own its own handle (#6217) (@houko)
-- Coding-agent class, actual_model reporting, CodeWhale driver, provider grouping (#6220) (@houko)
-- Add agent label to librefang_tool_call_total (#6226) (#6229) (@houko)
-- Guide user to a new session on token/context limit (#6211) (#6231) (@houko)
-- Emit agent-loop exit-reason metric (#6227) (#6232) (@houko)
-- Tool-call telemetry fidelity — failure-type breakdown, per-tool latency histogram, span error status (#6233) (@houko)
-- Display + edit provider max-token limit (#6209) (#6238) (@houko)
-- CoT-pruning + developer-loop aggregation (#6173) (#6239) (@houko)
-- Localize TUI main interface, welcome, sessions, and peers screens (#6241) (@pavver)
-- Add agent dimension to librefang_tool_execution_seconds (#6244) (#6245) (@houko)
-- Confidential OAuth clients via client_secret_env (revives #5060) (#6260) (@houko)
-
-### Fixed
-
-- Zeroize EmbeddingConfig.api_key on drop (partial LF-001) (#6190) (@BunnyMoth)
-- Enforce SHA256 verification in install.sh, remove silent skip paths (#6191) (@BunnyMoth)
-- Resolve link-preview-js peer conflict and commit lockfile (#6192) (@houko)
-- Deny WASM fs_write to the audit anchor via a capability deny-list (#6196) (@houko)
-- Bind launchctl status string to a let so the macOS build compiles (E0716) (#6203) (@houko)
-- Serve the SPA shell on a hard refresh of Prompts and Tasks pages (#6207) (@houko)
-- Refuse to delete the active (bound) prompt version (#6208) (@houko)
-- Stop the agent-creation wizard stamping a hidden 200k hourly token cap (#6212) (@houko)
-- Merge Hand settings on save instead of replacing the whole config (#6213) (@houko)
-- Drop the arbitrary 200000 cap on the agent max_tokens input (#6214) (@houko)
-- Allow close_range, getresuid/gid, and pipe splicing syscalls in seccomp sandbox (#6221) (@pavver)
-- Scope compaction-summary banner to the compacted session (#6225) (#6230) (@houko)
-- Make i18n locale-detection test deterministic on macOS (refs #6240) (#6243) (@houko)
-- Spill oversized shell_exec output instead of truncating (#6242) (#6246) (@houko)
-- Deliver streaming final answer as a fresh notifying message (#6248) (#6249) (@houko)
-- Rank explicit per-peer bindings above the sidecar instance default (#6258) (@neo-wanderer)
-- Clear .secrets.baseline drift from #6190 and hard-error pre-commit when detect-secrets missing (#6259) (@houko)
-- Channel_send without recipient replies to the group, not the speaker (#6261) (@neo-wanderer)
-
-### Changed
-
-- Migrate browser_tools.rs to ToolError (#3576 slice) (#6218) (@houko)
-- Typed TmuxError for terminal_tmux (#3576) (#6237) (@houko)
-- Make WebhookStore async-safe with tokio RwLock (closes #2) (#6256) (@maoxin1234)
-
-<details>
-<summary>Documentation, maintenance, and other internal changes</summary>
-
-### Maintenance
-
-- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 7 updates (#6183) (@app/dependabot)
-- Bump the web-minor-patch group in /web with 5 updates (#6184) (@app/dependabot)
-- Drop five orphaned email workspace dependencies (#6193) (@houko)
-- Bump the docs-minor-patch group in /docs with 3 updates (#6224) (@app/dependabot)
-- Skip network-dependent hands registry tests on the macOS lane (#6240) (#6247) (@houko)
-- Warn on cleanup failures in shell and web_fetch_to_file (#6255) (@maoxin1234)
-- Replace detect-secrets baseline with gitleaks (#6262) (@houko)
-
-</details>
-
-
-## [2026.6.17] - 2026-06-17
-
-_22 PRs from 3 contributors since v2026.6.16-beta.19._
-
-### Added
-
-- Per-conversation agent routing for multi-agent groups (#5323) (#6127) (@houko)
-- Passkey (WebAuthn/FIDO2) dashboard login (#5981) (#6129) (@houko)
-- Deterministic inbound dispatch — channel-instance binding lookup (#5671 Model A) (#6131) (@houko)
-- GitHub/Codeberg registry source selector (#6142) (@houko)
-- Gate auto-routing on AutoRouteStrategy, not the "assistant" name (#6139) (#6148) (@houko)
-- Propagate W3C traceparent on outbound MCP tool calls (#6128) (#6153) (@houko)
-- Report the model codex actually used (#6134) (#6157) (@houko)
-- Dock the agent panel as a resizable sidebar with a larger prompt editor (#6154 #6155) (#6164) (@houko)
-- The cron-management tool disables jobs instead of deleting them (#6159) (#6165) (@houko)
-- Enlarge TOML view, edit agent system prompt and tools with reset-to-default (#6150 #6151 #6152) (#6166) (@houko)
-- Central prompt repository page with versions and agent binding (#6160) (#6167) (@houko)
-
-### Fixed
-
-- Enforce cross-chat dispatch guard through the /mcp bridge (#6117) (#6125) (@houko)
-- Take over a stale conversation-ownership claim from a channel-ineligible holder (#5323) (#6132) (@houko)
-- Respect `LIBREFANG_HOME` when resolving plugin directory (#6136) (@HuaGu-Dragon)
-- Close channel media RBAC bypass and audit findings (#6141) (@houko)
-- Keep Save actionable after a passing Test (#6144) (#6146) (@houko)
-- Refetch hand settings after save so inputs persist (#6145) (#6147) (@houko)
-- Show the correct Hand agent name in the sessions view (#6156) (#6162) (@houko)
-- Build vendored OpenSSL on Windows so webauthn-rs links (#6161) (#6163) (@houko)
-- Pin vendored OpenSSL to Strawberry Perl on the Windows test lane (#6171) (@houko)
-
-### Changed
-
-- Lift tool dispatch table to typed ToolError (#3576 slice 5) (#6124) (@houko)
-
-<details>
-<summary>Documentation, maintenance, and other internal changes</summary>
-
-### Maintenance
-
-- Bump the actions-minor-patch group with 2 updates (#6140) (@app/dependabot)
-
-</details>
-
-
 ## [2026.6.16] - 2026-06-16
 
 _18 PRs from 3 contributors since v2026.6.11-beta.18._
@@ -909,45 +790,6 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ## [Unreleased]
 
-### Changed
-
-- **chore(secrets): replace the detect-secrets baseline with gitleaks** (#6262) (@houko).
-  The 4296-line `.secrets.baseline` pinned 534 unaudited high-entropy findings and forced every fixture-adding PR to append to it, which made it the repo's most merge-conflict-prone file.
-  gitleaks scans against a fixed rule set plus rule-based path/regex allowlists in `.gitleaks.toml`, which do not churn the way a per-finding snapshot does; CI runs `gitleaks dir .` and the pre-commit hook runs `gitleaks protect --staged`.
-
-### Fixed
-
-- **fix(runtime): `channel_send` without a `recipient` now replies to the group, not the speaker** (#6261) (@neo-wanderer).
-  In a group conversation a no-recipient `channel_send` auto-filled the recipient from `sender_id` (the individual who spoke) instead of `sender_chat_id` (the room / group).
-  The send then targeted the speaker's user id as if it were a conversation — e.g. a Matrix file send routed to `@user:hs` rather than the room `!room:hs`, which the homeserver rejected with `403 not in room` (visible only on the sidecar's stderr, so the tool still reported success).
-  The auto-fill now resolves the same canonical target the #6117 cross-chat guard validates against — the conversation id first, falling back to `sender_id` only for DMs — via a shared `resolve_send_target` helper, so the send target and the guard's `expected_chat` can no longer disagree.
-- **fix(channels): the streaming final answer now fires a push notification** (#6248) (@houko) — reported and diagnosed by @neo-wanderer.
-  On streaming channels (Telegram, Matrix) the agent's final answer was delivered as an *edit* of the `"…"` streaming placeholder, and edits do not generate a client push notification — so the push fired on the empty placeholder and the actual answer landed silently (unless it overflowed the per-message length limit, whose tail chunk is a fresh, notifying message).
-  Both adapters now finalize the answer as a *fresh* message — Telegram sends the answer and deletes the placeholder; Matrix sends a new `m.room.message` and redacts the placeholder — so the notification fires on the answer regardless of length.
-  The overflow path already sent a notifying tail, so finalize-as-new is skipped there to avoid a duplicate ping.
-
-### Added
-
-- **feat(runtime): add the `agent` dimension to `librefang_tool_execution_seconds`** (#6244) (@houko).
-  The per-tool latency histogram carried only a `tool` label, so per-tool p95 was an unweighted blend across every calling agent — a slow agent and a fast agent sharing a tool were indistinguishable, even though the sibling `librefang_tool_call_total` counter already carried `agent` (#6226).
-  The histogram now emits `{agent,tool}`, with `agent` sourced from the `agent_id` already in scope and sanitized + length-capped like `tool`, so tool latency is attributable per agent while cardinality stays bounded.
-- **feat(dashboard): provider max-token limit on the Providers page** (#6209) (@houko).
-  Each provider card now shows the representative model's max-output-token limit (the `max_tokens` override when set, else the catalog `max_output_tokens`), and the config drawer lets you edit it; clearing the field reverts to the catalog default.
-  Persisted through the existing per-model override endpoint, so no new persistence path is introduced.
-- **feat(runtime): emit `librefang_agent_loop_exits_total{agent,reason}`** so operators can alert on non-success agent-loop terminations (#6227) (@houko).
-  The agent loop previously recorded no metric when it aborted on repeated tool failures, max iterations, a loop-guard circuit break, or a provider content-filter — the only signal was reading transcripts, and a cron/trigger fire that aborted still recorded `librefang_cron_fires_total{outcome="ok"}` because the loop returned.
-  Reasons: `completed`, `max_iterations`, `repeated_tool_failures`, `circuit_break`, `content_filtered`, `error`.
-  The counter increments exactly once per termination from a thin wrapper around the streaming and non-streaming loops, so no branch fall-through can double-count.
-  Alert with `rate(librefang_agent_loop_exits_total{reason!="completed"}) > 0` per agent.
-- **feat(runtime): CoT-pruning for stale reasoning traces during compaction** (#6173) (@houko).
-  Strips `<think>...</think>` spans and `Thinking` content blocks from assistant turns older than `[compaction] strip_reasoning_after_turns` (default 0, disabled), reclaiming context that stale reasoning would otherwise occupy.
-  Runs only at the compaction boundary, never on the per-turn hot path, so it does not invalidate the provider prompt cache more often than compaction already does.
-  Skipped entirely for models whose `ReasoningEchoPolicy` is `Echo` (DeepSeek V4 Flash), which require the reasoning echoed back on tool_calls turns.
-  Implements part of the proposal in #6173 by @pavver.
-- **feat(runtime): developer-loop aggregation during compaction** (#6173) (@houko).
-  Collapses long runs of consecutive developer-tool steps — classified by the existing `ToolClass` taxonomy (`Mutating` / `ExecCapable`), not a hardcoded name list — into the first step, a deterministic placeholder, and the last step, opt-in via `[compaction] aggregate_developer_loops` (default off) with `max_loop_steps_before_aggregate` (default 5).
-  Whole tool-use/result pairs are removed together so no `tool_use_id` is orphaned.
-
 ### Breaking Changes
 
 - **Subprocess plugin sandbox is now secure-by-default** (#2) (@houko).
@@ -957,24 +799,6 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   The `seccomp-sandbox` and `landlock-sandbox` features (Linux syscall + LSM filtering) are now enabled in the default feature set; they are no-ops on macOS / Windows.
 
 ### Changed
-
-- **fix(runtime): spill oversized `shell_exec` output to the artifact store instead of lossily truncating it** (#6242) (@houko).
-  `shell_exec` capped each of stdout/stderr at `max_output_bytes` (default 100 KB) with `safe_truncate_str` and an `[truncated, N total bytes]` note, so the dropped middle of a long run (e.g. a 25k-line test log) was unrecoverable — the universal artifact spill never saw those bytes because the tool truncated them first.
-  Oversized streams now route through `artifact_store::maybe_spill`, yielding a compact stub the agent can page back in full via `read_artifact`, closing the only place the artifact store leaked information.
-- **dashboard(agents): drop the arbitrary 200000 cap on the model `max_tokens` input** (#6209) (@houko).
-  The agent model-config `max_tokens` field hard-capped its input at `max={200000}`, silently preventing operators from setting a higher output budget; the provider validates the real per-model ceiling anyway, so the UI no longer imposes its own arbitrary limit (`min={1}` is kept).
-  Closes #6209.
-- **refactor(error-contracts): migrate `browser_tools.rs` to `Result<String, ToolError>`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
-  The ten `tool_browser_*` dispatchers (navigate / click / type / screenshot / read_page / close / scroll / wait / run_js / back) now return the typed `ToolError` instead of an opaque `String`: missing params map to `MissingParameter`, an SSRF-blocked URL to `InvalidParameter`, and CDP transport / command failures to `Upstream` via `upstream_msg`.
-  The dispatch boundary drops its per-arm `.map_err(ToolError::upstream_msg)` so the typed variants flow through `tool_result_from_typed`; the `None` (browser-not-wired) arm still yields `Unavailable`.
-- **refactor(api): replace `anyhow` with a typed `TmuxError` in `terminal_tmux`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
-  The `TmuxController` methods and `parse_window_list` now return `Result<T, TmuxError>` instead of `anyhow::Result<T>`: spawn failures carry the underlying `io::Error` on the `source()` chain, plus typed variants for subprocess timeout, post-spawn I/O error, non-zero exit (rendered status + trimmed stderr), pre-spawn argument validation, empty `new-window` output, and the `parse_window_list` missing-field / bad-index cases.
-  Every `Display` string is preserved byte-for-byte from the old `anyhow!(…)` text because it reaches daemon logs via `warn!(error = %e, …)` in `routes/terminal.rs`, so callers compile unchanged with equivalent behavior.
-- **chore(deps): drop five orphaned email `[workspace.dependencies]` left after the channel sidecar migration** (#6176) (@houko).
-  `lettre` / `imap` / `rustls-connector` / `mailparse` / `rustls-pemfile` were declared in the root `Cargo.toml` but had no member consumer (no `.workspace = true`, no `use`) and were already absent from `Cargo.lock`, so they were never compiled or audited — the issue's "adds compile time / binary size / supply-chain surface" framing was inaccurate; the real defect was dead declaration cruft.
-  The now-unmatchable `deny.toml` ignore for `RUSTSEC-2025-0134` (`rustls-pemfile`) is dropped in the same change, since that crate no longer appears in the resolved graph.
-  Declaration-only removal; `Cargo.lock` is unchanged.
-  Closes #6176.
 
 - **refactor(error-contracts): migrate `web_search.rs` tool functions from `Result<String, String>` to `Result<String, ToolError>`** (#3576) (@houko) — one slice of the ongoing structured-error-contracts migration.
 The multi-provider search engine (`WebSearchEngine::search` and its `search_brave` / `search_tavily` / `search_perplexity` / `search_jina` / `search_duckduckgo` / `search_searxng` / `search_auto` / `list_searxng_categories` helpers) now returns the typed `ToolError` instead of an opaque `String`: missing API keys and unconfigured SearXNG URLs map to `Unavailable`, invalid `pageno` / `category` to `InvalidParameter`, `reqwest` send/JSON failures to `Upstream` via `ToolError::upstream` (preserving the `reqwest::Error` source chain per #3745), and "no results" / "all providers failed" to `Upstream` via `upstream_msg`.
@@ -998,57 +822,6 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
-- **channels: remove a configured sidecar channel from the dashboard** (#6186) (@houko).
-  Channels could only be added — the only way to remove one was hand-editing `config.toml`.
-  A new `DELETE /api/channels/sidecar/{name}` rewrites `config.toml` under the same lock that gates configure, then hot-reloads so the removed sidecar child is stopped rather than left running until restart.
-  The dashboard configured-channel cards gain a confirm-guarded Trash button wired to a `useRemoveSidecarConfig` mutation; the channel's `secrets.env` keys are deliberately left untouched, since purging secrets is a separate destructive action.
-  Closes #6186.
-- **dashboard(agents): group the Agents list into Core Agents and Hands sections** (#6189) (@houko).
-  The Agents page rendered every agent in one flat list, with hand-role agents distinguished only by a small per-row badge.
-  The already-filtered and -sorted list is now split on the `is_hand` flag into two titled sections (using the pre-seeded `agents.core_agents` / `agents.hands` i18n keys); each header only shows when its group is non-empty, so the `Show hands` toggle keeps its meaning and a single-group view shows no empty banner.
-  Presentational only — no data-layer, query, or backend change.
-  Closes #6189.
-- **observability: tool-call telemetry fidelity — failure-type breakdown, per-tool latency histogram, and span error status** (#6228) (@houko).
-  `librefang_tool_call_total` gains a bounded `failure_type` label that no longer collapses every failure to one `outcome=failure` bucket: a loop-guard / allowlist block (`blocked`), an approval denial or modify-and-retry (`approval_denied`), a tool timeout (`timeout`), a genuine crash (`hard_error`), and a circuit break (`circuit_break`) are now distinguishable on a dashboard.
-  The label is derived from the existing `ToolExecutionStatus` (`Skipped → blocked`, `Denied`/`ModifyAndRetry → approval_denied`, `Expired → timeout`, `Error → hard_error`, no-status circuit break → `circuit_break`); the success path carries `failure_type=none`.
-  A new `librefang_tool_execution_seconds{tool}` histogram exports the per-tool dispatch latency that was already measured for the decision trace (`execution_ms / 1000.0`), so latency distributions are now visible per tool.
-  The `execute_single_tool_call` span now records `tool.outcome` and sets the OpenTelemetry span status to error (`otel.status_code=error`) on a genuine service failure (hard error, circuit break, or timeout) — but not on a model-fat-fingered blocked / denied call — so a `hasError=true` trace filter and service-level errorRate finally match a failed tool. Closes #6228.
-- **dashboard(agents): edit the system prompt and bind a prompt-library version from the agent detail drawer** (#6187) (@houko).
-  The Agents page previously showed the system prompt read-only and the "Prompts" modal's activate only flipped the store's active flag without changing the live prompt; the Hands page already had a full editor (#6151 / #6166), leaving the two pages inconsistent.
-  `SystemPromptSection` is now an inline editor: edit and save via `PATCH /api/agents/{id}`, or open the prompt library and bind a saved version via `useBindPromptVersionToAgent` (which hot-swaps the live `system_prompt` and flips `is_active` together).
-  Dashboard-only — the backend `update_system_prompt` path is unchanged; i18n added to en/zh/uk and the editor is covered by a new `AgentsPage.test.tsx`. Closes #6187.
-- **observability: `librefang_tool_call_total` now carries an `agent` label** (#6226) (@houko).
-  The counter added in #3495 was labeled only by `tool` and `outcome`, so tool failures could not be attributed per-agent.
-  It is now `librefang_tool_call_total{agent, tool, outcome}`, mirroring the existing per-agent `librefang_cron_fires_total{agent}` precedent.
-  The agent id is threaded from `session.agent_id` into `record_tool_call_metric` at every call site (serial and parallel dispatch paths) and sanitized + length-capped exactly like the `tool` label, so a hallucinated or hostile caller id cannot blow up metric cardinality.
-  Closes #6226.
-- **dashboard: guide the user to start a new session when a conversation hits the token / context-window limit** (#6211) (@houko).
-  When the latest turn in the agent chat fails with a token / context-window or length / quota limit, the chat view now shows an inline guidance banner with a one-click "Start a new session" action that reuses the existing `useCreateAgentSession` mutation, instead of leaving only a raw error bubble.
-  Detection is a frontend heuristic over the daemon / provider error string (`isContextLimitError`), because the chat surface carries no structured per-turn context-exhaustion signal; the heuristic matches the canonical phrases the kernel's `classify_streaming_error` emits and explicitly suppresses the banner for an internal usage / spending-budget cap (where a new session would not help).
-  This complements the #6215 context-usage indicator (which shows *how full* the window is but does not classify a failed turn).
-  The banner is scoped to the agent session chat view — channels are config-only surfaces in the dashboard with no conversation UI.
-  Dashboard-only change; covered by `ChatPage.limit.test.ts`.
-  Closes #6211.
-
-- **sec(sandbox): protect the audit anchor from WASM skill `fs_write` via a capability deny-list** (#6182) (@houko).
-  The WASM sandbox previously gated `fs_write` solely on glob capability matching, so a skill granted a broad `FileWrite` subtree — or the universal `FileWrite("*")` — could truncate the audit anchor (`[audit].anchor_path`, default `data_dir/audit.anchor`) and silently break the tamper-evident Merkle chain.
-  `ToolPolicy` gains a `protected_write_paths()` method (default empty; the kernel returns the boot-resolved anchor), and `host_fs_write` now denies any write whose canonical target matches a protected path *above* the capability check, so even `FileWrite("*")` cannot reach the anchor.
-  The deny-list is scoped strictly to the anchor file, not all of `data_dir`, to keep the blast radius small; closes #6182 and supersedes the duplicate #6181.
-- **channels: per-instance sidecar secrets so each agent can own its own handle** (#6169) (@houko).
-  Two instances of the same sidecar adapter (e.g. one Matrix account per agent) previously had to share one global secret — a Matrix sidecar's identity is its `MATRIX_ACCESS_TOKEN`, so both logged in as the same account.
-  `build_spawn_env` now resolves a `<NAME>__KEY` entry in `secrets.env` to the bare `KEY` for the matching `[[sidecar_channels]]` instance (name uppercased, non-alphanumerics → `_`); the per-instance value overrides the global bare key and the parent env, and another instance's namespaced secret never leaks into this child.
-  Operators keep tokens in `secrets.env` (not plaintext `config.toml`); without a prefix all instances still share the global secret. Closes #6169.
-- **dashboard: a global Auto-Dream on/off switch on the Memory → Auto-Dream tab** (#6188) (@houko).
-  The tab previously showed only a read-only status badge and told users to edit `config.toml` to flip the master switch; it is now an interactive toggle wired to the existing `POST /api/config/set` (`auto_dream.enabled` is on the writable allowlist).
-  The handler invalidates `autoDreamKeys` in addition to `useSetConfigValue`'s `configKeys` so the badge and the per-agent "Dream now" buttons reflect the new global state immediately rather than after the 15s poll.
-  Dashboard-only change — the flag is read live by the kernel each tick, so the toggle takes effect without a restart. Closes #6188.
-
-- **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
-  Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
-  Adds the `webauthn_credentials` table (SQLite migration v44) storing the serialized `webauthn-rs` `Passkey` so the sign-count persists across assertions, a `PasskeyEngine` owning the two WebAuthn ceremonies with short-TTL in-memory challenge state, and six routes under `/api/auth/passkey/*` (registration-options/verify gated Owner-only, authentication-options/verify public and rate-limited, plus list/revoke).
-  A successful passkey assertion mints a session identical to `dashboard_login` and bypasses the password-path TOTP challenge (a passkey is already a phishing-resistant second factor).
-  Dashboard gains a "Sign in with passkey" button on the login screen and a Passkeys panel under Settings → Security to register / list / revoke devices, via `@simplewebauthn/browser`.
-  See `docs/architecture/passkey-webauthn.md`.
 - **channels(routing): per-conversation agent routing for multi-agent groups** (#5323) (@houko) — the AITL routing layer on top of #5671 PR-A's `agent` / `available_agents` schema.
   When more than one agent serves a channel, a group message that names a specific non-default agent now reaches that agent instead of the channel default.
   Two addressing paths: an explicit `@`-mention the adapter surfaces in `metadata["mention_names"]` (resolved against agent names/handles), and a non-default agent's declared `channel_overrides.group_trigger_patterns` alias matching the text — scored by a new deterministic per-agent attention scorer (`librefang_channels::bridge::best_alias_match`, reusing the compiled-regex cache) that the channel dispatch path consults before the previously non-deterministic "first available" fallback (closes layer (c) of #5294).
@@ -1067,10 +840,6 @@ In-crate only; no cross-crate error-shape changes.
   The diff helper is dependency-free (no new npm package).
   Background skill-review prompt tuning is out of scope here.
 - **kernel(triggers): `TaskClaimed` and `TaskCompleted` triggers gain an optional `creator_match` filter** (#5960) (@nevgenov), symmetrical to `TaskPosted`'s `assignee_match`, so an orchestrator can scope claim/completion notifications to tasks it originally posted instead of firing on every claim/completion system-wide.
-- **feat(runtime,kernel): non-blocking `agent_send` — `"async": true` delegates without blocking the caller** (#6043) (@DaBlitzStein).
-  `agent_send` was synchronous-only: it awaited the target agent's full reply as the tool result, so any delegation longer than `tool_timeout_secs` (default 120s) was killed mid-flight and the caller's loop stayed blocked the whole time (a Telegram-facing agent went unresponsive while it waited).
-  Passing `"async": true` now registers the delegation on the existing async-task tracker (#4983, previously wired only to `workflow_start`) via the new `KernelHandle::send_to_agent_async_tracked`, spawns the callee loop detached, and returns a `task_id` immediately. The callee's response is injected back into the caller's session when it finishes — mid-turn if the loop is live, else wake-idle — reusing `TaskKind::Delegation` and `complete_async_task`.
-  Blocking `agent_send` (the default) is unchanged; the depth guard still rejects too-deep chains before they can fire async.
   Accepts an agent UUID, display name, or `"self"`; absent (`#[serde(default)]`) it preserves the legacy fire-for-all behaviour and existing string-form triggers still parse. The original poster is threaded onto the `TaskClaimed` / `TaskCompleted` events from the task record.
 - **runtime(exec): opt-in `exec_policy.safe_bins_skip_approval` lets allowlist-mode `shell_exec` calls whose every base command is a declared `safe_bin` skip the approval prompt; default off preserves today's approve-every-shell posture** (#5962) (@jerrywang121).
 - **context engine: out-of-process `engine = "sidecar"`** — run the per-turn context **policy** (recall, window assembly, after-turn bookkeeping) in a subprocess of any language, keeping the **mechanism** it needs in Rust. The `ContextEngine` trait was already the right seam (`ingest` / `assemble` / `after_turn` / `bootstrap`); `SidecarContextEngine` implements it by delegating those async, non-LLM hooks to a child process over a newline-delimited JSON request/reply protocol, and wraps a built-in engine for the rest. LLM-bearing `compact` (its `Arc<dyn LlmDriver>` can't cross a process boundary) and the cheap synchronous hooks (`truncate_tool_result`, `should_compress`, `update_model`, metrics) stay on the inner engine. Robustness is the headline: the context engine is on the per-turn critical path, so **every bridged call falls back to the built-in engine on any failure** — spawn failure, write error, request timeout, malformed reply, or a crashed process — and a flaky sidecar never breaks a turn. Configured via `[context_engine] engine = "sidecar"` + a `[context_engine.sidecar]` block (`command`, `args`, `request_timeout_secs`); the command is trusted operator config so its environment is inherited. Ships a dependency-free Python reference (`docs/examples/context_engine_sidecar.py`) and a protocol/design doc (`docs/architecture/sidecar-context-engine.md`). Tests cover an end-to-end `assemble` round-trip through a real subprocess and spawn-failure fallback. (@houko)
@@ -1102,63 +871,6 @@ In-crate only; no cross-crate error-shape changes.
   `install.sh` / `install.ps1` install the bundled binary when present and stay silent on older tarballs that lack it.
 
 ### Fixed
-
-- **fix(sec): wrap `EmbeddingConfig.api_key` in `Zeroizing<String>` to ensure credential zeroization on drop** (@mrchn).
-  The embedding config struct held the API key as a plain `String`, which stayed in memory after deallocation.
-  Wrapping in `Zeroizing<String>` ensures the key is zeroed on drop, consistent with how the internal driver structs already stored it.
-- **fix(hands): saving one Hand setting no longer drops the others** (#6204) (@houko).
-  The Hand settings editor PUTs only the keys changed this session, but `update_hand_settings` passed that partial map straight to `HandRegistry::update_config`, which replaces the whole instance config — so for a Hand with several settings, saving one reverted every other to its default.
-  The route now reads the instance's current config and merges the incoming keys over it (a true partial update; the registry's replace contract is unchanged), and the editor also seeds its payload from the saved values as defense in depth.
-  Closes #6204.
-- **fix(dashboard): serve the SPA shell on a hard refresh of the Prompts and Tasks pages** (#6197) (@houko).
-  `/dashboard/prompts` and `/dashboard/tasks` are real router routes, but they were never added to the server-side `SPA_ROUTES` allowlist, so a direct navigation or browser refresh returned `asset not found` (404) instead of `index.html`.
-  Both slugs are added to the allowlist, and a drift-guard test now parses `router.tsx` and asserts every top-level dashboard route falls back to the shell, so a future route added without updating the allowlist fails loudly.
-  Closes #6197.
-- **fix(api): scope the compaction-summary banner to the session that was actually compacted** (#6225) (@houko).
-  The dashboard "Session summary (older messages compacted)" banner appeared on a freshly created session that was never compacted, showing a previous unrelated conversation's summary.
-  `compacted_summary` lives in the agent-scoped `canonical_sessions` row (one per `agent_id`) and outlives any individual session, but `get_agent_session` exposed it whenever the requested session was the agent's *active* one — so creating a new session, which makes it active without compacting it, leaked the prior summary onto message #1.
-  A nullable `compacted_summary_session_id` column (schema v46, backward-compatible) now records which session owns the current summary; `store_llm_summary` stamps it with the compacted session, and the GET handler surfaces the banner only when the requested session matches the owner via the new `MemorySubstrate::compacted_summary_for_session`.
-  The summary is scoped, not lost — the session that legitimately produced it still shows it.
-  Closes #6225.
-- **fix(cli): stop the agent-creation wizard from stamping a hidden 200k hourly token cap** (#6206) (@houko).
-  The TUI "create custom agent" wizard hard-coded `[resources] max_llm_tokens_per_hour = 200000` into every generated `agent.toml`, so TUI-created agents silently hit `Resource quota exceeded: Token limit would be exceeded ... > 200000` after a few large-context turns — even though the compiled and global defaults are unlimited.
-  The template now emits `max_llm_tokens_per_hour = 0` (explicitly unlimited, matching every non-TUI agent); operators who want a cap set it via `agent.toml [resources]`, the global `[budget] default_max_llm_tokens_per_hour`, or `PATCH /api/agents/{id}/budget`.
-  Existing agents keep their stored cap — edit the agent's manifest or PATCH its budget to lift it.
-  Closes #6206.
-- **fix(prompts): refuse to delete the active (bound) prompt version** (#6195) (@houko).
-  `PromptStore::delete_version` deleted unconditionally, so a direct API/SDK call could delete the version an agent is actively sending, orphaning its live prompt; the dashboard only hid the delete button client-side.
-  The store now rejects deleting an active version with `InvalidState` (surfaced as `400`, no longer flattened to `500` by the kernel handle), unknown ids stay an idempotent no-op, and the dashboard renders the active version's delete button disabled with an explanatory tooltip on both the Prompts page and the per-agent Prompts/Experiments modal.
-  Closes #6195.
-- **fix(cli): bind the macOS launchagent status string to a `let` so the macOS build compiles (E0716)** (#6198) (@houko).
-  The macOS-only launchagent-status block passed `&i18n::t(...)` from inside an `if`/`else` expression to `ui::kv`, but each arm returns an owned `String` whose temporary is freed at the end of the `if`-expression, before `ui::kv` borrows it.
-  The macOS test lane is main-push-only, so this surfaced as a red `main` after merge rather than failing the originating PR.
-  Closes #6198.
-
-- **fix(whatsapp-gateway): resolve the `link-preview-js` peer conflict and commit a lockfile** (#6180) (@houko).
-  `npm install` in `packages/whatsapp-gateway` failed with `ERESOLVE` unless `--legacy-peer-deps` was passed: the gateway declared `link-preview-js@^4.0.1` as a direct dependency while `@whiskeysockets/baileys@6.7.22` lists it as `peerOptional ^3.0.0`, and the direct declaration defeated the optional flag.
-  `link-preview-js` is never imported by the gateway, so the direct dependency is dropped and pinned via an `overrides` block to `^4.0.1`, preserving the #5934 SSRF fix (GHSA-4gp8-rjrq-ch6q) if Baileys ever pulls it in transitively.
-  A `package-lock.json` is now committed so installs are reproducible and CI can run `npm audit` against a locked graph.
-  Closes #6180.
-
-- **sec(install): enforce SHA256 verification in install.sh, remove silent skip paths** (#6179) (@mrchn).
-  `install.sh` previously skipped SHA256 verification silently in two cases: when no hash tool (`sha256sum`/`shasum`) was present on the system, and when the expected `.sha256` file was missing from the GitHub release — in both cases the install proceeded as if verification had passed.
-  Verification now fails loudly (non-zero exit, clear error message) instead of silently succeeding, closing the integrity-check bypass.
-- **ci: the Windows test lane is green again — `librefang-api` now builds vendored OpenSSL on Windows so `webauthn-rs` links** (#6161) (@houko).
-  The passkey/WebAuthn work (#5981) added `webauthn-rs`, which pulls in `webauthn-rs-core` → native `openssl-sys`; the Windows MSVC runners have no discoverable system OpenSSL, so `cargo test --no-run --workspace` failed there with "Could not find directory of OpenSSL installation".
-  A Windows-gated `openssl = { features = ["vendored"] }` dependency in `crates/librefang-api/Cargo.toml` makes cargo feature-unification build `openssl-sys` from source on Windows only; Unix keeps using the system library and is unaffected.
-  No NASM setup step is needed — the vendored builder auto-detects `nasm` and falls back to a no-asm build when it is absent, and both Windows runner images already ship the Perl the build requires.
-  Closes #6161.
-
-- **ci: point the vendored-OpenSSL build at Strawberry Perl on the Windows test lane** (#6171) (@houko).
-  Follow-up to the entry above: #6163's CI never exercised this because the Windows test lane is main-push-only, and it broke `main` on merge.
-  The `Test / Windows` job runs `cargo nextest` under `shell: bash`, so Git Bash's MSYS Perl (`/usr/share/perl5/core_perl`) shadows the Strawberry Perl the previous entry was counting on, and it cannot configure OpenSSL's `VC-WIN64A` build — its `IPC::Cmd` / `Params::Check` modules fail to compile, aborting `./Configure`.
-  `openssl-src` shells out to whichever `perl` is first on `PATH`; the `OPENSSL_SRC_PERL` env var (its documented override, ahead of `PERL` and the bare `perl` fallback) now pins the job at the runner's Windows-native `C:/Strawberry/perl/bin/perl.exe`.
-  The release Windows jobs are unaffected — their `cargo build` step runs under the default `pwsh`, where the system `PATH` resolves `perl` to Strawberry directly.
-
-- **ci: raise the Windows test-lane timeout to 90min so the heavier vendored-OpenSSL cold build fits** (#6161) (@houko).
-  Follow-up to #6171: with the Perl fix in place both Windows shards' tests passed, but the first cold run after #6163 had no warm cache, so the from-source OpenSSL build pushed one shard to the 60min ceiling — it passed its tests and was then cancelled mid cache-save, leaving `main` red on a non-test failure.
-  The vendored build recurs cold on every `Cargo.lock` change that busts the `test-windows` cache, so the ceiling is raised from 60min to 90min (macOS keeps 60min — its system-OpenSSL build is lighter).
-  The cap never inflates a green run: the job ends when nextest and the cache save finish, not at the ceiling, so a warm shard still lands in ~15min.
 
 - **channels: a conversation-ownership claim held by an agent that can no longer serve the channel is now taken over instead of silently dropping follow-ups** (#5323) (@houko).
   Follow-up to #6127: if agent A claimed a thread and A's `manifest.channels` allowlist was then narrowed to exclude that channel, the still-live claim suppressed every non-addressed follow-up (routed to an eligible agent B) until the TTL expired — a silent message drop.

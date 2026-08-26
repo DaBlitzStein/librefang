@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 46;
+const SCHEMA_VERSION: u32 = 43;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -209,20 +209,6 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(42, migrate_v42);
     // v43 (#6021): mcp_server_configs table for SQLite-backed MCP server config.
     run_step!(43, migrate_v43);
-    // v44 (#5981): webauthn_credentials table for passkey (WebAuthn/FIDO2)
-    // login. Stores the whole serialized webauthn-rs `Passkey` so the
-    // updated sign-count can be persisted after each assertion.
-    run_step!(44, migrate_v44);
-    // v45 (#5671): channel-instance binding tables backing the deterministic
-    // two-level inbound dispatch lookup (instance default + per-conversation
-    // override) that replaces the non-deterministic `list_agents().first()`
-    // fallback chain.
-    run_step!(45, migrate_v45);
-    // v46 (#6225): record which session a canonical compaction summary
-    // belongs to, so the GET-session banner is shown only on the session
-    // whose own history was actually compacted — never leaked onto a
-    // freshly created session that merely became the agent's active one.
-    run_step!(46, migrate_v46);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1677,90 +1663,6 @@ fn migrate_v43(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (43, datetime('now'), 'Add mcp_server_configs table for SQLite-backed MCP server config (#6021)')",
-        [],
-    )?;
-    Ok(())
-}
-
-fn migrate_v44(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS webauthn_credentials (
-             credential_id TEXT PRIMARY KEY,
-             user_name     TEXT NOT NULL,
-             cred          TEXT NOT NULL,
-             label         TEXT,
-             created_at    INTEGER NOT NULL,
-             last_used_at  INTEGER
-         );
-         CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user_name
-             ON webauthn_credentials(user_name);",
-    )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (44, datetime('now'), 'Add webauthn_credentials table for passkey (WebAuthn/FIDO2) login (#5981)')",
-        [],
-    )?;
-    Ok(())
-}
-
-fn migrate_v45(conn: &Connection) -> Result<(), rusqlite::Error> {
-    // Two tables backing Model A inbound dispatch (#5671):
-    //   channel_instance_defaults — one row per `[[sidecar_channels]]`
-    //     instance, seeded from config at boot; the default agent a channel
-    //     instance routes to when a conversation has no explicit override.
-    //   conversation_bindings — per (instance, conversation) override written
-    //     by `/agent`; supersedes the instance default. Empty until the
-    //     `/agent` command lands, but the read path consults it first.
-    // Both store the agent *name* (not the per-spawn `AgentId` uuid): config
-    // and the registry resolve agents by stable name, and the bridge maps
-    // name -> id at dispatch.
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS channel_instance_defaults (
-            instance_name TEXT PRIMARY KEY,
-            agent_name    TEXT NOT NULL,
-            bound_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            bound_by      TEXT
-        );
-        CREATE TABLE IF NOT EXISTS conversation_bindings (
-            instance_name   TEXT NOT NULL,
-            conversation_id TEXT NOT NULL,
-            agent_name      TEXT NOT NULL,
-            bound_at        TEXT NOT NULL DEFAULT (datetime('now')),
-            bound_by        TEXT,
-            PRIMARY KEY (instance_name, conversation_id)
-        );",
-    )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (45, datetime('now'), 'Add channel_instance_defaults + conversation_bindings tables for deterministic inbound dispatch (#5671)')",
-        [],
-    )?;
-    Ok(())
-}
-
-/// Version 46: Tag the canonical compaction summary with the session it
-/// belongs to (#6225).
-///
-/// `canonical_sessions.compacted_summary` is agent-scoped (one row per
-/// `agent_id`) and outlives any individual session. Before this column the
-/// GET-session handler exposed the summary on whichever session happened to
-/// be the agent's active one, so creating a brand-new session — which makes
-/// it active without ever compacting it — leaked a prior conversation's
-/// summary onto message #1. The nullable `compacted_summary_session_id`
-/// records which session legitimately owns the current summary; the read
-/// path gates the banner on a match. Backward-compatible: existing rows get
-/// `NULL`, which the read path treats as "owned by no specific session"
-/// (banner hidden) until the next compaction stamps the owning session.
-fn migrate_v46(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "canonical_sessions", "compacted_summary_session_id") {
-        conn.execute(
-            "ALTER TABLE canonical_sessions ADD COLUMN compacted_summary_session_id TEXT",
-            [],
-        )?;
-    }
-    conn.execute(
-        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (46, datetime('now'), 'Tag canonical compaction summary with owning session_id (#6225)')",
         [],
     )?;
     Ok(())

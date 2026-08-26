@@ -14,7 +14,6 @@ use ratatui::widgets::{
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::i18n;
 use crate::tui::theme;
 
 // ── Provider detection ──────────────────────────────────────────────────────
@@ -79,7 +78,6 @@ pub enum LauncherChoice {
     Quit,
 }
 
-#[allow(dead_code)]
 struct MenuItem {
     label: &'static str,
     hint: &'static str,
@@ -508,7 +506,7 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
             ]),
             Line::from(""),
             Line::from(vec![Span::styled(
-                i18n::t("launcher-welcome"),
+                "Welcome! Let's get you set up.",
                 Style::default().fg(theme::TEXT_PRIMARY),
             )]),
         ];
@@ -537,7 +535,7 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
         let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         let line = Line::from(vec![
             Span::styled(format!("{spinner} "), Style::default().fg(theme::YELLOW)),
-            Span::styled(i18n::t("launcher-checking-daemon"), theme::dim_style()),
+            Span::styled("Checking for daemon\u{2026}", theme::dim_style()),
         ]);
         frame.render_widget(Paragraph::new(line), chunks[3]);
     } else {
@@ -546,9 +544,10 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
         // Daemon status
         if let Some(ref url) = state.daemon_url {
             let agent_suffix = if state.daemon_agents > 0 {
-                i18n::t_args(
-                    "launcher-daemon-agents",
-                    &[("count", &state.daemon_agents.to_string())],
+                format!(
+                    " ({} agent{})",
+                    state.daemon_agents,
+                    if state.daemon_agents == 1 { "" } else { "s" }
                 )
             } else {
                 String::new()
@@ -561,7 +560,7 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    i18n::t_args("launcher-daemon-running", &[("url", url)]),
+                    format!("Daemon running at {url}"),
                     Style::default().fg(theme::TEXT_PRIMARY),
                 ),
                 Span::styled(agent_suffix, Style::default().fg(theme::GREEN)),
@@ -569,7 +568,7 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
         } else {
             lines.push(Line::from(vec![
                 Span::styled("\u{25cb} ", theme::dim_style()),
-                Span::styled(i18n::t("launcher-daemon-no-running"), theme::dim_style()),
+                Span::styled("No daemon running", theme::dim_style()),
             ]));
         }
 
@@ -583,7 +582,7 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    i18n::t_args("launcher-provider", &[("provider", provider)]),
+                    format!("Provider: {provider}"),
                     Style::default().fg(theme::TEXT_PRIMARY),
                 ),
                 Span::styled(format!(" ({env_var})"), theme::dim_style()),
@@ -591,19 +590,16 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
         } else {
             lines.push(Line::from(vec![
                 Span::styled("\u{25cb} ", Style::default().fg(theme::YELLOW)),
-                Span::styled(
-                    i18n::t("launcher-no-keys"),
-                    Style::default().fg(theme::YELLOW),
-                ),
+                Span::styled("No API keys detected", Style::default().fg(theme::YELLOW)),
             ]));
             if !state.first_run {
                 lines.push(Line::from(vec![Span::styled(
-                    i18n::t("launcher-hint-re-run"),
+                    "  Run 'Re-run setup' to configure a provider",
                     theme::hint_style(),
                 )]));
             } else {
                 lines.push(Line::from(vec![Span::styled(
-                    i18n::t("launcher-hint-get-started"),
+                    "  Select 'Get started' to configure",
                     theme::hint_style(),
                 )]));
             }
@@ -630,46 +626,9 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
                 Style::default().fg(theme::TEXT_PRIMARY)
             };
 
-            let (label, hint) = match item.choice {
-                LauncherChoice::GetStarted => {
-                    if state.first_run {
-                        (
-                            i18n::t("launcher-menu-get-started"),
-                            i18n::t("launcher-menu-get-started-hint"),
-                        )
-                    } else {
-                        (
-                            i18n::t("launcher-menu-settings"),
-                            i18n::t("launcher-menu-settings-hint"),
-                        )
-                    }
-                }
-                LauncherChoice::Chat => (
-                    i18n::t("launcher-menu-chat"),
-                    i18n::t("launcher-menu-chat-hint"),
-                ),
-                LauncherChoice::Dashboard => (
-                    i18n::t("launcher-menu-dashboard"),
-                    i18n::t("launcher-menu-dashboard-hint"),
-                ),
-                LauncherChoice::DesktopApp => (
-                    i18n::t("launcher-menu-desktop"),
-                    i18n::t("launcher-menu-desktop-hint"),
-                ),
-                LauncherChoice::TerminalUI => (
-                    i18n::t("launcher-menu-tui"),
-                    i18n::t("launcher-menu-tui-hint"),
-                ),
-                LauncherChoice::ShowHelp => (
-                    i18n::t("launcher-menu-help"),
-                    i18n::t("launcher-menu-help-hint"),
-                ),
-                LauncherChoice::Quit => (String::new(), String::new()),
-            };
-
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<26}", label), label_style),
-                Span::styled(hint, theme::dim_style()),
+                Span::styled(format!("{:<26}", item.label), label_style),
+                Span::styled(item.hint, theme::dim_style()),
             ]))
         })
         .collect();
@@ -688,9 +647,9 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
     // ── Migration hint ────────────────────────────────────────────────────────
     if state.first_run && (state.openclaw_detected || state.openfang_detected) {
         let source = match (state.openclaw_detected, state.openfang_detected) {
-            (true, true) => i18n::t("brand-openclaw-openfang"),
-            (true, false) => i18n::t("brand-openclaw"),
-            (false, true) => i18n::t("brand-openfang"),
+            (true, true) => "OpenClaw / OpenFang",
+            (true, false) => "OpenClaw",
+            (false, true) => "OpenFang",
             _ => unreachable!(),
         };
         let hint_lines = vec![
@@ -698,10 +657,13 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
             Line::from(vec![
                 Span::styled("\u{2192} ", Style::default().fg(theme::BLUE)),
                 Span::styled(
-                    i18n::t_args("launcher-migration-question", &[("source", &source)]),
+                    format!("Coming from {source}? "),
                     Style::default().fg(theme::BLUE),
                 ),
-                Span::styled(i18n::t("launcher-migration-hint"), theme::hint_style()),
+                Span::styled(
+                    "'Get started' includes automatic migration.",
+                    theme::hint_style(),
+                ),
             ]),
         ];
         frame.render_widget(Paragraph::new(hint_lines), chunks[6]);
@@ -709,7 +671,7 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
 
     // ── Keybind hints ───────────────────────────────────────────────────────
     let hints = Line::from(vec![Span::styled(
-        i18n::t("launcher-menu-hints"),
+        "\u{2191}\u{2193}/jk navigate  1-9 quick select  enter confirm  q quit",
         theme::hint_style(),
     )]);
     frame.render_widget(Paragraph::new(hints), chunks[7]);
@@ -767,12 +729,12 @@ fn draw_help(frame: &mut ratatui::Frame, lines: &[String], scroll: usize) -> usi
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                i18n::t("launcher-help-title"),
+                "All commands",
                 Style::default()
                     .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(i18n::t("launcher-help-subtitle"), theme::dim_style()),
+            Span::styled("  — q/Esc to go back", theme::dim_style()),
         ])),
         title_area,
     );
@@ -806,7 +768,7 @@ fn draw_help(frame: &mut ratatui::Frame, lines: &[String], scroll: usize) -> usi
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            i18n::t("launcher-help-hints"),
+            "\u{2191}\u{2193}/jk scroll  PgUp/PgDn  g/G top/bottom  q back",
             theme::hint_style(),
         ))),
         hint_area,

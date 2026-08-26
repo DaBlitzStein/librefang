@@ -36,52 +36,31 @@ pub(crate) async fn authenticate_chatgpt(
     if device_auth {
         match resolve_device_auth_start(chatgpt_oauth::start_device_auth_flow().await)? {
             DeviceAuthNextStep::ContinueDevice(prompt) => {
-                println!("{}", i18n::t("auth-chatgpt-device-requested"));
+                println!("Device authentication requested.");
                 println!(
-                    "{}",
-                    i18n::t_args(
-                        "auth-chatgpt-device-open-url",
-                        &[("url", chatgpt_oauth::DEVICE_AUTH_URL)]
-                    )
+                    "Open this URL in any browser:\n  {}\n",
+                    chatgpt_oauth::DEVICE_AUTH_URL
                 );
-                println!(
-                    "{}",
-                    i18n::t_args(
-                        "auth-chatgpt-device-one-time-code",
-                        &[("code", &prompt.user_code)]
-                    )
-                );
-                println!("{}", i18n::t("auth-chatgpt-device-do-not-share"));
-                println!("{}", i18n::t("auth-chatgpt-device-waiting"));
+                println!("Enter this one-time code:\n  {}\n", prompt.user_code);
+                println!("Do not share this code.");
+                println!("Waiting for authorization...");
                 return chatgpt_oauth::poll_device_auth_flow(&prompt).await;
             }
             DeviceAuthNextStep::FallbackToBrowser(message) => {
                 println!("{message}");
-                println!("{}", i18n::t("auth-chatgpt-switching-browser"));
+                println!("\nSwitching to the standard browser login flow...\n");
             }
         }
     }
 
     let (auth_url, port, code_verifier, state) = chatgpt_oauth::start_oauth_flow().await?;
 
-    println!("{}", i18n::t("auth-chatgpt-opening-browser"));
-    println!(
-        "{}",
-        i18n::t_args("auth-chatgpt-open-manually-hint", &[("url", &auth_url)])
-    );
+    println!("Opening browser for OpenAI authentication...");
+    println!("If the browser does not open, visit:\n  {auth_url}\n");
 
     if let Err(e) = open::that(&auth_url) {
-        eprintln!(
-            "{}",
-            i18n::t_args(
-                "auth-chatgpt-open-browser-failed",
-                &[("error", &e.to_string())]
-            )
-        );
-        eprintln!(
-            "{}",
-            i18n::t_args("auth-chatgpt-open-manually", &[("url", &auth_url)])
-        );
+        eprintln!("Could not open browser automatically: {e}");
+        eprintln!("Please open manually: {auth_url}");
     }
 
     let code = chatgpt_oauth::run_oauth_callback_server(port, &state).await?;
@@ -95,7 +74,7 @@ pub(crate) async fn persist_chatgpt_auth(
 
     let home = librefang_home();
     std::fs::create_dir_all(&home)
-        .map_err(|e| i18n::t_args("auth-error-create-home-dir", &[("error", &e.to_string())]))?;
+        .map_err(|e| format!("Failed to create LibreFang home directory: {e}"))?;
 
     let access_token = auth_result.access_token;
     let refresh_token = auth_result.refresh_token;
@@ -105,27 +84,15 @@ pub(crate) async fn persist_chatgpt_auth(
         refresh_token.as_ref().map(|rt| rt.as_str()),
     )?;
 
-    println!(
-        "{}",
-        i18n::t_args(
-            "auth-chatgpt-tokens-saved",
-            &[("path", &secrets_path.display().to_string())]
-        )
-    );
+    println!("\nChatGPT tokens saved to {}", secrets_path.display());
 
-    println!("{}", i18n::t("auth-chatgpt-detecting-model"));
+    println!("Detecting best available model...");
     let best_model = chatgpt_oauth::fetch_best_codex_model(&access_token).await;
-    println!(
-        "{}",
-        i18n::t_args("auth-chatgpt-selected-model", &[("model", &best_model)])
-    );
+    println!("Selected model: {best_model}");
 
     update_chatgpt_config(&home, &best_model)?;
 
-    println!(
-        "{}",
-        i18n::t_args("auth-chatgpt-config-updated", &[("model", &best_model)])
-    );
+    println!("config.toml updated: provider = \"chatgpt\", model = \"{best_model}\"");
     Ok(())
 }
 
@@ -162,7 +129,7 @@ pub(crate) fn write_chatgpt_secrets(
     }
 
     std::fs::write(&secrets_path, updated)
-        .map_err(|e| i18n::t_args("auth-error-write-secrets", &[("error", &e.to_string())]))?;
+        .map_err(|e| format!("Failed to write secrets.env: {e}"))?;
 
     Ok(secrets_path)
 }
@@ -178,14 +145,14 @@ pub(crate) fn update_chatgpt_config(
     } else {
         config_str
             .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| i18n::t_args("auth-error-parse-config", &[("error", &e.to_string())]))?
+            .map_err(|e| format!("Failed to parse config.toml: {e}"))?
     };
 
     let dm = doc
         .entry("default_model")
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
-        .ok_or_else(|| i18n::t("auth-error-default-model-not-table"))?;
+        .ok_or("default_model is not a table")?;
     dm.insert("provider", toml_edit::value("chatgpt"));
     dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
     dm.insert("model", toml_edit::value(best_model));
@@ -195,13 +162,13 @@ pub(crate) fn update_chatgpt_config(
     );
 
     std::fs::write(&config_path, doc.to_string())
-        .map_err(|e| i18n::t_args("auth-error-write-config", &[("error", &e.to_string())]))?;
+        .map_err(|e| format!("Failed to write config.toml: {e}"))?;
 
     Ok(())
 }
 
 pub(crate) fn cmd_auth_chatgpt(device_auth: bool) {
-    println!("{}", i18n::t("auth-chatgpt-starting-flow"));
+    println!("Starting ChatGPT authentication flow...\n");
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
@@ -211,12 +178,9 @@ pub(crate) fn cmd_auth_chatgpt(device_auth: bool) {
     });
 
     match result {
-        Ok(()) => ui::success(&i18n::t("auth-chatgpt-complete")),
+        Ok(()) => ui::success("ChatGPT authentication complete."),
         Err(e) => {
-            ui::error(&i18n::t_args(
-                "auth-chatgpt-failed",
-                &[("error", &e.to_string())],
-            ));
+            ui::error(&format!("ChatGPT authentication failed: {e}"));
             std::process::exit(1);
         }
     }
@@ -263,13 +227,7 @@ pub(crate) fn pool_load_doc_or_exit(path: &std::path::Path) -> toml_edit::Docume
 
 pub(crate) fn pool_write_doc_or_exit(path: &std::path::Path, doc: &toml_edit::DocumentMut) {
     std::fs::write(path, doc.to_string()).unwrap_or_else(|e| {
-        ui::error(&i18n::t_args(
-            "auth-write-failed",
-            &[
-                ("path", &path.display().to_string()),
-                ("error", &e.to_string()),
-            ],
-        ));
+        ui::error(&format!("Failed to write {}: {e}", path.display()));
         std::process::exit(1);
     });
 }
@@ -304,7 +262,7 @@ pub(crate) fn pool_lookup_doc_mut<'d>(
     let arr = match item.as_array_of_tables_mut() {
         Some(a) => a,
         None => {
-            ui::error(&i18n::t("auth-pool-config-not-array"));
+            ui::error("config.toml `credential_pools` exists but is not an array of tables");
             std::process::exit(1);
         }
     };
@@ -338,15 +296,14 @@ pub(crate) fn cmd_auth_pool_list(config: Option<PathBuf>, json: bool) {
                 return;
             }
             Ok(r) => {
-                ui::check_warn(&i18n::t_args(
-                    "auth-pool-daemon-error-fallback",
-                    &[("status", &r.status().to_string())],
+                ui::check_warn(&format!(
+                    "Daemon returned HTTP {} — falling back to config.toml view",
+                    r.status()
                 ));
             }
             Err(e) => {
-                ui::check_warn(&i18n::t_args(
-                    "auth-pool-daemon-connect-fallback",
-                    &[("url", &url), ("error", &e.to_string())],
+                ui::check_warn(&format!(
+                    "Failed to query daemon at {url}: {e} — falling back to config.toml view"
                 ));
             }
         }
@@ -358,18 +315,15 @@ pub(crate) fn cmd_auth_pool_list(config: Option<PathBuf>, json: bool) {
         if json {
             println!("[]");
         } else {
-            ui::check_warn(&i18n::t_args(
-                "auth-pool-no-config-offline",
-                &[("path", &path.display().to_string())],
+            ui::check_warn(&format!(
+                "No config at {} and daemon is not running.",
+                path.display()
             ));
         }
         return;
     }
     let cfg = load_config(Some(&path)).unwrap_or_else(|e| {
-        ui::error(&i18n::t_args(
-            "auth-pool-config-load-failed",
-            &[("error", &e.to_string())],
-        ));
+        ui::error(&format!("Failed to load config: {e}"));
         std::process::exit(1);
     });
     let mut pools: Vec<serde_json::Value> = cfg
@@ -426,10 +380,12 @@ pub(crate) fn print_pool_summary_human(body: &serde_json::Value) {
     let pools = match body.as_array() {
         Some(a) if !a.is_empty() => a,
         _ => {
-            println!("{}", i18n::t("auth-pool-none-configured").dimmed());
+            println!("{}", "No credential pools configured.".to_string().dimmed());
             println!();
-            println!("{}", i18n::t("auth-pool-add-hint"));
-            println!("{}", i18n::t("auth-pool-add-example"));
+            println!("Add one with:");
+            println!(
+                "  librefang auth pool add openai OPENAI_API_KEY_1 --label Primary --priority 10"
+            );
             return;
         }
     };
@@ -438,20 +394,12 @@ pub(crate) fn print_pool_summary_human(body: &serde_json::Value) {
         let strategy = pool["strategy"].as_str().unwrap_or("");
         let total = pool["total_count"].as_u64().unwrap_or(0);
         let available = pool["available_count"].as_u64().unwrap_or(total);
-        let header = i18n::t_args(
-            "auth-pool-header",
-            &[("provider", provider), ("strategy", strategy)],
-        );
+        let header = format!("{provider}  ({strategy})");
         println!("{}", header.bold());
         println!(
-            "{}",
-            i18n::t_args(
-                "auth-pool-keys-available",
-                &[
-                    ("available", &available.to_string().bold().to_string()),
-                    ("total", &total.to_string())
-                ]
-            )
+            "  keys: {}/{} available",
+            available.to_string().bold(),
+            total
         );
         if let Some(creds) = pool["credentials"].as_array() {
             for c in creds {
@@ -468,46 +416,28 @@ pub(crate) fn print_pool_summary_human(body: &serde_json::Value) {
                 let status: String = if exhausted {
                     if let Some(serde_json::Value::String(s)) = cooldown {
                         if s == "permanent" {
-                            i18n::t("auth-pool-status-invalid").red().to_string()
+                            "invalid".red().to_string()
                         } else {
-                            i18n::t("auth-pool-status-exhausted").yellow().to_string()
+                            "exhausted".yellow().to_string()
                         }
                     } else if let Some(serde_json::Value::Number(n)) = cooldown {
                         format!(
                             "{} {}",
-                            i18n::t("auth-pool-status-cooldown").yellow(),
-                            i18n::t_args("auth-pool-cooldown-left", &[("secs", &n.to_string())])
-                                .dimmed()
+                            "cooldown".yellow(),
+                            format!("({}s left)", n).dimmed()
                         )
                     } else {
-                        i18n::t("auth-pool-status-exhausted").yellow().to_string()
+                        "exhausted".yellow().to_string()
                     }
                 } else if env_resolved == Some(false) {
-                    i18n::t("auth-pool-status-env-missing").red().to_string()
+                    "env-missing".red().to_string()
                 } else {
-                    i18n::t("auth-pool-status-healthy").green().to_string()
+                    "healthy".green().to_string()
                 };
 
-                let reqs_str = reqs
-                    .map(|r| {
-                        format!(
-                            " {}",
-                            i18n::t_args("auth-pool-key-requests", &[("count", &r.to_string())])
-                        )
-                    })
-                    .unwrap_or_default();
+                let reqs_str = reqs.map(|r| format!(" requests={r}")).unwrap_or_default();
                 println!(
-                    "{}",
-                    i18n::t_args(
-                        "auth-pool-key-item",
-                        &[
-                            ("label", label),
-                            ("key_display", key_display),
-                            ("pri", &pri.to_string()),
-                            ("reqs_str", &reqs_str),
-                            ("status", &status)
-                        ]
-                    )
+                    "    - [{label}] {key_display}  priority={pri}{reqs_str}  status={status}"
                 );
             }
         }
@@ -539,9 +469,8 @@ pub(crate) fn cmd_auth_pool_add(
     priority: u32,
 ) {
     if !is_valid_env_var_name(env_var) {
-        ui::error(&i18n::t_args(
-            "auth-pool-invalid-env-name",
-            &[("env_var", env_var)],
+        ui::error(&format!(
+            "`{env_var}` is not a valid env var name. Expected uppercase letters, digits, and underscores (e.g. OPENAI_API_KEY_2)."
         ));
         std::process::exit(1);
     }
@@ -554,15 +483,15 @@ pub(crate) fn cmd_auth_pool_add(
         Ok(v) if !v.trim().is_empty() => {}
         Ok(_) => {
             ui::error_with_fix(
-                &i18n::t_args("auth-pool-env-empty", &[("env_var", env_var)]),
-                &i18n::t_args("auth-pool-env-empty-fix", &[("env_var", env_var)]),
+                &format!("env var `{env_var}` is set but empty."),
+                &format!("Set it to your API key before adding the pool entry, e.g.\n  export {env_var}=sk-…\nThen retry."),
             );
             std::process::exit(1);
         }
         Err(_) => {
             ui::error_with_fix(
-                &i18n::t_args("auth-pool-env-not-set", &[("env_var", env_var)]),
-                &i18n::t_args("auth-pool-env-not-set-fix", &[("env_var", env_var)]),
+                &format!("env var `{env_var}` is not set in the current shell."),
+                &format!("Export it before adding the pool entry, e.g.\n  export {env_var}=sk-…\nThen retry. (The daemon will read it from its own environment at boot time — make sure it's exported there too.)"),
             );
             std::process::exit(1);
         }
@@ -586,9 +515,8 @@ pub(crate) fn cmd_auth_pool_add(
                 let keys_arr = match keys_item.as_array_of_tables_mut() {
                     Some(a) => a,
                     None => {
-                        ui::error(&i18n::t_args(
-                            "auth-pool-keys-not-array",
-                            &[("provider", provider)],
+                        ui::error(&format!(
+                            "Pool for `{provider}` has a `keys` field that is not an array of tables."
                         ));
                         std::process::exit(1);
                     }
@@ -601,9 +529,8 @@ pub(crate) fn cmd_auth_pool_add(
                         .unwrap_or(false)
                 });
                 if dup {
-                    ui::error(&i18n::t_args(
-                        "auth-pool-key-duplicate",
-                        &[("env_var", env_var), ("provider", provider)],
+                    ui::error(&format!(
+                        "Key with env_var `{env_var}` already exists in pool for provider `{provider}`."
                     ));
                     std::process::exit(1);
                 }
@@ -631,14 +558,8 @@ pub(crate) fn cmd_auth_pool_add(
     }
 
     pool_write_doc_or_exit(&path, &doc);
-    ui::success(&i18n::t_args(
-        "auth-pool-key-added",
-        &[
-            ("label", label),
-            ("env_var", env_var),
-            ("priority", &priority.to_string()),
-            ("provider", provider),
-        ],
+    ui::success(&format!(
+        "Added key `{label}` (env={env_var}, priority={priority}) to pool for `{provider}`. Restart the daemon or hot-reload config to apply."
     ));
 }
 
@@ -650,25 +571,20 @@ pub(crate) fn cmd_auth_pool_remove(config: Option<PathBuf>, provider: &str, env_
     {
         let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
         let Some(i) = idx else {
-            ui::error(&i18n::t_args(
-                "auth-pool-not-configured",
-                &[("provider", provider)],
+            ui::error(&format!(
+                "No credential pool configured for provider `{provider}`."
             ));
             std::process::exit(1);
         };
 
         let pool_tbl = arr.get_mut(i).expect("idx within bounds");
         let Some(keys_item) = pool_tbl.get_mut("keys") else {
-            ui::error(&i18n::t_args(
-                "auth-pool-no-keys-field",
-                &[("provider", provider)],
-            ));
+            ui::error(&format!("Pool for `{provider}` has no keys array."));
             std::process::exit(1);
         };
         let Some(keys_arr) = keys_item.as_array_of_tables_mut() else {
-            ui::error(&i18n::t_args(
-                "auth-pool-keys-not-array",
-                &[("provider", provider)],
+            ui::error(&format!(
+                "Pool for `{provider}` has a `keys` field that is not an array of tables."
             ));
             std::process::exit(1);
         };
@@ -687,9 +603,8 @@ pub(crate) fn cmd_auth_pool_remove(config: Option<PathBuf>, provider: &str, env_
             }
         }
         if keys_arr.len() == before {
-            ui::error(&i18n::t_args(
-                "auth-pool-key-not-found",
-                &[("env_var", env_var), ("provider", provider)],
+            ui::error(&format!(
+                "No key with env_var `{env_var}` found in pool for `{provider}`."
             ));
             std::process::exit(1);
         }
@@ -701,23 +616,20 @@ pub(crate) fn cmd_auth_pool_remove(config: Option<PathBuf>, provider: &str, env_
 
     pool_write_doc_or_exit(&path, &doc);
     if empty_pool_removed {
-        ui::success(&i18n::t_args(
-            "auth-pool-key-removed-pool-empty",
-            &[("env_var", env_var), ("provider", provider)],
+        ui::success(&format!(
+            "Removed key `{env_var}` from pool for `{provider}`. Pool is now empty and has been removed entirely. Restart the daemon or hot-reload config to apply."
         ));
     } else {
-        ui::success(&i18n::t_args(
-            "auth-pool-key-removed",
-            &[("env_var", env_var), ("provider", provider)],
+        ui::success(&format!(
+            "Removed key `{env_var}` from pool for `{provider}`. Restart the daemon or hot-reload config to apply."
         ));
     }
 }
 
 pub(crate) fn cmd_auth_pool_strategy(config: Option<PathBuf>, provider: &str, strategy: &str) {
     let Some(canon) = pool_strategy_canon(strategy) else {
-        ui::error(&i18n::t_args(
-            "auth-pool-unknown-strategy",
-            &[("strategy", strategy)],
+        ui::error(&format!(
+            "Unknown strategy `{strategy}`. Valid: fill_first, round_robin, random, least_used."
         ));
         std::process::exit(1);
     };
@@ -728,9 +640,8 @@ pub(crate) fn cmd_auth_pool_strategy(config: Option<PathBuf>, provider: &str, st
     {
         let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
         let Some(i) = idx else {
-            ui::error(&i18n::t_args(
-                "auth-pool-not-configured",
-                &[("provider", provider)],
+            ui::error(&format!(
+                "No credential pool configured for provider `{provider}`."
             ));
             std::process::exit(1);
         };
@@ -739,9 +650,8 @@ pub(crate) fn cmd_auth_pool_strategy(config: Option<PathBuf>, provider: &str, st
     }
 
     pool_write_doc_or_exit(&path, &doc);
-    ui::success(&i18n::t_args(
-        "auth-pool-strategy-set",
-        &[("provider", provider), ("strategy", canon)],
+    ui::success(&format!(
+        "Set pool strategy for `{provider}` to `{canon}`. Restart the daemon or hot-reload config to apply."
     ));
 }
 
@@ -783,7 +693,7 @@ pub(crate) fn cmd_vault_set(key: &str) {
         std::process::exit(1);
     }
 
-    let value = prompt_input(&i18n::t_args("vault-enter-value-prompt", &[("key", key)]));
+    let value = prompt_input(&format!("Enter value for {key}: "));
     if value.is_empty() {
         ui::error(&i18n::t("vault-empty-value"));
         std::process::exit(1);
@@ -821,12 +731,9 @@ pub(crate) fn cmd_vault_list() {
 
     let keys = vault.list_keys();
     if keys.is_empty() {
-        println!("{}", i18n::t("vault-empty"));
+        println!("Vault is empty.");
     } else {
-        println!(
-            "{}",
-            i18n::t_args("vault-stored-count", &[("count", &keys.len().to_string())])
-        );
+        println!("Stored credentials ({}):", keys.len());
         for key in keys {
             println!("  {key}");
         }
@@ -1015,14 +922,14 @@ pub(crate) fn cmd_hash_password(password: Option<String>) {
     let pass = match password {
         Some(p) => p,
         None => {
-            let p1 = prompt_input(&i18n::t("auth-enter-password-prompt"));
+            let p1 = prompt_input("Enter password: ");
             if p1.is_empty() {
-                ui::error(&i18n::t("auth-password-empty"));
+                ui::error("Password cannot be empty.");
                 std::process::exit(1);
             }
-            let p2 = prompt_input(&i18n::t("auth-confirm-password-prompt"));
+            let p2 = prompt_input("Confirm password: ");
             if p1 != p2 {
-                ui::error(&i18n::t("auth-passwords-mismatch"));
+                ui::error("Passwords do not match.");
                 std::process::exit(1);
             }
             p1
@@ -1032,17 +939,11 @@ pub(crate) fn cmd_hash_password(password: Option<String>) {
     match librefang_api::password_hash::hash_password(&pass) {
         Ok(hash) => {
             println!("\n{hash}\n");
-            println!("{}", i18n::t("auth-hash-add-config-hint"));
-            println!(
-                "{}",
-                i18n::t_args("auth-hash-config-entry", &[("hash", &hash)])
-            );
+            println!("Add to config.toml:");
+            println!("  dashboard_pass_hash = \"{hash}\"");
         }
         Err(e) => {
-            ui::error(&i18n::t_args(
-                "auth-password-hash-failed",
-                &[("error", &e.to_string())],
-            ));
+            ui::error(&format!("Failed to hash password: {e}"));
             std::process::exit(1);
         }
     }

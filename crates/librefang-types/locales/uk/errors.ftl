@@ -49,7 +49,6 @@ api-error-auth-missing = API-ключ не налаштований для ць�
 api-error-session-load-failed = Не вдалося завантажити сесію
 api-error-session-not-found = Сесію не знайдено
 api-error-session-invalid-id = Недійсний ID сесії
-api-error-context-report-failed = Не вдалося сформувати звіт про контекст
 api-error-session-no-label = Не знайдено сесії з такою міткою
 api-error-session-cleanup-expired-failed = Не вдалося очистити застарілі сесії: { $error }
 api-error-session-cleanup-excess-failed = Не вдалося очистити надлишкові сесії: { $error }

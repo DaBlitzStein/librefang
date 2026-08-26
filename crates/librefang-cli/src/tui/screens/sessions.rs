@@ -168,11 +168,7 @@ impl SessionsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
-    let inner = widgets::render_screen_block(
-        f,
-        area,
-        &format!("{} {}", "\u{25c7}", crate::i18n::t("tui-sessions-title")),
-    );
+    let inner = widgets::render_screen_block(f, area, "\u{25c7} Sessions");
 
     let (header, content, hints) = widgets::layout_hch(inner, 2);
 
@@ -183,50 +179,26 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
         let search_hint = if state.search_buf.is_empty() {
             String::new()
         } else {
-            format!(
-                "  {}",
-                crate::i18n::t_args(
-                    "tui-sessions-filter",
-                    &[("query", state.search_buf.as_str())]
-                )
-            )
+            format!("  (filter: \"{}\")", state.search_buf)
         };
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
                     Span::styled(
-                        format!(
-                            "  {}",
-                            crate::i18n::t_args(
-                                "tui-sessions-count",
-                                &[("count", &state.filtered.len().to_string())]
-                            )
-                        ),
+                        format!("  {} sessions", state.filtered.len()),
                         Style::default().fg(theme::TEXT_SECONDARY),
                     ),
                     Span::styled(search_hint, theme::dim_style()),
                 ]),
                 Line::from(vec![
                     Span::styled("  ", theme::table_header()),
-                    Span::styled(
-                        format!("{:<20}", crate::i18n::t("tui-sessions-header-agent")),
-                        theme::table_header(),
-                    ),
+                    Span::styled(format!("{:<20}", "Agent"), theme::table_header()),
                     Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                    Span::styled(
-                        format!("{:<14}", crate::i18n::t("tui-sessions-header-id")),
-                        theme::table_header(),
-                    ),
+                    Span::styled(format!("{:<14}", "Session ID"), theme::table_header()),
                     Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                    Span::styled(
-                        format!("{:<6}", crate::i18n::t("tui-sessions-header-msgs")),
-                        theme::table_header(),
-                    ),
+                    Span::styled(format!("{:<6}", "Msgs"), theme::table_header()),
                     Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                    Span::styled(
-                        crate::i18n::t("tui-sessions-header-created"),
-                        theme::table_header(),
-                    ),
+                    Span::styled("Created", theme::table_header()),
                 ]),
             ]),
             header,
@@ -236,12 +208,12 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
     // ── List ──
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, &crate::i18n::t("tui-sessions-loading")),
+            widgets::spinner(state.tick, "Loading sessions\u{2026}"),
             content,
         );
     } else if state.filtered.is_empty() {
         f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-sessions-empty")),
+            widgets::empty_state("No sessions yet. Start a chat to create one."),
             content,
         );
     } else {
@@ -290,9 +262,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
     f.render_widget(
         widgets::confirm_or_status_or_hint(
             state.confirm_delete,
-            &crate::i18n::t("tui-sessions-delete-confirm"),
+            "  Delete this session? [y] Yes  [any] Cancel",
             &state.status_msg,
-            &format!("  {}", crate::i18n::t("tui-sessions-hints")),
+            "  \u{2191}\u{2193} Navigate  Enter Open  d Delete  / Search  r Refresh",
         ),
         hints,
     );

@@ -25,7 +25,6 @@ export {
   listAgentSessions,
   listAgentTemplates,
   listPromptVersions,
-  listPromptsOverview,
   listExperiments,
   getExperimentMetrics,
   // analytics / usage / budget
@@ -97,7 +96,6 @@ export {
   listSessions,
   getSessionDetails,
   loadAgentSession,
-  getAgentSessionContext,
   // skills (local + hubs)
   listSkills,
   getSkillDetail,
@@ -220,7 +218,6 @@ export {
   // channels & comms
   reloadChannels,
   saveSidecarConfig,
-  removeSidecarConfig,
   sendCommsMessage,
   postCommsTask,
   // attachments

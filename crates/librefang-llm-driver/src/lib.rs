@@ -416,18 +416,6 @@ pub struct CompletionResponse {
     /// on inner leaf drivers; populated by the outermost chain
     /// wrapper. See librefang/librefang#4807 review nit 10.
     pub actual_provider: Option<String>,
-    /// The model the provider actually used, when it differs from the
-    /// requested model id.
-    ///
-    /// Most drivers honour the requested model verbatim and leave this
-    /// `None`, so billing records the nominated model. Some drivers delegate
-    /// model selection to an external process that resolves its own model —
-    /// e.g. the `codex-cli` driver, where the CLI may run a different model
-    /// than the one requested (librefang/librefang#6134). Those drivers set
-    /// this to the model the call actually ran, and the kernel's
-    /// `UsageRecord` construction honours it so metering reflects reality
-    /// rather than the nominated id. `None` means "use the requested model".
-    pub actual_model: Option<String>,
 }
 
 impl CompletionResponse {
@@ -582,28 +570,6 @@ pub trait LlmDriver: Send + Sync {
     /// replay, tool-schema normalisation, …) without per-driver duplication.
     fn family(&self) -> LlmFamily {
         LlmFamily::Other
-    }
-
-    /// Whether this driver delegates to an external *coding-agent* CLI that
-    /// resolves and runs its own model — Claude Code, Codex, Gemini CLI, Qwen
-    /// Code, CodeWhale, … — rather than calling a raw provider API with a
-    /// caller-nominated model.
-    ///
-    /// This axis is orthogonal to [`LlmFamily`] (which groups by wire format):
-    /// the `claude-code` CLI and the Anthropic HTTP API are both
-    /// [`LlmFamily::Anthropic`], yet only the former is a coding agent.
-    /// Likewise `codex-cli` and the OpenAI API are both [`LlmFamily::OpenAi`].
-    ///
-    /// Coding agents own model selection — the spawned CLI may resolve a model
-    /// that differs from the requested id (codex picks from its own config,
-    /// CodeWhale's `/model auto` re-picks per turn) — so they are the drivers
-    /// that can meaningfully populate [`CompletionResponse::actual_model`]. Raw
-    /// providers honour the requested model verbatim and leave it `None`.
-    ///
-    /// Defaults to `false` so every existing HTTP provider and out-of-tree
-    /// driver keeps compiling unchanged; the in-tree CLI drivers override it.
-    fn is_coding_agent(&self) -> bool {
-        false
     }
 }
 
@@ -902,7 +868,6 @@ mod tests {
             tool_calls: vec![],
             usage: TokenUsage::default(),
             actual_provider: None,
-            actual_model: None,
         };
         assert_eq!(response.text(), "Hello world!");
     }
@@ -1020,24 +985,6 @@ mod tests {
         assert_eq!(BareDriver.family(), LlmFamily::Other);
     }
 
-    #[test]
-    fn test_llm_driver_is_coding_agent_default_is_false() {
-        struct BareDriver;
-
-        #[async_trait]
-        impl LlmDriver for BareDriver {
-            async fn complete(
-                &self,
-                _request: CompletionRequest,
-            ) -> Result<CompletionResponse, LlmError> {
-                unreachable!("test does not call complete")
-            }
-        }
-
-        // Raw providers / out-of-tree drivers are not coding agents by default.
-        assert!(!BareDriver.is_coding_agent());
-    }
-
     #[tokio::test]
     async fn test_default_stream_sends_events() {
         use tokio::sync::mpsc;
@@ -1063,7 +1010,6 @@ mod tests {
                         ..Default::default()
                     },
                     actual_provider: None,
-                    actual_model: None,
                 })
             }
         }
@@ -1132,7 +1078,6 @@ mod tests {
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
                     actual_provider: None,
-                    actual_model: None,
                 })
             }
         }

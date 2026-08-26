@@ -48,7 +48,6 @@ api-error-auth-missing = このプロバイダーのAPIキーが設定されて�
 api-error-session-load-failed = セッションの読み込みに失敗しました
 api-error-session-not-found = セッションが見つかりません
 api-error-session-invalid-id = 無効なセッション ID
-api-error-context-report-failed = コンテキストレポートに失敗しました
 api-error-session-no-label = そのラベルのセッションが見つかりません
 api-error-session-cleanup-expired-failed = 期限切れクリーンアップに失敗しました: { $error }
 api-error-session-cleanup-excess-failed = 超過クリーンアップに失敗しました: { $error }

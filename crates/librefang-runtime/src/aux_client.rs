@@ -358,7 +358,6 @@ mod tests {
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
                 actual_provider: None,
-                actual_model: None,
             })
         }
 
