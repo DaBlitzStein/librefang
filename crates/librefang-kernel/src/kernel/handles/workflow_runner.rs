@@ -665,7 +665,21 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             .engine
             .register_unique_name(workflow)
             .await
-            .map_err(|taken| KernelOpError::Conflict(taken.to_string()))?;
+            // The two rejections are not the same answer. A name collision is
+            // the proposing agent's to fix by choosing another name, and
+            // `Conflict` is what tells it so. A failed write is the operator's,
+            // and nothing was stored: reporting it as a conflict would send the
+            // agent off renaming a workflow that never existed, and reporting
+            // success — which is what this did before the engine propagated —
+            // left it believing in one that disappears at the next restart.
+            .map_err(|e| match e {
+                crate::workflow::RegisterWorkflowError::NameTaken(taken) => {
+                    KernelOpError::Conflict(taken.to_string())
+                }
+                crate::workflow::RegisterWorkflowError::NotPersisted(err) => {
+                    KernelOpError::Internal(err.to_string())
+                }
+            })?;
 
         // Two different questions, both answered here. `caller_agent_id` is the executor — which agent's turn assembled the spec — and stays a log-only trace.
         // `owner` is the principal that turn was acting for, and it is now recorded on the workflow itself (#7744): the log line rotates, the workflow does not.
