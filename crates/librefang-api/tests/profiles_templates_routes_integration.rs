@@ -165,7 +165,7 @@ async fn profiles_get_unknown_profile_returns_404() {
 /// One tempdir for the whole test binary. We never unset `LIBREFANG_HOME`
 /// once it's set — flipping it mid-run would race with any other test that
 /// happens to call `librefang_home()`.
-fn librefang_home_root() -> &'static std::path::Path {
+fn templates_root() -> PathBuf {
     static HOME: OnceLock<TempDir> = OnceLock::new();
     let dir = HOME.get_or_init(|| {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -177,26 +177,13 @@ fn librefang_home_root() -> &'static std::path::Path {
         std::env::set_var("LIBREFANG_HOME", tmp.path());
         tmp
     });
-    dir.path()
-}
-
-/// Workspace-agent fixtures (`source = "agent"`) — no longer picked up by
-/// the LIST endpoint, but still resolvable through the detail GET's
-/// fallback.
-fn templates_root() -> PathBuf {
-    librefang_home_root().join("workspaces").join("agents")
-}
-
-/// Real agent-type template fixtures (`source = "template"`) — the only
-/// thing the LIST endpoint reads.
-fn real_templates_root() -> PathBuf {
-    librefang_home_root().join("agent-types")
+    dir.path().join("workspaces").join("agents")
 }
 
 /// Serialise template-mutating tests so unique-name fixtures don't read each
 /// other's listings as "extra entries". `list_agent_templates` walks the
-/// whole `templates/` dir, so a parallel test seeding `bravo` while another
-/// is asserting "exactly one entry" would flake. Each test takes the lock,
+/// whole `agents/` dir, so a parallel test seeding `bravo` while another is
+/// asserting "exactly one entry" would flake. Each test takes the lock,
 /// writes its fixtures into a unique subdir, runs, then drops the lock.
 fn templates_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -213,6 +200,10 @@ impl Drop for TemplateFixture {
     }
 }
 
+/// The returned guard owns the template directory on disk.
+/// Dropping it runs `remove_template`, so a caller that discards the return value deletes the fixture it just wrote and every later read of that template answers 404.
+/// `#[must_use]` turns that mistake into a compile error rather than a failure that surfaces in an unrelated assertion.
+#[must_use = "bind the guard to keep the template on disk; discarding it deletes the fixture immediately"]
 fn write_template(name: &str, body: &str) -> TemplateFixture {
     let root = templates_root();
     let dir = root.join(name);
@@ -227,22 +218,6 @@ fn write_template(name: &str, body: &str) -> TemplateFixture {
 fn remove_template(name: &str) {
     let dir = templates_root().join(name);
     let _ = std::fs::remove_dir_all(dir);
-}
-
-/// Seed an agent-type file (`agent-types/<name>.toml`), the writable source the
-/// listing reports as `source = "agent-type"` / `editable = true`.
-///
-/// Distinct from [`write_template`], which seeds a *workspace agent* manifest:
-/// the listing merges both, so a test that means "an agent type" has to write
-/// the agent-type file or it asserts on the wrong row.
-fn write_real_template(name: &str, body: &str) {
-    let root = real_templates_root();
-    std::fs::create_dir_all(&root).expect("create templates dir");
-    std::fs::write(root.join(format!("{name}.toml")), body).expect("write template toml");
-}
-
-fn remove_real_template(name: &str) {
-    let _ = std::fs::remove_file(real_templates_root().join(format!("{name}.toml")));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -286,7 +261,7 @@ async fn templates_list_includes_seeded_template() {
     let _g = templates_lock().lock().await;
     // Force the home init before the harness boots so the kernel's own
     // setup doesn't hit `~/.librefang`.
-    let _ = librefang_home_root();
+    let _ = templates_root();
 
     let unique = "tmpl_list_alpha";
     let _fixture = write_template(
@@ -319,7 +294,7 @@ async fn templates_list_carries_provider_and_model_from_the_manifest() {
     let _ = templates_root();
 
     let unique = "tmpl_list_provider";
-    write_real_template(
+    let _fixture = write_template(
         unique,
         r#"name = "delta"
 version = "0.1.0"
@@ -349,7 +324,7 @@ tools = ["file_read"]
     assert_eq!(row["model"], "claude-test-9", "{body}");
     assert_eq!(row["description"], "Delta test template", "{body}");
 
-    remove_real_template(unique);
+    remove_template(unique);
 }
 
 /// A single unparseable manifest used to fail the whole listing with a 500, so one operator typo blanked every agent type for every client.
@@ -361,8 +336,8 @@ async fn templates_list_skips_a_malformed_manifest_instead_of_failing() {
 
     let good = "tmpl_skip_good";
     let bad = "tmpl_skip_bad";
-    write_real_template(good, &minimal_manifest_toml("echo", "Echo survives"));
-    write_real_template(bad, "this is not = = valid toml [[[");
+    let _good_fixture = write_template(good, &minimal_manifest_toml("echo", "Echo survives"));
+    let _bad_fixture = write_template(bad, "this is not = = valid toml [[[");
 
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/templates").await;
@@ -381,20 +356,18 @@ async fn templates_list_skips_a_malformed_manifest_instead_of_failing() {
         "the malformed template must be skipped, not rendered: {body}"
     );
 
-    remove_real_template(good);
-    remove_real_template(bad);
+    remove_template(good);
+    remove_template(bad);
 }
 
 /// The listing must not advertise a name that `/templates/{name}` and `/templates/{name}/toml` will reject — a row a client cannot fetch or spawn from is a dead end on the screen.
-///
-/// The fixture has to be a real agent-type file (`agent-types/<name>.toml`), not a workspace agent: the listing only walks `agent-types/`, so seeding anywhere else makes an "is absent from the list" assertion pass for the wrong reason.
 #[tokio::test(flavor = "multi_thread")]
 async fn templates_list_omits_names_the_detail_routes_reject() {
     let _g = templates_lock().lock().await;
     let _ = templates_root();
 
     let unusable = "tmpl.dotted.name";
-    write_real_template(unusable, &minimal_manifest_toml("dotted", "Dotted"));
+    let _fixture = write_template(unusable, &minimal_manifest_toml("dotted", "Dotted"));
 
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/templates").await;
@@ -408,7 +381,7 @@ async fn templates_list_omits_names_the_detail_routes_reject() {
         "a name the validator rejects must not be listed: {body}"
     );
 
-    remove_real_template(unusable);
+    remove_template(unusable);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -562,7 +535,7 @@ async fn templates_get_reports_what_promotion_would_strip() {
     let _ = templates_root();
 
     let unique = "tmpl_promo_leaky";
-    write_template(unique, &leaky_manifest_toml("researcher"));
+    let _fixture = write_template(unique, &leaky_manifest_toml("researcher"));
 
     let h = boot().await;
     let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
@@ -623,7 +596,7 @@ async fn templates_get_promotion_preview_omits_host_specifics_and_keeps_the_port
     let _ = templates_root();
 
     let unique = "tmpl_promo_scrub";
-    write_template(unique, &leaky_manifest_toml("researcher"));
+    let _fixture = write_template(unique, &leaky_manifest_toml("researcher"));
 
     let h = boot().await;
     let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
@@ -686,7 +659,7 @@ async fn templates_get_promotion_preview_flags_a_secret_inside_a_retained_prompt
     // A credential pasted into the system prompt sits inside a field promotion has to keep, so the operator has to edit it by hand.
     // The detector exists to say so rather than to silently keep it.
     let unique = "tmpl_promo_review";
-    write_template(
+    let _fixture = write_template(
         unique,
         r#"name = "leaky-prompt"
 version = "0.1.0"
@@ -729,7 +702,7 @@ async fn templates_get_promotion_preview_is_quiet_for_an_already_portable_templa
     let _ = templates_root();
 
     let unique = "tmpl_promo_clean";
-    write_template(unique, &minimal_manifest_toml("charlie", "Charlie type"));
+    let _fixture = write_template(unique, &minimal_manifest_toml("charlie", "Charlie type"));
 
     let h = boot().await;
     let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
