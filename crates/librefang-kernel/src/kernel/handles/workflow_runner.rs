@@ -657,7 +657,21 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             .engine
             .register_unique_name(workflow)
             .await
-            .map_err(|taken| KernelOpError::Conflict(taken.to_string()))?;
+            // The two rejections are not the same answer. A name collision is
+            // the proposing agent's to fix by choosing another name, and
+            // `Conflict` is what tells it so. A failed write is the operator's,
+            // and nothing was stored: reporting it as a conflict would send the
+            // agent off renaming a workflow that never existed, and reporting
+            // success — which is what this did before the engine propagated —
+            // left it believing in one that disappears at the next restart.
+            .map_err(|e| match e {
+                crate::workflow::RegisterWorkflowError::NameTaken(taken) => {
+                    KernelOpError::Conflict(taken.to_string())
+                }
+                crate::workflow::RegisterWorkflowError::NotPersisted(err) => {
+                    KernelOpError::Internal(err.to_string())
+                }
+            })?;
 
         // Provenance trace, not an authorization gate: workflows have no ownership model, and an agent-authored one is executable by any agent the moment it is registered.
         // Logging who asked for it is what makes that reviewable after the fact.
