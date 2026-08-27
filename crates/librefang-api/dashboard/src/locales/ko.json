@@ -750,6 +750,7 @@
       "switch_to_manual": "수동으로 전환",
       "check_interval_secs": "확인 간격(초)",
       "schedule_invalid_interval": "간격은 양의 정수(초)여야 합니다.",
+      "proactive_conditions_required": "쉼표로 구분하여 조건을 하나 이상 입력하세요",
       "schedule_updated": "일정이 업데이트되었습니다.",
       "cron_jobs": "크론 작업",
       "add_cron": "크론 추가",

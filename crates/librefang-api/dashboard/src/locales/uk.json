@@ -750,6 +750,7 @@
       "switch_to_manual": "Перейти на ручний режим",
       "check_interval_secs": "Інтервал перевірки (секунди)",
       "schedule_invalid_interval": "Інтервал має бути позитивним цілим числом (секунди)",
+      "proactive_conditions_required": "Введіть щонайменше одну умову, розділяючи комами",
       "schedule_updated": "Розклад оновлено",
       "cron_jobs": "Cron-завдання",
       "add_cron": "Додати cron-завдання",

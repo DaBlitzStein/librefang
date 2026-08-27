@@ -750,6 +750,7 @@
       "switch_to_manual": "切换为手动",
       "check_interval_secs": "检查间隔（秒）",
       "schedule_invalid_interval": "间隔必须是正整数（秒）",
+      "proactive_conditions_required": "请输入至少一个条件，以逗号分隔",
       "schedule_updated": "调度已更新",
       "cron_jobs": "定时任务",
       "add_cron": "新增定时",
