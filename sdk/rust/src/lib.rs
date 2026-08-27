@@ -4581,6 +4581,18 @@ impl SystemResource {
         .await
     }
 
+    pub async fn whoami(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "authz", "whoami"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn create_backup(&self) -> Result<Value> {
         do_req(
             &self.client,
