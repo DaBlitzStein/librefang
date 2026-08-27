@@ -20,6 +20,8 @@ export {
   // agents
   listAgents,
   getAgentDetail,
+  getAgentManifest,
+  getAgentChannels,
   getAgentStats,
   listAgentEvents,
   listAgentSessions,
@@ -162,10 +164,6 @@ export {
   // users (RBAC M6)
   listUsers,
   getUser,
-  // groups (#7745)
-  listGroups,
-  getGroup,
-  getUserGroups,
   // per-user budget (M5) / policy (M3 #3205 — wired)
   getUserBudget,
   getUserPolicy,
@@ -214,6 +212,10 @@ export {
   updateAgentTools,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
+  // per-agent MCP server grant — write (#6565 follow-up)
+  setAgentMcpServers,
+  // per-agent channel allowlist — write (#7742)
+  setAgentChannels,
   createAgentSession,
   switchAgentSession,
   deleteSession,
@@ -359,12 +361,6 @@ export {
   createUser,
   updateUser,
   deleteUser,
-  // groups (#7745)
-  createGroup,
-  updateGroup,
-  deleteGroup,
-  addGroupMember,
-  removeGroupMember,
   importUsers,
   rotateUserKey,
   // per-user policy (M3 #3205)
@@ -418,10 +414,6 @@ export type {
   // users / RBAC
   UserItem,
   UserUpsertPayload,
-  // groups (#7745)
-  GroupItem,
-  GroupUpsertPayload,
-  UserGroupsResult,
   UserRoleName,
   BulkImportRow,
   BulkImportResult,

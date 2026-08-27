@@ -290,6 +290,10 @@ func (r *A2AResource) A2AExternalTaskStatus(id string, query map[string]string) 
 
 type AgentsResource struct{ client *Client }
 
+func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", id), nil, nil)
+}
+
 func (r *AgentsResource) ListAgents(query map[string]string) (interface{}, error) {
 	return r.client.request("GET", "/api/agents", nil, query)
 }

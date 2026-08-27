@@ -190,6 +190,10 @@ class AgentsResource {
     return this._c._request("POST", "/api/agents/spawn-ephemeral", data, undefined);
   }
 
+  async getAgentManifestToml(id) {
+    return this._c._request("GET", `/api/agents/${id}/manifest`);
+  }
+
   async getAgent(id) {
     return this._c._request("GET", `/api/agents/${id}`);
   }

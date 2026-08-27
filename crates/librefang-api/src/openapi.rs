@@ -110,6 +110,7 @@ use crate::types;
         routes::inject_message,
         routes::push_message,
         routes::reload_agent_manifest,
+        routes::get_agent_manifest_toml,
         routes::suspend_agent,
         routes::resume_agent,
         routes::agent_metrics,
@@ -313,7 +314,6 @@ use crate::types;
         routes::usage_by_model,
         routes::usage_by_model_performance,
         routes::usage_daily,
-        routes::usage_export,
 
         // ── Auto-Dream (background memory consolidation) ──
         routes::auto_dream_status,
@@ -322,14 +322,6 @@ use crate::types;
         routes::auto_dream_set_enabled,
 
         // ── Users / RBAC ──
-        routes::groups::list_groups,
-        routes::groups::get_group,
-        routes::groups::create_group,
-        routes::groups::update_group,
-        routes::groups::delete_group,
-        routes::groups::add_group_member,
-        routes::groups::remove_group_member,
-        routes::groups::user_groups,
         routes::users::list_users,
         routes::users::get_user,
         routes::users::create_user,
@@ -549,9 +541,6 @@ use crate::types;
         routes::agents::EphemeralRunView,
         routes::agents::EphemeralRunRollupView,
         routes::agents::SessionContextResponse,
-        routes::groups::GroupView,
-        routes::groups::GroupUpsert,
-        routes::groups::UserGroupsView,
         routes::users::UserView,
         routes::users::UserUpsert,
         routes::users::BulkImportRequest,
@@ -587,7 +576,6 @@ use crate::types;
         (name = "auth", description = "OAuth/OIDC authentication endpoints"),
         (name = "openai", description = "OpenAI-compatible API endpoints"),
         (name = "users", description = "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"),
-        (name = "groups", description = "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"),
     ),
 )]
 pub struct ApiDoc;

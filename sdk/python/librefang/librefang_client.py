@@ -226,6 +226,9 @@ class _AgentsResource(_Resource):
     def spawn_ephemeral_agent(self, **data):
         return self._c._request("POST", "/api/agents/spawn-ephemeral", data)
 
+    def get_agent_manifest_toml(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/manifest")
+
     def get_agent(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}")
 

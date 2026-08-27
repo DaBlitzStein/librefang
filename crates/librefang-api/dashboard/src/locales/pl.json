@@ -839,7 +839,21 @@
       "tools_reset_to_all": "Resetuj, aby używać wszystkich narzędzi",
       "events_tail": "zdarzenia · tail",
       "no_logs": "Nie zarejestrowano jeszcze żadnych tur dla tego agenta.",
-      "crashed_title": "{{name}} jest w stanie błędu"
+      "crashed_title": "{{name}} jest w stanie błędu",
+      "description_saved": "Description saved",
+      "description": "Description",
+      "description_placeholder": "No description set.",
+      "channels_saved": "Channels updated",
+      "channels": "Channels",
+      "channels_hint": "Empty means reachable from every configured channel.",
+      "channels_search_placeholder": "Search channels…",
+      "no_channels_configured": "No channels configured on this instance.",
+      "manifest_saved": "Configuration saved",
+      "tools_mcp_saved": "MCP servers updated",
+      "tools_mcp_save_failed": "Failed to update MCP servers",
+      "edit_full_manifest": "Edit full configuration",
+      "edit_full_manifest_hint": "Every manifest field — resources, capabilities, autonomy, response format, and more.",
+      "manifest_load_failed": "Failed to load the current configuration."
     },
     "tab": {
       "conversation": "Rozmowa",

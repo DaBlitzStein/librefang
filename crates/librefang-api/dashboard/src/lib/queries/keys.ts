@@ -76,6 +76,17 @@ export const agentKeys = {
   // is separate from `tools`: an MCP read must not be invalidated by a tool write.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
+  // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest
+  // editor, distinct from `detail(id)`'s curated JSON projection.
+  manifest: (agentId: string) =>
+    [...agentKeys.all, "manifest", agentId] as const,
+  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
+  // Channels section. Named distinctly from `channelKeys` (the
+  // instance-wide `/api/channels` integration domain) to avoid confusion
+  // between "channels this agent is reachable from" and "channels
+  // configured on this instance".
+  channels: (agentId: string) =>
+    [...agentKeys.all, "channels", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
@@ -429,22 +440,6 @@ export const userKeys = {
     [...userKeys.lists(), filters] as const,
   details: () => [...userKeys.all, "detail"] as const,
   detail: (name: string) => [...userKeys.details(), name] as const,
-};
-
-// #7745 — user groups. `memberships(user)` hangs off the same root so a
-// membership change can invalidate `groupKeys.all` and sweep both the group
-// list and every per-user reverse lookup in one call, which is what every
-// membership mutation actually needs: adding alice to `oncall` changes the
-// group row AND alice's resolved role set.
-export const groupKeys = {
-  all: ["groups"] as const,
-  lists: () => [...groupKeys.all, "list"] as const,
-  list: (filters: { search?: string } = {}) =>
-    [...groupKeys.lists(), filters] as const,
-  details: () => [...groupKeys.all, "detail"] as const,
-  detail: (name: string) => [...groupKeys.details(), name] as const,
-  memberships: () => [...groupKeys.all, "membership"] as const,
-  membership: (user: string) => [...groupKeys.memberships(), user] as const,
 };
 
 // M5 / #3203 — per-user spend ranking + per-user detail. Endpoint stubbed
