@@ -30,6 +30,7 @@ impl LibreFangKernel {
     ///
     /// `max_iterations` stays an `Option` all the way down to [`crate::goal_runner::GoalRunner::start`], which is the only layer that knows whether this call is resuming a paused run.
     /// Substituting [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`] here would overwrite the cap that run was already under, because by then a `None` is indistinguishable from an operator asking for the default.
+    #[allow(clippy::too_many_arguments)]
     pub fn goal_run_start(
         &self,
         goal_id: GoalId,
