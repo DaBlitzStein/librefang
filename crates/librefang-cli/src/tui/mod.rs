@@ -1695,6 +1695,10 @@ impl App {
                         backend,
                         id,
                         channels,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
             agents::AgentAction::FetchAgentModelRouting(id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_model_routing(backend, id, self.event_tx.clone());
