@@ -223,6 +223,8 @@ export function useAgentSkills(agentId: string, options: QueryOverrides = {}) {
 
 export function useAgentMcpServers(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.agentMcpServers(agentId), options));
+}
+
 export function useAgentManifest(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.manifest(agentId), options));
 }
