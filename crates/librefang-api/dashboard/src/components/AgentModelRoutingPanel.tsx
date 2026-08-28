@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertCircle, Loader2, Route } from "lucide-react";
+import { AlertCircle, Loader2, Route } from "../lib/lucide";
 import type { AgentDetail, CostTier } from "../api";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
