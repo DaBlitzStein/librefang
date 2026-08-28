@@ -1,0 +1,5 @@
+The dashboard's running-agent editor now covers the whole manifest instead of 11 hand-picked fields.
+The Configure drawer mounts the same `AgentManifestForm` the create flow uses, seeded from a new `GET /api/agents/{id}/manifest` (the agent's full `AgentManifest` as raw TOML, rendered from live memory) and saved through the existing `PATCH /api/agents/{id}` `manifest_toml` path, carrying unrendered fields through `extras` so editing one cannot reset another.
+The Name field is rendered locked there, because `update_manifest` pins the name to the registry entry and a submitted rename would otherwise be discarded without a word.
+A Channels section gives `PUT /api/agents/{id}/channels` its first client — the per-agent channel allowlist had been reachable only by hand-editing `agent.toml`.
+The Tools tab reaches parity with Skills: a visible Customize button, per-tool assignment from Available, and MCP server grants that are queued in the draft and saved via `PUT /agents/{id}/mcp_servers` rather than rendered as a read-only hint pointing at another tab. (#7749) (@DaBlitzStein)

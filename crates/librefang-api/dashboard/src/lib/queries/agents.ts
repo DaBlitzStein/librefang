@@ -2,6 +2,8 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   listAgents,
   getAgentDetail,
+  getAgentManifest,
+  getAgentChannels,
   getAgentStats,
   listAgentEvents,
   listAgentSessions,
@@ -139,6 +141,40 @@ export const agentQueries = {
       queryFn: () => getAgentMcpServers(agentId),
       enabled: !!agentId,
     }),
+  // Full manifest as raw TOML (#7742). Disabled by default — callers gate
+  // this on the full manifest editor being open via QueryOverrides, since
+  // the payload is only needed while that drawer is mounted.
+  // `staleTime: 0` because this read seeds an editor whose Save writes the
+  // whole manifest back, so serving it from cache is a lost update waiting to
+  // happen: open the drawer, cancel, change channels or MCP grants through
+  // their own section, reopen — a cached body would seed the editor with the
+  // manifest as it was before those edits, and Save would write the stale copy
+  // over them.
+  //
+  // The observer for this query is mounted for the lifetime of the page and
+  // only toggles `enabled` when the drawer opens, so zero stale time is what
+  // forces the refetch on that transition. `refetchOnMount` would not help —
+  // the observer never remounts.
+  //
+  // Invalidating from every mutation that can touch a manifest field would
+  // also work, but that is a list which has to stay complete forever; one
+  // always-refetch rule on the read cannot fall behind. The cost is one
+  // request per drawer open, which is a user-initiated action.
+  manifest: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.manifest(agentId),
+      queryFn: () => getAgentManifest(agentId),
+      enabled: false,
+      staleTime: 0,
+    }),
+  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
+  // Channels section.
+  channels: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.channels(agentId),
+      queryFn: () => getAgentChannels(agentId),
+      enabled: !!agentId,
+    }),
   toolsList: () =>
     queryOptions({
       queryKey: toolKeys.list(),
@@ -204,4 +240,12 @@ export function useAgentSkills(agentId: string, options: QueryOverrides = {}) {
 
 export function useAgentMcpServers(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.agentMcpServers(agentId), options));
+}
+
+export function useAgentManifest(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.manifest(agentId), options));
+}
+
+export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.channels(agentId), options));
 }

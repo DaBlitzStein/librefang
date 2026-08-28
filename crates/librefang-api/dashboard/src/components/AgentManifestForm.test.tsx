@@ -26,12 +26,14 @@ function Harness({
   mcpCatalog,
   initialState,
   invalidFields = new Set(),
+  nameLocked,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
   mcpCatalog?: ManifestCatalogEntry[];
   initialState?: ManifestFormState;
   invalidFields?: Set<string>;
+  nameLocked?: boolean;
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
@@ -45,9 +47,39 @@ function Harness({
       skillCatalog={skillCatalog}
       toolCatalog={toolCatalog}
       mcpCatalog={mcpCatalog}
+      nameLocked={nameLocked}
     />
   );
 }
+
+describe("AgentManifestForm — nameLocked (#7742)", () => {
+  it("keeps the name editable in the create flow, where nameLocked is not set", async () => {
+    render(<Harness />);
+
+    const name = screen.getByPlaceholderText("agents.form.name_placeholder");
+    expect(name).toBeEnabled();
+    await userEvent.type(name, "scout");
+    expect(name).toHaveValue("scout");
+    expect(screen.queryByText("agents.form.name_locked_hint")).not.toBeInTheDocument();
+  });
+
+  it("rejects typing into the name and says where to rename when editing an existing agent", async () => {
+    const state = emptyManifestForm();
+    state.name = "scout";
+
+    render(<Harness initialState={state} nameLocked />);
+
+    const name = screen.getByPlaceholderText("agents.form.name_placeholder");
+    expect(name).toBeDisabled();
+    // The lock is silent-data-loss prevention, so the reason has to be on
+    // screen: `update_manifest` pins the name to the registry entry, and a
+    // submitted rename would be discarded without a word.
+    expect(screen.getByText("agents.form.name_locked_hint")).toBeInTheDocument();
+
+    await userEvent.type(name, "renamed");
+    expect(name).toHaveValue("scout");
+  });
+});
 
 describe("AgentManifestForm — validation feedback", () => {
   it("opens scheduling errors and exposes the cron error to assistive technology", () => {

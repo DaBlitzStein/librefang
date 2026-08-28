@@ -501,7 +501,8 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "移除 fallback",
-      "remove_context_injection": "移除上下文注入"
+      "remove_context_injection": "移除上下文注入",
+      "name_locked_hint": "重命名请使用重命名操作；在此输入的名称将被忽略。"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",
@@ -840,7 +841,21 @@
       "tools_reset_to_all": "重置为使用所有工具",
       "events_tail": "事件 · 尾部",
       "no_logs": "此智能体还没有记录的轮次。",
-      "crashed_title": "{{name}} 处于错误状态"
+      "crashed_title": "{{name}} 处于错误状态",
+      "description_saved": "Description saved",
+      "description": "Description",
+      "description_placeholder": "No description set.",
+      "channels_saved": "Channels updated",
+      "channels": "Channels",
+      "channels_hint": "Empty means reachable from every configured channel.",
+      "channels_search_placeholder": "Search channels…",
+      "no_channels_configured": "No channels configured on this instance.",
+      "manifest_saved": "Configuration saved",
+      "tools_mcp_saved": "MCP servers updated",
+      "tools_mcp_save_failed": "Failed to update MCP servers",
+      "edit_full_manifest": "Edit full configuration",
+      "edit_full_manifest_hint": "Every manifest field — resources, capabilities, autonomy, response format, and more.",
+      "manifest_load_failed": "Failed to load the current configuration."
     },
     "tab": {
       "conversation": "对话",
