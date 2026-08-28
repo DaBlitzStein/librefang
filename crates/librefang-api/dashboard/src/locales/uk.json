@@ -692,6 +692,7 @@
       }
     },
     "clone_failed": "Не вдалося клонувати агента",
+    "clone_partial": "Агента клоновано, але ініціалізацію не завершено: {{warnings}}",
     "clone_succeeded": "Агента клоновано",
     "clone_title": "Клонувати агента",
     "clone_desc": "Копіює маніфест {{name}} у нового агента. Ім'я має бути унікальним.",
@@ -744,7 +745,6 @@
       "schedule_periodic_desc": "агент запускається за виразом cron, заданим у маніфесті — редагуйте через agent.toml",
       "schedule_proactive": "Проактивно",
       "schedule_proactive_desc": "агент відстежує умови, задані у маніфесті — редагуйте через agent.toml",
-      "schedule_manifest_only": "під керуванням маніфесту",
       "switch_to_continuous": "Перейти на безперервний режим",
       "switch_to_manual": "Перейти на ручний режим",
       "check_interval_secs": "Інтервал перевірки (секунди)",
@@ -840,7 +840,10 @@
       "tools_label": "Інструменти",
       "tools_remove_group": "Видалити всю групу",
       "tools_reset_to_all": "Скинути до використання всіх інструментів",
-      "tools_saved": "Збережено в agent.toml"
+      "tools_saved": "Збережено в agent.toml",
+      "proactive_conditions": "Умови (через кому)",
+      "proactive_conditions_placeholder": "напр. agent.tags contains 'urgent'",
+      "proactive_conditions_hint": "Замінює весь список умов — поле не заповнюється поточним. Щоб побачити чинні умови, скористайтеся повним редактором маніфесту."
     },
     "configure": "Налаштувати",
     "select_an_agent": "Виберіть агента",

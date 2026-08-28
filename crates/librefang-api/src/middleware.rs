@@ -203,6 +203,20 @@ pub struct AuthenticatedApiUser {
     pub user_id: UserId,
 }
 
+impl AuthenticatedApiUser {
+    /// The [`Principal`] this caller acts for, for stamping ownership on what a request creates (#7744).
+    ///
+    /// `None` for the synthetic root credential — the master api key, a trusted loopback caller, or an `allow_no_auth` deployment, all of which are admitted as `name: "root"` with the fixed [`ROOT_API_KEY_USER_ID`] sentinel.
+    /// That sentinel says "authentication is off or the caller holds the daemon's own key", not "a person called root"; it names no `[[users]]` entry, so recording it as an owner would write a principal that resolves to nothing and looks like a real one.
+    /// Returning `None` here lets the caller fall through to `config.toml: default_owner`, which is the key an operator actually reaches for when they want unattributed writes attributed.
+    pub fn owner_principal(&self) -> Option<librefang_types::principal::Principal> {
+        if self.user_id.0 == ROOT_API_KEY_USER_ID {
+            return None;
+        }
+        Some(librefang_types::principal::Principal::user(self.user_id))
+    }
+}
+
 /// A LibreFang identity resolved from a validated OIDC ID token (#7744).
 ///
 /// Produced by [`crate::oauth::oidc_auth_middleware`], which is the only place that holds both the cryptographically validated `IdTokenClaims` and the `[external_auth]` config the grant is derived from, and consumed by [`auth`] at the two points where a request would otherwise be rejected as unauthenticated.
@@ -217,6 +231,24 @@ pub struct OidcRoleGrant {
     pub role: UserRole,
     /// `UserId::from_name(&name)`, so an OIDC caller resolves to the same id as a `[[users]]` entry declared under that name and inherits its per-user tool policy and budget.
     pub user_id: UserId,
+}
+
+/// The local `[[groups]]` an identity provider's claims placed this caller in, for the lifetime of one request (#7746).
+///
+/// Produced by [`crate::oauth::oidc_auth_middleware`] from `[external_auth.group_map]`, and read by handlers that need the caller's effective teams rather than their privilege level — `GET /api/authz/whoami` today, and any future check of `Principal::Group` ownership against the live caller.
+///
+/// **Ephemeral by design.** This never reaches `config.toml`. Membership is recomputed from the presented token on every request and dropped with it, so a revocation in the identity provider propagates when the caller's token expires, with no local cleanup and no stale row in operator-owned config. `ExternalAuthConfig::group_map` carries the full argument.
+///
+/// It is a separate extension from [`OidcRoleGrant`] rather than a field on it, because the two are independently configurable: an operator may declare `group_map` and no `role_map` — SSO identity for ownership and channel-binding roles, API privilege still on local keys — and folding membership into the role grant would silently disable it for exactly that deployment.
+///
+/// Presence carries no privilege. Membership confers group role strings and group-shaped ownership; it never contributes a [`UserRole`]. An IdP group called `owner` is a group called `owner`, nothing more.
+#[derive(Clone, Debug)]
+pub struct IdpGroupMembership {
+    /// Names of declared `[[groups]]` entries the caller matched. Always a
+    /// subset of the configured groups — `translate_oidc_groups` drops a map
+    /// target that names no declared group — and a `BTreeSet` so the order is
+    /// the same on every node and in every serialization (#3298).
+    pub groups: std::collections::BTreeSet<String>,
 }
 
 /// Marks requests admitted solely by the explicitly trusted loopback/no-auth deployment mode.
