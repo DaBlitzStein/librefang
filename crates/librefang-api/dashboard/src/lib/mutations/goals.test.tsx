@@ -76,7 +76,7 @@ describe("useStartGoalRun", () => {
     });
   });
 
-  it("invalidates the goal\'s run and the goal list on success", async () => {
+  it("invalidates the goal's run and the goal list on success", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useStartGoalRun(), { wrapper });
