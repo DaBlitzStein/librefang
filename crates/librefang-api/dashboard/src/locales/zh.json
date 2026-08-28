@@ -745,7 +745,6 @@
       "schedule_periodic_desc": "Agent 根据 manifest 中的 cron 表达式触发 — 请编辑 agent.toml",
       "schedule_proactive": "主动监听",
       "schedule_proactive_desc": "Agent 监控 manifest 中配置的条件 — 请编辑 agent.toml",
-      "schedule_manifest_only": "由 manifest 控制",
       "switch_to_continuous": "切换为持续运行",
       "switch_to_manual": "切换为手动",
       "check_interval_secs": "检查间隔（秒）",
@@ -841,7 +840,10 @@
       "tools_reset_to_all": "重置为使用所有工具",
       "events_tail": "事件 · 尾部",
       "no_logs": "此智能体还没有记录的轮次。",
-      "crashed_title": "{{name}} 处于错误状态"
+      "crashed_title": "{{name}} 处于错误状态",
+      "proactive_conditions": "条件（逗号分隔）",
+      "proactive_conditions_hint": "这将替换完整的条件列表——不会预填当前内容。使用完整的清单编辑器查看当前生效的内容。",
+      "proactive_conditions_placeholder": "例如 agent.tags contains 'urgent'"
     },
     "tab": {
       "conversation": "对话",
