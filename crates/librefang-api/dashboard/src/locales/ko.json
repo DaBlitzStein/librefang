@@ -856,7 +856,9 @@
       "manifest_load_failed": "현재 설정을 불러오지 못했습니다.",
       "proactive_conditions": "조건 (쉼표로 구분)",
       "proactive_conditions_hint": "이것은 전체 조건 목록을 대체합니다 — 현재 항목으로 미리 채워지지 않습니다. 현재 활성화된 내용을 보려면 전체 매니페스트 편집기를 사용하세요.",
-      "proactive_conditions_placeholder": "예: agent.tags contains 'urgent'"
+      "proactive_conditions_placeholder": "예: agent.tags contains 'urgent'",
+      "mcp_pending_title": "MCP 서버 미연결",
+      "mcp_pending_desc": "agent.toml에 부여되었지만 라이브 연결이 없어 도구를 제공하지 않습니다. MCP 페이지에서 서버를 확인하세요. 연결되면 부여가 활성화됩니다."
     },
     "tab": {
       "conversation": "대화",
