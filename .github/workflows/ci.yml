@@ -523,6 +523,8 @@ jobs:
       # Self-skips when sha256sum is absent, so it is safe anywhere.
       - name: pre-commit sha256sum fallback
         run: bash scripts/tests/pre-commit-sha-fallback.sh
+      - name: pre-commit channel path policy
+        run: bash scripts/tests/pre-commit-channel-paths.sh
       - name: pre-push protected branch policy
         run: bash scripts/tests/pre-push-protected-branches.sh
       - name: commit wrapper index transaction
