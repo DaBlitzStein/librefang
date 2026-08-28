@@ -856,7 +856,9 @@
       "manifest_load_failed": "Nie udało się wczytać bieżącej konfiguracji.",
       "proactive_conditions": "Warunki (oddzielone przecinkami)",
       "proactive_conditions_hint": "To zastępuje pełną listę warunków — nie jest wstępnie wypełnione bieżącymi. Użyj pełnego edytora manifestu, aby zobaczyć, co jest aktywne.",
-      "proactive_conditions_placeholder": "np. agent.tags contains 'urgent'"
+      "proactive_conditions_placeholder": "np. agent.tags contains 'urgent'",
+      "mcp_pending_title": "Serwery MCP niepodłączone",
+      "mcp_pending_desc": "Przyznane w agent.toml, ale brak aktywnego połączenia — nie dostarczają narzędzi. Sprawdź serwer na stronie MCP; uprawnienie aktywuje się po połączeniu."
     },
     "tab": {
       "conversation": "Rozmowa",
