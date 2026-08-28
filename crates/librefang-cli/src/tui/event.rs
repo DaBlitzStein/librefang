@@ -1985,10 +1985,39 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
                 Ok(resp) if resp.status().is_success() => {
                     let _ = tx.send(AppEvent::SkillInstalled(slug));
                 }
-                _ => {
+                Ok(resp) => {
+                    // Report what the daemon actually said. A broken
+                    // marketplace skill fails validation and comes back as a
+                    // 4xx carrying the reason ("YAML parse error at line 3");
+                    // collapsing that into a generic line reads like the
+                    // daemon fell over, and sends the operator looking in the
+                    // wrong place for a fault in someone else's skill.
+                    let http_status = resp.status();
+                    let detail = resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|b| b.get("error").and_then(|v| v.as_str()).map(String::from))
+                        // No body, or one without `error`: the status code is
+                        // the only thing known, so say that rather than
+                        // inventing a cause.
+                        .unwrap_or_else(|| {
+                            crate::i18n::t_args(
+                                "tui-event-skill-install-http-fallback",
+                                &[("status", http_status.as_str())],
+                            )
+                        });
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-skill-install-failed",
-                        &[("slug", &slug)],
+                        "tui-event-skill-install-failed-detail",
+                        &[("slug", &slug), ("detail", &detail)],
+                    )));
+                }
+                Err(e) => {
+                    // The request never reached the daemon at all — a
+                    // different failure from a rejected install, and the
+                    // transport error is the actionable part.
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-skill-install-failed-detail",
+                        &[("slug", &slug), ("detail", &e.to_string())],
                     )));
                 }
             }
