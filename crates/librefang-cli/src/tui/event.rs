@@ -1959,6 +1959,7 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
 
     items
         .map(|arr| {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             arr.iter()
                 .map(|r| ClawHubResult {
                     name: r["name"].as_str().unwrap_or("").to_string(),
@@ -1967,6 +1968,16 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
                     downloads: r["downloads"].as_u64().unwrap_or(0),
                     runtime: r["runtime"].as_str().unwrap_or("").to_string(),
                 })
+                // The index serves the same skill under more than one display
+                // casing ("Prd" and "prd"), and the install call addresses a
+                // skill by slug — so the duplicates are one skill, not two.
+                // Left as-is the browse list showed it twice and a single
+                // install press lit the pending state on every copy.
+                //
+                // Keyed on the lowercased slug, and first-wins: the index is
+                // returned in relevance order, so the first spelling of a slug
+                // is the one the server ranked highest.
+                .filter(|entry| seen.insert(entry.slug.to_lowercase()))
                 .collect()
         })
         .unwrap_or_default()
@@ -4207,5 +4218,58 @@ mod tests {
             flag.load(Ordering::SeqCst),
             "task detached during block_on_tui was aborted when the call returned"
         );
+    }
+
+    /// The ClawHub index serves the same skill under more than one display
+    /// casing. Install addresses a skill by slug, so those rows are one skill.
+    #[test]
+    fn the_index_yields_one_row_per_slug_whatever_its_casing() {
+        let body = serde_json::json!({
+            "items": [
+                {"name": "Prd", "slug": "Prd", "description": "first", "downloads": 9, "runtime": "python"},
+                {"name": "prd", "slug": "prd", "description": "second", "downloads": 4, "runtime": "python"},
+                {"name": "other", "slug": "other", "description": "third", "downloads": 1, "runtime": "node"}
+            ]
+        });
+
+        let results = parse_clawhub_results(&body);
+
+        assert_eq!(
+            results.len(),
+            2,
+            "`Prd` and `prd` are one skill; the list showed it twice"
+        );
+        // First-wins: the index comes back in relevance order, so the row the
+        // server ranked highest is the one kept.
+        assert_eq!(results[0].slug, "Prd");
+        assert_eq!(results[0].description, "first");
+        assert_eq!(results[1].slug, "other");
+    }
+
+    /// Deduping must not reach across slugs — two genuinely different skills
+    /// that merely share a display name are still two rows.
+    #[test]
+    fn distinct_slugs_survive_even_when_their_names_collide() {
+        let body = serde_json::json!({
+            "items": [
+                {"name": "deploy", "slug": "deploy-k8s", "description": "a", "downloads": 2, "runtime": "python"},
+                {"name": "deploy", "slug": "deploy-nomad", "description": "b", "downloads": 3, "runtime": "python"}
+            ]
+        });
+
+        let results = parse_clawhub_results(&body);
+
+        assert_eq!(results.len(), 2);
+    }
+
+    /// The bare-array shape (no `items` envelope) goes through the same path.
+    #[test]
+    fn the_bare_array_shape_is_deduped_too() {
+        let body = serde_json::json!([
+            {"name": "Prd", "slug": "PRD", "description": "a", "downloads": 1, "runtime": "python"},
+            {"name": "prd", "slug": "prd", "description": "b", "downloads": 1, "runtime": "python"}
+        ]);
+
+        assert_eq!(parse_clawhub_results(&body).len(), 1);
     }
 }
