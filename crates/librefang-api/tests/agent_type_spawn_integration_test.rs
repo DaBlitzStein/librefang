@@ -325,14 +325,14 @@ async fn save_agent_as_agent_type_round_trip() {
 
     // It shows up on the Agent Types list, editable/deletable like any
     // other template (point 1: only real templates are listed).
-    let (list_status, list_body) = send(h.app.clone(), get("/api/agent-types")).await;
+    let (list_status, list_body) = send(h.app.clone(), get("/api/templates")).await;
     assert_eq!(list_status, StatusCode::OK, "{list_body}");
-    let items = list_body["items"].as_array().expect("items array");
+    let items = list_body["templates"].as_array().expect("templates array");
     assert!(
         items
             .iter()
-            .any(|i| i["name"] == "researcher-template" && i["source"] == "template"),
-        "saved template must be listed as an editable template: {list_body}"
+            .any(|i| i["name"] == "researcher-template" && i["source"] == "agent-type"),
+        "saved template must be listed as an editable agent type: {list_body}"
     );
 
     // Round trip: spawn a brand new agent from the saved template.

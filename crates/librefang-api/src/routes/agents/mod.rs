@@ -212,6 +212,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
                 .delete(delete_hand_agent_runtime_config),
         )
         .route(
+            "/agents/{id}/save-as-agent-type",
+            axum::routing::post(save_agent_as_agent_type),
+        )
+        .route(
             "/agents/{id}/clone",
             axum::routing::post(clone_agent),
         )

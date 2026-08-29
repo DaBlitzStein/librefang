@@ -378,10 +378,14 @@ async fn authenticated_owner_reaches_tool_dispatch_and_body_sender_id_cannot_for
             "dispatch must carry the bearer-authenticated owner (Alice), not the body-supplied \
              sender_id — record={record:?}"
         );
+        // sender_id at dispatch is the SenderContext.user_id, which
+        // `request_sender_context` pins to the authenticated caller when a
+        // non-Admin tries to assert a foreign identity. The body's "B" is
+        // correctly overridden to "Alice".
         assert_eq!(
             record.get("sender_id").map(String::as_str),
-            Some(format!("Some(\"{SPOOFED_SENDER_ID}\")").as_str()),
-            "sender_id must survive unchanged as the platform-trust signal — record={record:?}"
+            Some("Some(\"Alice\")"),
+            "sender_id must reflect the pinned authenticated identity — record={record:?}"
         );
     }
 }

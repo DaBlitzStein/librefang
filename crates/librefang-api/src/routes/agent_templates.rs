@@ -577,9 +577,32 @@ pub async fn create_agent_type(
 pub async fn update_agent_type(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(mut spec): Json<librefang_types::agent_type::AgentTypeSpec>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let lang = super::resolve_lang(lang.as_ref());
+
+    match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(serde_json::Value::Object(_)) => {}
+        Ok(_) => {
+            return ApiErrorResponse::bad_request("Request body must be a JSON object")
+                .with_code("invalid_json")
+                .into_json_tuple();
+        }
+        Err(e) => {
+            return ApiErrorResponse::bad_request(format!("Invalid JSON: {e}"))
+                .with_code("invalid_json")
+                .into_json_tuple();
+        }
+    }
+    let mut spec: librefang_types::agent_type::AgentTypeSpec = match serde_json::from_slice(&body) {
+        Ok(s) => s,
+        Err(e) => {
+            return ApiErrorResponse::bad_request(format!("Invalid JSON body: {e}"))
+                .with_code("invalid_json")
+                .into_json_tuple();
+        }
+    };
+
     let (not_found, invalid_manifest, read_failed) = template_error_messages(lang, &name);
     let (invalid_name, managed_elsewhere) = {
         let t = ErrorTranslator::new(lang);
