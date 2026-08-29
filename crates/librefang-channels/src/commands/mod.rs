@@ -744,6 +744,7 @@ mod tests {
             "budget",
             "peers",
             "a2a",
+            "goal",
         ];
 
         let actual: std::collections::BTreeSet<&str> =
