@@ -1985,10 +1985,22 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
                 Ok(resp) if resp.status().is_success() => {
                     let _ = tx.send(AppEvent::SkillInstalled(slug));
                 }
-                _ => {
+                Ok(resp) => {
+                    let http_status = resp.status();
+                    let detail = resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|b| b["error"].as_str().map(String::from))
+                        .unwrap_or_else(|| format!("HTTP {http_status}"));
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
                         "tui-event-skill-install-failed",
-                        &[("slug", &slug)],
+                        &[("slug", &slug), ("detail", &detail)],
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-skill-install-failed",
+                        &[("slug", &slug), ("detail", &e.to_string())],
                     )));
                 }
             }
