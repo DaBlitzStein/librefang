@@ -186,7 +186,8 @@ pub fn create_and_start_goal(
         })
         .map_err(|e| format!("Failed to create goal: {e}"))?;
 
-    let started = kernel.start_goal_run(goal_id, agent_id, None);
+    let started =
+        kernel.start_goal_run(goal_id, agent_id, None, loop_engineering, None, None, None);
     Ok(GoalLaunch { goal_id, started })
 }
 
@@ -1929,6 +1930,12 @@ mod tests {
                 |_agent_id, _message| async move {
                     std::future::pending::<Result<String, String>>().await
                 },
+                no_learnings_hook,
+                no_evaluator,
+                false,
+                None,
+                None,
+                None,
             );
 
         assert!(!started);
