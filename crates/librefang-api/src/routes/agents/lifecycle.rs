@@ -39,25 +39,23 @@ async fn resolve_manifest(
                     message: t.t("api-error-template-invalid-name"),
                 });
             }
-            let home = &state.kernel.config_ref().home_dir;
-            let agent_type_path = home.join("agent-types").join(format!("{safe_name}.toml"));
-            let workspace_path = home
+            let tmpl_path = state
+                .kernel
+                .config_ref()
+                .home_dir
                 .join("workspaces")
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
-            match tokio::fs::read_to_string(&agent_type_path).await {
+            // Use tokio::fs to avoid blocking in an async context
+            match tokio::fs::read_to_string(&tmpl_path).await {
                 Ok(content) => content,
-                Err(_) => match tokio::fs::read_to_string(&workspace_path).await {
-                    Ok(content) => content,
-                    Err(_) => {
-                        let t = ErrorTranslator::new(lang);
-                        return Err(ManifestError {
-                            message: t
-                                .t_args("api-error-template-not-found", &[("name", &safe_name)]),
-                        });
-                    }
-                },
+                Err(_) => {
+                    let t = ErrorTranslator::new(lang);
+                    return Err(ManifestError {
+                        message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                    });
+                }
             }
         } else {
             let t = ErrorTranslator::new(lang);
@@ -1064,18 +1062,6 @@ pub async fn get_agent(
             entry.manifest.model.model.as_str()
         };
 
-    // Static footprint every request to this agent carries before the first
-    // user message: system prompt plus the assembled tool definitions
-    // (skills, MCP servers, built-ins — `available_tools` is the exact list
-    // that travels in the prompt). Same heuristic the compactor uses to
-    // decide when to fold history, so this number cannot drift from that one.
-    let tools = state.kernel.available_tools(agent_id);
-    let injected_footprint_tokens = librefang_kernel::compactor::estimate_token_count(
-        &[],
-        Some(&entry.manifest.model.system_prompt),
-        Some(tools.as_slice()),
-    );
-
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1091,17 +1077,8 @@ pub async fn get_agent(
             "model": {
                 "provider": resolved_provider,
                 "model": resolved_model,
-                // `null` means "inherit" — the agent has no opinion and the
-                // per-model override (or the system default) supplies the
-                // value. Surfaces render that as the inherit state rather than
-                // as a number the agent chose.
                 "max_tokens": entry.manifest.model.max_tokens,
                 "temperature": entry.manifest.model.temperature,
-                "top_p": entry.manifest.model.top_p,
-                "frequency_penalty": entry.manifest.model.frequency_penalty,
-                "presence_penalty": entry.manifest.model.presence_penalty,
-                "context_window": entry.manifest.model.context_window,
-                "max_output_tokens": entry.manifest.model.max_output_tokens,
             },
             "capabilities": {
                 "tools": entry.manifest.capabilities.tools,
@@ -1132,7 +1109,6 @@ pub async fn get_agent(
             "fallback_models": entry.manifest.fallback_models,
             "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
-            "injected_footprint_tokens": injected_footprint_tokens,
         })),
     )
         .into_response()
@@ -1520,115 +1496,77 @@ pub async fn reload_agent_manifest(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Save agent as agent type
-// ---------------------------------------------------------------------------
-
-#[derive(serde::Deserialize)]
-pub struct SaveAsAgentTypeRequest {
-    pub template_name: String,
-}
-
-/// POST /api/agents/{id}/save-as-agent-type — snapshot a live agent's manifest
-/// into a reusable agent-type template file.
+/// GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.
+///
+/// Powers the dashboard's full manifest editor (#7742): the Configure
+/// drawer's quick-edit widgets only cover a handful of fields, so this
+/// endpoint hands back every field `AgentManifest` carries for
+/// `AgentManifestForm` to parse and pre-fill, with `PATCH /api/agents/{id}`
+/// (`manifest_toml`) as the matching write path. Renders the live
+/// in-memory manifest the same way `persist_manifest_to_disk` writes
+/// `agent.toml`, rather than re-reading the on-disk file, so the response
+/// always reflects the latest state even if a prior partial PATCH hasn't
+/// flushed to disk yet.
 #[utoipa::path(
-    post,
-    path = "/api/agents/{id}/save-as-agent-type",
+    get,
+    path = "/api/agents/{id}/manifest",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonObject, description = "template_name to save as"),
     responses(
-        (status = 201, description = "Agent type created from live agent"),
-        (status = 404, description = "Agent not found"),
-        (status = 409, description = "Template name already taken")
+        (status = 200, description = "Agent manifest as raw TOML", content_type = "application/toml"),
+        (status = 404, description = "Agent not found")
     )
 )]
-pub async fn save_agent_as_agent_type(
+pub async fn get_agent_manifest_toml(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<SaveAsAgentTypeRequest>,
 ) -> impl IntoResponse {
+    use axum::body::Body;
+
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
-
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            );
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
         }
     };
-
-    let template_name = req.template_name.trim().to_string();
-    if librefang_types::agent_type_store::validate_agent_type_name(&template_name).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-template-invalid-name")})),
-        );
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
     }
-
-    let home = &state.kernel.config_ref().home_dir;
-    let types_dir = home.join("agent-types");
-    let type_path = types_dir.join(format!("{template_name}.toml"));
-
-    // Allow saving under the source agent's own name, reject if the name
-    // belongs to a different existing template.
-    if type_path.exists() {
-        return (
-            StatusCode::CONFLICT,
-            Json(
-                serde_json::json!({"error": format!("Agent type '{}' already exists", template_name)}),
-            ),
-        );
-    }
-
-    let mut manifest = entry.manifest.clone();
-    manifest.name = template_name.clone();
-    manifest.workspace = None;
-
-    if let Err(e) = std::fs::create_dir_all(&types_dir) {
-        tracing::error!("failed to create agent-types dir: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": t.t("api-error-internal")})),
-        );
-    }
-
-    let rendered = match toml::to_string_pretty(&manifest) {
-        Ok(r) => r,
+    // Localize before dropping the translator (`ErrorTranslator` is
+    // `!Send`) — the toml::to_string_pretty call below doesn't await, but
+    // matching the established pattern (see `patch_agent`) keeps this file
+    // consistent and future-proof against a refactor that adds one.
+    let internal_error_msg = t.t("api-error-internal");
+    drop(t);
+    match toml::to_string_pretty(&entry.manifest) {
+        Ok(text) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/toml")],
+            Body::from(text),
+        )
+            .into_response(),
         Err(e) => {
-            tracing::error!("failed to render manifest: {e}");
-            return (
+            tracing::error!(error = %e, "failed to serialize agent manifest to TOML");
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-internal")})),
-            );
+                Json(serde_json::json!({"error": internal_error_msg})),
+            )
+                .into_response()
         }
-    };
-
-    if let Err(e) = std::fs::write(&type_path, &rendered) {
-        tracing::error!("failed to write agent type: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": t.t("api-error-internal")})),
-        );
     }
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "name": template_name,
-            "description": manifest.description,
-        })),
-    )
 }

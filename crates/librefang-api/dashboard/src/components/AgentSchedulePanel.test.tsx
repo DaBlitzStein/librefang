@@ -270,47 +270,6 @@ describe("AgentSchedulePanel — non-continuous schedule modes", () => {
       }),
     );
   });
-
-  // Saving the conditions editor empty must not clear the agent's conditions.
-  //
-  // The textarea starts empty and is never seeded from the live schedule — the
-  // panel has no read of the current list to seed it with — so an empty field
-  // means "nothing typed", not "no conditions wanted". Without a guard, opening
-  // Edit and pressing Save sends `conditions: []`, wipes a proactive schedule
-  // the operator never looked at, and reports it as a successful save.
-  //
-  // `saveCron` has refused a blank cron since it was written; this is the same
-  // rule on the sibling field.
-  it("refuses to save an empty condition list instead of clearing the schedule", async () => {
-    const user = userEvent.setup();
-    withQueryClient(
-      <AgentSchedulePanel agent={{ ...agent, schedule: "proactive" }} />,
-    );
-    await user.click(await screen.findByRole("button", { name: "Edit" }));
-    await screen.findByLabelText("Conditions (comma-separated)");
-
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    expect(http.patchAgent).not.toHaveBeenCalled();
-  });
-
-  // Whitespace and stray separators are "nothing typed" too: `", ,"` filters
-  // down to an empty list, so it must take the same branch rather than
-  // slipping past a bare `.trim()` check.
-  it("treats a comma-and-whitespace-only entry as empty", async () => {
-    const user = userEvent.setup();
-    withQueryClient(
-      <AgentSchedulePanel agent={{ ...agent, schedule: "proactive" }} />,
-    );
-    await user.click(await screen.findByRole("button", { name: "Edit" }));
-    const conditionsInput = await screen.findByLabelText(
-      "Conditions (comma-separated)",
-    );
-    await user.type(conditionsInput, " , ,  ");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    expect(http.patchAgent).not.toHaveBeenCalled();
-  });
 });
 
 // Regression — Codex P2 review on PR #5256.

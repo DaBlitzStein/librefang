@@ -581,26 +581,6 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
       .split(",")
       .map((c) => c.trim())
       .filter(Boolean);
-    // Refuse an empty submit, exactly as `saveCron` does for a blank cron.
-    //
-    // The textarea starts empty and is never seeded from the live schedule —
-    // the panel has no read of the current condition list to seed it with — so
-    // "empty" here means "the operator typed nothing", not "the operator wants
-    // no conditions". Sending `conditions: []` on that would clear a proactive
-    // schedule the operator never looked at, and report it as a save.
-    //
-    // Clearing conditions deliberately is still available: switch the mode
-    // away from proactive, which is an explicit choice rather than the
-    // side effect of opening a drawer and pressing Save.
-    if (conditions.length === 0) {
-      addToast(
-        t("agents.detail.proactive_conditions_required", {
-          defaultValue: "Enter at least one condition, separated by commas",
-        }),
-        "error",
-      );
-      return;
-    }
     submitSchedule(
       { proactive: { conditions } },
       t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }),
