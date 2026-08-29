@@ -2373,3 +2373,13 @@ tui-groups-header-description = 설명
 tui-groups-loading = 그룹을 불러오는 중…
 tui-groups-empty = 구성된 그룹이 없습니다. `librefang group create <name>`으로 만드세요.
 tui-groups-hints = ↑/↓ 이동 · r 새로고침
+
+# purge command
+purge-failed-no-database = 삭제 실패: { $path }에 데이터베이스가 없습니다
+purge-failed-open-database = 삭제 실패: 데이터베이스 열기: { $error }
+purge-nothing-to-purge = 삭제할 항목이 없습니다: '{ $agent }'은(는) 이 설치에 흔적을 남기지 않았습니다.
+purge-purged-header = '{ $agent }' 삭제됨:
+purge-removed-roster-entry =   - 로스터 항목, 세션, 기억 및 KV 행
+purge-removed-workspace =   - 작업 공간 디렉터리
+purge-removed-agent-type =   - 에이전트 유형 템플릿
+purge-failed = 삭제 실패: { $error }

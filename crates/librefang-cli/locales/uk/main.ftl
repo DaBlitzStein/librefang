@@ -2397,3 +2397,13 @@ tui-groups-header-description = ОПИС
 tui-groups-loading = Завантаження груп…
 tui-groups-empty = Груп не налаштовано. Створіть за допомогою `librefang group create <name>`.
 tui-groups-hints = ↑/↓ навігація · r оновити
+
+# purge command
+purge-failed-no-database = Не вдалося очистити: немає бази даних за шляхом { $path }
+purge-failed-open-database = Не вдалося очистити: відкриття бази даних: { $error }
+purge-nothing-to-purge = Нічого очищати: '{ $agent }' не залишив слідів у цій інсталяції.
+purge-purged-header = Очищено '{ $agent }':
+purge-removed-roster-entry =   - запис у реєстрі, сесії, спогади та рядки KV
+purge-removed-workspace =   - каталог робочого простору
+purge-removed-agent-type =   - шаблон типу агента
+purge-failed = Не вдалося очистити: { $error }
