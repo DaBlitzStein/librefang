@@ -111,6 +111,16 @@ pub struct AgentSelectState {
     pub available_channels: Vec<(String, bool)>,
     pub channel_cursor: usize,
 
+    // Model routing editor (wired by the routing-TUI PR, not yet merged into the screen router)
+    #[allow(dead_code)]
+    pub model_mode: String,
+    #[allow(dead_code)]
+    pub router_profiles: Vec<(String, bool)>,
+    #[allow(dead_code)]
+    pub router_profile_cursor: usize,
+    #[allow(dead_code)]
+    pub cost_budget_idx: usize,
+
     // Result
     pub spawned_toml: Option<String>,
     pub status_msg: String,
@@ -155,6 +165,16 @@ pub struct AgentDetail {
     pub channels_mode: String,
 }
 
+#[allow(dead_code)]
+pub const COST_BUDGET_OPTIONS: &[(&str, Option<&str>)] = &[
+    ("Unlimited", None),
+    ("$0.10", Some("0.10")),
+    ("$0.50", Some("0.50")),
+    ("$1.00", Some("1.00")),
+    ("$5.00", Some("5.00")),
+    ("$10.00", Some("10.00")),
+];
+
 /// What the agent screen decided.
 #[derive(Debug)]
 pub enum AgentAction {
@@ -193,6 +213,15 @@ pub enum AgentAction {
     /// `Default::default()`, because nothing ever wrote them: every agent read as "all skills"
     /// and "no MCP servers" no matter what its manifest said.
     LoadAgentDetail(String),
+    #[allow(dead_code)]
+    FetchAgentModelRouting(String),
+    #[allow(dead_code)]
+    UpdateModelRouting {
+        id: String,
+        mode: String,
+        allowed_profiles: Vec<String>,
+        cost_budget: Option<String>,
+    },
 }
 
 impl AgentSelectState {
@@ -220,6 +249,10 @@ impl AgentSelectState {
             available_channels: Vec::new(),
             channel_cursor: 0,
             mcp_cursor: 0,
+            model_mode: String::new(),
+            router_profiles: Vec::new(),
+            router_profile_cursor: 0,
+            cost_budget_idx: 0,
             spawned_toml: None,
             status_msg: String::new(),
             workspaces: Vec::new(),

@@ -9,12 +9,14 @@ pub mod comms;
 pub mod dashboard;
 pub mod extensions;
 pub mod free_provider_guide;
+#[allow(dead_code)]
 pub mod goals;
 pub mod groups;
 pub mod hands;
 pub mod init_wizard;
 pub mod logs;
 pub mod memory;
+#[allow(dead_code)]
 pub mod model_params;
 pub mod models;
 pub mod peers;

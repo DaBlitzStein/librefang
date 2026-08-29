@@ -118,8 +118,11 @@ pub enum MemoryUIAction {
     LoadAgents,
     LoadConfig,
     SaveConfig {
+        #[allow(dead_code)]
         auto_memorize: bool,
+        #[allow(dead_code)]
         auto_retrieve: bool,
+        #[allow(dead_code)]
         extraction_model: String,
     },
     LoadKv(String),

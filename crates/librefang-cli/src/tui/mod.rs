@@ -1805,6 +1805,12 @@ impl App {
                     event::spawn_run_workflow(backend, id, input, self.event_tx.clone());
                 }
             }
+            workflows::WorkflowAction::FetchWorkflowParams(wf_id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.workflows.loading = true;
+                    event::spawn_fetch_workflow_runs(backend, wf_id, self.event_tx.clone());
+                }
+            }
         }
     }
 
@@ -1891,6 +1897,9 @@ impl App {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_delete_memory_kv(backend, agent_id, key, self.event_tx.clone());
                 }
+            }
+            memory::MemoryUIAction::SaveConfig { .. } => {
+                // ponytail: save-config event spawner not yet wired; add when the API endpoint lands
             }
         }
     }

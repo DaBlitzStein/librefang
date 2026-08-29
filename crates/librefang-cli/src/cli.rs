@@ -297,6 +297,20 @@ pub(crate) enum Commands {
         long_about = "Low-level daemon control commands.\n\nExamples:\n  librefang gateway start          # Start the daemon\n  librefang gateway stop           # Stop the daemon\n  librefang gateway restart        # Restart the daemon\n  librefang gateway status         # Show daemon status"
     )]
     Gateway(GatewayCommands),
+    /// Create and run an autonomous long-horizon goal.
+    Goal {
+        /// What the goal should accomplish.
+        description: String,
+        /// Agent to run the goal on (name or UUID).
+        #[arg(long)]
+        agent: Option<String>,
+        /// Maximum iterations before stopping.
+        #[arg(long)]
+        max_iterations: Option<u64>,
+        /// Poll and print progress until the goal completes.
+        #[arg(long)]
+        watch: bool,
+    },
     /// Purge every trace of an agent: roster entry, sessions, memories,
     /// workspace directory and any agent-type with the same name. For agents
     /// the operator already deleted but whose data lingers.
@@ -1221,6 +1235,37 @@ pub(crate) enum AgentCommands {
         /// New value.
         value: String,
     },
+    /// Show current model routing for an agent.
+    Routing {
+        /// Agent ID (UUID).
+        agent_id: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set model routing for an agent.
+    RoutingSet {
+        /// Agent ID (UUID).
+        agent_id: String,
+        /// Routing mode (e.g. "auto", "manual", "profile").
+        #[arg(long)]
+        mode: String,
+        /// Allowed profiles (comma-separated).
+        #[arg(long)]
+        profiles: Option<String>,
+        /// Cost budget (e.g. "1.00").
+        #[arg(long)]
+        budget: Option<String>,
+        /// Default profile name.
+        #[arg(long)]
+        default_profile: Option<String>,
+    },
+    /// List available routing profiles.
+    RoutingProfiles {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1409,6 +1454,23 @@ pub(crate) enum ModelsCommands {
         /// Also make this gateway's best model the daemon default.
         #[arg(long)]
         set_default: bool,
+    },
+    /// View or modify per-model overrides (context window, max output tokens).
+    Overrides {
+        /// Model ID or alias.
+        model: String,
+        /// Override context window size.
+        #[arg(long)]
+        context_window: Option<u64>,
+        /// Override max output tokens.
+        #[arg(long)]
+        max_output_tokens: Option<u64>,
+        /// Clear all overrides for this model.
+        #[arg(long)]
+        clear: bool,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
