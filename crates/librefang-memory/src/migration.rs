@@ -1358,7 +1358,14 @@ fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// `NULL` means "use the global", which is exactly what every pre-v58 row
 /// means, so the column needs no backfill.
 fn migrate_v58(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !try_column_exists(conn, "task_queue", "timeout_secs")? {
+    // A database stamped at or above the version that created `task_queue`
+    // without ever running its DDL has no table to alter, and it has no tasks
+    // to give a TTL to either — so skipping is correct. Same shape as
+    // `migrate_v56` above, and via the same helper rather than a hand-rolled
+    // `sqlite_master` query.
+    if try_table_exists(conn, "task_queue")?
+        && !try_column_exists(conn, "task_queue", "timeout_secs")?
+    {
         conn.execute(
             "ALTER TABLE task_queue ADD COLUMN timeout_secs INTEGER DEFAULT NULL",
             [],
