@@ -394,10 +394,6 @@ impl A2ARegistry for AclKernel {}
 impl ChannelSender for AclKernel {}
 impl PromptStore for AclKernel {}
 impl WorkflowRunner for AclKernel {}
-// `AgentTypeTools` joined the `KernelHandle` supertrait in #7722 without this
-// stub being updated, which left the whole test binary failing to compile.
-// Every method has a default, so the empty impl is all that is needed.
-impl librefang_kernel_handle::AgentTypeTools for AclKernel {}
 impl GoalControl for AclKernel {}
 impl ToolPolicy for AclKernel {}
 impl librefang_kernel_handle::CatalogQuery for AclKernel {}
