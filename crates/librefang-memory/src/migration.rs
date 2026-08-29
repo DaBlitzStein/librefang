@@ -276,11 +276,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
     run_step!(54, migrate_v54);
 
-    // v55: per-task claim TTL override on the Task Board. `[task_board]
-    // claim_ttl_secs` is one global number, so an installation that mixes a
-    // 30-second health check with a two-hour import has to pick a TTL that is
-    // wrong for one of them. NULL keeps the global, which is what every
-    // existing row means.
+    // v55 (#7752): add `sessions.parent_session_id` so a sub-agent run
+    // records which session spawned it. The parent can enumerate its
+    // children, and deleting the parent cascades. NULL on every ordinary
+    // session, which is almost all of them.
     run_step!(55, migrate_v55);
 
     // Audit-trail consistency (#3538): user_version must match the count
@@ -1219,27 +1218,21 @@ fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// v55: per-task claim TTL override (`task_queue.timeout_secs`).
-///
-/// The stuck-task sweeper reclaims an `in_progress` row once it has been held
-/// longer than `[task_board] claim_ttl_secs`, a single global number.
-/// A board that carries both a 30-second probe and a two-hour import cannot be
-/// served by one value: tuned for the import, a wedged probe sits claimed for
-/// hours; tuned for the probe, the import is torn away from a worker that is
-/// still making progress.
-///
-/// `NULL` means "use the global", which is exactly what every pre-v55 row
-/// means, so the column needs no backfill.
+/// v55 (#7752): session parentage — `sessions.parent_session_id`.
 fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !try_column_exists(conn, "task_queue", "timeout_secs")? {
+    if !try_column_exists(conn, "sessions", "parent_session_id")? {
         conn.execute(
-            "ALTER TABLE task_queue ADD COLUMN timeout_secs INTEGER DEFAULT NULL",
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT NULL",
             [],
         )?;
     }
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (55, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
+         VALUES (55, datetime('now'), 'Add sessions.parent_session_id for sub-agent run lineage (#7752)')",
         [],
     )?;
     Ok(())
@@ -4192,8 +4185,8 @@ mod tests {
         // If `parent_recorded` did not default to 0, every agent that predates v54 would start positively claiming to be a root agent — a more confident wrong answer than the `null` the bug already produced.
         //
         // Simulates a real pre-v54 database: build the v40-era `agents` table, insert a row, stamp `user_version = 50`, then let the ladder run.
-        // Steps 51-55 all fire from 50, so the fixture also needs the tables 51, 52 and 55 alter — `memories`, `group_roster` and `task_queue` — even though this test asserts nothing about them.
-        // Their absence is not a v54 bug; a real database at user_version 50 has all three (`task_queue` since `migrate_v1`).
+        // Steps 51-54 all fire from 50, so the fixture also needs the tables 51 and 52 alter — `memories` and `group_roster` — even though this test asserts nothing about them.
+        // Their absence is not a v54 bug; a real database at user_version 50 has both.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
@@ -4217,16 +4210,14 @@ mod tests {
                 user_id TEXT NOT NULL,
                 PRIMARY KEY (chat_id, user_id)
             );
-            CREATE TABLE task_queue (
+            CREATE TABLE sessions (
                 id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
-                task_type TEXT NOT NULL,
-                payload BLOB NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                priority INTEGER NOT NULL DEFAULT 0,
-                scheduled_at TEXT,
+                messages BLOB NOT NULL,
+                context_window_tokens INTEGER DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
-                completed_at TEXT
+                updated_at TEXT NOT NULL
             );
             CREATE TABLE migrations (
                 version INTEGER PRIMARY KEY,
@@ -4258,49 +4249,5 @@ mod tests {
             parent_recorded, 0,
             "a pre-v54 row must read as UNKNOWN lineage, not as a root agent"
         );
-    }
-
-    // ---------------------------------------------------------------------
-    // v55: per-task claim TTL override (task_queue.timeout_secs)
-    // ---------------------------------------------------------------------
-
-    /// The column has to arrive on a board that already holds tasks — a
-    /// migration that only works on a fresh file has never run where it
-    /// matters. A pre-v55 row means "use the global TTL", which is `NULL`.
-    #[test]
-    fn migrate_v55_adds_timeout_column_to_an_existing_board() {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-        conn.execute(
-            "INSERT INTO task_queue (id, agent_id, task_type, payload, status, created_at) \
-             VALUES ('existing', 'agent-1', 'work', x'00', 'in_progress', '2026-01-01')",
-            [],
-        )
-        .unwrap();
-
-        assert!(
-            column_exists(&conn, "task_queue", "timeout_secs"),
-            "v55 must add task_queue.timeout_secs"
-        );
-        let timeout: Option<i64> = conn
-            .query_row(
-                "SELECT timeout_secs FROM task_queue WHERE id = 'existing'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(
-            timeout.is_none(),
-            "a pre-existing task must inherit the global TTL, not acquire one of its own"
-        );
-    }
-
-    #[test]
-    fn migrate_v55_is_idempotent() {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-        // The runner can legitimately replay a step after an interrupted
-        // upgrade, so a duplicate-column rerun must not fail.
-        migrate_v55(&conn).expect("v55 must survive a rerun");
     }
 }
