@@ -524,6 +524,7 @@ impl LibreFangKernel {
         let mut new_session = librefang_memory::session::Session {
             id: sid,
             agent_id,
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
@@ -910,6 +911,7 @@ impl LibreFangKernel {
         let new_session = librefang_memory::session::Session {
             id: SessionId::new(),
             agent_id,
+            parent_session_id: None,
             messages: export.messages,
             context_window_tokens: export.context_window_tokens,
             label: export.label,
