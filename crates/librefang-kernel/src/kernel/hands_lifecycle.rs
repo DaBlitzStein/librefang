@@ -1005,13 +1005,13 @@ impl LibreFangKernel {
         if let Some(max_tokens) = merged.max_tokens {
             self.agents
                 .registry
-                .update_max_tokens(agent_id, Some(max_tokens))
+                .update_max_tokens(agent_id, max_tokens)
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(temperature) = merged.temperature {
             self.agents
                 .registry
-                .update_temperature(agent_id, Some(temperature))
+                .update_temperature(agent_id, temperature)
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(mode) = merged.web_search_augmentation {
@@ -1262,14 +1262,18 @@ impl LibreFangKernel {
                             base_url,
                         )
                         .map_err(KernelError::LibreFang)?;
-                    self.agents
-                        .registry
-                        .update_max_tokens(agent_id, agent_def.manifest.model.max_tokens)
-                        .map_err(KernelError::LibreFang)?;
-                    self.agents
-                        .registry
-                        .update_temperature(agent_id, agent_def.manifest.model.temperature)
-                        .map_err(KernelError::LibreFang)?;
+                    if let Some(mt) = agent_def.manifest.model.max_tokens {
+                        self.agents
+                            .registry
+                            .update_max_tokens(agent_id, mt)
+                            .map_err(KernelError::LibreFang)?;
+                    }
+                    if let Some(t) = agent_def.manifest.model.temperature {
+                        self.agents
+                            .registry
+                            .update_temperature(agent_id, t)
+                            .map_err(KernelError::LibreFang)?;
+                    }
                     self.agents
                         .registry
                         .update_web_search_augmentation(

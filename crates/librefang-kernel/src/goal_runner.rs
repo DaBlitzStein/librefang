@@ -134,7 +134,7 @@ pub fn create_and_start_goal(
         })
         .map_err(|e| format!("Failed to create goal: {e}"))?;
 
-    let started = kernel.start_goal_run(goal_id, agent_id, None);
+    let started = kernel.start_goal_run(goal_id, agent_id, None, false, None, None, None);
     Ok(GoalLaunch { goal_id, started })
 }
 
@@ -411,17 +411,27 @@ impl GoalRunner {
     /// goal persistence, and the rate-limit circuit breaker.
     ///
     /// Replaces any existing run for the same goal.
-    pub fn start<F, Fut>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn start<F, Fut, L, E, EFut>(
         &self,
         goal_id: GoalId,
         agent_id: AgentId,
         max_iterations: u32,
         substrate: Arc<MemorySubstrate>,
         send_message: F,
+        _on_learnings: L,
+        _evaluate: E,
+        _loop_engineering: bool,
+        _verify_agent_id: Option<AgentId>,
+        _verify_max_retries: Option<u32>,
+        _evaluator_model: Option<String>,
     ) -> bool
     where
         F: Fn(AgentId, String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
+        L: FnOnce(Vec<String>) + Send + 'static,
+        E: Fn(String, String) -> EFut + Send + Sync + 'static,
+        EFut: std::future::Future<Output = Result<bool, String>> + Send + 'static,
     {
         // Hold `start_lock` for the whole stop→gen→spawn→insert sequence so a
         // concurrent `start()` for the same goal cannot observe the empty slot

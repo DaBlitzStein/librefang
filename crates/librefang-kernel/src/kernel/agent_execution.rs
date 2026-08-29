@@ -1115,8 +1115,8 @@ impl LibreFangKernel {
                     message,
                 )]),
                 tools: std::sync::Arc::new(tools.clone()),
-                max_tokens: manifest.model.max_tokens,
-                temperature: manifest.model.temperature,
+                max_tokens: manifest.model.max_tokens.unwrap_or_default(),
+                temperature: manifest.model.temperature.unwrap_or_default(),
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
                 prompt_caching: false,
@@ -1182,10 +1182,10 @@ impl LibreFangKernel {
             let catalog = self.llm.model_catalog.load();
             if let Some(mo) = catalog.get_overrides(&override_key) {
                 if let Some(t) = mo.temperature {
-                    manifest.model.temperature = t;
+                    manifest.model.temperature = Some(t);
                 }
                 if let Some(mt) = mo.max_tokens {
-                    manifest.model.max_tokens = mt;
+                    manifest.model.max_tokens = Some(mt);
                 }
                 let ep = &mut manifest.model.extra_params;
                 if let Some(tp) = mo.top_p {

@@ -547,7 +547,7 @@ impl AgentRegistry {
     /// Update an agent's max_tokens (response length limit).
     pub fn update_max_tokens(&self, id: AgentId, max_tokens: u32) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
-            entry.manifest.model.max_tokens = max_tokens;
+            entry.manifest.model.max_tokens = Some(max_tokens);
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -557,7 +557,23 @@ impl AgentRegistry {
     /// Update an agent's sampling temperature.
     pub fn update_temperature(&self, id: AgentId, temperature: f32) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
-            entry.manifest.model.temperature = temperature;
+            entry.manifest.model.temperature = Some(temperature);
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's model routing mode and optional router override.
+    pub fn update_model_routing(
+        &self,
+        id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.mode = mode;
+            entry.manifest.model.router_override = router_override;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();

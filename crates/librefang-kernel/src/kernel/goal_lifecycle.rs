@@ -150,6 +150,21 @@ impl LibreFangKernel {
         self.workflows.goal_runner.stop(goal_id)
     }
 
+    /// Pause an active goal run, checkpointing progress for a later resume.
+    pub fn goal_run_pause(&self, goal_id: GoalId) -> bool {
+        self.workflows.goal_runner.stop(goal_id)
+    }
+
+    /// Resume a paused goal run with the given agent and iteration cap.
+    pub fn goal_run_resume(
+        &self,
+        goal_id: GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+    ) -> bool {
+        self.goal_run_start(goal_id, agent_id, max_iterations, false, None, None, None)
+    }
+
     /// Snapshot the observable state of a goal's run, if one is active.
     pub fn goal_run_status(&self, goal_id: GoalId) -> Option<GoalRunState> {
         self.workflows.goal_runner.state(goal_id)
