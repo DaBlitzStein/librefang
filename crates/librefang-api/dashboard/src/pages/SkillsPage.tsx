@@ -221,6 +221,23 @@ export function tryStartInstall(
   return true;
 }
 
+/**
+ * Identity of an in-flight marketplace install.
+ *
+ * A bare slug is not unique across marketplaces: FangHub addresses entries by
+ * `name` and the ClawHub-style hubs by `slug`, and the same string routinely
+ * exists on more than one hub. Keyed by slug alone, installing "prd" from one
+ * hub put the "Installing…" state on every "prd" on the page, including the
+ * ones nobody had asked for.
+ *
+ * The browse list already keys its React elements this way
+ * (`key={`fanghub:${entry.name}`}`); this is the same identity, applied to the
+ * state that decides which card is busy.
+ */
+export function marketplaceInstallKey(source: string, id: string): string {
+  return `${source}:${id}`;
+}
+
 // ─── Grid skeleton ────────────────────────────────────────────────────────────
 
 function SkillGridSkeleton({ count = 6 }: { count?: number }) {
@@ -517,7 +534,7 @@ function MarketplaceDetailModal({
   onInstall: () => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
-  const isPending = pendingId === skill.slug;
+  const isPending = pendingId === marketplaceInstallKey(source, skill.slug);
   return (
     <DrawerPanel isOpen onClose={onClose} title={skill.name} size="md">
       <div className="p-5 space-y-4">
@@ -1898,8 +1915,9 @@ export function SkillsPage() {
     slug: string,
     src: MarketplaceSource,
   ) => {
-    if (!tryStartInstall(installingRef, slug)) return;
-    setInstallingId(slug);
+    const installKey = marketplaceInstallKey(src, slug);
+    if (!tryStartInstall(installingRef, installKey)) return;
+    setInstallingId(installKey);
     const hand = targetHand || undefined;
     const opts = {
       onSuccess: () => {
@@ -2258,7 +2276,7 @@ export function SkillsPage() {
                   description={entry.description}
                   tags={entry.tags}
                   isInstalled={entry.is_installed}
-                  installPending={installingId === entry.name}
+                  installPending={installingId === marketplaceInstallKey("fanghub", entry.name)}
                   source="fanghub"
                   hubBadge={<HubBadge hub="fanghub" />}
                   onInstall={() => handleInstall(entry.name, "fanghub")}
@@ -2276,7 +2294,7 @@ export function SkillsPage() {
                   stars={entry.stars}
                   downloads={entry.downloads}
                   isInstalled={entry.is_installed}
-                  installPending={installingId === entry.slug}
+                  installPending={installingId === marketplaceInstallKey(entry._hub, entry.slug)}
                   source={entry._hub}
                   hubBadge={<HubBadge hub={entry._hub} />}
                   onInstall={() => handleInstall(entry.slug, entry._hub)}
@@ -2397,13 +2415,13 @@ export function SkillsPage() {
               <Button
                 variant="primary"
                 className="w-full"
-                disabled={installingId === detailsFangHub.name}
+                disabled={installingId === marketplaceInstallKey("fanghub", detailsFangHub.name)}
                 onClick={() => {
                   if (detailsFangHub) handleInstall(detailsFangHub.name, "fanghub");
                 }}
-                leftIcon={installingId === detailsFangHub.name ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                leftIcon={installingId === marketplaceInstallKey("fanghub", detailsFangHub.name) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
               >
-                {installingId === detailsFangHub.name ? t("skills.installing") : t("skills.install")}
+                {installingId === marketplaceInstallKey("fanghub", detailsFangHub.name) ? t("skills.installing") : t("skills.install")}
               </Button>
             )}
           </div>
