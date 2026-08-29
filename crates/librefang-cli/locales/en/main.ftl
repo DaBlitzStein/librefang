@@ -2234,6 +2234,7 @@ tui-memory-config-on = on
 tui-memory-config-off = off
 tui-memory-config-loading = Reading configuration...
 tui-memory-config-saving = Saving...
+tui-memory-config-save-failed = Save failed
 tui-memory-config-unsaved = Unsaved changes — press s to save, Esc to discard
 tui-memory-config-hint =   r refresh · Esc back
 tui-memory-label-select-agent =   Select an agent to browse its memory:

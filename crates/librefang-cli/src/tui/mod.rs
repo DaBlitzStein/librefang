@@ -474,7 +474,7 @@ impl App {
                 self.memory.status_msg = if ok {
                     crate::i18n::t("tui-memory-config-on")
                 } else {
-                    "save failed".to_string()
+                    crate::i18n::t("tui-memory-config-save-failed")
                 };
             }
             AppEvent::MemoryAgentsLoaded(agents) => {
