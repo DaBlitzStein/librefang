@@ -577,6 +577,8 @@ impl AgentSelectState {
                     let id = detail.id.clone();
                     self.sub = AgentSubScreen::EditChannels;
                     return AgentAction::FetchAgentChannels(id);
+                }
+            }
             KeyCode::Char('r') => {
                 // Edit model routing for this agent
                 if let Some(ref detail) = self.detail {
@@ -1097,7 +1099,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::EditSkills
         | AgentSubScreen::EditMcpServers
         | AgentSubScreen::EditChannels => unreachable!(),
-        | AgentSubScreen::EditModelRouting => unreachable!(),
+        AgentSubScreen::EditModelRouting => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
