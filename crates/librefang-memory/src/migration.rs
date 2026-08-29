@@ -1231,7 +1231,12 @@ fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// `NULL` means "use the global", which is exactly what every pre-v55 row
 /// means, so the column needs no backfill.
 fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !try_column_exists(conn, "task_queue", "timeout_secs")? {
+    let table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='task_queue'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_exists && !try_column_exists(conn, "task_queue", "timeout_secs")? {
         conn.execute(
             "ALTER TABLE task_queue ADD COLUMN timeout_secs INTEGER DEFAULT NULL",
             [],
