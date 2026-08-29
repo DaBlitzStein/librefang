@@ -359,7 +359,7 @@
       "agent_spawn": "Może tworzyć podagenty",
       "ofp_discover": "Może wykrywać partnerów OFP",
       "capability_routing": "Routing możliwości",
-      "capability_routing_hint": "Który dostawca i model obsługuje modalność, z którą nie radzi sobie własny model agenta. Puste pole dziedziczy ustawienie globalne. Przyjmuje „dostawca/model" albo sam „dostawca".",
+      "capability_routing_hint": "Który dostawca i model obsługuje modalność, z którą nie radzi sobie własny model agenta. Puste pole dziedziczy ustawienie globalne. Przyjmuje „dostawca/model” albo sam „dostawca”.",
       "capability_inherit_placeholder": "Dziedzicz globalne",
       "capability_image_understanding": "Wizja",
       "capability_image_understanding_hint": "Opisuje obrazy modelowi bez obsługi wizji, zamiast je pomijać.",
