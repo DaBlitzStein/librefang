@@ -1825,6 +1825,8 @@ mod workspaces_tests {
             skills_mode: String::new(),
             mcp_servers: vec![],
             mcp_servers_mode: String::new(),
+            channels: vec![],
+            channels_mode: String::new(),
         });
         state
     }
