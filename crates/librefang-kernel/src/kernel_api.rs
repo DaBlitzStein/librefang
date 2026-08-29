@@ -176,8 +176,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`]).
     ///
     /// `loop_engineering` opts the run into the verifier gate and the
-    /// evaluator; the three arguments after it are inert without it. Returns
-    /// whether the run actually started.
+    /// evaluator; the three arguments after it are inert without it.
     #[allow(clippy::too_many_arguments)]
     fn start_goal_run(
         &self,
