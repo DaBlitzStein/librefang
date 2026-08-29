@@ -320,11 +320,7 @@ impl CommsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
-    let inner = widgets::render_screen_block(
-        f,
-        area,
-        &format!("{} {}", "○", crate::i18n::t("tui-comms-title")),
-    );
+    let inner = widgets::render_screen_block(f, area, "\u{25ef} Comms");
 
     let chunks = Layout::vertical([
         Constraint::Length(1),      // focus tabs
@@ -352,28 +348,14 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
             Span::raw("  "),
             Span::styled(
                 format!(
-                    " {} ",
-                    crate::i18n::t_args(
-                        "tui-comms-tab-topology",
-                        &[
-                            ("agents", &state.nodes.len().to_string()),
-                            ("edges", &state.edges.len().to_string()),
-                        ]
-                    )
+                    " Topology ({} agents, {} edges) ",
+                    state.nodes.len(),
+                    state.edges.len()
                 ),
                 topo_style,
             ),
             Span::raw("  "),
-            Span::styled(
-                format!(
-                    " {} ",
-                    crate::i18n::t_args(
-                        "tui-comms-tab-events",
-                        &[("count", &state.events.len().to_string())]
-                    )
-                ),
-                event_style,
-            ),
+            Span::styled(format!(" Events ({}) ", state.events.len()), event_style),
         ])),
         chunks[0],
     );
@@ -393,12 +375,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
     // Status message or hints
     let hint_text = if !state.status_msg.is_empty() {
         format!(
-            "  {} | {}",
-            state.status_msg,
-            crate::i18n::t("tui-comms-hints")
+            "  {} | [s]end  [t]ask  [r]efresh  [Tab] focus  [\u{2191}\u{2193}] scroll",
+            state.status_msg
         )
     } else {
-        crate::i18n::t("tui-comms-hints")
+        "  [s]end  [t]ask  [r]efresh  [Tab] focus  [\u{2191}\u{2193}] scroll".to_string()
     };
     f.render_widget(widgets::hint_bar(&hint_text), chunks[5]);
 
@@ -414,7 +395,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
 fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
     if state.loading && state.nodes.is_empty() {
         f.render_widget(
-            widgets::spinner(state.tick, &crate::i18n::t("tui-comms-loading")),
+            widgets::spinner(state.tick, "Loading topology\u{2026}"),
             area,
         );
         return;
@@ -422,7 +403,7 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
 
     if state.nodes.is_empty() {
         f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-comms-empty")),
+            widgets::empty_state("No agents running. Start agents to see communication."),
             area,
         );
         return;
@@ -452,7 +433,7 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
         // Peer annotations
         for peer in state.peers_of(&root.id) {
             spans.push(Span::styled(
-                format!("  ↔ {}", peer.name),
+                format!("  \u{2194} {}", peer.name),
                 Style::default().fg(theme::PURPLE),
             ));
         }
@@ -462,9 +443,9 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
         let children = state.children_of(&root.id);
         for (i, child) in children.iter().enumerate() {
             let branch = if i < children.len() - 1 {
-                "├── "
+                "\u{251c}\u{2500}\u{2500} "
             } else {
-                "└── "
+                "\u{2514}\u{2500}\u{2500} "
             };
             let (child_ind, child_ind_style) = state_indicator(&child.state);
             lines.push(Line::from(vec![
@@ -489,7 +470,7 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
 fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
     if state.events.is_empty() {
         f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-comms-events-empty")),
+            widgets::empty_state("No inter-agent events yet. Activity will appear here."),
             area,
         );
         return;
@@ -505,7 +486,7 @@ fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
             let target_part = if ev.target_name.is_empty() {
                 String::new()
             } else {
-                format!(" → {}", ev.target_name)
+                format!(" \u{2192} {}", ev.target_name)
             };
             let detail = widgets::truncate(&ev.detail, 50);
             ListItem::new(Line::from(vec![
@@ -536,10 +517,7 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     f.render_widget(Clear, modal);
 
     let block = Block::default()
-        .title(Span::styled(
-            crate::i18n::t("tui-comms-modal-send-title"),
-            theme::title_style(),
-        ))
+        .title(Span::styled(" Send Message ", theme::title_style()))
         .borders(Borders::ALL)
         .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
@@ -569,49 +547,40 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     };
 
     f.render_widget(
-        Paragraph::new(Span::styled(
-            crate::i18n::t("tui-comms-modal-send-from"),
-            field_style(0),
-        )),
+        Paragraph::new(Span::styled("From (agent ID):", field_style(0))),
         rows[0],
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.send_from),
+            format!("  {}\u{2588}", &state.send_from),
             Style::default().fg(theme::TEXT),
         )),
         rows[1],
     );
     f.render_widget(
-        Paragraph::new(Span::styled(
-            crate::i18n::t("tui-comms-modal-send-to"),
-            field_style(1),
-        )),
+        Paragraph::new(Span::styled("To (agent ID):", field_style(1))),
         rows[2],
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.send_to),
+            format!("  {}\u{2588}", &state.send_to),
             Style::default().fg(theme::TEXT),
         )),
         rows[3],
     );
     f.render_widget(
-        Paragraph::new(Span::styled(
-            crate::i18n::t("tui-comms-modal-send-msg"),
-            field_style(2),
-        )),
+        Paragraph::new(Span::styled("Message:", field_style(2))),
         rows[4],
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.send_msg),
+            format!("  {}\u{2588}", &state.send_msg),
             Style::default().fg(theme::TEXT),
         )),
         rows[5],
     );
     f.render_widget(
-        widgets::hint_bar(&crate::i18n::t("tui-comms-modal-send-hints")),
+        widgets::hint_bar("[Tab] field  [Enter] send  [Esc] cancel"),
         rows[6],
     );
 }
@@ -621,10 +590,7 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     f.render_widget(Clear, modal);
 
     let block = Block::default()
-        .title(Span::styled(
-            crate::i18n::t("tui-comms-modal-task-title"),
-            theme::title_style(),
-        ))
+        .title(Span::styled(" Post Task ", theme::title_style()))
         .borders(Borders::ALL)
         .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
@@ -654,49 +620,43 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     };
 
     f.render_widget(
-        Paragraph::new(Span::styled(
-            crate::i18n::t("tui-comms-modal-task-title-field"),
-            field_style(0),
-        )),
+        Paragraph::new(Span::styled("Title:", field_style(0))),
         rows[0],
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.task_title),
+            format!("  {}\u{2588}", &state.task_title),
             Style::default().fg(theme::TEXT),
         )),
         rows[1],
     );
     f.render_widget(
-        Paragraph::new(Span::styled(
-            crate::i18n::t("tui-comms-modal-task-desc"),
-            field_style(1),
-        )),
+        Paragraph::new(Span::styled("Description:", field_style(1))),
         rows[2],
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.task_desc),
+            format!("  {}\u{2588}", &state.task_desc),
             Style::default().fg(theme::TEXT),
         )),
         rows[3],
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            crate::i18n::t("tui-comms-modal-task-assign"),
+            "Assign to (agent ID, optional):",
             field_style(2),
         )),
         rows[4],
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.task_assign),
+            format!("  {}\u{2588}", &state.task_assign),
             Style::default().fg(theme::TEXT),
         )),
         rows[5],
     );
     f.render_widget(
-        widgets::hint_bar(&crate::i18n::t("tui-comms-modal-task-hints")),
+        widgets::hint_bar("[Tab] field  [Enter] post  [Esc] cancel"),
         rows[6],
     );
 }
@@ -715,14 +675,14 @@ fn state_color(state: &str) -> Style {
 fn state_indicator(state: &str) -> (&'static str, Style) {
     match state {
         "Running" => (
-            "●",
+            "\u{25cf}",
             Style::default()
                 .fg(theme::GREEN)
                 .add_modifier(Modifier::BOLD),
         ),
-        "Suspended" => ("●", Style::default().fg(theme::YELLOW)),
-        "Terminated" | "Crashed" => ("○", Style::default().fg(theme::RED)),
-        _ => ("○", theme::dim_style()),
+        "Suspended" => ("\u{25cf}", Style::default().fg(theme::YELLOW)),
+        "Terminated" | "Crashed" => ("\u{25cb}", Style::default().fg(theme::RED)),
+        _ => ("\u{25cb}", theme::dim_style()),
     }
 }
 
@@ -752,11 +712,11 @@ fn kind_short(kind: &str) -> &str {
 
 fn kind_indicator(kind: &str) -> &'static str {
     match kind {
-        "agent_spawned" | "task_completed" => "●", // filled green-ish
-        "agent_message" | "task_claimed" => "●",   // filled
-        "agent_terminated" => "○",                 // hollow
-        "task_posted" => "●",                      // filled yellow-ish
-        _ => "○",
+        "agent_spawned" | "task_completed" => "\u{25cf}", // filled green-ish
+        "agent_message" | "task_claimed" => "\u{25cf}",   // filled
+        "agent_terminated" => "\u{25cb}",                 // hollow
+        "task_posted" => "\u{25cf}",                      // filled yellow-ish
+        _ => "\u{25cb}",
     }
 }
 

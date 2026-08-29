@@ -13,7 +13,6 @@ use std::path::Path;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracing::warn;
 
 use crate::web_fetch::check_ssrf;
 use crate::web_search::WebToolsContext;
@@ -159,15 +158,11 @@ pub async fn tool_web_fetch_to_file(
     );
     let tmp_path = parent.join(tmp_name);
     if let Err(e) = tokio::fs::write(&tmp_path, &buf).await {
-        if let Err(rm_err) = tokio::fs::remove_file(&tmp_path).await {
-            warn!(path = %tmp_path.display(), error = %rm_err, "failed to remove partial download temp file after write error");
-        }
+        let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(format!("Failed to write file: {e}"));
     }
     if let Err(e) = tokio::fs::rename(&tmp_path, &resolved).await {
-        if let Err(rm_err) = tokio::fs::remove_file(&tmp_path).await {
-            warn!(path = %tmp_path.display(), error = %rm_err, "failed to remove partial download temp file after rename error");
-        }
+        let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(format!("Failed to publish file (rename): {e}"));
     }
 

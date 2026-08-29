@@ -271,9 +271,6 @@ class _AgentsResource(_Resource):
     def compact_session(self, id: str):
         return self._c._request("POST", f"/api/agents/{id}/session/compact")
 
-    def get_agent_session_context(self, id: str, session_id: Any = None):
-        return self._c._request("GET", f"/api/agents/{id}/session/context", None, query={"session_id": session_id})
-
     def reboot_session(self, id: str):
         return self._c._request("POST", f"/api/agents/{id}/session/reboot")
 
@@ -407,24 +404,6 @@ class _AuthResource(_Resource):
     def dashboard_logout(self):
         return self._c._request("POST", "/api/auth/logout")
 
-    def authentication_options(self, **data):
-        return self._c._request("POST", "/api/auth/passkey/authentication-options", data)
-
-    def authentication_verify(self, **data):
-        return self._c._request("POST", "/api/auth/passkey/authentication-verify", data)
-
-    def list_credentials(self):
-        return self._c._request("GET", "/api/auth/passkey/credentials")
-
-    def revoke_credential(self, id: str):
-        return self._c._request("DELETE", f"/api/auth/passkey/credentials/{id}")
-
-    def registration_options(self, **data):
-        return self._c._request("POST", "/api/auth/passkey/registration-options", data)
-
-    def registration_verify(self, **data):
-        return self._c._request("POST", "/api/auth/passkey/registration-verify", data)
-
     def auth_providers(self):
         return self._c._request("GET", "/api/auth/providers")
 
@@ -517,9 +496,6 @@ class _ChannelsResource(_Resource):
 
     def reload_channels(self):
         return self._c._request("POST", "/api/channels/reload")
-
-    def delete_sidecar_channel(self, name: str):
-        return self._c._request("DELETE", f"/api/channels/sidecar/{name}")
 
     def configure_sidecar_channel(self, name: str, **data):
         return self._c._request("POST", f"/api/channels/sidecar/{name}/configure", data)

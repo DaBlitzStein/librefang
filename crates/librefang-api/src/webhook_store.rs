@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 use uuid::Uuid;
 
 /// Unique identifier for a webhook subscription.
@@ -426,11 +426,6 @@ pub struct WebhookStore {
 
 impl WebhookStore {
     /// Load or create a webhook store at the given path.
-    ///
-    /// File I/O is synchronous because this is called once at daemon boot
-    /// (or test setup) rather than on the async request path. The in-memory
-    /// state is guarded by [`tokio::sync::RwLock`] so concurrent async
-    /// handlers can read and write it without blocking the runtime.
     pub fn load(path: PathBuf) -> Self {
         let data = if path.exists() {
             match std::fs::read_to_string(&path) {
@@ -465,43 +460,37 @@ impl WebhookStore {
     }
 
     /// Persist current state to disk atomically (write tmp → fsync → rename).
-    ///
-    /// The actual file I/O runs on the blocking pool so it does not hold up
-    /// the async runtime (AGENTS.md: no synchronous `std::fs` in async
-    /// handlers).
-    async fn persist(&self, data: &StoreData) -> Result<(), String> {
+    fn persist(&self, data: &StoreData) -> Result<(), String> {
         let json =
             serde_json::to_string_pretty(data).map_err(|e| format!("serialize error: {e}"))?;
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            // Ensure parent directory exists
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            crate::atomic_write(&path, json.as_bytes())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-            }
-            Ok::<(), std::io::Error>(())
-        })
-        .await
-        .map_err(|e| format!("persist task panicked: {e}"))?
-        .map_err(|e| format!("write error: {e}"))?;
+        // Ensure parent directory exists
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        crate::atomic_write(&self.path, json.as_bytes())
+            .map_err(|e| format!("write error: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+        }
         Ok(())
     }
 
     /// List all webhook subscriptions.
-    pub async fn list(&self) -> Vec<WebhookSubscription> {
-        self.data.read().await.webhooks.clone()
+    pub fn list(&self) -> Vec<WebhookSubscription> {
+        self.data
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .webhooks
+            .clone()
     }
 
     /// Get a single webhook by ID.
-    pub async fn get(&self, id: WebhookId) -> Option<WebhookSubscription> {
+    pub fn get(&self, id: WebhookId) -> Option<WebhookSubscription> {
         self.data
             .read()
-            .await
+            .unwrap_or_else(|e| e.into_inner())
             .webhooks
             .iter()
             .find(|w| w.id == id)
@@ -509,9 +498,9 @@ impl WebhookStore {
     }
 
     /// Create a new webhook subscription.
-    pub async fn create(&self, req: CreateWebhookRequest) -> Result<WebhookSubscription, String> {
+    pub fn create(&self, req: CreateWebhookRequest) -> Result<WebhookSubscription, String> {
         req.validate()?;
-        let mut data = self.data.write().await;
+        let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
         if data.webhooks.len() >= MAX_WEBHOOKS {
             return Err(format!(
                 "maximum number of webhooks ({}) reached",
@@ -530,19 +519,19 @@ impl WebhookStore {
             updated_at: now,
         };
         data.webhooks.push(webhook.clone());
-        if let Err(e) = self.persist(&data).await {
+        if let Err(e) = self.persist(&data) {
             tracing::warn!("Failed to persist webhook store: {e}");
         }
         Ok(webhook)
     }
 
     /// Update an existing webhook subscription.
-    pub async fn update(
+    pub fn update(
         &self,
         id: WebhookId,
         req: UpdateWebhookRequest,
     ) -> Result<WebhookSubscription, String> {
-        let mut data = self.data.write().await;
+        let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
         let webhook = data
             .webhooks
             .iter_mut()
@@ -598,20 +587,20 @@ impl WebhookStore {
         }
         webhook.updated_at = Utc::now();
         let updated = webhook.clone();
-        if let Err(e) = self.persist(&data).await {
+        if let Err(e) = self.persist(&data) {
             tracing::warn!("Failed to persist webhook store: {e}");
         }
         Ok(updated)
     }
 
     /// Delete a webhook subscription.
-    pub async fn delete(&self, id: WebhookId) -> bool {
-        let mut data = self.data.write().await;
+    pub fn delete(&self, id: WebhookId) -> bool {
+        let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
         let before = data.webhooks.len();
         data.webhooks.retain(|w| w.id != id);
         let removed = data.webhooks.len() < before;
         if removed {
-            if let Err(e) = self.persist(&data).await {
+            if let Err(e) = self.persist(&data) {
                 tracing::warn!("Failed to persist webhook store: {e}");
             }
         }
@@ -646,13 +635,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn create_and_list() {
+    #[test]
+    fn create_and_list() {
         let (store, _dir) = temp_store();
-        assert!(store.list().await.is_empty());
-        let wh = store.create(valid_create_req()).await.unwrap();
+        assert!(store.list().is_empty());
+        let wh = store.create(valid_create_req()).unwrap();
         assert_eq!(wh.name, "test-hook");
-        assert_eq!(store.list().await.len(), 1);
+        assert_eq!(store.list().len(), 1);
     }
 
     #[tokio::test]
@@ -776,94 +765,94 @@ mod tests {
         assert!(validate_webhook_url("http://169.254.169.254/").is_err());
     }
 
-    #[tokio::test]
-    async fn create_validates_empty_name() {
+    #[test]
+    fn create_validates_empty_name() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.name = String::new();
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(err.contains("name must not be empty"));
     }
 
-    #[tokio::test]
-    async fn create_validates_empty_url() {
+    #[test]
+    fn create_validates_empty_url() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = String::new();
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(err.contains("url must not be empty"));
     }
 
-    #[tokio::test]
-    async fn create_validates_invalid_url() {
+    #[test]
+    fn create_validates_invalid_url() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = "not a url".to_string();
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(err.contains("not a valid URL"));
     }
 
-    #[tokio::test]
-    async fn create_rejects_empty_secret() {
+    #[test]
+    fn create_rejects_empty_secret() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.secret = Some(String::new());
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(
             err.contains("secret must not be empty"),
             "unexpected error: {err}"
         );
     }
 
-    #[tokio::test]
-    async fn create_validates_empty_events() {
+    #[test]
+    fn create_validates_empty_events() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.events = vec![];
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(err.contains("events must not be empty"));
     }
 
-    #[tokio::test]
-    async fn create_rejects_private_ip_url() {
+    #[test]
+    fn create_rejects_private_ip_url() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = "http://192.168.1.1/hook".to_string();
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(err.contains("private"));
     }
 
-    #[tokio::test]
-    async fn create_rejects_localhost_url() {
+    #[test]
+    fn create_rejects_localhost_url() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = "http://localhost:8080/hook".to_string();
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(err.contains("internal/localhost"));
     }
 
-    #[tokio::test]
-    async fn create_rejects_link_local_url() {
+    #[test]
+    fn create_rejects_link_local_url() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = "http://169.254.169.254/metadata".to_string();
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(err.contains("private") || err.contains("link-local"));
     }
 
-    #[tokio::test]
-    async fn get_by_id() {
+    #[test]
+    fn get_by_id() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).await.unwrap();
-        let found = store.get(wh.id).await.unwrap();
+        let wh = store.create(valid_create_req()).unwrap();
+        let found = store.get(wh.id).unwrap();
         assert_eq!(found.name, "test-hook");
-        assert!(store.get(WebhookId(Uuid::new_v4())).await.is_none());
+        assert!(store.get(WebhookId(Uuid::new_v4())).is_none());
     }
 
-    #[tokio::test]
-    async fn update_webhook() {
+    #[test]
+    fn update_webhook() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).await.unwrap();
+        let wh = store.create(valid_create_req()).unwrap();
         let updated = store
             .update(
                 wh.id,
@@ -875,17 +864,16 @@ mod tests {
                     enabled: Some(false),
                 },
             )
-            .await
             .unwrap();
         assert_eq!(updated.name, "renamed");
         assert!(!updated.enabled);
         assert!(updated.updated_at > wh.updated_at);
     }
 
-    #[tokio::test]
-    async fn update_clears_secret_with_empty_string() {
+    #[test]
+    fn update_clears_secret_with_empty_string() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).await.unwrap();
+        let wh = store.create(valid_create_req()).unwrap();
         assert!(wh.secret.is_some());
         let updated = store
             .update(
@@ -898,13 +886,12 @@ mod tests {
                     enabled: None,
                 },
             )
-            .await
             .unwrap();
         assert!(updated.secret.is_none());
     }
 
-    #[tokio::test]
-    async fn update_not_found() {
+    #[test]
+    fn update_not_found() {
         let (store, _dir) = temp_store();
         let err = store
             .update(
@@ -917,41 +904,40 @@ mod tests {
                     enabled: None,
                 },
             )
-            .await
             .unwrap_err();
         assert!(err.contains("not found"));
     }
 
-    #[tokio::test]
-    async fn delete_webhook() {
+    #[test]
+    fn delete_webhook() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).await.unwrap();
-        assert!(store.delete(wh.id).await);
-        assert!(store.list().await.is_empty());
-        assert!(!store.delete(wh.id).await);
+        let wh = store.create(valid_create_req()).unwrap();
+        assert!(store.delete(wh.id));
+        assert!(store.list().is_empty());
+        assert!(!store.delete(wh.id));
     }
 
-    #[tokio::test]
-    async fn persistence_roundtrip() {
+    #[test]
+    fn persistence_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("webhooks.json");
 
         // Create and persist
         {
             let store = WebhookStore::load(path.clone());
-            store.create(valid_create_req()).await.unwrap();
+            store.create(valid_create_req()).unwrap();
         }
 
         // Reload and verify
         {
             let store = WebhookStore::load(path);
-            assert_eq!(store.list().await.len(), 1);
-            assert_eq!(store.list().await[0].name, "test-hook");
+            assert_eq!(store.list().len(), 1);
+            assert_eq!(store.list()[0].name, "test-hook");
         }
     }
 
-    #[tokio::test]
-    async fn max_webhooks_enforced() {
+    #[test]
+    fn max_webhooks_enforced() {
         let (store, _dir) = temp_store();
         for i in 0..MAX_WEBHOOKS {
             let req = CreateWebhookRequest {
@@ -961,9 +947,9 @@ mod tests {
                 events: vec![WebhookEvent::All],
                 enabled: true,
             };
-            store.create(req).await.unwrap();
+            store.create(req).unwrap();
         }
-        let err = store.create(valid_create_req()).await.unwrap_err();
+        let err = store.create(valid_create_req()).unwrap_err();
         assert!(err.contains("maximum number of webhooks"));
     }
 
@@ -984,28 +970,28 @@ mod tests {
         assert_eq!(events, back);
     }
 
-    #[tokio::test]
-    async fn name_too_long() {
+    #[test]
+    fn name_too_long() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.name = "x".repeat(MAX_NAME_LEN + 1);
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(err.contains("name exceeds maximum length"));
     }
 
-    #[tokio::test]
-    async fn url_too_long() {
+    #[test]
+    fn url_too_long() {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = format!("https://example.com/{}", "x".repeat(MAX_URL_LEN));
-        let err = store.create(req).await.unwrap_err();
+        let err = store.create(req).unwrap_err();
         assert!(err.contains("url exceeds maximum length"));
     }
 
-    #[tokio::test]
-    async fn update_validates_empty_name() {
+    #[test]
+    fn update_validates_empty_name() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).await.unwrap();
+        let wh = store.create(valid_create_req()).unwrap();
         let err = store
             .update(
                 wh.id,
@@ -1017,15 +1003,14 @@ mod tests {
                     enabled: None,
                 },
             )
-            .await
             .unwrap_err();
         assert!(err.contains("name must not be empty"));
     }
 
-    #[tokio::test]
-    async fn update_validates_invalid_url() {
+    #[test]
+    fn update_validates_invalid_url() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).await.unwrap();
+        let wh = store.create(valid_create_req()).unwrap();
         let err = store
             .update(
                 wh.id,
@@ -1037,15 +1022,14 @@ mod tests {
                     enabled: None,
                 },
             )
-            .await
             .unwrap_err();
         assert!(err.contains("not a valid URL"));
     }
 
-    #[tokio::test]
-    async fn update_validates_empty_events() {
+    #[test]
+    fn update_validates_empty_events() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).await.unwrap();
+        let wh = store.create(valid_create_req()).unwrap();
         let err = store
             .update(
                 wh.id,
@@ -1057,7 +1041,6 @@ mod tests {
                     enabled: None,
                 },
             )
-            .await
             .unwrap_err();
         assert!(err.contains("events must not be empty"));
     }

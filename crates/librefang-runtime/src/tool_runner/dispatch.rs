@@ -944,9 +944,7 @@ pub async fn execute_tool_raw(
         }
 
         // Inter-agent tools (require kernel handle).
-        "agent_send" => {
-            tool_agent_send(input, *kernel, *caller_agent_id, *session_id, *chat_id).await
-        }
+        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id).await,
         "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
         "agent_list" => tool_agent_list(*kernel),
         "agent_kill" => tool_agent_kill(input, *kernel),
@@ -970,7 +968,6 @@ pub async fn execute_tool_raw(
         }
         "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
         "schedule_delete" => tool_schedule_delete(input, *kernel, *caller_agent_id).await,
-        "schedule_resume" => tool_schedule_resume(input, *kernel, *caller_agent_id).await,
 
         // Knowledge graph tools.
         "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel).await,
@@ -1085,7 +1082,6 @@ pub async fn execute_tool_raw(
         "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id, *sender_id).await,
         "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
         "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
-        "cron_enable" => tool_cron_enable(input, *kernel, *caller_agent_id).await,
 
         // Channel send tool (proactive outbound messaging)
         "channel_send" => {
@@ -1161,7 +1157,9 @@ pub async fn execute_tool_raw(
             match browser_ctx {
                 Some(mgr) => {
                     let aid = caller_agent_id.unwrap_or("default");
-                    crate::browser_tools::tool_browser_navigate(input, mgr, aid).await
+                    crate::browser_tools::tool_browser_navigate(input, mgr, aid)
+                        .await
+                        .map_err(ToolError::upstream_msg)
                 }
                 None => Err(ToolError::Unavailable("Browser tools")),
             }
@@ -1170,7 +1168,9 @@ pub async fn execute_tool_raw(
         "browser_click" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser_tools::tool_browser_click(input, mgr, aid).await
+                crate::browser_tools::tool_browser_click(input, mgr, aid)
+                    .await
+                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1178,7 +1178,9 @@ pub async fn execute_tool_raw(
         "browser_type" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser_tools::tool_browser_type(input, mgr, aid).await
+                crate::browser_tools::tool_browser_type(input, mgr, aid)
+                    .await
+                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1189,7 +1191,9 @@ pub async fn execute_tool_raw(
                 let upload_dir = kernel
                     .map(|k| k.effective_upload_dir())
                     .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
-                crate::browser_tools::tool_browser_screenshot(input, mgr, aid, &upload_dir).await
+                crate::browser_tools::tool_browser_screenshot(input, mgr, aid, &upload_dir)
+                    .await
+                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1197,7 +1201,9 @@ pub async fn execute_tool_raw(
         "browser_read_page" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser_tools::tool_browser_read_page(input, mgr, aid).await
+                crate::browser_tools::tool_browser_read_page(input, mgr, aid)
+                    .await
+                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1205,7 +1211,9 @@ pub async fn execute_tool_raw(
         "browser_close" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser_tools::tool_browser_close(input, mgr, aid).await
+                crate::browser_tools::tool_browser_close(input, mgr, aid)
+                    .await
+                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1213,7 +1221,9 @@ pub async fn execute_tool_raw(
         "browser_scroll" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser_tools::tool_browser_scroll(input, mgr, aid).await
+                crate::browser_tools::tool_browser_scroll(input, mgr, aid)
+                    .await
+                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1221,7 +1231,9 @@ pub async fn execute_tool_raw(
         "browser_wait" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser_tools::tool_browser_wait(input, mgr, aid).await
+                crate::browser_tools::tool_browser_wait(input, mgr, aid)
+                    .await
+                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1229,7 +1241,9 @@ pub async fn execute_tool_raw(
         "browser_run_js" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser_tools::tool_browser_run_js(input, mgr, aid).await
+                crate::browser_tools::tool_browser_run_js(input, mgr, aid)
+                    .await
+                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1237,7 +1251,9 @@ pub async fn execute_tool_raw(
         "browser_back" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser_tools::tool_browser_back(input, mgr, aid).await
+                crate::browser_tools::tool_browser_back(input, mgr, aid)
+                    .await
+                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },

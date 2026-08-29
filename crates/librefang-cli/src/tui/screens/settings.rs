@@ -259,11 +259,7 @@ impl SettingsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
-    let inner = widgets::render_screen_block(
-        f,
-        area,
-        &format!("⚙ {}", crate::i18n::t("tui-settings-title")),
-    );
+    let inner = widgets::render_screen_block(f, area, "\u{2699} Settings");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -285,35 +281,40 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
 
     // Hints
     let hint_text = match state.sub {
-        SettingsSub::Providers if state.input_mode => crate::i18n::t("tui-settings-hints-input"),
-        SettingsSub::Providers => crate::i18n::t("tui-settings-hints-providers"),
-        SettingsSub::Models => crate::i18n::t("tui-settings-hints-models"),
-        SettingsSub::Tools => crate::i18n::t("tui-settings-hints-tools"),
+        SettingsSub::Providers if state.input_mode => "  [Enter] Save  [Esc] Cancel",
+        SettingsSub::Providers => {
+            "  [\u{2191}\u{2193}] Navigate  [e] Set Key  [d] Delete Key  [t] Test  [r] Refresh"
+        }
+        SettingsSub::Models => "  [\u{2191}\u{2193}] Navigate  [r] Refresh",
+        SettingsSub::Tools => "  [\u{2191}\u{2193}] Navigate  [r] Refresh",
     };
-    f.render_widget(widgets::hint_bar(&hint_text), chunks[3]);
+    f.render_widget(widgets::hint_bar(hint_text), chunks[3]);
 }
 
 fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
     let tabs = [
-        (
-            SettingsSub::Providers,
-            crate::i18n::t("tui-settings-tab-providers"),
-        ),
-        (
-            SettingsSub::Models,
-            crate::i18n::t("tui-settings-tab-models"),
-        ),
-        (SettingsSub::Tools, crate::i18n::t("tui-settings-tab-tools")),
+        (SettingsSub::Providers, "1 Providers"),
+        (SettingsSub::Models, "2 Models"),
+        (SettingsSub::Tools, "3 Tools"),
     ];
     let mut spans = vec![Span::raw("  ")];
     for (i, (sub, label)) in tabs.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" │ ", Style::default().fg(theme::BORDER)));
+            spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(theme::BORDER),
+            ));
         }
         if *sub == active {
-            spans.push(Span::styled(format!(" ● {label} "), theme::tab_active()));
+            spans.push(Span::styled(
+                format!(" \u{25cf} {label} "),
+                theme::tab_active(),
+            ));
         } else {
-            spans.push(Span::styled(format!(" ○ {label} "), theme::tab_inactive()));
+            spans.push(Span::styled(
+                format!(" \u{25cb} {label} "),
+                theme::tab_inactive(),
+            ));
         }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -327,12 +328,9 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     ])
     .split(area);
 
-    let provider_hdr = crate::i18n::t("tui-settings-providers-header-provider");
-    let status_hdr = crate::i18n::t("tui-settings-providers-header-status");
-    let env_hdr = crate::i18n::t("tui-settings-providers-header-env");
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            format!("  {:<20} {:<20} {}", provider_hdr, status_hdr, env_hdr),
+            format!("  {:<20} {:<20} {}", "Provider", "Status", "Env Variable"),
             theme::table_header(),
         )])),
         chunks[0],
@@ -340,15 +338,12 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
 
     if state.loading && state.providers.is_empty() {
         f.render_widget(
-            widgets::spinner(
-                state.tick,
-                &crate::i18n::t("tui-settings-providers-loading"),
-            ),
+            widgets::spinner(state.tick, "Loading providers\u{2026}"),
             chunks[1],
         );
     } else if state.providers.is_empty() {
         f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-settings-providers-empty")),
+            widgets::empty_state("No providers configured. Run `librefang init` to set up."),
             chunks[1],
         );
     } else {
@@ -361,47 +356,23 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
                         Some(true) => {
                             let ms = p.latency_ms.unwrap_or(0);
                             (
-                                format!(
-                                    "● {}",
-                                    crate::i18n::t_args(
-                                        "tui-settings-providers-status-online",
-                                        &[("ms", &ms.to_string())]
-                                    )
-                                ),
+                                format!("\u{25cf} Online ({ms}ms)"),
                                 Style::default().fg(theme::GREEN),
                             )
                         }
                         Some(false) => (
-                            format!(
-                                "● {}",
-                                crate::i18n::t("tui-settings-providers-status-offline")
-                            ),
+                            "\u{25cf} Offline".to_string(),
                             Style::default().fg(theme::RED),
                         ),
-                        None => (
-                            format!(
-                                "○ {}",
-                                crate::i18n::t("tui-settings-providers-status-local")
-                            ),
-                            theme::dim_style(),
-                        ),
+                        None => ("\u{25cb} Local".to_string(), theme::dim_style()),
                     }
                 } else if p.configured {
                     (
-                        format!(
-                            "● {}",
-                            crate::i18n::t("tui-settings-providers-status-configured")
-                        ),
+                        "\u{25cf} Configured".to_string(),
                         Style::default().fg(theme::GREEN),
                     )
                 } else {
-                    (
-                        format!(
-                            "○ {}",
-                            crate::i18n::t("tui-settings-providers-status-notset")
-                        ),
-                        theme::dim_style(),
-                    )
+                    ("\u{25cb} Not set".to_string(), theme::dim_style())
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(
@@ -424,23 +395,17 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![Span::styled(
-                    format!(
-                        "  🔑 {}",
-                        crate::i18n::t_args(
-                            "tui-settings-providers-input-prompt",
-                            &[("provider", provider_name)]
-                        )
-                    ),
+                    format!("  \u{1f511} Enter API key for {provider_name}: "),
                     Style::default().fg(theme::YELLOW),
                 )]),
                 Line::from(vec![
-                    Span::raw("  ▸ "),
+                    Span::raw("  \u{25b8} "),
                     Span::styled(
-                        "•".repeat(state.input_buf.len().min(40)),
+                        "\u{2022}".repeat(state.input_buf.len().min(40)),
                         theme::input_style(),
                     ),
                     Span::styled(
-                        "█",
+                        "\u{2588}",
                         Style::default()
                             .fg(theme::GREEN)
                             .add_modifier(Modifier::SLOW_BLINK),
@@ -451,9 +416,9 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         );
     } else if let Some(result) = &state.test_result {
         let (icon, style) = if result.success {
-            ("●", Style::default().fg(theme::GREEN))
+            ("\u{25cf}", Style::default().fg(theme::GREEN))
         } else {
-            ("●", Style::default().fg(theme::RED))
+            ("\u{25cf}", Style::default().fg(theme::RED))
         };
         f.render_widget(
             Paragraph::new(vec![
@@ -463,13 +428,7 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
                 ]),
                 Line::from(vec![Span::styled(
                     if result.success {
-                        format!(
-                            "  {}",
-                            crate::i18n::t_args(
-                                "tui-settings-providers-latency",
-                                &[("ms", &result.latency_ms.to_string())]
-                            )
-                        )
+                        format!("  Latency: {}ms", result.latency_ms)
                     } else {
                         String::new()
                     },
@@ -496,16 +455,11 @@ fn draw_models(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     ])
     .split(area);
 
-    let id_hdr = crate::i18n::t("tui-settings-models-header-id");
-    let provider_hdr = crate::i18n::t("tui-settings-models-header-provider");
-    let tier_hdr = crate::i18n::t("tui-settings-models-header-tier");
-    let ctx_hdr = crate::i18n::t("tui-settings-models-header-context");
-    let cost_hdr = crate::i18n::t("tui-settings-models-header-cost");
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<28} {:<14} {:<10} {:<10} {}",
-                id_hdr, provider_hdr, tier_hdr, ctx_hdr, cost_hdr
+                "Model ID", "Provider", "Tier", "Context", "Cost (in/out per 1M)"
             ),
             theme::table_header(),
         )])),
@@ -514,14 +468,11 @@ fn draw_models(f: &mut Frame, area: Rect, state: &mut SettingsState) {
 
     if state.loading && state.models.is_empty() {
         f.render_widget(
-            widgets::spinner(state.tick, &crate::i18n::t("tui-settings-models-loading")),
+            widgets::spinner(state.tick, "Loading models\u{2026}"),
             chunks[1],
         );
     } else if state.models.is_empty() {
-        f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-settings-models-empty")),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No models available."), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .models
@@ -572,21 +523,16 @@ fn draw_tools(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     ])
     .split(area);
 
-    let name_hdr = crate::i18n::t("tui-settings-tools-header-name");
-    let desc_hdr = crate::i18n::t("tui-settings-tools-header-desc");
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            format!("  {:<24} {}", name_hdr, desc_hdr),
+            format!("  {:<24} {}", "Tool Name", "Description"),
             theme::table_header(),
         )])),
         chunks[0],
     );
 
     if state.tools.is_empty() {
-        f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-settings-tools-empty")),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No tools available."), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .tools

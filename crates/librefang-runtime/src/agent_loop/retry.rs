@@ -281,7 +281,6 @@ pub(super) async fn stream_with_retry(
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
                     actual_provider: None,
-                    actual_model: None,
                 },
                 cascade_leak_aborted: true,
             });

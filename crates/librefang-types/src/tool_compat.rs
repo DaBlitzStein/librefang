@@ -77,7 +77,6 @@ pub fn is_known_librefang_tool(name: &str) -> bool {
             | "schedule_create"
             | "schedule_list"
             | "schedule_delete"
-            | "schedule_resume"
             | "image_analyze"
             | "location_get"
     )
@@ -205,7 +204,6 @@ mod tests {
             "schedule_create",
             "schedule_list",
             "schedule_delete",
-            "schedule_resume",
             "image_analyze",
             "location_get",
         ];

@@ -337,11 +337,7 @@ impl LibreFangKernel {
             .update_session_id(agent_id, new_session.id)
             .map_err(KernelError::LibreFang)?;
 
-        // Reset the in-memory per-agent token tracker (scheduler). This clears ONLY
-        // the in-memory per-agent token/burst/tool-call caps; it does NOT clear the
-        // persisted cost/usage windows in UsageStore (global/per-agent/per-provider/
-        // per-user budgets) nor the per-provider hourly-token cap. A "Resource quota
-        // exceeded" from those persists across reset until its window elapses.
+        // Reset quota tracking so /new clears "token quota exceeded"
         self.agents.scheduler.reset_usage(agent_id);
 
         // Fire external session:reset hook (fire-and-forget).
@@ -637,8 +633,7 @@ impl LibreFangKernel {
             .update_session_id(agent_id, new_session.id)
             .map_err(KernelError::LibreFang)?;
 
-        // Reset the in-memory per-agent token tracker only (see reset_all_sessions
-        // note above); persisted cost/usage budget windows are unaffected.
+        // Reset quota tracking
         self.agents.scheduler.reset_usage(agent_id);
 
         // Fire external session:reset hook (fire-and-forget).
@@ -1801,7 +1796,6 @@ mod session_summary_tests {
                     cache_read_input_tokens: 0,
                 },
                 actual_provider: None,
-                actual_model: None,
             })
         }
 

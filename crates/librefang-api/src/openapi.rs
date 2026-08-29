@@ -60,7 +60,6 @@ use crate::types;
         routes::send_message_stream,
         routes::attach_session_stream,
         routes::get_agent_session,
-        routes::get_agent_session_context,
         routes::list_agent_sessions,
         routes::create_agent_session,
         routes::switch_agent_session,
@@ -220,7 +219,6 @@ use crate::types;
         // ── Channels ──
         routes::list_channels,
         routes::configure_sidecar_channel,
-        routes::delete_sidecar_channel,
         routes::reload_channels,
         routes::list_channel_registry,
         // Per-channel `/configure` (POST/DELETE) + `/instances` (GET/POST)
@@ -477,14 +475,6 @@ use crate::types;
         crate::server::dashboard_logout,
         crate::server::change_password,
 
-        // ── Passkey (WebAuthn/FIDO2) login + credential management (#5981) ──
-        routes::passkey::registration_options,
-        routes::passkey::registration_verify,
-        routes::passkey::authentication_options,
-        routes::passkey::authentication_verify,
-        routes::passkey::list_credentials,
-        routes::passkey::revoke_credential,
-
         // ── OpenAI-Compatible API ──
         openai_compat::chat_completions,
         openai_compat::list_models,
@@ -518,7 +508,6 @@ use crate::types;
         routes::agents::AgentStatsPrevView,
         routes::agents::AgentEventRowView,
         routes::agents::AgentEventsResponse,
-        routes::agents::SessionContextResponse,
         routes::users::UserView,
         routes::users::UserUpsert,
         routes::users::BulkImportRequest,

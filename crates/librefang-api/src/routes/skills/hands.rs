@@ -293,9 +293,6 @@ pub async fn get_hand(
                             "provider": if a.manifest.model.provider == "default" { &dm.provider } else { &a.manifest.model.provider },
                             "model": if a.manifest.model.model == "default" { &dm.model } else { &a.manifest.model.model },
                             "steps": steps,
-                            // manifest values; per-agent edit endpoints target AgentRegistry/agent.toml, not HAND.toml, so these remain an honest restore-default target.
-                            "system_prompt": a.manifest.model.system_prompt,
-                            "capabilities_tools": a.manifest.capabilities.tools,
                         })
                     }).collect::<Vec<_>>(),
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
@@ -1116,35 +1113,31 @@ pub async fn update_hand_settings(
     Path(hand_id): Path<String>,
     Json(config): Json<std::collections::HashMap<String, serde_json::Value>>,
 ) -> impl IntoResponse {
-    let instance = state
+    // Find active instance for this hand
+    let instance_id = state
         .kernel
         .hands()
         .list_instances()
-        .into_iter()
-        .find(|i| i.hand_id == hand_id);
+        .iter()
+        .find(|i| i.hand_id == hand_id)
+        .map(|i| i.instance_id);
 
-    match instance {
-        Some(inst) => {
-            let id = inst.instance_id;
-            // Merge over existing config so untouched keys keep their saved values.
-            let mut merged = inst.config;
-            merged.extend(config);
-            match state.kernel.hands().update_config(id, merged.clone()) {
-                Ok(()) => {
-                    state.kernel.persist_hand_state();
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "status": "ok",
-                            "hand_id": hand_id,
-                            "instance_id": id,
-                            "config": merged,
-                        })),
-                    )
-                }
-                Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+    match instance_id {
+        Some(id) => match state.kernel.hands().update_config(id, config.clone()) {
+            Ok(()) => {
+                state.kernel.persist_hand_state();
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "hand_id": hand_id,
+                        "instance_id": id,
+                        "config": config,
+                    })),
+                )
             }
-        }
+            Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        },
         None => ApiErrorResponse::not_found(format!(
             "No active instance for hand: {hand_id}. Activate the hand first."
         ))

@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -104,9 +104,6 @@ chrono-tz = "0.10"
 # IDs
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
-# WebAuthn / passkeys (#5981)
-webauthn-rs = "0.5.5"
-
 # Database
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
 r2d2 = "0.8"
@@ -123,6 +120,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 rustls = "0.23"
 webpki-roots = "1"
 rustls-native-certs = "0.8"
+# PEM parsing for user-supplied IMAP root CA certs (#4877). Tiny dep, no I/O.
+rustls-pemfile = "2"
 
 # Async trait
 async-trait = "0.1"
@@ -257,6 +256,14 @@ socket2 = "0.6.4"
 
 # Zip archive extraction
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+# Email (SMTP + IMAP)
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
+imap = { version = "2", default-features = false }
+# `native-certs` is no longer a default feature in 0.23, but the
+# channels crate relies on the system trust store for IMAP/SMTP.
+rustls-connector = { version = "0.23", features = ["native-certs"] }
+mailparse = "0.16"
 
 # Internationalization (i18n)
 fluent = "0.17"

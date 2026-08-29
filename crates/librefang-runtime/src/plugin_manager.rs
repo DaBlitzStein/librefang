@@ -79,18 +79,23 @@ pub fn validate_plugin_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn librefang_home() -> PathBuf {
-    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
-        return PathBuf::from(home);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".librefang")
-}
-
 /// Default plugin directory: `~/.librefang/plugins/`.
 pub fn plugins_dir() -> PathBuf {
-    librefang_home().join("plugins")
+    dirs::home_dir()
+        .unwrap_or_else(|| {
+            warn!("HOME directory not set; using temporary directory for plugins");
+            #[cfg(unix)]
+            let fallback = PathBuf::from("/tmp/librefang");
+            #[cfg(windows)]
+            let fallback =
+                PathBuf::from(std::env::var("TEMP").unwrap_or_else(|_| r"C:\Temp".to_string()))
+                    .join("librefang");
+            #[cfg(not(any(unix, windows)))]
+            let fallback = PathBuf::from(".librefang");
+            fallback
+        })
+        .join(".librefang")
+        .join("plugins")
 }
 
 /// Ensure the plugins directory exists.

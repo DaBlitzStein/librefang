@@ -57,18 +57,10 @@ pub(crate) fn spawn_detached_daemon(
     config: Option<&std::path::Path>,
     log_path: &std::path::Path,
 ) -> Result<std::process::Child, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| i18n::t_args("daemon-error-resolve-exe", &[("error", &e.to_string())]))?;
+    let exe = std::env::current_exe().map_err(|e| format!("resolve current executable: {e}"))?;
     if let Some(log_dir) = log_path.parent() {
-        std::fs::create_dir_all(log_dir).map_err(|e| {
-            i18n::t_args(
-                "daemon-error-create-log-dir",
-                &[
-                    ("path", &log_dir.display().to_string()),
-                    ("error", &e.to_string()),
-                ],
-            )
-        })?;
+        std::fs::create_dir_all(log_dir)
+            .map_err(|e| format!("create log directory {}: {e}", log_dir.display()))?;
         restrict_dir_permissions(log_dir);
     }
 
@@ -76,24 +68,10 @@ pub(crate) fn spawn_detached_daemon(
         .create(true)
         .append(true)
         .open(log_path)
-        .map_err(|e| {
-            i18n::t_args(
-                "daemon-error-open-log",
-                &[
-                    ("path", &log_path.display().to_string()),
-                    ("error", &e.to_string()),
-                ],
-            )
-        })?;
-    let stderr = stdout.try_clone().map_err(|e| {
-        i18n::t_args(
-            "daemon-error-clone-log-handle",
-            &[
-                ("path", &log_path.display().to_string()),
-                ("error", &e.to_string()),
-            ],
-        )
-    })?;
+        .map_err(|e| format!("open daemon log {}: {e}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|e| format!("clone daemon log handle {}: {e}", log_path.display()))?;
 
     let mut command = std::process::Command::new(exe);
     command
@@ -130,7 +108,7 @@ pub(crate) fn spawn_detached_daemon(
 
     command
         .spawn()
-        .map_err(|e| i18n::t_args("daemon-error-spawn-detached", &[("error", &e.to_string())]))
+        .map_err(|e| format!("spawn detached daemon: {e}"))
 }
 
 /// Generate a daily log path for the current daemon start.
@@ -196,16 +174,7 @@ pub(crate) fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeG
             // Report the failure on the real stderr (not yet redirected), then
             // exit instead of limping forward into the silent-hang regime the
             // old ordering produced.
-            eprintln!(
-                "{}",
-                i18n::t_args(
-                    "daemon-error-failed-create-log-dir",
-                    &[
-                        ("path", &parent.display().to_string()),
-                        ("error", &e.to_string())
-                    ]
-                )
-            );
+            eprintln!("Failed to create log directory {}: {e}", parent.display());
             std::process::exit(1);
         }
     }
@@ -222,16 +191,7 @@ pub(crate) fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeG
             .append(true)
             .open(log_path)
             .unwrap_or_else(|e| {
-                eprintln!(
-                    "{}",
-                    i18n::t_args(
-                        "daemon-error-failed-open-log",
-                        &[
-                            ("path", &log_path.display().to_string()),
-                            ("error", &e.to_string())
-                        ]
-                    )
-                );
+                eprintln!("Failed to open daemon log file {}: {e}", log_path.display());
                 std::process::exit(1);
             }),
     );
@@ -298,18 +258,15 @@ pub(crate) fn ensure_initialized(config: &Option<PathBuf>) {
         None => {
             let home = cli_librefang_home();
             if !home.join("config.toml").exists() {
-                ui::hint(&i18n::t("daemon-first-run-setup"));
+                ui::hint("First run detected — running quick setup...");
                 cmd_init(true);
             }
         }
         Some(path) => {
             if !path.exists() {
                 ui::error_with_fix(
-                    &i18n::t_args(
-                        "daemon-config-not-found",
-                        &[("path", &path.display().to_string())],
-                    ),
-                    &i18n::t("daemon-config-not-found-fix"),
+                    &format!("Config file not found: {}", path.display()),
+                    "Run `librefang init` to create a default config at ~/.librefang/config.toml, or check the --config path.",
                 );
                 std::process::exit(1);
             }
@@ -653,11 +610,8 @@ pub(crate) fn force_kill_pid(pid: u32) {
 pub(crate) fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bool) {
     if !log_path.exists() {
         ui::error_with_fix(
-            &i18n::t("daemon-log-file-not-found"),
-            &i18n::t_args(
-                "daemon-log-file-not-found-fix",
-                &[("path", &log_path.display().to_string())],
-            ),
+            "Log file not found",
+            &format!("Expected at: {}", log_path.display()),
         );
         std::process::exit(1);
     }
@@ -680,13 +634,7 @@ pub(crate) fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bo
             for line in &all_lines[start..] {
                 println!("{line}");
             }
-            println!(
-                "{}",
-                i18n::t_args(
-                    "log-following",
-                    &[("path", &log_path.display().to_string())]
-                )
-            );
+            println!("--- Following {} (Ctrl+C to stop) ---", log_path.display());
             let mut last_len = content.len();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -721,9 +669,9 @@ pub(crate) fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
         None => daemon.home_dir.join("logs").join("tui.log"),
     };
     if tui_log.exists() {
-        ui::hint(&i18n::t_args(
-            "daemon-log-not-found-showing-tui",
-            &[("path", &tui_log.display().to_string())],
+        ui::hint(&format!(
+            "Daemon log not found; showing TUI log at {}",
+            tui_log.display()
         ));
         show_log_file(&tui_log, lines, follow);
         return;

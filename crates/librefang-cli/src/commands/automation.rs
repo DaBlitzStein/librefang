@@ -15,20 +15,9 @@ pub(crate) fn cmd_workflow_list() {
     let body = daemon_json(client.get(format!("{base}/api/workflows")).send());
 
     match body.as_array() {
-        Some(workflows) if workflows.is_empty() => {
-            println!("{}", i18n::t("automation-workflow-none"));
-        }
+        Some(workflows) if workflows.is_empty() => println!("No workflows registered."),
         Some(workflows) => {
-            let header_id = i18n::t("label-header-id");
-            let header_name = i18n::t("label-header-name");
-            let header_steps = i18n::t("label-header-steps");
-            let header_created = i18n::t("label-header-created");
-            let mut t = crate::table::Table::new(&[
-                &header_id,
-                &header_name,
-                &header_steps,
-                &header_created,
-            ]);
+            let mut t = crate::table::Table::new(&["ID", "NAME", "STEPS", "CREATED"]);
             for w in workflows {
                 t.add_row(&[
                     w["id"].as_str().unwrap_or("?"),
@@ -39,40 +28,22 @@ pub(crate) fn cmd_workflow_list() {
             }
             t.print();
         }
-        None => println!("{}", i18n::t("automation-workflow-none")),
+        None => println!("No workflows registered."),
     }
 }
 
 pub(crate) fn cmd_workflow_create(file: PathBuf) {
     let base = require_daemon("workflow create");
     if !file.exists() {
-        eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-workflow-file-not-found",
-                &[("path", &file.display().to_string())]
-            )
-        );
+        eprintln!("Workflow file not found: {}", file.display());
         std::process::exit(1);
     }
     let contents = std::fs::read_to_string(&file).unwrap_or_else(|e| {
-        eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-workflow-read-error",
-                &[("error", &e.to_string())]
-            )
-        );
+        eprintln!("Error reading workflow file: {e}");
         std::process::exit(1);
     });
     let json_body: serde_json::Value = serde_json::from_str(&contents).unwrap_or_else(|e| {
-        eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-workflow-invalid-json",
-                &[("error", &e.to_string())]
-            )
-        );
+        eprintln!("Invalid JSON: {e}");
         std::process::exit(1);
     });
 
@@ -85,24 +56,12 @@ pub(crate) fn cmd_workflow_create(file: PathBuf) {
     );
 
     if let Some(id) = body["workflow_id"].as_str() {
-        println!("{}", i18n::t("automation-workflow-created"));
-        println!(
-            "{}",
-            i18n::t_args("automation-workflow-created-id", &[("id", id)])
-        );
+        println!("Workflow created successfully!");
+        println!("  ID: {id}");
     } else {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
-        let err_localized = if err_msg == "Unknown error" {
-            i18n::t("error-unknown")
-        } else {
-            err_msg.to_string()
-        };
         eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-workflow-create-failed",
-                &[("error", &err_localized)]
-            )
+            "Failed to create workflow: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
         );
         std::process::exit(1);
     }
@@ -119,25 +78,13 @@ pub(crate) fn cmd_workflow_run(workflow_id: &str, input: &str) {
     );
 
     if let Some(output) = body["output"].as_str() {
-        println!("{}", i18n::t("automation-workflow-completed"));
-        println!(
-            "{}",
-            i18n::t_args(
-                "automation-workflow-run-id",
-                &[("id", body["run_id"].as_str().unwrap_or("?"))]
-            )
-        );
+        println!("Workflow completed!");
+        println!("  Run ID: {}", body["run_id"].as_str().unwrap_or("?"));
         println!("  Output:\n{output}");
     } else {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
-        let err_localized = if err_msg == "Unknown error" {
-            i18n::t("error-unknown")
-        } else {
-            err_msg.to_string()
-        };
         eprintln!(
-            "{}",
-            i18n::t_args("automation-workflow-failed", &[("error", &err_localized)])
+            "Workflow failed: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
         );
         std::process::exit(1);
     }
@@ -159,41 +106,27 @@ pub(crate) fn cmd_trigger_list(agent_id: Option<&str>) {
 
     let arr = body["triggers"].as_array().or_else(|| body.as_array());
     match arr {
-        Some(triggers) if triggers.is_empty() => {
-            println!("{}", i18n::t("automation-trigger-none"));
-        }
+        Some(triggers) if triggers.is_empty() => println!("No triggers registered."),
         Some(triggers) => {
-            let header_trigger_id = i18n::t("label-header-trigger-id");
-            let header_agent_id = i18n::t("label-header-agent-id");
-            let header_enabled = i18n::t("label-header-enabled");
-            let header_fires = i18n::t("label-header-fires");
-            let header_pattern = i18n::t("label-header-pattern");
-            let yes_str = i18n::t("label-yes");
-            let no_str = i18n::t("label-no");
-
             let mut tbl = crate::table::Table::new(&[
-                &header_trigger_id,
-                &header_agent_id,
-                &header_enabled,
-                &header_fires,
-                &header_pattern,
+                "TRIGGER ID",
+                "AGENT ID",
+                "ENABLED",
+                "FIRES",
+                "PATTERN",
             ]);
             for t in triggers {
                 tbl.add_row(&[
                     t["id"].as_str().unwrap_or("?"),
                     t["agent_id"].as_str().unwrap_or("?"),
-                    if t["enabled"].as_bool().unwrap_or(false) {
-                        &yes_str
-                    } else {
-                        &no_str
-                    },
+                    &t["enabled"].as_bool().unwrap_or(false).to_string(),
                     &t["fire_count"].as_u64().unwrap_or(0).to_string(),
                     t["pattern"].as_str().unwrap_or("?"),
                 ]);
             }
             tbl.print();
         }
-        None => println!("{}", i18n::t("automation-trigger-none")),
+        None => println!("No triggers registered."),
     }
 }
 
@@ -209,13 +142,7 @@ pub(crate) fn cmd_trigger_create(
     let base = require_daemon("trigger create");
     let agent_id = resolve_agent_id(&base, agent_id);
     let pattern: serde_json::Value = serde_json::from_str(pattern_json).unwrap_or_else(|e| {
-        eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-trigger-invalid-pattern",
-                &[("error", &e.to_string())]
-            )
-        );
+        eprintln!("Invalid pattern JSON: {e}");
         eprintln!("Examples:");
         eprintln!("  '\"lifecycle\"'");
         eprintln!("  '{{\"agent_spawned\":{{\"name_pattern\":\"*\"}}}}'");
@@ -249,37 +176,16 @@ pub(crate) fn cmd_trigger_create(
     );
 
     if let Some(id) = body["trigger_id"].as_str() {
-        println!("{}", i18n::t("automation-trigger-created"));
-        println!(
-            "{}",
-            i18n::t_args("automation-trigger-created-id", &[("id", id)])
-        );
-        println!(
-            "{}",
-            i18n::t_args(
-                "automation-trigger-created-agent",
-                &[("agent_id", &agent_id)]
-            )
-        );
+        println!("Trigger created successfully!");
+        println!("  Trigger ID: {id}");
+        println!("  Agent ID:   {agent_id}");
         if let Some(t) = target_agent {
-            println!(
-                "{}",
-                i18n::t_args("automation-trigger-created-target", &[("target", t)])
-            );
+            println!("  Target:     {t}");
         }
     } else {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
-        let err_localized = if err_msg == "Unknown error" {
-            i18n::t("error-unknown")
-        } else {
-            err_msg.to_string()
-        };
         eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-trigger-create-failed",
-                &[("error", &err_localized)]
-            )
+            "Failed to create trigger: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
         );
         std::process::exit(1);
     }
@@ -295,23 +201,11 @@ pub(crate) fn cmd_trigger_delete(trigger_id: &str) {
     );
 
     if body.get("status").is_some() {
-        println!(
-            "{}",
-            i18n::t_args("automation-trigger-deleted", &[("id", trigger_id)])
-        );
+        println!("Trigger {trigger_id} deleted.");
     } else {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
-        let err_localized = if err_msg == "Unknown error" {
-            i18n::t("error-unknown")
-        } else {
-            err_msg.to_string()
-        };
         eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-trigger-delete-failed",
-                &[("error", &err_localized)]
-            )
+            "Failed to delete trigger: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
         );
         std::process::exit(1);
     }
@@ -327,108 +221,46 @@ pub(crate) fn cmd_trigger_get(trigger_id: &str) {
     );
 
     if body.get("error").is_some() {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
-        let err_localized = if err_msg == "Unknown error" {
-            i18n::t("error-unknown")
-        } else {
-            err_msg.to_string()
-        };
         eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-trigger-get-failed",
-                &[("error", &err_localized)]
-            )
+            "Failed to get trigger: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
         );
         std::process::exit(1);
     }
 
+    println!("Trigger ID:    {}", body["id"].as_str().unwrap_or("-"));
     println!(
-        "{}",
-        i18n::t_args(
-            "automation-trigger-info-id",
-            &[("id", body["id"].as_str().unwrap_or("-"))]
-        )
+        "Agent ID:      {}",
+        body["agent_id"].as_str().unwrap_or("-")
+    );
+    println!("Pattern:       {}", body["pattern"]);
+    println!(
+        "Prompt:        {}",
+        body["prompt_template"].as_str().unwrap_or("-")
     );
     println!(
-        "{}",
-        i18n::t_args(
-            "automation-trigger-info-agent",
-            &[("id", body["agent_id"].as_str().unwrap_or("-"))]
-        )
+        "Enabled:       {}",
+        body["enabled"].as_bool().unwrap_or(false)
     );
     println!(
-        "{}",
-        i18n::t_args(
-            "automation-trigger-info-pattern",
-            &[("pattern", &body["pattern"].to_string())]
-        )
+        "Fire count:    {}",
+        body["fire_count"].as_u64().unwrap_or(0)
     );
     println!(
-        "{}",
-        i18n::t_args(
-            "automation-trigger-info-prompt",
-            &[("prompt", body["prompt_template"].as_str().unwrap_or("-"))]
-        )
+        "Max fires:     {}",
+        body["max_fires"]
+            .as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unlimited".to_string())
     );
-
-    let yes_str = i18n::t("label-yes");
-    let no_str = i18n::t("label-no");
-    let enabled_str = if body["enabled"].as_bool().unwrap_or(false) {
-        &yes_str
-    } else {
-        &no_str
-    };
-    println!(
-        "{}",
-        i18n::t_args(
-            "automation-trigger-info-enabled",
-            &[("enabled", enabled_str)]
-        )
-    );
-    println!(
-        "{}",
-        i18n::t_args(
-            "automation-trigger-info-fires",
-            &[(
-                "count",
-                &body["fire_count"].as_u64().unwrap_or(0).to_string()
-            )]
-        )
-    );
-
-    let max_fires_str = body["max_fires"]
-        .as_u64()
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| i18n::t("automation-unlimited"));
-    println!(
-        "{}",
-        i18n::t_args(
-            "automation-trigger-info-max-fires",
-            &[("count", &max_fires_str)]
-        )
-    );
-
     if let Some(t) = body["target_agent_id"].as_str() {
-        println!(
-            "{}",
-            i18n::t_args("automation-trigger-info-target", &[("agent", t)])
-        );
+        println!("Target agent:  {t}");
     }
     if let Some(c) = body["cooldown_secs"].as_u64() {
-        println!(
-            "{}",
-            i18n::t_args(
-                "automation-trigger-info-cooldown",
-                &[("secs", &c.to_string())]
-            )
-        );
+        println!("Cooldown:      {c}s");
     }
     if let Some(m) = body["session_mode"].as_str() {
-        println!(
-            "{}",
-            i18n::t_args("automation-trigger-info-session", &[("mode", m)])
-        );
+        println!("Session mode:  {m}");
     }
 }
 
@@ -452,13 +284,7 @@ pub(crate) fn cmd_trigger_update(
     let mut payload = serde_json::json!({});
     if let Some(p) = pattern {
         let parsed: serde_json::Value = serde_json::from_str(p).unwrap_or_else(|e| {
-            eprintln!(
-                "{}",
-                i18n::t_args(
-                    "automation-trigger-invalid-pattern",
-                    &[("error", &e.to_string())]
-                )
-            );
+            eprintln!("Invalid pattern JSON: {e}");
             std::process::exit(1);
         });
         payload["pattern"] = parsed;
@@ -496,25 +322,13 @@ pub(crate) fn cmd_trigger_update(
     );
 
     if body.get("error").is_some() {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
-        let err_localized = if err_msg == "Unknown error" {
-            i18n::t("error-unknown")
-        } else {
-            err_msg.to_string()
-        };
         eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-trigger-update-failed",
-                &[("error", &err_localized)]
-            )
+            "Failed to update trigger: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
         );
         std::process::exit(1);
     }
-    println!(
-        "{}",
-        i18n::t_args("automation-trigger-updated", &[("id", trigger_id)])
-    );
+    println!("Trigger {trigger_id} updated.");
 }
 
 pub(crate) fn cmd_trigger_set_enabled(trigger_id: &str, enabled: bool) {
@@ -532,29 +346,17 @@ pub(crate) fn cmd_trigger_set_enabled(trigger_id: &str, enabled: bool) {
             .send(),
     );
 
-    let action = if enabled { "enable" } else { "disable" };
     if body.get("error").is_some() {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
-        let err_localized = if err_msg == "Unknown error" {
-            i18n::t("error-unknown")
-        } else {
-            err_msg.to_string()
-        };
         eprintln!(
-            "{}",
-            i18n::t_args(
-                "automation-trigger-toggle-failed",
-                &[("action", action), ("error", &err_localized)]
-            )
+            "Failed to {} trigger: {}",
+            if enabled { "enable" } else { "disable" },
+            body["error"].as_str().unwrap_or("Unknown error")
         );
         std::process::exit(1);
     }
     println!(
-        "{}",
-        i18n::t_args(
-            "automation-trigger-toggled",
-            &[("id", trigger_id), ("action", action)]
-        )
+        "Trigger {trigger_id} {}.",
+        if enabled { "enabled" } else { "disabled" }
     );
 }
 
@@ -575,24 +377,10 @@ pub(crate) fn cmd_cron_list(json: bool) {
         .or_else(|| body.as_array())
     {
         if arr.is_empty() {
-            println!("{}", i18n::t("automation-cron-none"));
+            println!("No scheduled jobs.");
             return;
         }
-        let header_id = i18n::t("label-header-id");
-        let header_agent = i18n::t("label-header-agent");
-        let header_schedule = i18n::t("label-header-schedule");
-        let header_enabled = i18n::t("label-header-enabled");
-        let header_prompt = i18n::t("label-header-prompt");
-        let yes_str = i18n::t("label-yes");
-        let no_str = i18n::t("label-no");
-
-        let mut t = crate::table::Table::new(&[
-            &header_id,
-            &header_agent,
-            &header_schedule,
-            &header_enabled,
-            &header_prompt,
-        ]);
+        let mut t = crate::table::Table::new(&["ID", "AGENT", "SCHEDULE", "ENABLED", "PROMPT"]);
         for j in arr {
             t.add_row(&[
                 j["id"].as_str().unwrap_or("?"),
@@ -602,9 +390,9 @@ pub(crate) fn cmd_cron_list(json: bool) {
                     .or_else(|| j["cron_expr"].as_str())
                     .unwrap_or("?"),
                 if j["enabled"].as_bool().unwrap_or(false) {
-                    &yes_str
+                    "yes"
                 } else {
-                    &no_str
+                    "no"
                 },
                 &j["action"]["message"]
                     .as_str()

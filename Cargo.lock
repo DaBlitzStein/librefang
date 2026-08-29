@@ -326,45 +326,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asn1-rs"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5493c3bedbacf7fd7382c6346bbd66687d12bbaad3a89a2d2c303ee6cf20b048"
-dependencies = [
- "asn1-rs-derive",
- "asn1-rs-impl",
- "displaydoc",
- "nom 7.1.3",
- "num-traits",
- "rusticata-macros",
- "thiserror 1.0.69",
- "time",
-]
-
-[[package]]
-name = "asn1-rs-derive"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "965c2d33e53cb6b267e148a4cb0760bc01f4904c1cd4bb4002a085bb016d1490"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
- "synstructure",
-]
-
-[[package]]
-name = "asn1-rs-impl"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b18050c2cd6fe86c3a76584ef5e0baf286d038cda203eb6223df2cc413565f7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -679,17 +640,6 @@ name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
-
-[[package]]
-name = "base64urlsafedata"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b08e33815c87d8cadcddb1e74ac307368a3751fbe40c961538afa21a1899f21c"
-dependencies = [
- "base64 0.21.7",
- "pastey 0.1.1",
- "serde",
-]
 
 [[package]]
 name = "bcrypt-pbkdf"
@@ -1379,7 +1329,7 @@ dependencies = [
  "bitflags 2.13.0",
  "core-foundation 0.10.1",
  "core-graphics-types",
- "foreign-types 0.5.0",
+ "foreign-types",
  "libc",
 ]
 
@@ -2024,20 +1974,6 @@ dependencies = [
  "const-oid 0.10.2",
  "pem-rfc7468 1.0.0",
  "zeroize",
-]
-
-[[package]]
-name = "der-parser"
-version = "9.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cd0a5c643689626bec213c4d8bd4d96acc8ffdb4ad4bb6bc16abf27d5f4b553"
-dependencies = [
- "asn1-rs",
- "displaydoc",
- "nom 7.1.3",
- "num-bigint",
- "num-traits",
- "rusticata-macros",
 ]
 
 [[package]]
@@ -2773,21 +2709,12 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "foreign-types"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
-dependencies = [
- "foreign-types-shared 0.1.1",
-]
-
-[[package]]
-name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d737d9aa519fb7b749cbc3b962edcf310a8dd1f4b67c91c4f83975dbdd17d965"
 dependencies = [
  "foreign-types-macros",
- "foreign-types-shared 0.3.1",
+ "foreign-types-shared",
 ]
 
 [[package]]
@@ -2800,12 +2727,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
-
-[[package]]
-name = "foreign-types-shared"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "foreign-types-shared"
@@ -4491,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-acp"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-tokio",
@@ -4513,7 +4434,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4554,7 +4475,6 @@ dependencies = [
  "librefang-wire",
  "metrics",
  "metrics-exporter-prometheus",
- "openssl",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -4572,7 +4492,6 @@ dependencies = [
  "subtle",
  "tar",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -4588,16 +4507,14 @@ dependencies = [
  "utoipa",
  "uuid",
  "walkdir",
- "webauthn-rs",
  "which",
  "windows-sys 0.61.2",
- "zeroize",
  "zip 8.6.0",
 ]
 
 [[package]]
 name = "librefang-channels"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "async-trait",
  "axum",
@@ -4635,7 +4552,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -4681,7 +4598,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "axum",
  "clap",
@@ -4712,7 +4629,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2 0.5.3",
@@ -4745,7 +4662,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4770,7 +4687,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-http"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "librefang-types",
  "reqwest",
@@ -4782,7 +4699,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-import"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4800,7 +4717,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4860,7 +4777,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-handle"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4873,7 +4790,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "librefang-llm-driver",
  "librefang-memory",
@@ -4885,7 +4802,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-router"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "dirs 6.0.0",
  "librefang-hands",
@@ -4901,7 +4818,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-driver"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -4915,7 +4832,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-drivers"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4949,7 +4866,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4972,7 +4889,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory-wiki"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "chrono",
  "librefang-kernel-handle",
@@ -4988,7 +4905,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-rl-export"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -5007,7 +4924,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5074,7 +4991,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-audit"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "chrono",
  "hex",
@@ -5092,7 +5009,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-mcp"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5100,9 +5017,6 @@ dependencies = [
  "http",
  "librefang-http",
  "librefang-types",
- "opentelemetry",
- "opentelemetry-http",
- "opentelemetry_sdk",
  "psl",
  "rand 0.10.1",
  "reqwest",
@@ -5113,15 +5027,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
  "url",
  "wiremock",
 ]
 
 [[package]]
 name = "librefang-runtime-media"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5138,7 +5050,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-sandbox-docker"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "chrono",
  "dashmap",
@@ -5150,7 +5062,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -5179,7 +5091,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-subprocess"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "metrics",
  "serde_json",
@@ -5191,7 +5103,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -5199,7 +5111,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5221,7 +5133,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5247,7 +5159,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6175,15 +6087,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oid-registry"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8d8034d9489cdaf79228eb9f6a3b8d7bb32ba00d6645ebd48eef4077ceb5bd9"
-dependencies = [
- "asn1-rs",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6220,57 +6123,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "openssl"
-version = "0.10.81"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77823a27f0babb03091cb9ed9ef80af3b39dbc82f97e8fa530374b7dafd87a45"
-dependencies = [
- "bitflags 2.13.0",
- "cfg-if",
- "foreign-types 0.3.2",
- "libc",
- "openssl-macros",
- "openssl-sys",
-]
-
-[[package]]
-name = "openssl-macros"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "openssl-src"
-version = "300.6.1+3.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46eb8fb9fb3b61ce1c0f8a026c4c1a0714d3a9e138e7fbde78753ce2babc3846"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "openssl-sys"
-version = "0.9.117"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
-dependencies = [
- "cc",
- "libc",
- "openssl-src",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "opentelemetry"
@@ -6572,12 +6428,6 @@ checksum = "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b"
 dependencies = [
  "phc",
 ]
-
-[[package]]
-name = "pastey"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
 name = "pastey"
@@ -8101,7 +7951,7 @@ dependencies = [
  "chrono",
  "futures",
  "http",
- "pastey 0.2.2",
+ "pastey",
  "pin-project-lite",
  "process-wrap",
  "reqwest",
@@ -8351,15 +8201,6 @@ dependencies = [
  "rand_core 0.10.0",
  "rustcrypto-ff",
  "subtle",
-]
-
-[[package]]
-name = "rusticata-macros"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faf0c4a6ece9950b9abdb62b1cfcf2a68b3b67a10ba445b3bb85be2a293d0632"
-dependencies = [
- "nom 7.1.3",
 ]
 
 [[package]]
@@ -8735,16 +8576,6 @@ dependencies = [
  "serde",
  "serde_core",
  "typeid",
-]
-
-[[package]]
-name = "serde_cbor_2"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aec2709de9078e077090abd848e967abab63c9fb3fdb5d4799ad359d8d482c"
-dependencies = [
- "half",
- "serde",
 ]
 
 [[package]]
@@ -10643,7 +10474,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
 dependencies = [
  "async-compression",
- "bitflags 2.13.0",
+ "bitflags 2.12.1",
  "bytes",
  "futures-core",
  "http",
@@ -11738,74 +11569,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "webauthn-attestation-ca"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6475c0bbd1a3f04afaa3e98880408c5be61680c5e6bd3c6f8c250990d5d3e18e"
-dependencies = [
- "base64urlsafedata",
- "openssl",
- "openssl-sys",
- "serde",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "webauthn-rs"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c548915e0e92ee946bbf2aecf01ea21bef53d974b0793cc6732ba81a03fc422"
-dependencies = [
- "base64urlsafedata",
- "serde",
- "tracing",
- "url",
- "uuid",
- "webauthn-rs-core",
-]
-
-[[package]]
-name = "webauthn-rs-core"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "296d2d501feb715d80b8e186fb88bab1073bca17f460303a1013d17b673bea6a"
-dependencies = [
- "base64 0.21.7",
- "base64urlsafedata",
- "der-parser",
- "hex",
- "nom 7.1.3",
- "openssl",
- "openssl-sys",
- "rand 0.9.3",
- "rand_chacha 0.9.0",
- "serde",
- "serde_cbor_2",
- "serde_json",
- "thiserror 1.0.69",
- "tracing",
- "url",
- "uuid",
- "webauthn-attestation-ca",
- "webauthn-rs-proto",
- "x509-parser",
-]
-
-[[package]]
-name = "webauthn-rs-proto"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c37393beac9c1ed1ca6dbb30b1e01783fb316ab3a45d90ecd48c99052dd7ef1e"
-dependencies = [
- "base64 0.21.7",
- "base64urlsafedata",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
 name = "webkit2gtk"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12771,23 +12534,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "x509-parser"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcbc162f30700d6f3f82a24bf7cc62ffe7caea42c0b2cba8bf7f3ae50cf51f69"
-dependencies = [
- "asn1-rs",
- "data-encoding",
- "der-parser",
- "lazy_static",
- "nom 7.1.3",
- "oid-registry",
- "rusticata-macros",
- "thiserror 1.0.69",
- "time",
-]
-
-[[package]]
 name = "xattr"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12805,7 +12551,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.6.22-beta.21"
+version = "2026.6.16-beta.19"
 dependencies = [
  "base64 0.22.1",
  "chrono",
