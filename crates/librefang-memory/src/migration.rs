@@ -4197,8 +4197,8 @@ mod tests {
         // If `parent_recorded` did not default to 0, every agent that predates v54 would start positively claiming to be a root agent — a more confident wrong answer than the `null` the bug already produced.
         //
         // Simulates a real pre-v54 database: build the v40-era `agents` table, insert a row, stamp `user_version = 50`, then let the ladder run.
-        // Steps 51-54 all fire from 50, so the fixture also needs the tables 51 and 52 alter — `memories` and `group_roster` — even though this test asserts nothing about them.
-        // Their absence is not a v54 bug; a real database at user_version 50 has both.
+        // Steps 51-55 all fire from 50, so the fixture also needs the tables 51, 52 and 55 alter — `memories`, `group_roster` and `task_queue` — even though this test asserts nothing about them.
+        // Their absence is not a v54 bug; a real database at user_version 50 has all three (`task_queue` since `migrate_v1`).
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
@@ -4221,6 +4221,17 @@ mod tests {
                 chat_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
                 PRIMARY KEY (chat_id, user_id)
+            );
+            CREATE TABLE task_queue (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                payload BLOB NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority INTEGER NOT NULL DEFAULT 0,
+                scheduled_at TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
             );
             CREATE TABLE migrations (
                 version INTEGER PRIMARY KEY,
@@ -4252,5 +4263,49 @@ mod tests {
             parent_recorded, 0,
             "a pre-v54 row must read as UNKNOWN lineage, not as a root agent"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // v55: per-task claim TTL override (task_queue.timeout_secs)
+    // ---------------------------------------------------------------------
+
+    /// The column has to arrive on a board that already holds tasks — a
+    /// migration that only works on a fresh file has never run where it
+    /// matters. A pre-v55 row means "use the global TTL", which is `NULL`.
+    #[test]
+    fn migrate_v55_adds_timeout_column_to_an_existing_board() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO task_queue (id, agent_id, task_type, payload, status, created_at) \
+             VALUES ('existing', 'agent-1', 'work', x'00', 'in_progress', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+
+        assert!(
+            column_exists(&conn, "task_queue", "timeout_secs"),
+            "v55 must add task_queue.timeout_secs"
+        );
+        let timeout: Option<i64> = conn
+            .query_row(
+                "SELECT timeout_secs FROM task_queue WHERE id = 'existing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            timeout.is_none(),
+            "a pre-existing task must inherit the global TTL, not acquire one of its own"
+        );
+    }
+
+    #[test]
+    fn migrate_v55_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // The runner can legitimately replay a step after an interrupted
+        // upgrade, so a duplicate-column rerun must not fail.
+        migrate_v55(&conn).expect("v55 must survive a rerun");
     }
 }
