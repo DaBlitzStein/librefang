@@ -1957,6 +1957,7 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
         .and_then(|v| v.as_array())
         .or_else(|| body.as_array());
 
+    let mut seen = std::collections::HashSet::new();
     items
         .map(|arr| {
             arr.iter()
@@ -1967,6 +1968,7 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
                     downloads: r["downloads"].as_u64().unwrap_or(0),
                     runtime: r["runtime"].as_str().unwrap_or("").to_string(),
                 })
+                .filter(|entry| seen.insert(entry.slug.to_lowercase()))
                 .collect()
         })
         .unwrap_or_default()
