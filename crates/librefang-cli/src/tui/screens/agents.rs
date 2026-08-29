@@ -1662,7 +1662,7 @@ fn draw_edit_workspaces(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     for (i, (name, path, mode)) in state.workspaces.iter().enumerate() {
         let marker = if i == state.ws_cursor { ">" } else { " " };
         let mut spans = vec![Span::styled(
-            format!("{marker} {name:<16} {path:<28} {mode}"),
+            format!("{} {:<16} {:<28} {}", marker, name, path, mode),
             if i == state.ws_cursor {
                 Style::default().fg(theme::ACCENT)
             } else {
