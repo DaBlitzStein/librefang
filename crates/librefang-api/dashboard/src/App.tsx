@@ -44,7 +44,6 @@ import {
   UserCircle,
   X,
   Sparkles,
-  LayoutTemplate,
   ScrollText,
   Terminal,
   Plug,
@@ -85,7 +84,6 @@ type DashboardRoute =
   | "/media"
   | "/sessions"
   | "/skills"
-  | "/agent-types"
   | "/prompts"
   | "/workflows"
   | "/scheduler"
@@ -1077,7 +1075,6 @@ function DashboardApp() {
           { to: "/chat", label: t("nav.chat"), icon: MessageCircle },
           { to: "/sessions", label: t("nav.sessions", { defaultValue: "Sessions" }), icon: History },
           { to: "/skills", label: t("nav.skills"), icon: Sparkles },
-          { to: "/agent-types", label: t("nav.agent_types"), icon: LayoutTemplate },
           { to: "/prompts", label: t("nav.prompts"), icon: ScrollText },
           { to: "/workflows", label: t("nav.workflows"), icon: Layers },
           { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
