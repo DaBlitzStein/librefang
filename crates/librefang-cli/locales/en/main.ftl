@@ -2073,6 +2073,7 @@ tui-agents-title-templates = Templates
 tui-agents-title-custom-name = Custom — Name
 tui-agents-title-custom-desc = Custom — Description
 tui-agents-title-custom-prompt = Custom — System Prompt
+tui-agents-detail-tokens = Token footprint  ($ to refresh)
 tui-agents-title-custom-tools = Custom — Tools
 tui-agents-title-custom-skills = Custom — Skills
 tui-agents-title-custom-mcp = Custom — MCP Servers

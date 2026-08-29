@@ -1396,8 +1396,8 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
-  /** Template this agent was spawned from, if any (#8018). */
   source_template?: string;
+  injected_footprint_tokens?: number;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
