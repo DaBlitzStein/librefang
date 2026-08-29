@@ -1132,6 +1132,13 @@ model-header-resolves-to = ВКАЗУЄ НА
 model-header-auth = АВТОРИЗАЦІЯ
 model-header-models = МОДЕЛІ
 model-header-base-url = БАЗОВИЙ URL
+model-overrides-cleared = Перевизначення для моделі { $model } очищено.
+model-overrides-clear-failed = Не вдалося очистити перевизначення для { $model }: { $status }
+model-overrides-header-field = ПОЛЕ
+model-overrides-header-value = ЗНАЧЕННЯ
+model-overrides-none-set = Для моделі { $model } не встановлено перевизначень.
+model-overrides-saved = Перевизначення для моделі { $model } збережено.
+model-overrides-save-failed = Не вдалося зберегти перевизначення для { $model }: { $status }
 model-picker-item =     { $idx }. { $id } { $tier }
 
 # Approvals command specific keys

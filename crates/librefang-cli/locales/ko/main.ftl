@@ -1118,6 +1118,13 @@ model-header-resolves-to = 확인 대상
 model-header-auth = 인증
 model-header-models = 모델
 model-header-base-url = BASE URL
+model-overrides-cleared = 모델 { $model }의 오버라이드가 초기화되었습니다.
+model-overrides-clear-failed = { $model }의 오버라이드 초기화 실패: { $status }
+model-overrides-header-field = 필드
+model-overrides-header-value = 값
+model-overrides-none-set = 모델 { $model }에 설정된 오버라이드가 없습니다.
+model-overrides-saved = 모델 { $model }의 오버라이드가 저장되었습니다.
+model-overrides-save-failed = { $model }의 오버라이드 저장 실패: { $status }
 model-picker-item =     { $idx }. { $id } { $tier }
 
 # Approvals command specific keys
