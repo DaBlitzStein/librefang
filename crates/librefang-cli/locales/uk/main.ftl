@@ -2088,6 +2088,9 @@ tui-agents-title-custom-desc = Власний — Опис
 tui-agents-title-custom-prompt = Власний — Системний промпт
 tui-agents-title-custom-tools = Власний — Інструменти
 tui-agents-title-custom-skills = Власний — Скіли
+tui-agents-workspaces-help = a додати · d видалити · Enter редагувати · s зберегти · Esc назад
+tui-agents-workspaces-empty = Спільних папок ще немає. Натисніть a, щоб додати.
+tui-event-workspaces-update-failed = Не вдалося оновити спільні папки
 tui-agents-title-custom-mcp = Власний — MCP-сервери
 tui-agents-title-edit-channels = Редагування — Канали
 tui-agents-title-spawning = Створення...
@@ -2125,6 +2128,7 @@ tui-agents-title-model-params = Параметри моделі
 tui-agents-prompt-model-params = Налаштування цього агента мають перевагу над налаштуваннями моделі. `inherit` означає налаштування моделі.
 tui-agents-hints-model-params =   [←→] Змінити  [i] Успадкувати  [e] Своє значення  [Enter] Зберегти  [Esc] Скасувати
 tui-agents-hints-model-params-custom =   Введіть значення  [Enter] Підтвердити  [Esc] Скасувати  (порожнє = успадкувати)
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [w] Спільні папки  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-hints-navigate =     [↑↓] Навігація  [Enter] Обрати  [Esc] Назад
 tui-agents-hints-input =     [Enter] Далі  [Esc] Назад
 tui-agents-hints-tools =     [↑↓] Навігація  [Space] Перемкнути  [Enter] Створити  [Esc] Назад

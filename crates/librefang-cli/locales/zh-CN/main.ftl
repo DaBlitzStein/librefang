@@ -1131,6 +1131,9 @@ tui-agents-title-custom-desc = 自定义 — 描述
 tui-agents-title-custom-prompt = 自定义 — 系统提示词
 tui-agents-title-custom-tools = 自定义 — 工具
 tui-agents-title-custom-skills = 自定义 — Skill
+tui-agents-workspaces-help = a 添加 · d 删除 · Enter 编辑 · s 保存 · Esc 返回
+tui-agents-workspaces-empty = 还没有共享文件夹。按 a 添加一个。
+tui-event-workspaces-update-failed = 更新共享文件夹失败
 tui-agents-title-custom-mcp = 自定义 — MCP 服务
 tui-agents-title-edit-channels = 编辑 — 频道
 tui-agents-title-spawning = 正在创建...
@@ -1168,6 +1171,7 @@ tui-agents-title-model-params = 模型参数
 tui-agents-prompt-model-params = 该代理自己的设置优先于模型设置。`inherit` 表示使用模型的设置。
 tui-agents-hints-model-params =   [←→] 修改  [i] 继承  [e] 自定义值  [Enter] 保存  [Esc] 取消
 tui-agents-hints-model-params-custom =   输入值  [Enter] 确认  [Esc] 取消  （留空 = 继承）
+tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [w] 共享文件夹  [c] 聊天  [k] 停止  [Esc] 返回
 tui-agents-hints-navigate =     [↑↓] 导航  [Enter] 选择  [Esc] 返回
 tui-agents-hints-input =     [Enter] 下一步  [Esc] 返回
 tui-agents-hints-tools =     [↑↓] 导航  [Space] 切换  [Enter] 创建  [Esc] 返回

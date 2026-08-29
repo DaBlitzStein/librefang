@@ -872,6 +872,7 @@
       "proactive_conditions_hint": "To zastępuje całą listę warunków — nie jest wstępnie wypełnione bieżącą wartością. Użyj pełnego edytora manifestu, aby zobaczyć aktualny stan.",
       "mcp_pending_title": "Serwery MCP niepodłączone",
       "mcp_pending_desc": "Przyznane w agent.toml, ale brak aktywnego połączenia — nie dostarczają narzędzi. Sprawdź serwer na stronie MCP; uprawnienie aktywuje się po połączeniu."
+      "proactive_conditions_hint": "To zastępuje całą listę warunków — nie jest wstępnie wypełnione bieżącą wartością. Użyj pełnego edytora manifestu, aby zobaczyć aktualny stan."
     },
     "tab": {
       "conversation": "Rozmowa",

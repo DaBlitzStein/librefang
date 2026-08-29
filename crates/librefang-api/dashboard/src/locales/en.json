@@ -872,6 +872,7 @@
       "proactive_conditions_hint": "This replaces the full condition list — it isn't pre-filled with the current one. Use the full manifest editor to see what's live today.",
       "mcp_pending_title": "MCP servers not connected",
       "mcp_pending_desc": "Granted in agent.toml but no live connection, so they contribute no tools. Check the server on the MCP page; the grant activates as soon as it connects."
+      "proactive_conditions_hint": "This replaces the full condition list — it isn't pre-filled with the current one. Use the full manifest editor to see what's live today."
     },
     "tab": {
       "conversation": "Conversation",
