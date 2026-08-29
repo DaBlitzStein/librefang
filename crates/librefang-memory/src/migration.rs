@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 60;
+const SCHEMA_VERSION: u32 = 61;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -291,6 +291,22 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(58, migrate_v58);
     run_step!(59, migrate_v59);
     run_step!(60, migrate_v60);
+
+    // v61: per-task claim TTL override on the Task Board. `[task_board]
+    // claim_ttl_secs` is one global number, so an installation that mixes a
+    // 30-second health check with a two-hour import has to pick a TTL that is
+    // wrong for one of them. NULL keeps the global, which is what every
+    // existing row means.
+    //
+    // 61 is the next free number above main's 60, and it must stay contiguous
+    // rather than skipping ahead to leave room for other open PRs:
+    // `run_step!` gates on `current_version < N` read once at boot, so a
+    // database that reaches N via a binary with a gap below it will never run
+    // the skipped migrations — the backfill at the end of `run_migrations`
+    // writes their audit rows anyway, so the skew is silent and permanent.
+    // Another open PR also wants 61; whichever merges first keeps it and the
+    // rest renumber to 62, 63, … on rebase.
+    run_step!(61, migrate_v61);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1485,6 +1501,32 @@ fn migrate_v60(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (60, datetime('now'), 'Ensure manifest_versions and template_versions exist with the columns the code reads, on databases a pre-release build stamped past 58')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v61: per-task claim TTL override (`task_queue.timeout_secs`).
+///
+/// The stuck-task sweeper reclaims an `in_progress` row once it has been held
+/// longer than `[task_board] claim_ttl_secs`, a single global number.
+/// A board that carries both a 30-second probe and a two-hour import cannot be
+/// served by one value: tuned for the import, a wedged probe sits claimed for
+/// hours; tuned for the probe, the import is torn away from a worker that is
+/// still making progress.
+///
+/// `NULL` means "use the global", which is exactly what every pre-v61 row
+/// means, so the column needs no backfill.
+fn migrate_v61(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "task_queue", "timeout_secs")? {
+        conn.execute(
+            "ALTER TABLE task_queue ADD COLUMN timeout_secs INTEGER DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (61, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
         [],
     )?;
     Ok(())

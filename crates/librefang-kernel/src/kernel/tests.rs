@@ -3547,6 +3547,8 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
             "Worker will stall",
             Some("worker"),
             None,
+            0,
+            None,
             librefang_memory::TaskQueueCaps::UNLIMITED,
         )
         .await
