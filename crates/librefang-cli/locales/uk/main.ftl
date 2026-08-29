@@ -2262,6 +2262,7 @@ tui-memory-config-on = увімк.
 tui-memory-config-off = вимк.
 tui-memory-config-loading = Читання конфігурації...
 tui-memory-config-saving = Збереження...
+tui-memory-config-save-failed = Помилка збереження
 tui-memory-config-unsaved = Незбережені зміни — натисніть s щоб зберегти, Esc щоб скасувати
 tui-memory-config-hint =   r оновити · Esc назад
 tui-memory-label-select-agent =   Виберіть агента для перегляду його пам'яті:
