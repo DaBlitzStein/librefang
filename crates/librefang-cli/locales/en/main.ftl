@@ -2385,3 +2385,12 @@ tui-groups-hints = ↑/↓ navigate · r refresh
 
 tui-goals-judge-label = { "  " }Goal Judge:{ " " }
 tui-goals-phase-label = { "  " }Run Phase:{ " " }
+# purge command
+purge-failed-no-database = Purge failed: no database at { $path }
+purge-failed-open-database = Purge failed: open database: { $error }
+purge-nothing-to-purge = Nothing to purge: '{ $agent }' left no trace in this installation.
+purge-purged-header = Purged '{ $agent }':
+purge-removed-roster-entry =   - roster entry, sessions, memories and KV rows
+purge-removed-workspace =   - workspace directory
+purge-removed-agent-type =   - agent-type template
+purge-failed = Purge failed: { $error }

@@ -2339,3 +2339,12 @@ tui-groups-hints = ↑/↓ 导航 · r 刷新
 
 tui-goals-judge-label = { "  " }目标裁判:{ " " }
 tui-goals-phase-label = { "  " }运行阶段:{ " " }
+# purge command
+purge-failed-no-database = 清除失败：{ $path } 处无数据库
+purge-failed-open-database = 清除失败：打开数据库：{ $error }
+purge-nothing-to-purge = 无需清除：'{ $agent }' 在此安装中未留下痕迹。
+purge-purged-header = 已清除 '{ $agent }'：
+purge-removed-roster-entry =   - 名册条目、会话、记忆和 KV 行
+purge-removed-workspace =   - 工作区目录
+purge-removed-agent-type =   - 代理类型模板
+purge-failed = 清除失败：{ $error }
