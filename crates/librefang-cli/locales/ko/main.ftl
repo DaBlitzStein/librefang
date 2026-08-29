@@ -2065,6 +2065,7 @@ tui-agents-title-custom-name = 사용자 지정 — 이름
 tui-agents-title-custom-desc = 사용자 지정 — 설명
 tui-agents-title-custom-prompt = 사용자 지정 — 시스템 프롬프트
 tui-agents-detail-tokens = 토큰 사용량  ($ 새로고침)
+tui-agents-detail-tokens-injected = 주입됨
 tui-agents-title-custom-tools = 사용자 지정 — 도구
 tui-agents-title-custom-skills = 사용자 지정 — 스킬
 tui-agents-title-custom-mcp = 사용자 지정 — MCP 서버
