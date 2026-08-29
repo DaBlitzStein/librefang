@@ -8354,7 +8354,6 @@ mod tests {
     /// straight from the bot menu. Assert the arm exists and is reachable.
     #[tokio::test]
     async fn test_handle_command_goal_is_dispatched() {
-        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
@@ -8377,7 +8376,6 @@ mod tests {
             None,
             None,
             &sender.platform_id,
-            &thread_ownership,
         )
         .await;
         assert!(
@@ -8399,7 +8397,6 @@ mod tests {
             None,
             None,
             &sender.platform_id,
-            &thread_ownership,
         )
         .await;
         assert!(
