@@ -196,14 +196,6 @@ pub struct ModelCatalogEntry {
     /// downstream calculations.
     #[serde(default)]
     pub max_output_tokens: u64,
-    /// Whether `context_window` / `max_output_tokens` were actually sourced.
-    ///
-    /// `false` marks an entry whose capacities are placeholders: `merge_discovered_models` admits a gateway-discovered model with hardcoded `131_072` / `16_384` because the OpenAI-compatible `/v1/models` shape carries no capacity field at all (#7780).
-    /// The number is still there — compaction and budget math need *something* — but nothing may present it to an operator as measured, and [`Self::known_max_output_tokens`] refuses to hand it out as a ceiling to warn against.
-    ///
-    /// Registry-shipped entries carry curated values, and older files predate the field, so a missing value defaults to `true` — the same convention as [`Self::pricing_known`].
-    #[serde(default = "default_true")]
-    pub limits_known: bool,
     /// Cost per million input tokens (USD) — text tokens for image/audio models.
     pub input_cost_per_m: f64,
     /// Cost per million output tokens (USD) — text tokens for image/audio models.
@@ -376,7 +368,6 @@ impl Default for ModelCatalogEntry {
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
             pricing_known: true,
-            limits_known: true,
             image_input_cost_per_m: None,
             image_output_cost_per_m: None,
             supports_tools: false,
