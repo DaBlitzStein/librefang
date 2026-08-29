@@ -1957,6 +1957,7 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
         .and_then(|v| v.as_array())
         .or_else(|| body.as_array());
 
+    let mut seen = std::collections::HashSet::new();
     items
         .map(|arr| {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
