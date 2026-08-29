@@ -12,7 +12,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Loader2,
-  ArrowUpNarrowWide,
+  SortAsc,
   Hourglass,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -221,7 +221,7 @@ function TaskCard({ task, isDragTarget, onDragStart, agentsById }: TaskCardProps
             className={`flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-md shrink-0
               ${task.priority > 0 ? "text-warning bg-warning/10" : "text-text-dim/60 bg-main/50"}`}
           >
-            <ArrowUpNarrowWide className="w-2.5 h-2.5" />
+            <SortAsc className="w-2.5 h-2.5" />
             {t(
               PRIORITY_LEVELS.find((p) => p.value === task.priority)?.labelKey
                 ?? "tasks.priority_custom",
