@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 54;
+const SCHEMA_VERSION: u32 = 55;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -275,6 +275,13 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     //
     // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
     run_step!(54, migrate_v54);
+
+    // v55: per-task claim TTL override on the Task Board. `[task_board]
+    // claim_ttl_secs` is one global number, so an installation that mixes a
+    // 30-second health check with a two-hour import has to pick a TTL that is
+    // wrong for one of them. NULL keeps the global, which is what every
+    // existing row means.
+    run_step!(55, migrate_v55);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1207,6 +1214,32 @@ fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (54, datetime('now'), 'Persist agent lineage: agents.parent_id + idx_agents_parent_id + agents.parent_recorded so a pre-v54 row reads as unknown rather than root (#7930)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v55: per-task claim TTL override (`task_queue.timeout_secs`).
+///
+/// The stuck-task sweeper reclaims an `in_progress` row once it has been held
+/// longer than `[task_board] claim_ttl_secs`, a single global number.
+/// A board that carries both a 30-second probe and a two-hour import cannot be
+/// served by one value: tuned for the import, a wedged probe sits claimed for
+/// hours; tuned for the probe, the import is torn away from a worker that is
+/// still making progress.
+///
+/// `NULL` means "use the global", which is exactly what every pre-v55 row
+/// means, so the column needs no backfill.
+fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "task_queue", "timeout_secs")? {
+        conn.execute(
+            "ALTER TABLE task_queue ADD COLUMN timeout_secs INTEGER DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (55, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
         [],
     )?;
     Ok(())
