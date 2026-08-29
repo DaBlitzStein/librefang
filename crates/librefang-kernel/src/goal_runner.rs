@@ -1929,6 +1929,12 @@ mod tests {
                 |_agent_id, _message| async move {
                     std::future::pending::<Result<String, String>>().await
                 },
+                no_learnings_hook,
+                no_evaluator,
+                false,
+                None,
+                None,
+                None,
             );
 
         assert!(!started);
