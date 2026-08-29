@@ -252,13 +252,6 @@ pub async fn start_goal_run(
         },
     };
 
-    let started = state
-        .kernel
-        .start_goal_run(goal_id, agent_id, max_iterations);
-    if !started {
-        return ApiErrorResponse::internal("Failed to start goal run").into_json_tuple();
-    }
-
     // Loop-engineering configuration lives on the goal, not on the request, so
     // a run started from the dashboard, the CLI or a script all get the same
     // verification the operator configured once.
@@ -267,22 +260,12 @@ pub async fn start_goal_run(
         .as_str()
         .map(str::trim)
         .unwrap_or("");
-    // A stored verifier only means anything under loop engineering, so it is
-    // only validated there — a goal that is not using the gate must not be
-    // blocked by a field the run would never read.
     let verify_agent_id = if !loop_engineering || stored_verifier.is_empty() {
-        // No verifier is a legitimate configuration: loop engineering also
-        // buys the evaluator and the captured lessons. The run proceeds
-        // without a gate, and the prompt says so.
         None
     } else {
         match stored_verifier.parse::<uuid::Uuid>() {
             Ok(u) => Some(AgentId(u)),
             Err(_) => {
-                // Dropping an unusable verifier would silently downgrade a
-                // gated run to an ungated one — the exact failure the gate
-                // exists to prevent, and invisible to the operator who
-                // configured it.
                 return ApiErrorResponse::bad_request(format!(
                     "This goal's verify_agent_id ('{stored_verifier}') is not a valid agent UUID — reassign the verifier to repair it"
                 ))
@@ -300,6 +283,19 @@ pub async fn start_goal_run(
         .and_then(|b| b.0.get("verify_max_retries"))
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
+
+    let started = state.kernel.start_goal_run(
+        goal_id,
+        agent_id,
+        max_iterations,
+        loop_engineering,
+        verify_agent_id,
+        verify_max_retries,
+        evaluator_model,
+    );
+    if !started {
+        return ApiErrorResponse::internal("Failed to start goal run").into_json_tuple();
+    }
 
     // Flip the goal to in_progress so the dashboard reflects the active run.
     //
