@@ -1908,6 +1908,20 @@ pub async fn execute_tool_with_sender_account(
     }
 
     debug!(tool_name, "Executing tool");
+
+    // #7744: structured identity record so integration tests can assert that the
+    // authenticated owner survived all the way to dispatch.
+    {
+        let owner = acting_principal.and_then(|p| p.as_user_id()).map(|u| u.0);
+        tracing::info!(
+            target: "librefang::tool_identity",
+            tool = tool_name,
+            owner = ?owner,
+            sender_id = ?sender_id,
+            "tool dispatch identity"
+        );
+    }
+
     // `parsed_session_id` is computed once at the top of this fn so
     // both the deferred-approval payload (v36 H1 fix) and this
     // ToolExecContext below see the same SessionId.

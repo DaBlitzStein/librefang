@@ -39,23 +39,25 @@ async fn resolve_manifest(
                     message: t.t("api-error-template-invalid-name"),
                 });
             }
-            let tmpl_path = state
-                .kernel
-                .config_ref()
-                .home_dir
+            let home = &state.kernel.config_ref().home_dir;
+            let agent_type_path = home.join("agent-types").join(format!("{safe_name}.toml"));
+            let workspace_path = home
                 .join("workspaces")
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
-            // Use tokio::fs to avoid blocking in an async context
-            match tokio::fs::read_to_string(&tmpl_path).await {
+            match tokio::fs::read_to_string(&agent_type_path).await {
                 Ok(content) => content,
-                Err(_) => {
-                    let t = ErrorTranslator::new(lang);
-                    return Err(ManifestError {
-                        message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
-                    });
-                }
+                Err(_) => match tokio::fs::read_to_string(&workspace_path).await {
+                    Ok(content) => content,
+                    Err(_) => {
+                        let t = ErrorTranslator::new(lang);
+                        return Err(ManifestError {
+                            message: t
+                                .t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                        });
+                    }
+                },
             }
         } else {
             let t = ErrorTranslator::new(lang);
@@ -1516,4 +1518,117 @@ pub async fn reload_agent_manifest(
             )
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Save agent as agent type
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct SaveAsAgentTypeRequest {
+    pub template_name: String,
+}
+
+/// POST /api/agents/{id}/save-as-agent-type — snapshot a live agent's manifest
+/// into a reusable agent-type template file.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/save-as-agent-type",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = crate::types::JsonObject, description = "template_name to save as"),
+    responses(
+        (status = 201, description = "Agent type created from live agent"),
+        (status = 404, description = "Agent not found"),
+        (status = 409, description = "Template name already taken")
+    )
+)]
+pub async fn save_agent_as_agent_type(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(req): Json<SaveAsAgentTypeRequest>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            );
+        }
+    };
+
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    };
+
+    let template_name = req.template_name.trim().to_string();
+    if librefang_types::agent_type_store::validate_agent_type_name(&template_name).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": t.t("api-error-template-invalid-name")})),
+        );
+    }
+
+    let home = &state.kernel.config_ref().home_dir;
+    let types_dir = home.join("agent-types");
+    let type_path = types_dir.join(format!("{template_name}.toml"));
+
+    // Allow saving under the source agent's own name, reject if the name
+    // belongs to a different existing template.
+    if type_path.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::json!({"error": format!("Agent type '{}' already exists", template_name)}),
+            ),
+        );
+    }
+
+    let mut manifest = entry.manifest.clone();
+    manifest.name = template_name.clone();
+    manifest.workspace = None;
+
+    if let Err(e) = std::fs::create_dir_all(&types_dir) {
+        tracing::error!("failed to create agent-types dir: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": t.t("api-error-internal")})),
+        );
+    }
+
+    let rendered = match toml::to_string_pretty(&manifest) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("failed to render manifest: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": t.t("api-error-internal")})),
+            );
+        }
+    };
+
+    if let Err(e) = std::fs::write(&type_path, &rendered) {
+        tracing::error!("failed to write agent type: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": t.t("api-error-internal")})),
+        );
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "name": template_name,
+            "description": manifest.description,
+        })),
+    )
 }
