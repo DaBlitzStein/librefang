@@ -1383,12 +1383,22 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                         .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(Span::styled(
-                    format!("  injected {}", usage.total_tokens),
+                    format!(
+                        "  {} {}",
+                        crate::i18n::t("tui-agents-detail-tokens-injected"),
+                        usage.total_tokens
+                    ),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 )));
                 for (model, input, output, cost) in usage.recent.iter().take(5) {
                     lines.push(Line::from(Span::styled(
-                        format!("    {model:<20} {input}/{output}  ${cost:.4}"),
+                        format!(
+                            "    {model:<20} {input}/{output}  ${cost:.4}",
+                            model = model,
+                            input = input,
+                            output = output,
+                            cost = cost
+                        ),
                         Style::default().fg(theme::TEXT_TERTIARY),
                     )));
                 }
