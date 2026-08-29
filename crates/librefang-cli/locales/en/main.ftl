@@ -2521,3 +2521,12 @@ tui-agents-label-routing-no-cap = no cap
 tui-agents-label-routing-cheap = cheap
 tui-agents-label-routing-medium = medium
 tui-agents-label-routing-expensive = expensive
+# purge command
+purge-failed-no-database = Purge failed: no database at { $path }
+purge-failed-open-database = Purge failed: open database: { $error }
+purge-nothing-to-purge = Nothing to purge: '{ $agent }' left no trace in this installation.
+purge-purged-header = Purged '{ $agent }':
+purge-removed-roster-entry =   - roster entry, sessions, memories and KV rows
+purge-removed-workspace =   - workspace directory
+purge-removed-agent-type =   - agent-type template
+purge-failed = Purge failed: { $error }
