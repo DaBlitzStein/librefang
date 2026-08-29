@@ -428,6 +428,24 @@ impl AgentRegistry {
         })?;
 
         for tag in old_tags.iter().filter(|t| !new_tags.contains(t)) {
+            if let Entry::Occupied(mut bucket) = self.tag_index.entry(tag.clone()) {
+                bucket.get_mut().retain(|&agent_id| agent_id != id);
+                if bucket.get().is_empty() {
+                    bucket.remove();
+                }
+            }
+        }
+        for tag in new_tags.iter().filter(|t| !old_tags.contains(t)) {
+            let mut bucket = self.tag_index.entry(tag.clone()).or_default();
+            if !bucket.contains(&id) {
+                bucket.push(id);
+            }
+        }
+
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's tags, keeping `entry.tags` (index-backing),
     /// `entry.manifest.tags` (what gets persisted to `agent.toml`), and the
     /// `tag_index` all in sync (#7742).
@@ -455,14 +473,12 @@ impl AgentRegistry {
                 }
             }
         }
-        for tag in new_tags.iter().filter(|t| !old_tags.contains(t)) {
         for tag in tags.iter().filter(|t| !old_tags.contains(t)) {
             let mut bucket = self.tag_index.entry(tag.clone()).or_default();
             if !bucket.contains(&id) {
                 bucket.push(id);
             }
         }
-
 
         self.notify_changed();
         Ok(())
