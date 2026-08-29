@@ -611,7 +611,8 @@ impl GoalRunner {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) where
+    ) -> bool
+    where
         F: Fn(AgentId, String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
         L: FnOnce(Vec<String>) + Send + 'static,
