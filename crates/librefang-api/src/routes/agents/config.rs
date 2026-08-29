@@ -1429,7 +1429,11 @@ pub async fn patch_agent_config(
         req.max_output_tokens
             .map(|v| registry.update_model_max_output_tokens(agent_id, v)),
     ];
-    if model_writes.iter().flatten().any(|r| r.is_err()) {
+    if model_writes
+        .iter()
+        .flatten()
+        .any(|r: &Result<(), _>| r.is_err())
+    {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),

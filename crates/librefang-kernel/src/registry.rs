@@ -545,9 +545,14 @@ impl AgentRegistry {
     }
 
     /// Update an agent's max_tokens (response length limit).
-    pub fn update_max_tokens(&self, id: AgentId, max_tokens: u32) -> LibreFangResult<()> {
+    pub fn update_max_tokens(
+        &self,
+        id: AgentId,
+        max_tokens: impl Into<Option<u32>>,
+    ) -> LibreFangResult<()> {
+        let v = max_tokens.into();
         self.with_entry_mut(id, |entry| {
-            entry.manifest.model.max_tokens = Some(max_tokens);
+            entry.manifest.model.max_tokens = v;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -555,9 +560,63 @@ impl AgentRegistry {
     }
 
     /// Update an agent's sampling temperature.
-    pub fn update_temperature(&self, id: AgentId, temperature: f32) -> LibreFangResult<()> {
+    pub fn update_temperature(
+        &self,
+        id: AgentId,
+        temperature: impl Into<Option<f32>>,
+    ) -> LibreFangResult<()> {
+        let v = temperature.into();
         self.with_entry_mut(id, |entry| {
-            entry.manifest.model.temperature = Some(temperature);
+            entry.manifest.model.temperature = v;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    pub fn update_top_p(&self, id: AgentId, top_p: Option<f32>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.top_p = top_p;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    pub fn update_frequency_penalty(&self, id: AgentId, val: Option<f32>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.frequency_penalty = val;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    pub fn update_presence_penalty(&self, id: AgentId, val: Option<f32>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.presence_penalty = val;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    pub fn update_context_window(&self, id: AgentId, val: Option<u64>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.context_window = val;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    pub fn update_model_max_output_tokens(
+        &self,
+        id: AgentId,
+        val: Option<u64>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.max_output_tokens = val;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
