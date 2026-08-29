@@ -219,6 +219,7 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "default language pack must be valid",
         "failed to initialize default i18n fallback: {error}",
         "HTTP error: {e}",
+        "HTTP {http_status}",
         "Parse error: {e}",
         "Invalid agent ID",
         "Parse error",
