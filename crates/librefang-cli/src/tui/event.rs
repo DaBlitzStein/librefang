@@ -17,7 +17,6 @@ use super::screens::{
     audit::AuditEntry,
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
-    goals::GoalInfo,
     groups::GroupInfo,
     hands::{HandInfo, HandInstanceInfo},
     logs::LogEntry,
@@ -107,8 +106,6 @@ pub enum AppEvent {
     WorkflowRunResult(String),
     /// Workflow created successfully.
     WorkflowCreated(String),
-    /// Workflow declared parameters loaded for the run-input form.
-    WorkflowParamsLoaded(Vec<crate::tui::screens::workflows::WorkflowParamField>),
     /// Trigger list loaded.
     TriggerListLoaded(Vec<TriggerInfo>),
     /// Trigger created.
@@ -132,7 +129,6 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
-    MemoryConfigSaved(bool),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -215,23 +211,6 @@ pub enum AppEvent {
     GroupsLoaded(Vec<GroupInfo>),
     /// Log entries loaded.
     LogsLoaded(Vec<LogEntry>),
-    /// Goals loaded.
-    GoalsLoaded(Vec<GoalInfo>),
-    /// Live run state fetched for one goal.
-    GoalRunLoaded {
-        goal_id: String,
-        phase: Option<String>,
-        iteration: Option<u32>,
-        max_iterations: Option<u32>,
-    },
-    /// Goal created.
-    GoalCreated(String),
-    /// Goal deleted.
-    GoalDeleted(String),
-    /// Goal run started.
-    GoalRunStarted(String),
-    /// Goal run stopped.
-    GoalRunStopped(String),
     /// Hand definitions loaded (marketplace).
     HandsLoaded(Vec<HandInfo>),
     /// Active hand instances loaded.
@@ -275,7 +254,6 @@ pub enum AppEvent {
     },
     /// Agent channel allowlist updated.
     AgentChannelsUpdated(String),
-    AgentTokenUsageLoaded(crate::tui::screens::agents::AgentTokenUsage),
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -957,59 +935,6 @@ pub fn spawn_fetch_workflow_runs(
     });
 }
 
-/// Fetch a workflow's declared `input_schema` parameters for the run-input form.
-pub fn spawn_fetch_workflow_params(
-    backend: BackendRef,
-    workflow_id: String,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            let params = client
-                .get(format!("{base_url}/api/workflows/{workflow_id}"))
-                .send()
-                .ok()
-                .and_then(|r| r.json::<serde_json::Value>().ok())
-                .and_then(|body| body.get("input_schema").cloned())
-                .and_then(|v| v.as_array().cloned())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|p| {
-                            let name = p.get("name")?.as_str()?.to_string();
-                            Some(crate::tui::screens::workflows::WorkflowParamField {
-                                name,
-                                param_type: p
-                                    .get("param_type")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("string")
-                                    .to_string(),
-                                required: p
-                                    .get("required")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(true),
-                                description: p
-                                    .get("description")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                value: p
-                                    .get("default")
-                                    .map(|d| match d.as_str() {
-                                        Some(s) => s.to_string(),
-                                        None => d.to_string(),
-                                    })
-                                    .unwrap_or_default(),
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let _ = tx.send(AppEvent::WorkflowParamsLoaded(params));
-        }
-    });
-}
-
 /// How long the daemon may hold the run request open before handing the run back as a background task.
 ///
 /// Same reasoning as `WORKFLOW_RUN_WAIT_MS` in the `workflow run` command: `?wait=true` on its own ties the run's lifetime to the request, so a workflow slower than this thread's 60 s client timeout would be killed by the disconnect.
@@ -1683,48 +1608,6 @@ pub fn spawn_update_agent_channels(
     });
 }
 
-pub fn spawn_fetch_agent_token_usage(
-    backend: BackendRef,
-    agent_id: String,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            let mut usage = crate::tui::screens::agents::AgentTokenUsage::default();
-            if let Ok(body) = client
-                .get(format!("{base_url}/api/agents/{agent_id}"))
-                .send()
-                .and_then(|r| r.json::<serde_json::Value>())
-            {
-                usage.total_tokens = body["injected_footprint_tokens"].as_u64().unwrap_or(0);
-            }
-            if let Ok(body) = client
-                .get(format!("{base_url}/api/agents/{agent_id}/events?limit=5"))
-                .send()
-                .and_then(|r| r.json::<serde_json::Value>())
-            {
-                usage.recent = body["events"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|c| {
-                                Some((
-                                    c["model"].as_str()?.to_string(),
-                                    c["input_tokens"].as_u64().unwrap_or(0),
-                                    c["output_tokens"].as_u64().unwrap_or(0),
-                                    c["cost_usd"].as_f64().unwrap_or(0.0),
-                                ))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-            }
-            let _ = tx.send(AppEvent::AgentTokenUsageLoaded(usage));
-        }
-    });
-}
-
 // ── New screen spawn functions ───────────────────────────────────────────────
 
 /// Build a blocking reqwest client for daemon calls.
@@ -1850,34 +1733,6 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                     let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
                 }
             }
-        }
-    });
-}
-
-pub fn spawn_save_memory_config(
-    backend: BackendRef,
-    auto_memorize: bool,
-    auto_retrieve: bool,
-    extraction_model: String,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            let body = serde_json::json!({
-                "proactive_memory": {
-                    "auto_memorize": auto_memorize,
-                    "auto_retrieve": auto_retrieve,
-                    "extraction_model": extraction_model,
-                }
-            });
-            let ok = client
-                .patch(format!("{base_url}/api/memory/config"))
-                .json(&body)
-                .send()
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            let _ = tx.send(AppEvent::MemoryConfigSaved(ok));
         }
     });
 }
@@ -2102,9 +1957,9 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
         .and_then(|v| v.as_array())
         .or_else(|| body.as_array());
 
-    let mut seen = std::collections::HashSet::new();
     items
         .map(|arr| {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             arr.iter()
                 .map(|r| ClawHubResult {
                     name: r["name"].as_str().unwrap_or("").to_string(),
@@ -2113,6 +1968,15 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
                     downloads: r["downloads"].as_u64().unwrap_or(0),
                     runtime: r["runtime"].as_str().unwrap_or("").to_string(),
                 })
+                // The index serves the same skill under more than one display
+                // casing ("Prd" and "prd"), and the install call addresses a
+                // skill by slug — so the duplicates are one skill, not two.
+                // Left as-is the browse list showed it twice and a single
+                // install press lit the pending state on every copy.
+                //
+                // Keyed on the lowercased slug, and first-wins: the index is
+                // returned in relevance order, so the first spelling of a slug
+                // is the one the server ranked highest.
                 .filter(|entry| seen.insert(entry.slug.to_lowercase()))
                 .collect()
         })
@@ -2132,39 +1996,10 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
                 Ok(resp) if resp.status().is_success() => {
                     let _ = tx.send(AppEvent::SkillInstalled(slug));
                 }
-                Ok(resp) => {
-                    // Report what the daemon actually said. A broken
-                    // marketplace skill fails validation and comes back as a
-                    // 4xx carrying the reason ("YAML parse error at line 3");
-                    // collapsing that into a generic line reads like the
-                    // daemon fell over, and sends the operator looking in the
-                    // wrong place for a fault in someone else's skill.
-                    let http_status = resp.status();
-                    let detail = resp
-                        .json::<serde_json::Value>()
-                        .ok()
-                        .and_then(|b| b.get("error").and_then(|v| v.as_str()).map(String::from))
-                        // No body, or one without `error`: the status code is
-                        // the only thing known, so say that rather than
-                        // inventing a cause.
-                        .unwrap_or_else(|| {
-                            crate::i18n::t_args(
-                                "tui-event-skill-install-http-fallback",
-                                &[("status", http_status.as_str())],
-                            )
-                        });
+                _ => {
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-skill-install-failed-detail",
-                        &[("slug", &slug), ("detail", &detail)],
-                    )));
-                }
-                Err(e) => {
-                    // The request never reached the daemon at all — a
-                    // different failure from a rejected install, and the
-                    // transport error is the actionable part.
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-skill-install-failed-detail",
-                        &[("slug", &slug), ("detail", &e.to_string())],
+                        "tui-event-skill-install-failed",
+                        &[("slug", &slug)],
                     )));
                 }
             }
@@ -3372,241 +3207,6 @@ pub fn spawn_fetch_logs(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
-// ── Goals events ────────────────────────────────────────────────────────────
-
-/// Fetch the goals list.
-pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/goals")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    // `GET /api/goals` answers with a `PaginatedResponse`
-                    // (`{"items": [...]}`); the bare-array fallback keeps an
-                    // older daemon working.
-                    let goals: Vec<GoalInfo> = body
-                        .get("items")
-                        .and_then(|v| v.as_array())
-                        .or_else(|| body.as_array())
-                        .map(|arr| arr.iter().map(goal_from_json).collect())
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::GoalsLoaded(goals));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::GoalsLoaded(Vec::new()));
-        }
-    });
-}
-
-/// Read one goal document into a [`GoalInfo`].
-///
-/// Run state is deliberately absent: the stored document never carries it, so
-/// it is fetched per goal by [`spawn_fetch_goal_run`] when the detail pane opens.
-fn goal_from_json(g: &serde_json::Value) -> GoalInfo {
-    GoalInfo {
-        id: g["id"].as_str().unwrap_or_default().to_string(),
-        title: g["title"].as_str().unwrap_or_default().to_string(),
-        description: g["description"].as_str().unwrap_or_default().to_string(),
-        status: g["status"].as_str().unwrap_or_default().to_string(),
-        progress: g["progress"].as_u64().unwrap_or(0).min(100) as u8,
-        agent_id: g["agent_id"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        run_phase: None,
-        run_iteration: None,
-        run_max_iterations: None,
-    }
-}
-
-/// Fetch the live run state for a single goal.
-pub fn spawn_fetch_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || {
-        let BackendRef::Daemon { base_url, api_key } = backend else {
-            return;
-        };
-        let client = make_daemon_client(api_key.as_deref());
-        let Ok(resp) = client
-            .get(format!("{base_url}/api/goals/{goal_id}/run"))
-            .send()
-        else {
-            return;
-        };
-        let Ok(body) = resp.json::<serde_json::Value>() else {
-            return;
-        };
-        // A goal that never ran answers `{"running": false}` with no `run`
-        // object, which correctly leaves every field `None`.
-        let run = &body["run"];
-        let _ = tx.send(AppEvent::GoalRunLoaded {
-            goal_id,
-            phase: run["phase"].as_str().map(str::to_string),
-            iteration: run["iteration"].as_u64().map(|v| v as u32),
-            max_iterations: run["max_iterations"].as_u64().map(|v| v as u32),
-        });
-    });
-}
-
-/// Create a goal.
-pub fn spawn_create_goal(
-    backend: BackendRef,
-    title: String,
-    description: String,
-    agent_id: String,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            let body = serde_json::json!({
-                "title": title,
-                "description": description,
-                "agent_id": agent_id,
-            });
-            match client
-                .post(format!("{base_url}/api/goals"))
-                .json(&body)
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let resp_body: serde_json::Value = resp.json().unwrap_or_default();
-                    let id = resp_body["id"].as_str().unwrap_or_default().to_string();
-                    let _ = tx.send(AppEvent::GoalCreated(id));
-                }
-                Ok(resp) => {
-                    let _ = tx.send(AppEvent::FetchError(api_error_text(
-                        resp,
-                        "tui-goal-create-failed",
-                    )));
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-goal-create-error",
-                        &[("error", &e.to_string())],
-                    )));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-goal-inproc-unavailable",
-            )));
-        }
-    });
-}
-
-/// Delete a goal.
-pub fn spawn_delete_goal(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .delete(format!("{base_url}/api/goals/{goal_id}"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::GoalDeleted(goal_id));
-                }
-                Ok(resp) => {
-                    let _ = tx.send(AppEvent::FetchError(api_error_text(
-                        resp,
-                        "tui-goal-delete-failed",
-                    )));
-                }
-                Err(_) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-goal-delete-failed",
-                    )));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-goal-inproc-unavailable",
-            )));
-        }
-    });
-}
-
-/// Start a goal run.
-pub fn spawn_start_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/goals/{goal_id}/start"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::GoalRunStarted(goal_id));
-                }
-                Ok(resp) => {
-                    // The daemon's own message is the useful one here — it
-                    // names the cause, e.g. an unassigned or unparsable agent.
-                    let _ = tx.send(AppEvent::FetchError(api_error_text(
-                        resp,
-                        "tui-goal-start-failed",
-                    )));
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-goal-start-error",
-                        &[("error", &e.to_string())],
-                    )));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-goal-inproc-unavailable",
-            )));
-        }
-    });
-}
-
-/// Stop a goal run.
-pub fn spawn_stop_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/goals/{goal_id}/stop"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::GoalRunStopped(goal_id));
-                }
-                Ok(resp) => {
-                    let _ = tx.send(AppEvent::FetchError(api_error_text(
-                        resp,
-                        "tui-goal-stop-failed",
-                    )));
-                }
-                Err(_) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-goal-stop-failed")));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-goal-inproc-unavailable",
-            )));
-        }
-    });
-}
-
-/// The `error` field of a failed daemon response, or the given fallback message.
-fn api_error_text(resp: reqwest::blocking::Response, fallback_key: &str) -> String {
-    let body: serde_json::Value = resp.json().unwrap_or_default();
-    body["error"]
-        .as_str()
-        .filter(|e| !e.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| crate::i18n::t(fallback_key))
-}
-
 // ── Hands events ────────────────────────────────────────────────────────────
 
 /// Fetch hand definitions (marketplace).
@@ -4618,5 +4218,58 @@ mod tests {
             flag.load(Ordering::SeqCst),
             "task detached during block_on_tui was aborted when the call returned"
         );
+    }
+
+    /// The ClawHub index serves the same skill under more than one display
+    /// casing. Install addresses a skill by slug, so those rows are one skill.
+    #[test]
+    fn the_index_yields_one_row_per_slug_whatever_its_casing() {
+        let body = serde_json::json!({
+            "items": [
+                {"name": "Prd", "slug": "Prd", "description": "first", "downloads": 9, "runtime": "python"},
+                {"name": "prd", "slug": "prd", "description": "second", "downloads": 4, "runtime": "python"},
+                {"name": "other", "slug": "other", "description": "third", "downloads": 1, "runtime": "node"}
+            ]
+        });
+
+        let results = parse_clawhub_results(&body);
+
+        assert_eq!(
+            results.len(),
+            2,
+            "`Prd` and `prd` are one skill; the list showed it twice"
+        );
+        // First-wins: the index comes back in relevance order, so the row the
+        // server ranked highest is the one kept.
+        assert_eq!(results[0].slug, "Prd");
+        assert_eq!(results[0].description, "first");
+        assert_eq!(results[1].slug, "other");
+    }
+
+    /// Deduping must not reach across slugs — two genuinely different skills
+    /// that merely share a display name are still two rows.
+    #[test]
+    fn distinct_slugs_survive_even_when_their_names_collide() {
+        let body = serde_json::json!({
+            "items": [
+                {"name": "deploy", "slug": "deploy-k8s", "description": "a", "downloads": 2, "runtime": "python"},
+                {"name": "deploy", "slug": "deploy-nomad", "description": "b", "downloads": 3, "runtime": "python"}
+            ]
+        });
+
+        let results = parse_clawhub_results(&body);
+
+        assert_eq!(results.len(), 2);
+    }
+
+    /// The bare-array shape (no `items` envelope) goes through the same path.
+    #[test]
+    fn the_bare_array_shape_is_deduped_too() {
+        let body = serde_json::json!([
+            {"name": "Prd", "slug": "PRD", "description": "a", "downloads": 1, "runtime": "python"},
+            {"name": "prd", "slug": "prd", "description": "b", "downloads": 1, "runtime": "python"}
+        ]);
+
+        assert_eq!(parse_clawhub_results(&body).len(), 1);
     }
 }
