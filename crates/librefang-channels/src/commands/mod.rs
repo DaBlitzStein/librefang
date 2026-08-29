@@ -191,6 +191,17 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         dashboard_exec: Some(DashboardExec::Backend),
     },
     CommandDef {
+        name: "reset",
+        aliases: &[],
+        category: Category::Session,
+        scope: Scope::DASHBOARD,
+        description: "Reset current session (clear history, same session id)",
+        args_hint: "",
+        subcommands: &[],
+        telegram_menu: false,
+        dashboard_exec: Some(DashboardExec::Backend),
+    },
+    CommandDef {
         name: "reboot",
         aliases: &[],
         category: Category::Session,
