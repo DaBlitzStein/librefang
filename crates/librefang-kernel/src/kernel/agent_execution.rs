@@ -409,7 +409,7 @@ impl LibreFangKernel {
     /// The last guard mirrors the tier router a few lines below: routing an
     /// agent onto a provider the operator never configured would turn a
     /// cost optimisation into a hard failure on every turn.
-    fn route_to_profile(
+    pub fn route_to_profile(
         &self,
         manifest: &librefang_types::agent::AgentManifest,
         message: &str,
@@ -453,8 +453,14 @@ impl LibreFangKernel {
         }
 
         if profile.provider != manifest.model.provider {
-            let key_env = cfg.resolve_api_key_env(&profile.provider);
-            if std::env::var(&key_env).is_err() {
+            let provider = &profile.provider;
+            let is_local = librefang_runtime::provider_health::is_local_provider(provider);
+            let has_pool = self.llm.credential_pools.contains_key(provider.as_str());
+            let has_key = || {
+                let key_env = self.resolve_non_default_api_key_env(cfg, provider);
+                std::env::var(&key_env).is_ok()
+            };
+            if !is_local && !has_pool && !has_key() {
                 warn!(
                     agent = %manifest.name,
                     profile = %profile.name,
