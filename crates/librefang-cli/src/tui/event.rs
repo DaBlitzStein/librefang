@@ -1787,7 +1787,6 @@ pub fn spawn_update_agent_model_routing(
     });
 }
 
-
 // ── New screen spawn functions ───────────────────────────────────────────────
 
 /// Build a blocking reqwest client for daemon calls.
