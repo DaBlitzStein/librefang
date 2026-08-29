@@ -2085,6 +2085,7 @@ tui-agents-title-templates = Шаблони
 tui-agents-title-custom-name = Власний — Ім'я
 tui-agents-title-custom-desc = Власний — Опис
 tui-agents-title-custom-prompt = Власний — Системний промпт
+tui-agents-detail-tokens = Обсяг токенів  ($ оновити)
 tui-agents-title-custom-tools = Власний — Інструменти
 tui-agents-title-custom-skills = Власний — Скіли
 tui-agents-title-custom-mcp = Власний — MCP-сервери
