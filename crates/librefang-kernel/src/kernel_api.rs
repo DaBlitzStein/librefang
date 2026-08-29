@@ -979,6 +979,7 @@ impl KernelApi for LibreFangKernel {
         LibreFangKernel::preview_step_agent(self, agent_ref)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_goal_run(
         &self,
         goal_id: librefang_types::goal::GoalId,

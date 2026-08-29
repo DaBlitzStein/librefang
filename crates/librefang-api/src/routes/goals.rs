@@ -445,13 +445,19 @@ pub async fn create_goal(
     let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
     // Same boundary rule as `agent_id`: reject a bad verifier id here rather
     // than storing junk that `start_goal_run` has to reject later.
-    let verify_agent_id_str = optional_id_field(&req, "verify_agent_id");
+    let verify_agent_id_str: Option<String> = req
+        .get("verify_agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
     if let Some(ref vid) = verify_agent_id_str {
         if vid.parse::<uuid::Uuid>().is_err() {
             return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
         }
     }
-    let evaluator_model_str = optional_id_field(&req, "evaluator_model");
+    let evaluator_model_str: Option<String> = req
+        .get("evaluator_model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
 
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
@@ -582,22 +588,12 @@ pub async fn update_goal_by_id(
         return ApiErrorResponse::bad_request("A goal cannot be its own parent").into_json_tuple();
     }
 
-    // `""` is treated exactly like `null` — "clear this link" (#6562).
-    // Resolved once here so the validation below and the mutation inside the transaction cannot drift apart on what a blank string means.
-    let parent_clear = req.get("parent_id").is_some_and(is_clear_signal);
-    let agent_clear = req.get("agent_id").is_some_and(is_clear_signal);
     let verifier_clear = req.get("verify_agent_id").is_some_and(is_clear_signal);
 
-    // A non-blank agent_id must be a real UUID: `start_goal_run` parses it
-    // with `uuid::Uuid` and otherwise reports the misleading "Assign an
-    // agent to this goal before starting a run" on a goal that *was*
-    // assigned, just with an unparsable id (mirrors the same check in
-    // `create_goal` and the existing convention in `triggers.rs` / `cron.rs`).
-    if !agent_clear {
-        if let Some(aid) = req.get("agent_id").and_then(|v| v.as_str()) {
-            if aid.trim().parse::<uuid::Uuid>().is_err() {
-                return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
-            }
+    let agent_update = match optional_uuid_field(&req, "agent_id") {
+        Ok(value) => value,
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
         }
     };
 
