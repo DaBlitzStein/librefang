@@ -30,7 +30,7 @@ use super::screens::{
     templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
     usage::{AgentUsage, ModelUsage, UsageSummary},
-    workflows::{WorkflowInfo, WorkflowRun},
+    workflows::{WorkflowInfo, WorkflowParamField, WorkflowRun},
 };
 
 // ── BackendRef ──────────────────────────────────────────────────────────────
@@ -106,6 +106,8 @@ pub enum AppEvent {
     WorkflowRunResult(String),
     /// Workflow created successfully.
     WorkflowCreated(String),
+    /// Declared input parameters for a workflow, loaded from its schema.
+    WorkflowParamsLoaded(Vec<WorkflowParamField>),
     /// Trigger list loaded.
     TriggerListLoaded(Vec<TriggerInfo>),
     /// Trigger created.
@@ -931,6 +933,53 @@ pub fn spawn_fetch_workflow_runs(
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::WorkflowRunsLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Fetch declared input parameters from a workflow's schema.
+pub fn spawn_fetch_workflow_params(
+    backend: BackendRef,
+    workflow_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let params = client
+                .get(format!("{base_url}/api/workflows/{workflow_id}"))
+                .send()
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok())
+                .and_then(|body| body.get("input_schema").cloned())
+                .and_then(|v| v.as_array().cloned())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| {
+                            let name = p.get("name")?.as_str()?.to_string();
+                            Some(WorkflowParamField {
+                                name,
+                                param_type: p
+                                    .get("param_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("string")
+                                    .to_string(),
+                                required: p
+                                    .get("required")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true),
+                                description: p
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                value: String::new(),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let _ = tx.send(AppEvent::WorkflowParamsLoaded(params));
         }
     });
 }
