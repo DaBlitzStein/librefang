@@ -1430,6 +1430,7 @@ mod tests {
             messages: vec![Message::user("hello")],
             context_window_tokens: 0,
             label: None,
+            parent_session_id: None,
             model_override: None,
 
             messages_generation: 0,
@@ -1451,6 +1452,7 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
+            parent_session_id: None,
             model_override: None,
 
             messages_generation: 0,
@@ -1774,6 +1776,7 @@ mod tests {
             messages: vec![Message::user("hello"), Message::assistant("hi")],
             context_window_tokens: 0,
             label: None,
+            parent_session_id: None,
             model_override: None,
 
             messages_generation: 0,
@@ -1881,6 +1884,7 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
+            parent_session_id: None,
             model_override: None,
 
             messages_generation: 0,
@@ -1966,6 +1970,7 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
+            parent_session_id: None,
             model_override: None,
 
             messages_generation: 0,
@@ -2104,6 +2109,7 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
+            parent_session_id: None,
             model_override: None,
 
             messages_generation: 0,

@@ -61,6 +61,7 @@ fn populated_session(
         messages,
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
