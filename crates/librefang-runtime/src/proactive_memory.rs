@@ -565,8 +565,6 @@ impl LlmMemoryExtractor {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: self.echo_policy_for(model),
-
-            ..Default::default()
         };
 
         let response = self.driver.complete(request).await.map_err(|e| {
@@ -690,8 +688,6 @@ impl MemoryExtractor for LlmMemoryExtractor {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: self.echo_policy(),
-
-            ..Default::default()
         };
 
         match self.driver.complete(request).await {
@@ -1070,7 +1066,6 @@ mod tests {
                     cache_read_input_tokens: 0,
                 },
                 actual_provider: None,
-                actual_model: None,
             })
         }
         fn is_configured(&self) -> bool {

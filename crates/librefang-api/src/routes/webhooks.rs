@@ -543,7 +543,6 @@ pub async fn list_webhooks(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let webhooks: Vec<_> = state
         .webhook_store
         .list()
-        .await
         .iter()
         .map(crate::webhook_store::redact_webhook_secret)
         .collect();
@@ -560,31 +559,24 @@ pub async fn get_webhook(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    // `ErrorTranslator` is `!Send`, so resolve every message we might need up
-    // front and drop `t` before the `.await` on the async store (see CLAUDE.md).
-    let (err_invalid_id, err_serialize, err_not_found) = {
-        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-        (
-            t.t("api-error-webhook-invalid-id"),
-            t.t("api-error-webhook-serialize-error"),
-            t.t("api-error-webhook-not-found"),
-        )
-    };
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
         Err(_) => {
-            return ApiErrorResponse::bad_request(err_invalid_id).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id"))
+                .into_json_tuple();
         }
     };
-    match state.webhook_store.get(wh_id).await {
+    match state.webhook_store.get(wh_id) {
         Some(wh) => {
             let redacted = crate::webhook_store::redact_webhook_secret(&wh);
             match serde_json::to_value(&redacted) {
                 Ok(v) => (StatusCode::OK, Json(v)),
-                Err(_) => ApiErrorResponse::internal(err_serialize).into_json_tuple(),
+                Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
+                    .into_json_tuple(),
             }
         }
-        None => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
+        None => ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple(),
     }
 }
 
@@ -622,12 +614,7 @@ async fn create_webhook_inner(
     l: &'static str,
     body_bytes: &[u8],
 ) -> (StatusCode, Vec<u8>) {
-    // Resolve the only translated message used after the async store call and
-    // drop the `!Send` `ErrorTranslator` before `.await` (see CLAUDE.md).
-    let err_serialize = {
-        let t = ErrorTranslator::new(l);
-        t.t("api-error-webhook-serialize-error")
-    };
+    let t = ErrorTranslator::new(l);
     let req: crate::webhook_store::CreateWebhookRequest = match serde_json::from_slice(body_bytes) {
         Ok(r) => r,
         Err(e) => {
@@ -638,13 +625,13 @@ async fn create_webhook_inner(
             );
         }
     };
-    match state.webhook_store.create(req).await {
+    match state.webhook_store.create(req) {
         Ok(webhook) => {
             let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
             match serde_json::to_vec(&redacted) {
                 Ok(v) => (StatusCode::CREATED, v),
                 Err(_) => {
-                    let payload = serde_json::json!({"error": err_serialize, "code": "serialize_error", "type": "serialize_error"});
+                    let payload = serde_json::json!({"error": t.t("api-error-webhook-serialize-error"), "code": "serialize_error", "type": "serialize_error"});
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         serde_json::to_vec(&payload).unwrap_or_default(),
@@ -669,30 +656,27 @@ pub async fn update_webhook(
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<crate::webhook_store::UpdateWebhookRequest>,
 ) -> impl IntoResponse {
-    // Resolve translated messages before the `.await`; `ErrorTranslator` is
-    // `!Send` and must be dropped first (see CLAUDE.md).
-    let (err_invalid_id, err_serialize) = {
-        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-        (
-            t.t("api-error-webhook-invalid-id"),
-            t.t("api-error-webhook-serialize-error"),
-        )
-    };
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let wh_id = crate::webhook_store::WebhookId(uuid);
-            match state.webhook_store.update(wh_id, req).await {
+            match state.webhook_store.update(wh_id, req) {
                 Ok(webhook) => {
                     let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
                     match serde_json::to_value(&redacted) {
                         Ok(v) => (StatusCode::OK, Json(v)),
-                        Err(_) => ApiErrorResponse::internal(err_serialize).into_json_tuple(),
+                        Err(_) => {
+                            ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
+                                .into_json_tuple()
+                        }
                     }
                 }
                 Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
             }
         }
-        Err(_) => ApiErrorResponse::bad_request(err_invalid_id).into_json_tuple(),
+        Err(_) => {
+            ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple()
+        }
     }
 }
 
@@ -702,25 +686,19 @@ pub async fn delete_webhook(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    // Resolve translated messages before the `.await`; `ErrorTranslator` is
-    // `!Send` and must be dropped first (see CLAUDE.md).
-    let (err_invalid_id, err_not_found) = {
-        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-        (
-            t.t("api-error-webhook-invalid-id"),
-            t.t("api-error-webhook-not-found"),
-        )
-    };
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let wh_id = crate::webhook_store::WebhookId(uuid);
-            if state.webhook_store.delete(wh_id).await {
+            if state.webhook_store.delete(wh_id) {
                 (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
             } else {
-                ApiErrorResponse::not_found(err_not_found).into_json_tuple()
+                ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple()
             }
         }
-        Err(_) => ApiErrorResponse::bad_request(err_invalid_id).into_json_tuple(),
+        Err(_) => {
+            ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple()
+        }
     }
 }
 
@@ -747,7 +725,7 @@ pub async fn test_webhook(
         }
     };
 
-    let webhook = match state.webhook_store.get(wh_id).await {
+    let webhook = match state.webhook_store.get(wh_id) {
         Some(w) => w,
         None => {
             return ApiErrorResponse::not_found(err_not_found).into_json_tuple();

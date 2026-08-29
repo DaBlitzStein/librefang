@@ -46,7 +46,10 @@ pub(crate) fn cmd_service_install() {
     {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } == 0 {
-            ui::error(&i18n::t("maintenance-service-install-root-error"));
+            ui::error(
+                "Running as root — the service will be installed for the root account, \
+                 not your user. Run without sudo instead.",
+            );
             std::process::exit(1);
         }
     }
@@ -71,7 +74,7 @@ pub(crate) fn cmd_service_install() {
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = &binary;
-        ui::error(&i18n::t("maintenance-service-unsupported"));
+        ui::error("Auto-start service is not supported on this platform.");
     }
 }
 
@@ -80,19 +83,13 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => {
-            ui::error(&i18n::t("migrate-error-home-dir"));
+            ui::error("Cannot determine home directory.");
             return;
         }
     };
     let service_dir = home.join(".config/systemd/user");
     if let Err(e) = std::fs::create_dir_all(&service_dir) {
-        ui::error(&i18n::t_args(
-            "maintenance-failed-create-dir",
-            &[
-                ("path", &service_dir.display().to_string()),
-                ("error", &e.to_string()),
-            ],
-        ));
+        ui::error(&format!("Failed to create {}: {e}", service_dir.display()));
         return;
     }
 
@@ -120,19 +117,10 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
 
     let service_path = service_dir.join("librefang.service");
     if let Err(e) = std::fs::write(&service_path, &unit) {
-        ui::error(&i18n::t_args(
-            "maintenance-failed-write-file",
-            &[
-                ("path", &service_path.display().to_string()),
-                ("error", &e.to_string()),
-            ],
-        ));
+        ui::error(&format!("Failed to write {}: {e}", service_path.display()));
         return;
     }
-    ui::success(&i18n::t_args(
-        "maintenance-wrote-file",
-        &[("path", &service_path.display().to_string())],
-    ));
+    ui::success(&format!("Wrote {}", service_path.display()));
 
     // Reload and enable
     let reload = std::process::Command::new("systemctl")
@@ -140,7 +128,7 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
         .output();
     if let Ok(o) = &reload {
         if !o.status.success() {
-            ui::error(&i18n::t("maintenance-systemctl-reload-failed"));
+            ui::error("systemctl --user daemon-reload failed");
             return;
         }
     }
@@ -149,12 +137,12 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
         .output();
     match enable {
         Ok(o) if o.status.success() => {
-            ui::success(&i18n::t("maintenance-service-enabled"));
-            ui::hint(&i18n::t("maintenance-service-start-hint"));
+            ui::success("Service enabled (will start on next login)");
+            ui::hint("Start now with: systemctl --user start librefang.service");
             // Enable lingering so the user service runs without an active login session
-            ui::hint(&i18n::t("maintenance-service-linger-hint"));
+            ui::hint("For headless servers, also run: loginctl enable-linger");
         }
-        _ => ui::error(&i18n::t("maintenance-systemctl-enable-failed")),
+        _ => ui::error("systemctl --user enable librefang.service failed"),
     }
 }
 
@@ -163,19 +151,13 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => {
-            ui::error(&i18n::t("migrate-error-home-dir"));
+            ui::error("Cannot determine home directory.");
             return;
         }
     };
     let agents_dir = home.join("Library/LaunchAgents");
     if let Err(e) = std::fs::create_dir_all(&agents_dir) {
-        ui::error(&i18n::t_args(
-            "maintenance-failed-create-dir",
-            &[
-                ("path", &agents_dir.display().to_string()),
-                ("error", &e.to_string()),
-            ],
-        ));
+        ui::error(&format!("Failed to create {}: {e}", agents_dir.display()));
         return;
     }
 
@@ -220,38 +202,23 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
     }
 
     if let Err(e) = std::fs::write(&plist_path, &plist) {
-        ui::error(&i18n::t_args(
-            "maintenance-failed-write-file",
-            &[
-                ("path", &plist_path.display().to_string()),
-                ("error", &e.to_string()),
-            ],
-        ));
+        ui::error(&format!("Failed to write {}: {e}", plist_path.display()));
         return;
     }
-    ui::success(&i18n::t_args(
-        "maintenance-wrote-file",
-        &[("path", &plist_path.display().to_string())],
-    ));
+    ui::success(&format!("Wrote {}", plist_path.display()));
 
     let load = std::process::Command::new("launchctl")
         .args(["load", &plist_path.to_string_lossy()])
         .output();
     match load {
         Ok(o) if o.status.success() => {
-            ui::success(&i18n::t("maintenance-launchagent-loaded"));
+            ui::success("LaunchAgent loaded (will start on login and now)");
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            ui::error(&i18n::t_args(
-                "maintenance-launchctl-load-failed",
-                &[("error", &stderr.to_string())],
-            ));
+            ui::error(&format!("launchctl load failed: {stderr}"));
         }
-        Err(e) => ui::error(&i18n::t_args(
-            "maintenance-launchctl-run-failed",
-            &[("error", &e.to_string())],
-        )),
+        Err(e) => ui::error(&format!("Failed to run launchctl: {e}")),
     }
 }
 
@@ -273,19 +240,13 @@ pub(crate) fn service_install_windows(binary: &std::path::Path) {
         .output();
     match output {
         Ok(o) if o.status.success() => {
-            ui::success(&i18n::t("maintenance-windows-startup-added"));
+            ui::success("Added to Windows startup (HKCU\\...\\Run)");
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            ui::error(&i18n::t_args(
-                "maintenance-windows-registry-write-failed",
-                &[("error", &stderr.to_string())],
-            ));
+            ui::error(&format!("Failed to write registry: {stderr}"));
         }
-        Err(e) => ui::error(&i18n::t_args(
-            "maintenance-windows-reg-run-failed",
-            &[("error", &e.to_string())],
-        )),
+        Err(e) => ui::error(&format!("Failed to run reg.exe: {e}")),
     }
 }
 
@@ -303,15 +264,12 @@ pub(crate) fn cmd_service_uninstall() {
                     let _ = std::process::Command::new("systemctl")
                         .args(["--user", "daemon-reload"])
                         .output();
-                    ui::success(&i18n::t("maintenance-systemd-removed"));
+                    ui::success("Removed systemd user service");
                 }
-                Err(e) => ui::error(&i18n::t_args(
-                    "maintenance-systemd-remove-failed",
-                    &[("error", &e.to_string())],
-                )),
+                Err(e) => ui::error(&format!("Failed to remove service file: {e}")),
             }
         } else {
-            ui::hint(&i18n::t("maintenance-systemd-not-found"));
+            ui::hint("No systemd user service found — nothing to remove.");
         }
     }
     #[cfg(target_os = "macos")]
@@ -323,14 +281,11 @@ pub(crate) fn cmd_service_uninstall() {
                 .args(["unload", &plist_path.to_string_lossy()])
                 .output();
             match std::fs::remove_file(&plist_path) {
-                Ok(()) => ui::success(&i18n::t("maintenance-launchagent-removed")),
-                Err(e) => ui::error(&i18n::t_args(
-                    "maintenance-launchagent-remove-failed",
-                    &[("error", &e.to_string())],
-                )),
+                Ok(()) => ui::success("Removed LaunchAgent"),
+                Err(e) => ui::error(&format!("Failed to remove plist: {e}")),
             }
         } else {
-            ui::hint(&i18n::t("maintenance-launchagent-not-found"));
+            ui::hint("No LaunchAgent found — nothing to remove.");
         }
     }
     #[cfg(windows)]
@@ -346,14 +301,14 @@ pub(crate) fn cmd_service_uninstall() {
             .output();
         match output {
             Ok(o) if o.status.success() => {
-                ui::success(&i18n::t("maintenance-windows-startup-removed"));
+                ui::success("Removed from Windows startup");
             }
-            _ => ui::hint(&i18n::t("maintenance-windows-startup-not-found")),
+            _ => ui::hint("No startup entry found — nothing to remove."),
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        ui::error(&i18n::t("maintenance-service-unsupported"));
+        ui::error("Auto-start service is not supported on this platform.");
     }
 }
 
@@ -363,25 +318,25 @@ pub(crate) fn cmd_service_status() {
         let home = dirs::home_dir().unwrap_or_default();
         let service_path = home.join(".config/systemd/user/librefang.service");
         if service_path.exists() {
-            ui::success(&i18n::t("maintenance-systemd-status-registered"));
+            ui::success("Systemd user service is registered");
             // Show enabled/active status
             if let Ok(output) = std::process::Command::new("systemctl")
                 .args(["--user", "is-enabled", "librefang.service"])
                 .output()
             {
                 let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                ui::kv(&i18n::t("maintenance-status-label-enabled"), &status);
+                ui::kv("  Enabled", &status);
             }
             if let Ok(output) = std::process::Command::new("systemctl")
                 .args(["--user", "is-active", "librefang.service"])
                 .output()
             {
                 let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                ui::kv(&i18n::t("maintenance-status-label-active"), &status);
+                ui::kv("  Active", &status);
             }
         } else {
-            ui::hint(&i18n::t("maintenance-systemd-status-not-registered"));
-            ui::hint(&i18n::t("maintenance-service-install-hint"));
+            ui::hint("No systemd user service registered.");
+            ui::hint("Run `librefang service install` to set it up.");
         }
     }
     #[cfg(target_os = "macos")]
@@ -389,24 +344,18 @@ pub(crate) fn cmd_service_status() {
         let home = dirs::home_dir().unwrap_or_default();
         let plist_path = home.join("Library/LaunchAgents/ai.librefang.daemon.plist");
         if plist_path.exists() {
-            ui::success(&i18n::t("maintenance-launchagent-status-registered"));
+            ui::success("LaunchAgent is registered");
             if let Ok(output) = std::process::Command::new("launchctl")
                 .args(["list"])
                 .output()
             {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let running = stdout.lines().any(|l| l.contains("ai.librefang.daemon"));
-                // i18n::t() in an if-arm is a temporary dropped before the call site (E0716).
-                let loaded_status = if running {
-                    i18n::t("label-yes")
-                } else {
-                    i18n::t("label-not-loaded")
-                };
-                ui::kv(&i18n::t("maintenance-status-label-loaded"), &loaded_status);
+                ui::kv("  Loaded", if running { "yes" } else { "not loaded" });
             }
         } else {
-            ui::hint(&i18n::t("maintenance-launchagent-status-not-registered"));
-            ui::hint(&i18n::t("maintenance-service-install-hint"));
+            ui::hint("No LaunchAgent registered.");
+            ui::hint("Run `librefang service install` to set it up.");
         }
     }
     #[cfg(windows)]
@@ -421,17 +370,17 @@ pub(crate) fn cmd_service_status() {
             .output();
         match output {
             Ok(o) if o.status.success() => {
-                ui::success(&i18n::t("maintenance-windows-status-registered"));
+                ui::success("Windows startup entry is registered");
             }
             _ => {
-                ui::hint(&i18n::t("maintenance-windows-status-not-registered"));
-                ui::hint(&i18n::t("maintenance-service-install-hint"));
+                ui::hint("No startup entry registered.");
+                ui::hint("Run `librefang service install` to set it up.");
             }
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        ui::error(&i18n::t("maintenance-service-unsupported"));
+        ui::error("Auto-start service is not supported on this platform.");
     }
 }
 
@@ -440,26 +389,19 @@ pub(crate) fn cmd_reset(confirm: bool) {
 
     if !librefang_dir.exists() {
         println!(
-            "{}",
-            i18n::t_args(
-                "reset-not-needed",
-                &[("path", &librefang_dir.display().to_string())]
-            )
+            "Nothing to reset — {} does not exist.",
+            librefang_dir.display()
         );
         return;
     }
 
     if !confirm {
-        println!(
-            "{}",
-            i18n::t_args(
-                "reset-confirm-message",
-                &[("path", &librefang_dir.display().to_string())]
-            )
-        );
-        let answer = prompt_input(&i18n::t("reset-confirm-prompt"));
+        println!("  This will delete all data in {}", librefang_dir.display());
+        println!("  Including: config, database, agent manifests, credentials.");
+        println!();
+        let answer = prompt_input("  Are you sure? Type 'yes' to confirm: ");
         if answer.trim() != "yes" {
-            println!("{}", i18n::t("uninstall-cancelled"));
+            println!("  Cancelled.");
             return;
         }
     }
@@ -486,10 +428,7 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     use librefang_types::config::UpdateChannel;
 
     let current_exe = std::env::current_exe().unwrap_or_else(|e| {
-        ui::error(&i18n::t_args(
-            "maintenance-update-error-exe-path",
-            &[("error", &e.to_string())],
-        ));
+        ui::error(&format!("Cannot determine current executable path: {e}"));
         std::process::exit(1);
     });
 
@@ -510,38 +449,32 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
         load_update_channel_from_config().unwrap_or_default()
     };
 
-    ui::section(&i18n::t("maintenance-update-section"));
-    ui::kv(&i18n::t("label-current"), current_version);
-    ui::kv(&i18n::t("label-channel"), &channel.to_string());
-    ui::kv(&i18n::t("label-binary"), &current_exe_display);
+    ui::section("Update");
+    ui::kv("Current", current_version);
+    ui::kv("Channel", &channel.to_string());
+    ui::kv("Binary", &current_exe_display);
 
     let latest_tag = if requested_version.is_none() {
         match fetch_latest_release_tag(channel) {
             Ok(tag) => {
-                ui::kv(&i18n::t("label-latest"), &tag);
+                ui::kv("Latest", &tag);
                 Some(tag)
             }
             Err(err) => {
                 if check {
-                    ui::error(&i18n::t_args(
-                        "maintenance-update-error-check-release",
-                        &[("error", &err.to_string())],
-                    ));
+                    ui::error(&format!("Failed to check latest release: {err}"));
                     std::process::exit(1);
                 }
                 ui::warn_with_fix(
-                    &i18n::t_args(
-                        "maintenance-update-warn-resolve-release",
-                        &[("error", &err.to_string())],
-                    ),
-                    &i18n::t("maintenance-update-warn-resolve-release-fix"),
+                    &format!("Could not resolve the latest published release: {err}"),
+                    "Retry later, or pass `--version <tag>` to target a specific release.",
                 );
                 None
             }
         }
     } else {
         if let Some(target) = requested_version {
-            ui::kv(&i18n::t("label-target"), target);
+            ui::kv("Target", target);
         }
         None
     };
@@ -556,35 +489,33 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
         match (target_tag.as_deref(), target_comparison) {
             (Some(tag), Some(ReleaseComparison::Newer)) => {
                 ui::warn_with_fix(
-                    &i18n::t_args("maintenance-update-available", &[("tag", tag)]),
-                    &i18n::t("maintenance-update-run-hint"),
+                    &format!("A newer published release is available: {tag}"),
+                    "Run `librefang update` to install it.",
                 );
             }
             (Some(tag), Some(ReleaseComparison::SameCore)) => {
                 ui::warn_with_fix(
-                    &i18n::t_args(
-                        "maintenance-update-same-core",
-                        &[("tag", tag), ("current", current_version)],
+                    &format!(
+                        "The published release {tag} uses the same CLI version core as the current binary ({current_version})."
                     ),
-                    &i18n::t("maintenance-update-same-core-hint"),
+                    "Run `librefang update` if you want the latest published build for this version line.",
                 );
             }
             (Some(tag), Some(ReleaseComparison::Older)) => {
-                ui::success(&i18n::t_args(
-                    "maintenance-update-ahead",
-                    &[("current", current_version), ("tag", tag)],
+                ui::success(&format!(
+                    "Current binary version {current_version} is ahead of the published release {tag}."
                 ));
             }
             (Some(tag), Some(ReleaseComparison::Unknown)) => {
                 ui::warn_with_fix(
-                    &i18n::t_args("maintenance-update-compare-unknown", &[("tag", tag)]),
-                    &i18n::t("maintenance-update-compare-unknown-hint"),
+                    &format!("Could not compare the current binary with release tag {tag}."),
+                    "If you want that exact release, run `librefang update --version <tag>`.",
                 );
             }
             _ => {
                 ui::warn_with_fix(
-                    &i18n::t("maintenance-update-unable-to-determine"),
-                    &i18n::t("maintenance-update-unable-to-determine-hint"),
+                    "Unable to determine whether an update is available.",
+                    "Retry later when GitHub Releases is reachable.",
                 );
             }
         }
@@ -594,18 +525,18 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     if requested_version.is_none() {
         match (latest_tag.as_deref(), target_comparison) {
             (Some(tag), Some(ReleaseComparison::Older)) => {
-                ui::success(&i18n::t_args(
-                    "maintenance-update-ahead",
-                    &[("current", current_version), ("tag", tag)],
+                ui::success(&format!(
+                    "Current binary version {current_version} is ahead of the latest published release {tag}."
                 ));
                 return;
             }
             (Some(tag), Some(ReleaseComparison::Unknown)) => {
                 ui::warn_with_fix(
-                    &i18n::t_args("maintenance-update-cannot-compare-safely", &[("tag", tag)]),
-                    &i18n::t_args(
-                        "maintenance-update-cannot-compare-safely-hint",
-                        &[("tag", tag)],
+                    &format!(
+                        "Could not safely compare the current binary against release tag {tag}."
+                    ),
+                    &format!(
+                        "Re-run with `librefang update --version {tag}` to install it explicitly."
                     ),
                 );
                 return;
@@ -621,8 +552,8 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     #[cfg(windows)]
     if same_path(&current_exe, &default_install) && find_daemon().is_some() {
         ui::error_with_fix(
-            &i18n::t("maintenance-update-windows-daemon-running-error"),
-            &i18n::t("maintenance-update-windows-daemon-running-error-fix"),
+            "Stop the running daemon before updating on Windows.",
+            "Run `librefang stop`, then `librefang update`, then `librefang start`.",
         );
         std::process::exit(1);
     }
@@ -631,31 +562,28 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
         match run_official_update(target_version) {
             #[cfg(not(windows))]
             Ok(UpdateLaunch::Completed) => {
-                ui::success(&i18n::t("maintenance-update-cli-success"));
+                ui::success("LibreFang CLI updated.");
                 if let Some(installed) = installed_binary_version(&default_install) {
-                    ui::kv(&i18n::t("label-installed"), &installed);
+                    ui::kv("Installed", &installed);
                 }
                 // Merge any new config defaults added in the updated binary.
                 // Spawn the new binary rather than calling cmd_init_upgrade() here,
                 // because the current process still holds the old binary's template.
                 ui::blank();
-                ui::hint(&i18n::t("maintenance-update-merging-config-defaults"));
+                ui::hint("Merging new config defaults...");
                 let _ = std::process::Command::new(&default_install)
                     .args(["init", "--upgrade"])
                     .status();
-                ui::hint(&i18n::t("maintenance-update-restart-daemon-hint"));
+                ui::hint("If the daemon is running, restart it with `librefang restart`.");
             }
             #[cfg(windows)]
             Ok(UpdateLaunch::Detached) => {
-                ui::success(&i18n::t("maintenance-update-background-launched"));
-                ui::hint(&i18n::t("maintenance-update-background-hint-terminal"));
-                ui::hint(&i18n::t("maintenance-update-background-hint-restart"));
+                ui::success("Update launched in the background.");
+                ui::hint("Open a new terminal after it finishes and run `librefang --version`.");
+                ui::hint("If the daemon is running, restart it after the update completes.");
             }
             Err(err) => {
-                ui::error(&i18n::t_args(
-                    "maintenance-update-failed-error",
-                    &[("error", &err.to_string())],
-                ));
+                ui::error(&format!("Update failed: {err}"));
                 std::process::exit(1);
             }
         }
@@ -664,19 +592,21 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
 
     if same_path(&current_exe, &cargo_install) {
         let cargo_cmd = cargo_update_command(target_version);
-        ui::warn_with_fix(&i18n::t("maintenance-update-cargo-blocked"), &cargo_cmd);
+        ui::warn_with_fix(
+            "This binary was installed with cargo. Running `cargo install` from inside the active executable is intentionally blocked.",
+            &cargo_cmd,
+        );
         return;
     }
 
     let official_path = default_install.display().to_string();
     ui::warn_with_fix(
-        &i18n::t_args(
-            "maintenance-update-unofficial-path",
-            &[("path", &official_path)],
+        &format!(
+            "Automatic update only supports the official install path ({official_path}). This binary is running from a different location."
         ),
         &manual_installer_command(target_version),
     );
-    ui::hint(&i18n::t("maintenance-update-package-manager-hint"));
+    ui::hint("If this binary came from another package manager, update it with that package manager instead.");
 }
 
 pub(crate) fn fetch_latest_release_tag(
@@ -689,52 +619,36 @@ pub(crate) fn fetch_latest_release_tag(
     match channel {
         UpdateChannel::Stable => {
             // /releases/latest returns the latest non-draft, non-prerelease
-            let response = client.get(RELEASES_LATEST_API).send().map_err(|e| {
-                i18n::t_args(
-                    "maintenance-error-github-request",
-                    &[("error", &e.to_string())],
-                )
-            })?;
+            let response = client
+                .get(RELEASES_LATEST_API)
+                .send()
+                .map_err(|e| format!("GitHub request failed: {e}"))?;
             let status = response.status();
             if !status.is_success() {
-                return Err(i18n::t_args(
-                    "maintenance-error-github-status",
-                    &[("status", &status.to_string())],
-                ));
+                return Err(format!("GitHub API returned {status}"));
             }
-            let body = response.json::<serde_json::Value>().map_err(|e| {
-                i18n::t_args(
-                    "maintenance-error-decode-release",
-                    &[("error", &e.to_string())],
-                )
-            })?;
+            let body = response
+                .json::<serde_json::Value>()
+                .map_err(|e| format!("Failed to decode release metadata: {e}"))?;
             body["tag_name"]
                 .as_str()
                 .filter(|tag| !tag.is_empty())
                 .map(str::to_string)
-                .ok_or_else(|| i18n::t("maintenance-error-missing-tag"))
+                .ok_or_else(|| "Release metadata is missing `tag_name`".to_string())
         }
         UpdateChannel::Beta | UpdateChannel::Rc => {
             // /releases lists all releases, newest first — filter by channel
-            let response = client.get(RELEASES_API).send().map_err(|e| {
-                i18n::t_args(
-                    "maintenance-error-github-request",
-                    &[("error", &e.to_string())],
-                )
-            })?;
+            let response = client
+                .get(RELEASES_API)
+                .send()
+                .map_err(|e| format!("GitHub request failed: {e}"))?;
             let status = response.status();
             if !status.is_success() {
-                return Err(i18n::t_args(
-                    "maintenance-error-github-status",
-                    &[("status", &status.to_string())],
-                ));
+                return Err(format!("GitHub API returned {status}"));
             }
-            let releases = response.json::<Vec<serde_json::Value>>().map_err(|e| {
-                i18n::t_args(
-                    "maintenance-error-decode-list",
-                    &[("error", &e.to_string())],
-                )
-            })?;
+            let releases = response
+                .json::<Vec<serde_json::Value>>()
+                .map_err(|e| format!("Failed to decode releases list: {e}"))?;
 
             for release in &releases {
                 let draft = release["draft"].as_bool().unwrap_or(false);
@@ -754,9 +668,8 @@ pub(crate) fn fetch_latest_release_tag(
                     _ => unreachable!(),
                 }
             }
-            Err(i18n::t_args(
-                "maintenance-error-no-release",
-                &[("channel", &channel.to_string())],
+            Err(format!(
+                "No matching release found for the '{channel}' channel"
             ))
         }
     }
@@ -767,12 +680,7 @@ pub(crate) fn update_http_client() -> Result<reqwest::blocking::Client, String> 
         .user_agent(format!("librefang-cli/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(60))
         .build()
-        .map_err(|e| {
-            i18n::t_args(
-                "maintenance-error-http-client",
-                &[("error", &e.to_string())],
-            )
-        })
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
 }
 
 pub(crate) fn compare_release_tag(tag: &str, current_version: &str) -> ReleaseComparison {
@@ -838,12 +746,9 @@ pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch,
             command.env("LIBREFANG_VERSION", tag);
         }
 
-        command.spawn().map_err(|e| {
-            i18n::t_args(
-                "maintenance-error-powershell-updater",
-                &[("error", &e.to_string())],
-            )
-        })?;
+        command
+            .spawn()
+            .map_err(|e| format!("Failed to launch PowerShell updater: {e}"))?;
         Ok(UpdateLaunch::Detached)
     }
 
@@ -856,18 +761,12 @@ pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch,
             command.env("LIBREFANG_VERSION", tag);
         }
 
-        let status = command.status().map_err(|e| {
-            i18n::t_args(
-                "maintenance-error-run-installer",
-                &[("error", &e.to_string())],
-            )
-        })?;
+        let status = command
+            .status()
+            .map_err(|e| format!("Failed to run installer: {e}"))?;
         let _ = std::fs::remove_file(&script_path);
         if !status.success() {
-            return Err(i18n::t_args(
-                "maintenance-error-installer-status",
-                &[("status", &status.to_string())],
-            ));
+            return Err(format!("Installer exited with status {status}"));
         }
         Ok(UpdateLaunch::Completed)
     }
@@ -875,25 +774,17 @@ pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch,
 
 pub(crate) fn download_text(url: &str) -> Result<String, String> {
     let client = update_http_client()?;
-    let response = client.get(url).send().map_err(|e| {
-        i18n::t_args(
-            "maintenance-error-download-fail",
-            &[("error", &e.to_string())],
-        )
-    })?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("Download failed: {e}"))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(i18n::t_args(
-            "maintenance-error-download-status",
-            &[("status", &status.to_string())],
-        ));
+        return Err(format!("Download returned {status}"));
     }
-    response.text().map_err(|e| {
-        i18n::t_args(
-            "maintenance-error-read-response",
-            &[("error", &e.to_string())],
-        )
-    })
+    response
+        .text()
+        .map_err(|e| format!("Failed to read response body: {e}"))
 }
 
 #[cfg(not(windows))]
@@ -928,8 +819,7 @@ pub(crate) fn write_update_script(contents: &str, extension: &str) -> Result<Pat
     // race to swap the contents before they ran. `create_new` refuses an
     // existing path / dangling symlink and never follows one.
     let dir = cli_librefang_home().join("updates");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| i18n::t_args("maintenance-error-create-dir", &[("error", &e.to_string())]))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create updater dir: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -946,19 +836,12 @@ pub(crate) fn write_update_script(contents: &str, extension: &str) -> Result<Pat
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(&path).map_err(|e| {
-        i18n::t_args(
-            "maintenance-error-create-script",
-            &[("error", &e.to_string())],
-        )
-    })?;
+    let mut f = opts
+        .open(&path)
+        .map_err(|e| format!("Failed to create updater script: {e}"))?;
     use std::io::Write as _;
-    f.write_all(contents.as_bytes()).map_err(|e| {
-        i18n::t_args(
-            "maintenance-error-write-script",
-            &[("error", &e.to_string())],
-        )
-    })?;
+    f.write_all(contents.as_bytes())
+        .map_err(|e| format!("Failed to write updater script: {e}"))?;
     Ok(path)
 }
 
@@ -1033,35 +916,25 @@ pub(crate) fn cmd_uninstall(confirm: bool, keep_config: bool) {
 
     // Step 1: Show what will be removed
     println!();
-    println!("  {}", i18n::t("uninstall-warning").bold().red());
+    println!(
+        "  {}",
+        "This will completely uninstall LibreFang from your system."
+            .bold()
+            .red()
+    );
     println!();
     if librefang_dir.exists() {
         if keep_config {
             println!(
-                "{}",
-                i18n::t_args(
-                    "uninstall-remove-data-kept",
-                    &[("path", &librefang_dir.display().to_string())]
-                )
+                "  • Remove data in {} (keeping config files)",
+                librefang_dir.display()
             );
         } else {
-            println!(
-                "{}",
-                i18n::t_args(
-                    "uninstall-remove-all",
-                    &[("path", &librefang_dir.display().to_string())]
-                )
-            );
+            println!("  • Remove {}", librefang_dir.display());
         }
     }
     if let Some(ref exe) = exe_path {
-        println!(
-            "{}",
-            i18n::t_args(
-                "uninstall-remove-binary",
-                &[("path", &exe.display().to_string())]
-            )
-        );
+        println!("  • Remove binary: {}", exe.display());
     }
     // Check cargo bin path
     let cargo_bin = dirs::home_dir()
@@ -1074,23 +947,17 @@ pub(crate) fn cmd_uninstall(confirm: bool, keep_config: bool) {
             "librefang"
         });
     if cargo_bin.exists() && exe_path.as_ref().is_none_or(|e| *e != cargo_bin) {
-        println!(
-            "{}",
-            i18n::t_args(
-                "uninstall-remove-cargo-binary",
-                &[("path", &cargo_bin.display().to_string())]
-            )
-        );
+        println!("  • Remove cargo binary: {}", cargo_bin.display());
     }
-    println!("{}", i18n::t("uninstall-remove-autostart"));
-    println!("{}", i18n::t("uninstall-clean-path"));
+    println!("  • Remove auto-start entries (if any)");
+    println!("  • Clean PATH from shell configs (if any)");
     println!();
 
     // Step 2: Confirm
     if !confirm {
-        let answer = prompt_input(&i18n::t("uninstall-confirm-prompt"));
+        let answer = prompt_input("  Type 'uninstall' to confirm: ");
         if answer.trim() != "uninstall" {
-            println!("{}", i18n::t("uninstall-cancelled"));
+            println!("  Cancelled.");
             return;
         }
         println!();

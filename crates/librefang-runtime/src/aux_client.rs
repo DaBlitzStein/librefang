@@ -358,7 +358,6 @@ mod tests {
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
                 actual_provider: None,
-                actual_model: None,
             })
         }
 
@@ -408,8 +407,6 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
         resolution.driver.complete(req).await.unwrap();
         assert_eq!(primary_calls.1.load(Ordering::SeqCst), 1);
@@ -548,8 +545,6 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
         let out = res.driver.complete(req).await.unwrap();
         match &out.content[0] {

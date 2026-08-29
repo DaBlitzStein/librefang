@@ -43,10 +43,7 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
     // unfindable bug. (#3313 review, M2)
     #[cfg(unix)]
     if let Some(sock) = locate_acp_socket() {
-        eprintln!(
-            "{}",
-            crate::i18n::t_args("acp-attached-uds", &[("path", &sock.to_string_lossy())])
-        );
+        eprintln!("librefang acp: attached to daemon (UDS {})", sock.display());
         let exit_code = run_uds_proxy(&sock);
         if exit_code != 0 {
             std::process::exit(exit_code);
@@ -55,22 +52,19 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
     }
     #[cfg(windows)]
     if super::find_daemon().is_some() {
-        eprintln!("{}", crate::i18n::t("acp-attached-pipe"));
+        eprintln!("librefang acp: attached to daemon (named pipe)");
         let exit_code = run_pipe_proxy();
         if exit_code != 0 {
             std::process::exit(exit_code);
         }
         return;
     }
-    eprintln!("{}", crate::i18n::t("acp-in-process"));
+    eprintln!("librefang acp: in-process kernel (no daemon detected)");
 
     let kernel = match LibreFangKernel::boot(config.as_deref()) {
         Ok(k) => Arc::new(k),
         Err(e) => {
-            eprintln!(
-                "{}",
-                crate::i18n::t_args("acp-error-boot-kernel", &[("error", &e.to_string())])
-            );
+            eprintln!("Failed to boot kernel: {e}");
             std::process::exit(1);
         }
     };
@@ -84,13 +78,7 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
         let agent_id = match adapter.resolve_agent(agent_name).await {
             Ok(id) => id,
             Err(e) => {
-                eprintln!(
-                    "{}",
-                    crate::i18n::t_args(
-                        "acp-error-resolve-agent",
-                        &[("name", agent_name), ("error", &e.to_string())]
-                    )
-                );
+                eprintln!("Failed to resolve agent '{agent_name}': {e}");
                 return 1;
             }
         };
@@ -98,10 +86,7 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
         match librefang_acp::run(Arc::new(adapter), agent_id).await {
             Ok(()) => 0,
             Err(e) => {
-                eprintln!(
-                    "{}",
-                    crate::i18n::t_args("acp-error-server", &[("error", &e.to_string())])
-                );
+                eprintln!("ACP server error: {e}");
                 1
             }
         }
@@ -146,16 +131,7 @@ fn run_uds_proxy(sock_path: &std::path::Path) -> i32 {
         let stream = match UnixStream::connect(sock_path).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "{}",
-                    crate::i18n::t_args(
-                        "acp-error-uds-connect",
-                        &[
-                            ("path", &sock_path.to_string_lossy()),
-                            ("error", &e.to_string())
-                        ]
-                    )
-                );
+                eprintln!("ACP UDS connect failed at {}: {e}", sock_path.display());
                 return 1;
             }
         };
@@ -223,13 +199,7 @@ fn run_pipe_proxy() -> i32 {
         let stream = match ClientOptions::new().open(PIPE_NAME) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "{}",
-                    crate::i18n::t_args(
-                        "acp-error-pipe-connect",
-                        &[("name", PIPE_NAME), ("error", &e.to_string())]
-                    )
-                );
+                eprintln!("ACP named-pipe connect failed at {PIPE_NAME}: {e}");
                 return 1;
             }
         };

@@ -106,11 +106,7 @@ impl DashboardState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut DashboardState) {
-    let inner = widgets::render_screen_block(
-        f,
-        area,
-        &format!("{} {}", "▣", crate::i18n::t("tui-dashboard-title")),
-    );
+    let inner = widgets::render_screen_block(f, area, "\u{25a3} Dashboard");
 
     // The dream strip height is 0 when there's nothing to show so the audit
     // trail keeps the full screen. 2 + N lines otherwise (header + rows,
@@ -141,7 +137,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut DashboardState) {
     draw_audit_body(f, chunks[4], state);
 
     f.render_widget(
-        widgets::hint_bar(&crate::i18n::t("tui-dashboard-hints")),
+        widgets::hint_bar(
+            "  [r] Refresh  [a] Agents  [\u{2191}\u{2193}] Scroll  [PgUp/PgDn] Fast scroll",
+        ),
         chunks[5],
     );
 }
@@ -156,7 +154,7 @@ fn draw_dream_strip(f: &mut Frame, area: Rect, state: &DashboardState) {
     };
     let header = Line::from(vec![
         Span::styled(
-            format!("  ☽ {}", crate::i18n::t("tui-dashboard-dreams-title")),
+            "  \u{263d} DREAMS",
             Style::default()
                 .fg(header_color)
                 .add_modifier(Modifier::BOLD),
@@ -164,9 +162,9 @@ fn draw_dream_strip(f: &mut Frame, area: Rect, state: &DashboardState) {
         Span::raw("  "),
         Span::styled(
             if state.dreams_enabled {
-                crate::i18n::t("tui-dashboard-auto-dream-enabled")
+                "auto-dream enabled"
             } else {
-                crate::i18n::t("tui-dashboard-auto-dream-disabled")
+                "auto-dream disabled"
             },
             Style::default().fg(theme::TEXT_TERTIARY),
         ),
@@ -180,11 +178,11 @@ fn draw_dream_strip(f: &mut Frame, area: Rect, state: &DashboardState) {
         .map(|d| {
             // Status pill colour mirrors the dashboard card.
             let (status_color, status_glyph) = match d.status.as_str() {
-                "running" => (theme::BLUE, "●"),
-                "completed" => (theme::GREEN, "✓"),
-                "failed" => (theme::RED, "✗"),
-                "aborted" => (theme::ACCENT, "■"),
-                _ => (theme::TEXT_TERTIARY, "◌"),
+                "running" => (theme::BLUE, "\u{25cf}"),
+                "completed" => (theme::GREEN, "\u{2713}"),
+                "failed" => (theme::RED, "\u{2717}"),
+                "aborted" => (theme::ACCENT, "\u{25a0}"),
+                _ => (theme::TEXT_TERTIARY, "\u{25cc}"),
             };
             Line::from(vec![
                 Span::raw("  "),
@@ -198,20 +196,15 @@ fn draw_dream_strip(f: &mut Frame, area: Rect, state: &DashboardState) {
                 Span::styled(format!("[{}]", d.status), Style::default().fg(status_color)),
                 Span::raw("  "),
                 Span::styled(
-                    crate::i18n::t_args(
-                        "tui-dashboard-dream-details",
-                        &[
-                            (
-                                "phase",
-                                if d.phase.is_empty() {
-                                    "—"
-                                } else {
-                                    d.phase.as_str()
-                                },
-                            ),
-                            ("tools", &d.tool_use_count.to_string()),
-                            ("mems", &d.memories_touched.to_string()),
-                        ],
+                    format!(
+                        "phase={}  tools={}  mems={}",
+                        if d.phase.is_empty() {
+                            "\u{2014}"
+                        } else {
+                            d.phase.as_str()
+                        },
+                        d.tool_use_count,
+                        d.memories_touched,
                     ),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
@@ -234,7 +227,7 @@ fn draw_stat_row(f: &mut Frame, area: Rect, state: &DashboardState) {
     draw_stat_cell(
         f,
         cols[0],
-        &crate::i18n::t("tui-dashboard-stat-agents"),
+        "AGENTS",
         &format!("{}", state.agent_count),
         if state.agent_count > 0 {
             theme::GREEN
@@ -247,38 +240,26 @@ fn draw_stat_row(f: &mut Frame, area: Rect, state: &DashboardState) {
     draw_stat_cell(
         f,
         cols[1],
-        &crate::i18n::t("tui-dashboard-stat-uptime"),
+        "UPTIME",
         &format_uptime(state.uptime_secs),
         theme::BLUE,
     );
 
     // Provider
     let prov = if state.provider.is_empty() {
-        "—".to_string()
+        "\u{2014}".to_string()
     } else {
         state.provider.clone()
     };
-    draw_stat_cell(
-        f,
-        cols[2],
-        &crate::i18n::t("tui-dashboard-stat-provider"),
-        &prov,
-        theme::ACCENT,
-    );
+    draw_stat_cell(f, cols[2], "PROVIDER", &prov, theme::ACCENT);
 
     // Model
     let model = if state.model.is_empty() {
-        "—".to_string()
+        "\u{2014}".to_string()
     } else {
         widgets::truncate(&state.model, 16)
     };
-    draw_stat_cell(
-        f,
-        cols[3],
-        &crate::i18n::t("tui-dashboard-stat-model"),
-        &model,
-        theme::PURPLE,
-    );
+    draw_stat_cell(f, cols[3], "MODEL", &model, theme::PURPLE);
 }
 
 fn draw_stat_cell(
@@ -316,10 +297,7 @@ fn draw_audit_header(f: &mut Frame, area: Rect) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<18} {:<12} {:<14} {}",
-                crate::i18n::t("tui-dashboard-audit-time"),
-                crate::i18n::t("tui-dashboard-audit-agent"),
-                crate::i18n::t("tui-dashboard-audit-action"),
-                crate::i18n::t("tui-dashboard-audit-detail")
+                "Time", "Agent", "Action", "Detail"
             ),
             theme::table_header(),
         )])),
@@ -329,18 +307,12 @@ fn draw_audit_header(f: &mut Frame, area: Rect) {
 
 fn draw_audit_body(f: &mut Frame, area: Rect, state: &DashboardState) {
     if state.loading {
-        f.render_widget(
-            widgets::spinner(state.tick, &crate::i18n::t("tui-dashboard-loading")),
-            area,
-        );
+        f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), area);
         return;
     }
 
     if state.recent_audit.is_empty() {
-        f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-dashboard-no-audit")),
-            area,
-        );
+        f.render_widget(widgets::empty_state("No audit entries yet."), area);
         return;
     }
 
@@ -384,30 +356,12 @@ fn items_to_lines(rows: &[AuditRow]) -> Vec<Line<'_>> {
 
 fn format_uptime(secs: u64) -> String {
     if secs < 60 {
-        crate::i18n::t_args("format-uptime-s", &[("secs", &secs.to_string())])
+        format!("{secs}s")
     } else if secs < 3600 {
-        crate::i18n::t_args(
-            "format-uptime-ms",
-            &[
-                ("mins", &(secs / 60).to_string()),
-                ("secs", &(secs % 60).to_string()),
-            ],
-        )
+        format!("{}m {}s", secs / 60, secs % 60)
     } else if secs < 86400 {
-        crate::i18n::t_args(
-            "format-uptime-hm",
-            &[
-                ("hours", &(secs / 3600).to_string()),
-                ("mins", &((secs % 3600) / 60).to_string()),
-            ],
-        )
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     } else {
-        crate::i18n::t_args(
-            "format-uptime-dh",
-            &[
-                ("days", &(secs / 86400).to_string()),
-                ("hours", &((secs % 86400) / 3600).to_string()),
-            ],
-        )
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
     }
 }

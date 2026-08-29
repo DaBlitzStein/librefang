@@ -1,10 +1,4 @@
 import { ApiError } from "./lib/http/errors";
-import {
-  startRegistration,
-  startAuthentication,
-  type PublicKeyCredentialCreationOptionsJSON,
-  type PublicKeyCredentialRequestOptionsJSON,
-} from "@simplewebauthn/browser";
 
 export interface HealthCheck {
   name: string;
@@ -70,16 +64,6 @@ export interface ProviderItem {
    *  Lets the dashboard distinguish "user-hidden" from "never configured"
    *  for the otherwise indistinguishable `auth_status: "missing"`. */
   suppressed?: boolean;
-  /** True when this provider is a coding-agent CLI (claude-code, codex-cli,
-   *  gemini-cli, qwen-code, codewhale) rather than a raw provider API.
-   *  Sourced from the backend (`is_coding_agent_provider`) so the dashboard
-   *  can group coding agents apart from providers. */
-  is_coding_agent?: boolean;
-  /** Headline max-output-token limit for the provider's representative
-   *  (default, else first) model: the user's `max_tokens` override when set,
-   *  otherwise the model's catalog `max_output_tokens`. Absent when the
-   *  provider has no usable model or declares no output limit (#6209). */
-  max_output_tokens?: number;
 }
 
 export interface MediaProvider {
@@ -1560,32 +1544,6 @@ export async function loadAgentSession(
   return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session${qs}`);
 }
 
-/**
- * Context-window usage snapshot for a session.
- *
- * `pct` is `used_tokens / max_context_tokens` clamped to 0..=100 with one
- * decimal; it is an approximate (chars/4 heuristic) estimate, not the
- * provider's exact tokenizer count. `max_context_tokens` is 0 when the model
- * window could not be resolved.
- */
-export interface SessionContextResponse {
-  used_tokens: number;
-  max_context_tokens: number;
-  pct: number;
-  model: string;
-  pressure: string;
-}
-
-export async function getAgentSessionContext(
-  agentId: string,
-  sessionId?: string | null,
-): Promise<SessionContextResponse> {
-  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
-  return get<SessionContextResponse>(
-    `/api/agents/${encodeURIComponent(agentId)}/session/context${qs}`,
-  );
-}
-
 export async function sendAgentMessage(
   agentId: string,
   message: string,
@@ -1859,21 +1817,6 @@ export async function saveSidecarConfig(
   return post<SidecarSaveResult>(
     `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
     { values },
-  );
-}
-
-export interface SidecarRemoveResult {
-  status: "removed";
-  restart_required: boolean;
-  hot_actions_applied: string[];
-}
-
-// Remove a configured sidecar channel: rewrites config.toml and stops the child.
-export async function removeSidecarConfig(
-  name: string,
-): Promise<SidecarRemoveResult> {
-  return del<SidecarRemoveResult>(
-    `/api/channels/sidecar/${encodeURIComponent(name)}`,
   );
 }
 
@@ -3081,98 +3024,6 @@ export async function totpRevoke(code: string): Promise<ApiActionResponse> {
   return response.json();
 }
 
-// --- Passkey (WebAuthn/FIDO2) login + credential management (#5981) ---
-
-export interface PasskeyCredentialSummary {
-  credential_id: string;
-  label: string | null;
-  created_at: number;
-  last_used_at: number | null;
-}
-
-/** True when this browser exposes the WebAuthn platform API. */
-export function isPasskeySupported(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof window.PublicKeyCredential !== "undefined"
-  );
-}
-
-/** webauthn-rs wraps its options in a top-level `publicKey` object. */
-interface CreationChallenge {
-  ceremony_id: string;
-  options: { publicKey: PublicKeyCredentialCreationOptionsJSON };
-}
-interface RequestChallenge {
-  ceremony_id: string;
-  options: { publicKey: PublicKeyCredentialRequestOptionsJSON };
-}
-
-export async function listPasskeys(): Promise<PasskeyCredentialSummary[]> {
-  const data = await get<{ credentials: PasskeyCredentialSummary[] }>(
-    "/api/auth/passkey/credentials",
-  );
-  return data.credentials;
-}
-
-/**
- * Run the registration ceremony: fetch creation options, prompt the
- * platform authenticator via `navigator.credentials.create()`, and persist
- * the resulting credential. Requires an authenticated session.
- */
-export async function registerPasskey(
-  label?: string,
-): Promise<{ ok: boolean; credential_id: string }> {
-  const challenge = await post<CreationChallenge>(
-    "/api/auth/passkey/registration-options",
-    {},
-  );
-  const credential = await startRegistration({
-    optionsJSON: challenge.options.publicKey,
-  });
-  return post<{ ok: boolean; credential_id: string }>(
-    "/api/auth/passkey/registration-verify",
-    { ceremony_id: challenge.ceremony_id, credential, label },
-  );
-}
-
-/**
- * Run the authentication ceremony: fetch request options, prompt the
- * authenticator via `navigator.credentials.get()`, verify the assertion, and
- * store the returned session token. Public — no session required.
- */
-export async function loginWithPasskey(): Promise<{
-  ok: boolean;
-  token?: string;
-}> {
-  const challenge = await post<RequestChallenge>(
-    "/api/auth/passkey/authentication-options",
-    {},
-  );
-  const credential = await startAuthentication({
-    optionsJSON: challenge.options.publicKey,
-  });
-  const result = await post<{ ok: boolean; token?: string }>(
-    "/api/auth/passkey/authentication-verify",
-    { ceremony_id: challenge.ceremony_id, credential },
-  );
-  if (result.ok && result.token) {
-    setApiKey(result.token);
-  }
-  return result;
-}
-
-export async function revokePasskey(
-  credentialId: string,
-): Promise<ApiActionResponse> {
-  const response = await fetchWithTimeout(
-    `/api/auth/passkey/credentials/${encodeURIComponent(credentialId)}`,
-    { method: "DELETE", headers: buildHeaders() },
-  );
-  if (!response.ok) throw await parseError(response);
-  return response.json();
-}
-
 export async function rejectApproval(id: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/reject`, {});
 }
@@ -4171,34 +4022,6 @@ export interface ExperimentVariantMetrics {
   avg_latency_ms: number;
   avg_cost_usd: number;
   total_cost_usd: number;
-}
-
-/**
- * One row of the cross-agent prompt repository overview
- * (`GET /api/prompts/overview`). Aggregates each non-hand agent's
- * prompt-version store into a single fleet-wide summary so the prompt
- * repository page can render every agent without N per-agent round trips.
- *
- * `active_version` mirrors the version flagged `is_active` in the store;
- * `live_system_prompt` is the prompt actually used in LLM calls
- * (`manifest.model.system_prompt`). The two diverge until a version is
- * bound back onto the agent manifest.
- */
-export interface PromptOverviewItem {
-  agent_id: string;
-  agent_name: string;
-  version_count: number;
-  active_version?: number | null;
-  active_version_id?: string | null;
-  live_system_prompt: string;
-  latest_version_at?: string | null;
-}
-
-export async function listPromptsOverview(): Promise<PromptOverviewItem[]> {
-  const data = await get<PaginatedResponse<PromptOverviewItem>>(
-    "/api/prompts/overview",
-  );
-  return data.items ?? [];
 }
 
 export async function listPromptVersions(agentId: string): Promise<PromptVersion[]> {

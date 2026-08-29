@@ -266,16 +266,11 @@ impl LlmDriver for GeminiCliDriver {
                 ..Default::default()
             },
             actual_provider: None,
-            actual_model: None,
         })
     }
 
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::Google
-    }
-
-    fn is_coding_agent(&self) -> bool {
-        true
     }
 }
 
@@ -334,11 +329,6 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn is_coding_agent_is_true() {
-        assert!(GeminiCliDriver::new(None, false).is_coding_agent());
-    }
 
     #[test]
     fn test_new_defaults() {
@@ -476,8 +466,6 @@ mod tests {
             session_id: Some("sess-xyz".to_string()),
             step_id: Some("step-001".to_string()),
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
         GeminiCliDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd
@@ -537,8 +525,6 @@ mod tests {
             session_id: Some(String::new()),
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
         GeminiCliDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd

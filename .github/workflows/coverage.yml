@@ -37,7 +37,7 @@ on:
       - 'CODEOWNERS'
       - '.gitignore'
       - '.editorconfig'
-      - '.gitleaks.toml'
+      - '.secrets.baseline'
   workflow_dispatch:
 
 permissions:

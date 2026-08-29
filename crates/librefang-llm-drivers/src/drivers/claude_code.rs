@@ -335,14 +335,6 @@ impl ClaudeCodeDriver {
     fn write_mcp_config(
         bridge: &McpBridgeConfig,
         agent_id: Option<&str>,
-        // #6117: inbound peer scope of the current turn. Forwarded on the
-        // bridge connection so `/mcp` can rehydrate `ToolExecContext`'s
-        // sender_id / channel / chat_id and `channel_send` can reject a
-        // cross-chat recipient mismatch on the same channel. `None` for
-        // out-of-band turns (cron, triggers) — those run the bridge unguarded.
-        peer_jid: Option<&str>,
-        peer_channel: Option<&str>,
-        peer_chat_id: Option<&str>,
     ) -> std::io::Result<PathBuf> {
         let path =
             std::env::temp_dir().join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
@@ -370,19 +362,6 @@ impl ClaudeCodeDriver {
                 headers.insert("X-LibreFang-Agent-Id".to_string(), serde_json::json!(id));
             }
         }
-        // #6117: forward the turn's inbound peer scope. The bridge endpoint
-        // (`routes/network.rs::mcp_http`) reads these back into
-        // `ToolExecContext` so `channel_send` enforces the cross-chat guard.
-        let mut insert_nonempty = |key: &str, val: Option<&str>| {
-            if let Some(v) = val {
-                if !v.is_empty() {
-                    headers.insert(key.to_string(), serde_json::json!(v));
-                }
-            }
-        };
-        insert_nonempty("X-LibreFang-Current-Peer-Jid", peer_jid);
-        insert_nonempty("X-LibreFang-Current-Channel", peer_channel);
-        insert_nonempty("X-LibreFang-Current-Chat-Id", peer_chat_id);
 
         let mut server = serde_json::json!({
             "type": "http",
@@ -804,11 +783,6 @@ struct ClaudeJsonOutput {
     /// The CLI sets this when the result is an error (auth failure, etc.).
     #[serde(default)]
     is_error: bool,
-    /// The model the CLI reports running. `claude -p --output-format json` does
-    /// not currently emit it (so this stays `None`); captured for forward-compat
-    /// if a future CLI version adds it.
-    #[serde(default)]
-    model: Option<String>,
 }
 
 /// Usage stats from Claude CLI JSON output.
@@ -834,10 +808,6 @@ struct ClaudeStreamEvent {
     /// The CLI sets this when the result is an error (auth failure, etc.).
     #[serde(default)]
     is_error: bool,
-    /// Present on the `system`/`init` event in stream-json mode: the model the
-    /// CLI resolved for this run.
-    #[serde(default)]
-    model: Option<String>,
 }
 
 /// Check if CLI response text looks like an auth or rate-limit error that
@@ -895,13 +865,7 @@ impl LlmDriver for ClaudeCodeDriver {
 
         if !request.tools.is_empty() {
             if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(
-                    bridge,
-                    request.agent_id.as_deref(),
-                    request.sender_user_id.as_deref(),
-                    request.sender_channel.as_deref(),
-                    request.sender_chat_id.as_deref(),
-                ) {
+                match Self::write_mcp_config(bridge, request.agent_id.as_deref()) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
                         prepared.cleanup();
@@ -1141,7 +1105,6 @@ impl LlmDriver for ClaudeCodeDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
-                actual_model: parsed.model,
             });
         }
 
@@ -1167,7 +1130,6 @@ impl LlmDriver for ClaudeCodeDriver {
                 ..Default::default()
             },
             actual_provider: None,
-            actual_model: None,
         })
     }
 
@@ -1186,13 +1148,7 @@ impl LlmDriver for ClaudeCodeDriver {
 
         if !request.tools.is_empty() {
             if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(
-                    bridge,
-                    request.agent_id.as_deref(),
-                    request.sender_user_id.as_deref(),
-                    request.sender_channel.as_deref(),
-                    request.sender_chat_id.as_deref(),
-                ) {
+                match Self::write_mcp_config(bridge, request.agent_id.as_deref()) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
                         prepared.cleanup();
@@ -1298,9 +1254,6 @@ impl LlmDriver for ClaudeCodeDriver {
             output_tokens: 0,
             ..Default::default()
         };
-        // The model the CLI resolved, recovered from the stream-json `init`
-        // event (stream-json mode emits it up front). Surfaced as actual_model.
-        let mut actual_model: Option<String> = None;
 
         // Track last known activity for timeout diagnostics
         let mut last_activity = "starting".to_string();
@@ -1391,16 +1344,6 @@ impl LlmDriver for ClaudeCodeDriver {
 
                     match serde_json::from_str::<ClaudeStreamEvent>(&line) {
                         Ok(event) => {
-                            // Recover the resolved model from whichever event
-                            // carries it (the `system`/`init` event in
-                            // stream-json mode emits it up front).
-                            if actual_model.is_none() {
-                                if let Some(ref m) = event.model {
-                                    if !m.is_empty() {
-                                        actual_model = Some(m.clone());
-                                    }
-                                }
-                            }
                             // Track last activity for timeout diagnostics
                             let etype = event.r#type.as_str();
                             if etype.contains("tool") {
@@ -1627,16 +1570,11 @@ impl LlmDriver for ClaudeCodeDriver {
             tool_calls: Vec::new(),
             usage: final_usage,
             actual_provider: None,
-            actual_model,
         })
     }
 
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::Anthropic
-    }
-
-    fn is_coding_agent(&self) -> bool {
-        true
     }
 }
 
@@ -1693,11 +1631,6 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn is_coding_agent_is_true() {
-        assert!(ClaudeCodeDriver::new(None, false).is_coding_agent());
-    }
 
     /// Spawn a tiny cross-platform child process for the
     /// `diagnose_stdin_write_failure` tests. POSIX runners can rely on
@@ -1853,8 +1786,6 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1904,8 +1835,6 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1972,8 +1901,6 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -2056,8 +1983,6 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -3073,8 +2998,6 @@ mod tests {
             session_id: Some("sess-xyz".to_string()),
             step_id: Some("step-001".to_string()),
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
         ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd
@@ -3133,8 +3056,6 @@ mod tests {
             session_id: Some(String::new()),
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
         ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd
@@ -3178,9 +3099,7 @@ mod tests {
             base_url: "http://127.0.0.1:4545".to_string(),
             api_key: Some("secret-key".to_string()),
         };
-        let path =
-            ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234"), None, None, None)
-                .unwrap();
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234")).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
@@ -3200,60 +3119,13 @@ mod tests {
             base_url: "http://127.0.0.1:4545".to_string(),
             api_key: Some("secret-key".to_string()),
         };
-        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None, None, None, None).unwrap();
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
         let headers = &cfg["mcpServers"]["librefang"]["headers"];
         assert_eq!(headers["X-API-Key"], "secret-key");
         assert!(headers.get("X-LibreFang-Agent-Id").is_none());
-    }
-
-    #[test]
-    fn test_mcp_config_carries_current_peer_scope_headers() {
-        // #6117: the inbound peer scope of the turn is forwarded on the bridge
-        // connection so `/mcp` can rehydrate ToolExecContext and `channel_send`
-        // can reject a cross-chat recipient mismatch on the same channel.
-        let bridge = McpBridgeConfig {
-            base_url: "http://127.0.0.1:4545".to_string(),
-            api_key: None,
-        };
-        let path = ClaudeCodeDriver::write_mcp_config(
-            &bridge,
-            Some("agent-1234"),
-            Some("owner-jid"),
-            Some("whatsapp"),
-            Some("group-123"),
-        )
-        .unwrap();
-        let written = std::fs::read_to_string(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
-        let headers = &cfg["mcpServers"]["librefang"]["headers"];
-        assert_eq!(headers["X-LibreFang-Current-Peer-Jid"], "owner-jid");
-        assert_eq!(headers["X-LibreFang-Current-Channel"], "whatsapp");
-        assert_eq!(headers["X-LibreFang-Current-Chat-Id"], "group-123");
-    }
-
-    #[test]
-    fn test_mcp_config_omits_peer_scope_headers_when_absent() {
-        // Out-of-band turns (cron, triggers) carry no peer scope → no peer
-        // headers, so the `/mcp` bridge runs `channel_send` unguarded exactly
-        // as before #6117.
-        let bridge = McpBridgeConfig {
-            base_url: "http://127.0.0.1:4545".to_string(),
-            api_key: Some("k".to_string()),
-        };
-        let path =
-            ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234"), None, None, None)
-                .unwrap();
-        let written = std::fs::read_to_string(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
-        let headers = &cfg["mcpServers"]["librefang"]["headers"];
-        assert!(headers.get("X-LibreFang-Current-Peer-Jid").is_none());
-        assert!(headers.get("X-LibreFang-Current-Channel").is_none());
-        assert!(headers.get("X-LibreFang-Current-Chat-Id").is_none());
     }
 
     #[test]
@@ -3266,7 +3138,7 @@ mod tests {
             base_url: "http://127.0.0.1:4545".to_string(),
             api_key: None,
         };
-        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None, None, None, None).unwrap();
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();

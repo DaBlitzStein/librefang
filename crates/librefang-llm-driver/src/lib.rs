@@ -362,24 +362,6 @@ pub struct CompletionRequest {
     /// wire as `x-librefang-step-id`. `None` for callers that don't
     /// distinguish between steps.
     pub step_id: Option<String>,
-    /// Inbound peer identity for the turn that triggered this LLM call.
-    ///
-    /// Identifies the user / contact whose message the agent is currently responding to (a WhatsApp / Telegram JID, an email address, …).
-    /// Drivers that spawn a subprocess and re-expose LibreFang's tool surface through an MCP bridge (notably `claude-code`) forward it as `x-librefang-current-peer-jid` so the bridge endpoint can rehydrate `ToolExecContext::sender_id` — which `channel_send` uses (as the DM fallback) to reject cross-chat recipient mismatches on the same channel (#6117).
-    /// `None` for out-of-band callers (cron, automation triggers, compaction, routing probes) with no inbound peer scope.
-    pub sender_user_id: Option<String>,
-    /// Inbound channel for the turn that triggered this LLM call.
-    ///
-    /// Paired with [`Self::sender_user_id`]: the channel name (`"whatsapp"`, `"telegram"`, `"email"`, …) the peer reached the agent through.
-    /// Forwarded by subprocess drivers as `x-librefang-current-channel` so the `channel_send` guard scopes the cross-chat check to the **same** channel — a different-channel dispatch stays allowed; only intra-channel re-targeting is the cross-chat-leak pattern.
-    /// `None` out-of-band.
-    pub sender_channel: Option<String>,
-    /// Platform conversation id (Telegram chat_id, WhatsApp group jid, …) the inbound turn arrived on.
-    ///
-    /// Distinct from [`Self::sender_user_id`] for **group chats** — there the chat id is the conversation while `sender_user_id` is the individual speaker; they coincide in DMs.
-    /// Forwarded as `x-librefang-current-chat-id` so the bridge can rehydrate `ToolExecContext::chat_id`; the cross-chat guard compares the outbound `recipient` against this value (with `sender_user_id` as DM fallback) so legitimate group replies pass.
-    /// `None` out-of-band.
-    pub sender_chat_id: Option<String>,
     /// How the OpenAI-compat driver should handle `reasoning_content` on
     /// historical assistant turns for this request's model.
     ///
@@ -416,18 +398,6 @@ pub struct CompletionResponse {
     /// on inner leaf drivers; populated by the outermost chain
     /// wrapper. See librefang/librefang#4807 review nit 10.
     pub actual_provider: Option<String>,
-    /// The model the provider actually used, when it differs from the
-    /// requested model id.
-    ///
-    /// Most drivers honour the requested model verbatim and leave this
-    /// `None`, so billing records the nominated model. Some drivers delegate
-    /// model selection to an external process that resolves its own model —
-    /// e.g. the `codex-cli` driver, where the CLI may run a different model
-    /// than the one requested (librefang/librefang#6134). Those drivers set
-    /// this to the model the call actually ran, and the kernel's
-    /// `UsageRecord` construction honours it so metering reflects reality
-    /// rather than the nominated id. `None` means "use the requested model".
-    pub actual_model: Option<String>,
 }
 
 impl CompletionResponse {
@@ -582,28 +552,6 @@ pub trait LlmDriver: Send + Sync {
     /// replay, tool-schema normalisation, …) without per-driver duplication.
     fn family(&self) -> LlmFamily {
         LlmFamily::Other
-    }
-
-    /// Whether this driver delegates to an external *coding-agent* CLI that
-    /// resolves and runs its own model — Claude Code, Codex, Gemini CLI, Qwen
-    /// Code, CodeWhale, … — rather than calling a raw provider API with a
-    /// caller-nominated model.
-    ///
-    /// This axis is orthogonal to [`LlmFamily`] (which groups by wire format):
-    /// the `claude-code` CLI and the Anthropic HTTP API are both
-    /// [`LlmFamily::Anthropic`], yet only the former is a coding agent.
-    /// Likewise `codex-cli` and the OpenAI API are both [`LlmFamily::OpenAi`].
-    ///
-    /// Coding agents own model selection — the spawned CLI may resolve a model
-    /// that differs from the requested id (codex picks from its own config,
-    /// CodeWhale's `/model auto` re-picks per turn) — so they are the drivers
-    /// that can meaningfully populate [`CompletionResponse::actual_model`]. Raw
-    /// providers honour the requested model verbatim and leave it `None`.
-    ///
-    /// Defaults to `false` so every existing HTTP provider and out-of-tree
-    /// driver keeps compiling unchanged; the in-tree CLI drivers override it.
-    fn is_coding_agent(&self) -> bool {
-        false
     }
 }
 
@@ -902,7 +850,6 @@ mod tests {
             tool_calls: vec![],
             usage: TokenUsage::default(),
             actual_provider: None,
-            actual_model: None,
         };
         assert_eq!(response.text(), "Hello world!");
     }
@@ -1020,24 +967,6 @@ mod tests {
         assert_eq!(BareDriver.family(), LlmFamily::Other);
     }
 
-    #[test]
-    fn test_llm_driver_is_coding_agent_default_is_false() {
-        struct BareDriver;
-
-        #[async_trait]
-        impl LlmDriver for BareDriver {
-            async fn complete(
-                &self,
-                _request: CompletionRequest,
-            ) -> Result<CompletionResponse, LlmError> {
-                unreachable!("test does not call complete")
-            }
-        }
-
-        // Raw providers / out-of-tree drivers are not coding agents by default.
-        assert!(!BareDriver.is_coding_agent());
-    }
-
     #[tokio::test]
     async fn test_default_stream_sends_events() {
         use tokio::sync::mpsc;
@@ -1063,7 +992,6 @@ mod tests {
                         ..Default::default()
                     },
                     actual_provider: None,
-                    actual_model: None,
                 })
             }
         }
@@ -1088,8 +1016,6 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
 
         let response = driver.stream(request, tx).await.unwrap();
@@ -1132,7 +1058,6 @@ mod tests {
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
                     actual_provider: None,
-                    actual_model: None,
                 })
             }
         }
@@ -1158,8 +1083,6 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-
-            ..Default::default()
         };
         let err = driver.stream(request, tx).await.unwrap_err();
         assert!(

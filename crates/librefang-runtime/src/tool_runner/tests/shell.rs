@@ -732,8 +732,7 @@ async fn test_unknown_tool() {
     )
     .await;
     assert!(result.is_error);
-    assert!(result.content.contains("not found"));
-    assert!(result.content.contains("nonexistent_tool"));
+    assert!(result.content.contains("Unknown tool"));
 }
 
 #[tokio::test]

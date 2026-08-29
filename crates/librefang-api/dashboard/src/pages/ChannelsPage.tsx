@@ -5,7 +5,6 @@ import { useChannels, useChannelQr } from "../lib/queries/channels";
 import {
   useReloadChannels,
   useSaveSidecarConfig,
-  useRemoveSidecarConfig,
 } from "../lib/mutations/channels";
 import QRCode from "qrcode";
 import { useUIStore } from "../lib/store";
@@ -19,11 +18,10 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
-import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import {
   Network, Search, CheckCircle2, ChevronRight, X, Grid3X3, List,
   Settings, AlertCircle, CheckSquare, Square, Plus, XCircle,
-  MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Globe, Trash2
+  MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Globe
 } from "lucide-react";
 
 const channelIcons: Record<string, React.ReactNode> = {
@@ -57,12 +55,11 @@ interface ChannelCardProps {
   viewMode: ViewMode;
   onSelect: (name: string, checked: boolean) => void;
   onConfigure: (channel: Channel) => void;
-  onRemove: (channel: Channel) => void;
   onViewDetails: (channel: Channel) => void;
   t: (key: string, opts?: { defaultValue?: string }) => string;
 }
 
-const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onRemove, onViewDetails, t }: ChannelCardProps) {
+const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onViewDetails, t }: ChannelCardProps) {
   // Whole-card click opens the details drawer. Inner controls
   // (checkbox, Configure button) call e.stopPropagation() so the
   // card-level handler doesn't fire when the user clicks them.
@@ -137,17 +134,6 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
           title={t("channels.config")}
         >
           <Settings className="w-3.5 h-3.5" />
-        </button>
-      )}
-      {c.configured && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onRemove(c); }}
-          className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-red-500 hover:bg-red-500/10 transition-colors"
-          aria-label={t("channels.remove", { defaultValue: "Remove channel" })}
-          title={t("channels.remove", { defaultValue: "Remove channel" })}
-        >
-          <Trash2 className="w-3.5 h-3.5" />
         </button>
       )}
       {viewMode === "grid" && (
@@ -612,11 +598,8 @@ export function ChannelsPage() {
 
   const addToast = useUIStore((s) => s.addToast);
 
-  const [removeChannel, setRemoveChannel] = useState<Channel | null>(null);
-
   const channelsQuery = useChannels();
   const reloadMut = useReloadChannels();
-  const removeMut = useRemoveSidecarConfig();
 
   const handleReload = () => {
     reloadMut.mutate(undefined, {
@@ -627,20 +610,6 @@ export function ChannelsPage() {
   const handleCardConfigure = useCallback((ch: Channel) => {
     setSidecarFormChannel(ch);
   }, []);
-  const handleCardRemove = useCallback((ch: Channel) => {
-    setRemoveChannel(ch);
-  }, []);
-  const confirmRemove = () => {
-    if (!removeChannel) return;
-    const name = removeChannel.name;
-    removeMut.mutate(name, {
-      onSuccess: () => {
-        setRemoveChannel(null);
-        addToast(t("channels.remove_success", { defaultValue: "Channel removed" }), "success");
-      },
-      onError: (err) => addToast(toastErr(err, t("common.error")), "error"),
-    });
-  };
 
   const channels = channelsQuery.data ?? [];
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
@@ -858,7 +827,6 @@ export function ChannelsPage() {
                 viewMode={viewMode}
                 onSelect={handleSelect}
                 onConfigure={handleCardConfigure}
-                onRemove={handleCardRemove}
                 onViewDetails={setDetailsChannel}
                 t={t}
               />
@@ -876,18 +844,6 @@ export function ChannelsPage() {
           t={t}
         />
       )}
-
-      <ConfirmDialog
-        isOpen={!!removeChannel}
-        title={t("channels.remove", { defaultValue: "Remove channel" })}
-        message={t("channels.remove_confirm", {
-          defaultValue:
-            "Remove this channel from config.toml and stop its sidecar? Its secrets in secrets.env are left untouched.",
-        })}
-        tone="destructive"
-        onConfirm={confirmRemove}
-        onClose={() => setRemoveChannel(null)}
-      />
 
       {/* Sidecar configure form — schema-driven, hits
           `POST /api/channels/sidecar/{name}/configure`. */}

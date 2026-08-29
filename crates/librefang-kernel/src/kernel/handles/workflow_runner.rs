@@ -305,7 +305,6 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                         agent_id,
                         session_id,
                         TaskKind::Workflow { run_id },
-                        None,
                     );
                     let cfg = self
                         .agents

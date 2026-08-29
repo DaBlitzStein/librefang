@@ -117,10 +117,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_session),
         )
         .route(
-            "/agents/{id}/session/context",
-            axum::routing::get(get_agent_session_context),
-        )
-        .route(
             "/agents/{id}/sessions",
             axum::routing::get(list_agent_sessions).post(create_agent_session),
         )
@@ -1630,10 +1626,6 @@ mod monitoring_tests {
         > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
             kernel.substrate_ref().pool(),
         ));
-        let passkey_store: Arc<dyn librefang_memory::passkey_store::PasskeyStore + Send + Sync> =
-            Arc::new(librefang_memory::passkey_store::SqlitePasskeyStore::new(
-                kernel.substrate_ref().pool(),
-            ));
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
@@ -1659,8 +1651,6 @@ mod monitoring_tests {
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
             idempotency_store,
-            passkey_store,
-            passkey_engine: None,
         });
         (state, tmp)
     }

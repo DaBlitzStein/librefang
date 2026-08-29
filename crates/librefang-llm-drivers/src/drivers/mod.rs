@@ -8,7 +8,6 @@ pub mod anthropic;
 pub mod bedrock;
 pub mod chatgpt;
 pub mod claude_code;
-pub mod codewhale;
 pub mod codex_cli;
 pub mod copilot;
 pub mod fallback;
@@ -136,8 +135,6 @@ pub enum ApiFormat {
     GeminiCli,
     /// Codex CLI subprocess.
     CodexCli,
-    /// CodeWhale CLI subprocess.
-    CodeWhale,
     /// ChatGPT with session token authentication.
     ChatGpt,
     /// GitHub Copilot with automatic token exchange.
@@ -469,16 +466,6 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: false,
     },
     ProviderEntry {
-        name: "codewhale",
-        aliases: &[],
-        base_url: "",
-        api_key_env: "",
-        key_required: false,
-        api_format: ApiFormat::CodeWhale,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
         name: "moonshot",
         aliases: &["kimi", "kimi2"],
         base_url: "https://api.moonshot.ai/v1",
@@ -792,10 +779,6 @@ fn create_driver_from_entry(
             codex_cli::CodexCliDriver::new(config.base_url.clone(), config.skip_permissions)
                 .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
         )),
-        ApiFormat::CodeWhale => Ok(Arc::new(
-            codewhale::CodeWhaleDriver::new(config.base_url.clone(), config.skip_permissions)
-                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
-        )),
         ApiFormat::ChatGpt => Ok(Arc::new(
             chatgpt::ChatGptDriver::with_proxy(api_key, base_url, proxy_url)
                 .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
@@ -927,7 +910,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, deepinfra, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             azure-openai, vertex-ai, nvidia-nim, novita, bedrock, claude-code, qwen-code, gemini-cli, codex-cli, codewhale, \
+             azure-openai, vertex-ai, nvidia-nim, novita, bedrock, claude-code, qwen-code, gemini-cli, codex-cli, \
              qwen, minimax, zhipu, zhipu_coding, zai, moonshot, kimi_coding, \
              qianfan, volcengine, byteplus, alibaba-coding-plan. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
@@ -1008,13 +991,7 @@ pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'stat
     //
     // Order matches typical install prevalence — claude-code first, then
     // codex-cli, then Google's Gemini CLI, then Qwen's fork.
-    const CLI_PRIORITY: &[&str] = &[
-        "claude-code",
-        "codex-cli",
-        "codewhale",
-        "gemini-cli",
-        "qwen-code",
-    ];
+    const CLI_PRIORITY: &[&str] = &["claude-code", "codex-cli", "gemini-cli", "qwen-code"];
     for &name in CLI_PRIORITY {
         if cli_provider_available(name) {
             return Some((name, "", ""));
@@ -1048,27 +1025,6 @@ pub fn provider_api_format(name: &str) -> Option<ApiFormat> {
         .iter()
         .find(|p| p.name == name || p.aliases.contains(&name))
         .map(|p| p.api_format)
-}
-
-/// Whether a provider id (or alias) maps to a coding-agent CLI driver —
-/// `claude-code`, `codex-cli`, `gemini-cli`, `qwen-code`, `codewhale`.
-///
-/// Registry-level mirror of [`crate::llm_driver::LlmDriver::is_coding_agent`]
-/// for the in-tree drivers: lets surfaces that only have a provider name (the
-/// dashboard provider list, metering labels) group coding agents apart from
-/// raw provider APIs without instantiating a driver. Returns `false` for
-/// unknown providers.
-pub fn is_coding_agent_provider(name: &str) -> bool {
-    matches!(
-        provider_api_format(name),
-        Some(
-            ApiFormat::ClaudeCode
-                | ApiFormat::QwenCode
-                | ApiFormat::GeminiCli
-                | ApiFormat::CodexCli
-                | ApiFormat::CodeWhale
-        )
-    )
 }
 
 /// `(env_var, provider_id)` pairs for every cloud provider in the registry
@@ -1106,7 +1062,6 @@ pub fn cli_provider_available(name: &str) -> bool {
         "qwen-code" => qwen_code::qwen_code_available(),
         "gemini-cli" => gemini_cli::gemini_cli_available(),
         "codex-cli" => codex_cli::codex_cli_available(),
-        "codewhale" => codewhale::codewhale_available(),
         _ => false,
     }
 }
@@ -1139,7 +1094,7 @@ pub fn is_proxied_via_env(env_vars: &[&str], official_hosts: &[&str]) -> bool {
 pub fn is_cli_provider(name: &str) -> bool {
     matches!(
         name,
-        "claude-code" | "qwen-code" | "gemini-cli" | "codex-cli" | "codewhale"
+        "claude-code" | "qwen-code" | "gemini-cli" | "codex-cli"
     )
 }
 
@@ -1366,37 +1321,13 @@ mod tests {
         assert!(providers.contains(&"qwen-code"));
         assert!(providers.contains(&"gemini-cli"));
         assert!(providers.contains(&"codex-cli"));
-        assert!(providers.contains(&"codewhale"));
         assert!(providers.contains(&"azure-openai"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
         assert!(providers.contains(&"novita"));
         assert!(providers.contains(&"bedrock"));
         assert!(providers.contains(&"microsoft"));
-        assert_eq!(providers.len(), 44);
-    }
-
-    #[test]
-    fn is_coding_agent_provider_classifies_cli_drivers() {
-        for p in [
-            "claude-code",
-            "codex-cli",
-            "gemini-cli",
-            "qwen-code",
-            "codewhale",
-        ] {
-            assert!(
-                super::is_coding_agent_provider(p),
-                "{p} should be a coding agent"
-            );
-        }
-        for p in ["openai", "anthropic", "gemini", "ollama", "deepseek"] {
-            assert!(
-                !super::is_coding_agent_provider(p),
-                "{p} should NOT be a coding agent"
-            );
-        }
-        assert!(!super::is_coding_agent_provider("nonexistent-xyz"));
+        assert_eq!(providers.len(), 43);
     }
 
     /// `microsoft` (GitHub Models / Azure AI Inference) must declare its own

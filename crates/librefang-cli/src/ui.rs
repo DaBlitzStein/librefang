@@ -2,7 +2,6 @@
 //!
 //! Uses `colored` for terminal output. The interactive TUI uses ratatui instead.
 
-use crate::i18n;
 use colored::Colorize;
 
 // ---------------------------------------------------------------------------
@@ -48,9 +47,9 @@ pub fn banner() {
     println!(
         "  {} {}",
         ">>".bright_cyan().bold(),
-        i18n::t("ui-brand-title").bold()
+        "LibreFang Agent OS".bold()
     );
-    println!("     {}", i18n::t("ui-brand-tagline").dimmed());
+    println!("     {}", "The open-source agent operating system".dimmed());
 }
 
 /// Section header: ">> Title" in cyan.
@@ -75,12 +74,12 @@ pub fn kv_warn(label: &str, value: &str) {
 
 /// Hint line: "  hint: message" in dimmed text.
 pub fn hint(msg: &str) {
-    println!("  {} {}", i18n::t("ui-label-hint").dimmed(), msg.dimmed());
+    println!("  {} {}", "hint:".dimmed(), msg.dimmed());
 }
 
 /// Numbered "Next steps:" list.
 pub fn next_steps(steps: &[&str]) {
-    println!("  {}:", i18n::t("ui-label-next-steps").bold());
+    println!("  {}:", "Next steps".bold());
     for (i, step) in steps.iter().enumerate() {
         println!("    {}. {step}", i + 1);
     }
@@ -94,13 +93,13 @@ pub fn suggest_cmd(label: &str, cmd: &str) {
 /// Red error + yellow "fix:" suggestion.
 pub fn error_with_fix(msg: &str, fix: &str) {
     println!("  {} {}", "\u{2718}".bright_red(), msg.bright_red());
-    println!("    {} {}", i18n::t("ui-label-fix").bright_yellow(), fix);
+    println!("    {} {}", "fix:".bright_yellow(), fix);
 }
 
 /// Yellow warning + "try:" suggestion.
 pub fn warn_with_fix(msg: &str, fix: &str) {
     println!("  {} {}", "-".bright_yellow(), msg.yellow());
-    println!("    {} {}", i18n::t("ui-label-try").bright_yellow(), fix);
+    println!("    {} {}", "try:".bright_yellow(), fix);
 }
 
 /// Provider status line: checkmark/circle + name + env var.
@@ -108,12 +107,11 @@ pub fn provider_status(name: &str, env_var: &str, configured: bool) {
     if configured {
         println!("  {} {:<14} ({})", "\u{2714}".bright_green(), name, env_var);
     } else {
-        let not_set_msg = i18n::t_args("ui-provider-not-set", &[("env_var", env_var)]);
         println!(
-            "  {} {:<14} ({})",
+            "  {} {:<14} ({} not set)",
             "\u{25cb}".dimmed(),
             name.dimmed(),
-            not_set_msg.dimmed()
+            env_var.dimmed()
         );
     }
 }
