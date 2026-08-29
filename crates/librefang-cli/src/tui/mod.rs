@@ -437,6 +437,9 @@ impl App {
                     };
                 }
             }
+            AppEvent::AgentTokenUsageLoaded(usage) => {
+                self.agents.token_usage = Some(usage);
+            }
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
                 match self.active_tab {
@@ -1667,6 +1670,11 @@ impl App {
                 }
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_channels(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::FetchAgentTokenUsage(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_token_usage(backend, id, self.event_tx.clone());
                 }
             }
             agents::AgentAction::UpdateChannels { id, channels } => {
