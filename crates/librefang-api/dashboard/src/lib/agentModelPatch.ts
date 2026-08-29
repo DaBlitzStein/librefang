@@ -57,6 +57,7 @@ function parseTriState(
 ): number | null | undefined {
   const trimmed = raw.trim();
   if (trimmed === "") return null;
+  if (Number.isNaN(Number(trimmed))) return undefined;
   const parsed = parse(trimmed);
   return Number.isNaN(parsed) || !valid(parsed) ? undefined : parsed;
 }
@@ -93,10 +94,10 @@ export function buildModelConfigPatch(
 
   // `?? null` rather than `|| null`: a persisted explicit `0` is a real value,
   // not an absent one.
-  if (maxTokens !== (persisted?.max_tokens ?? null)) {
+  if (maxTokens !== (persisted?.max_tokens ?? null) && (!providerChanged || maxTokens !== null)) {
     patch.max_tokens = maxTokens;
   }
-  if (temperature !== (persisted?.temperature ?? null)) {
+  if (temperature !== (persisted?.temperature ?? null) && (!providerChanged || temperature !== null)) {
     patch.temperature = temperature;
   }
 
