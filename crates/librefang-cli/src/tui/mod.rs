@@ -383,6 +383,33 @@ impl App {
                     .collect();
                 self.agents.mcp_cursor = 0;
             }
+            AppEvent::AgentModelRoutingLoaded {
+                mode,
+                allowed_profiles,
+                cost_budget,
+                available,
+            } => {
+                // Populate the routing editor from the agent's real stored
+                // state, not from whatever the previous screen left behind.
+                self.agents.model_mode = mode;
+                self.agents.router_profiles = available
+                    .into_iter()
+                    .map(|name| {
+                        let checked = allowed_profiles.contains(&name);
+                        (name, checked)
+                    })
+                    .collect();
+                self.agents.router_profile_cursor = 0;
+                self.agents.cost_budget_idx = agents::COST_BUDGET_OPTIONS
+                    .iter()
+                    .position(|(_, wire)| *wire == cost_budget.as_deref())
+                    .unwrap_or(0);
+            }
+            AppEvent::AgentModelRoutingUpdated(id) => {
+                self.agents.status_msg =
+                    crate::i18n::t_args("tui-mod-agent-model-routing-updated", &[("id", &id)]);
+                self.agents.sub = agents::AgentSubScreen::AgentDetail;
+            }
             AppEvent::AgentSkillsUpdated(id) => {
                 self.agents.status_msg =
                     crate::i18n::t_args("tui-mod-agent-skills-updated", &[("id", &id)]);
@@ -436,24 +463,6 @@ impl App {
                         "allowlist".to_string()
                     };
                 }
-            }
-            AppEvent::AgentModelParamsLoaded {
-                model,
-                context_cap,
-                output_cap,
-            } => {
-                self.agents.model_params.load(&model);
-                self.agents.model_params.set_caps(context_cap, output_cap);
-            }
-            AppEvent::AgentModelParamsUpdated { id, warnings } => {
-                // The values were stored as asked. A warning says the provider
-                // may refuse them, not that the save failed.
-                self.agents.status_msg = if warnings.is_empty() {
-                    crate::i18n::t_args("tui-mod-agent-model-params-updated", &[("id", &id)])
-                } else {
-                    warnings.join(" \u{2022} ")
-                };
-                self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
@@ -1690,17 +1699,24 @@ impl App {
                     );
                 }
             }
-            agents::AgentAction::FetchAgentModelParams(id) => {
+            agents::AgentAction::FetchAgentModelRouting(id) => {
                 if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_fetch_agent_model_params(backend, id, self.event_tx.clone());
+                    event::spawn_fetch_agent_model_routing(backend, id, self.event_tx.clone());
                 }
             }
-            agents::AgentAction::UpdateModelParams { id, changes } => {
+            agents::AgentAction::UpdateModelRouting {
+                id,
+                mode,
+                allowed_profiles,
+                cost_budget,
+            } => {
                 if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_update_agent_model_params(
+                    event::spawn_update_agent_model_routing(
                         backend,
                         id,
-                        changes,
+                        mode,
+                        allowed_profiles,
+                        cost_budget,
                         self.event_tx.clone(),
                     );
                 }

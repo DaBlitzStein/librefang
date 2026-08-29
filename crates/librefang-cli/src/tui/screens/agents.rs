@@ -56,8 +56,8 @@ pub enum AgentSubScreen {
     EditMcpServers,
     /// Edit the channel allowlist for an existing agent
     EditChannels,
-    /// Edit the inference parameters (temperature, ladders, limits) for an existing agent
-    EditModelParams,
+    /// Edit model routing (mode, profile allowlist, cost budget) for existing agent
+    EditModelRouting,
     /// Spawning agent (waiting for result)
     Spawning,
 }
@@ -105,8 +105,15 @@ pub struct AgentSelectState {
     pub available_channels: Vec<(String, bool)>,
     pub channel_cursor: usize,
 
-    // Inference-parameter editor (detail view)
-    pub model_params: super::model_params::ModelParamsEditor,
+    // Model routing editor
+    /// `"fixed"` or `"flexible"`.
+    pub model_mode: String,
+    /// The resolved profile catalog with this agent's allowlist applied:
+    /// `(profile name, allowed)`. All-unchecked means "any profile".
+    pub router_profiles: Vec<(String, bool)>,
+    pub router_profile_cursor: usize,
+    /// Index into [`COST_BUDGET_OPTIONS`].
+    pub cost_budget_idx: usize,
 
     // Result
     pub spawned_toml: Option<String>,
@@ -182,15 +189,31 @@ pub enum AgentAction {
     /// `Default::default()`, because nothing ever wrote them: every agent read as "all skills"
     /// and "no MCP servers" no matter what its manifest said.
     LoadAgentDetail(String),
-    /// Fetch the agent's current inference parameters before editing them.
-    FetchAgentModelParams(String),
-    /// Persist edited inference parameters. `None` in a pair clears the agent's
-    /// own value so the per-model override supplies it again.
-    UpdateModelParams {
+    /// Update an agent's model routing mode and router override.
+    UpdateModelRouting {
         id: String,
-        changes: Vec<(String, Option<f64>)>,
+        /// `"fixed"` or `"flexible"`.
+        mode: String,
+        /// Empty means "any profile".
+        allowed_profiles: Vec<String>,
+        /// `None` means "no cap".
+        cost_budget: Option<String>,
     },
+    /// Fetch an agent's model routing settings and the profile catalog.
+    FetchAgentModelRouting(String),
 }
+
+/// Cost-budget choices in the model routing editor, cycled with `+` / `-`.
+///
+/// `(i18n key for the label, wire value)`. The first entry is the no-cap
+/// choice, which has no `CostTier`; the rest map onto one. The label is a
+/// translation key rather than the display text so the picker is localised.
+pub const COST_BUDGET_OPTIONS: &[(&str, Option<&str>)] = &[
+    ("tui-agents-label-routing-no-cap", None),
+    ("tui-agents-label-routing-cheap", Some("cheap")),
+    ("tui-agents-label-routing-medium", Some("medium")),
+    ("tui-agents-label-routing-expensive", Some("expensive")),
+];
 
 impl AgentSelectState {
     pub fn new() -> Self {
@@ -211,13 +234,16 @@ impl AgentSelectState {
             custom_prompt: String::new(),
             tool_checks: DEFAULT_TOOLS.to_vec(),
             tool_cursor: 0,
-            model_params: super::model_params::ModelParamsEditor::new(),
             available_skills: Vec::new(),
             skill_cursor: 0,
             available_mcp: Vec::new(),
             available_channels: Vec::new(),
             channel_cursor: 0,
             mcp_cursor: 0,
+            model_mode: "fixed".to_string(),
+            router_profiles: Vec::new(),
+            router_profile_cursor: 0,
+            cost_budget_idx: 0,
             spawned_toml: None,
             status_msg: String::new(),
         }
@@ -239,6 +265,10 @@ impl AgentSelectState {
         self.mcp_cursor = 0;
         self.available_channels.clear();
         self.channel_cursor = 0;
+        self.model_mode = "fixed".to_string();
+        self.router_profiles.clear();
+        self.router_profile_cursor = 0;
+        self.cost_budget_idx = 0;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -404,7 +434,6 @@ impl AgentSelectState {
         match self.sub {
             AgentSubScreen::AgentList => self.handle_agent_list(key),
             AgentSubScreen::AgentDetail => self.handle_detail(key),
-            AgentSubScreen::EditModelParams => self.handle_edit_model_params(key),
             AgentSubScreen::CreateMethod => self.handle_create_method(key),
             AgentSubScreen::TemplatePicker => self.handle_template_picker(key),
             AgentSubScreen::CustomName => self.handle_custom_name(key),
@@ -416,6 +445,7 @@ impl AgentSelectState {
             AgentSubScreen::EditSkills => self.handle_edit_skills(key),
             AgentSubScreen::EditMcpServers => self.handle_edit_mcp_servers(key),
             AgentSubScreen::EditChannels => self.handle_edit_channels(key),
+            AgentSubScreen::EditModelRouting => self.handle_edit_model_routing(key),
             AgentSubScreen::Spawning => AgentAction::Continue,
         }
     }
@@ -549,63 +579,12 @@ impl AgentSelectState {
                     return AgentAction::FetchAgentChannels(id);
                 }
             }
-            KeyCode::Char('p') => {
-                // Edit this agent's inference parameters
+            KeyCode::Char('r') => {
+                // Edit model routing for this agent
                 if let Some(ref detail) = self.detail {
                     let id = detail.id.clone();
-                    self.sub = AgentSubScreen::EditModelParams;
-                    return AgentAction::FetchAgentModelParams(id);
-                }
-            }
-            _ => {}
-        }
-        AgentAction::Continue
-    }
-
-    /// Key handling for the inference-parameter editor.
-    ///
-    /// While a custom value is being typed the editor swallows navigation keys
-    /// — otherwise `j` in "0.5j" would move the cursor instead of being
-    /// rejected as a non-numeric character.
-    fn handle_edit_model_params(&mut self, key: KeyEvent) -> AgentAction {
-        if self.model_params.custom_buffer().is_some() {
-            match key.code {
-                KeyCode::Esc => self.model_params.cancel_custom(),
-                KeyCode::Backspace => self.model_params.pop_custom_char(),
-                KeyCode::Enter => match self.model_params.commit_custom() {
-                    Ok(()) => self.model_params.status.clear(),
-                    Err(e) => self.model_params.status = e,
-                },
-                KeyCode::Char(c) => self.model_params.push_custom_char(c),
-                _ => {}
-            }
-            return AgentAction::Continue;
-        }
-        match key.code {
-            KeyCode::Esc => {
-                self.sub = AgentSubScreen::AgentDetail;
-            }
-            KeyCode::Up | KeyCode::Char('k') => self.model_params.move_cursor(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.model_params.move_cursor(1),
-            KeyCode::Left | KeyCode::Char('h') => self.model_params.step(-1),
-            KeyCode::Right | KeyCode::Char('l') => self.model_params.step(1),
-            KeyCode::Char('i') => self.model_params.set_inherit(),
-            KeyCode::Char('e') => self.model_params.begin_custom(),
-            KeyCode::Enter => {
-                let changes: Vec<(String, Option<f64>)> = self
-                    .model_params
-                    .changes()
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v))
-                    .collect();
-                self.sub = AgentSubScreen::AgentDetail;
-                if !changes.is_empty() {
-                    if let Some(ref detail) = self.detail {
-                        return AgentAction::UpdateModelParams {
-                            id: detail.id.clone(),
-                            changes,
-                        };
-                    }
+                    self.sub = AgentSubScreen::EditModelRouting;
+                    return AgentAction::FetchAgentModelRouting(id);
                 }
             }
             _ => {}
@@ -874,6 +853,81 @@ impl AgentSelectState {
         AgentAction::Continue
     }
 
+    /// Model routing editor.
+    ///
+    /// `Tab` flips fixed <-> flexible, `Space` toggles a profile in the
+    /// allowlist, `+` / `-` cycle the cost budget, `Enter` saves.
+    ///
+    /// Enter always emits [`AgentAction::UpdateModelRouting`] — including for
+    /// `fixed`, which is how an operator turns routing back off. Returning to
+    /// the detail screen without emitting would silently discard the edit.
+    fn handle_edit_model_routing(&mut self, key: KeyEvent) -> AgentAction {
+        let profile_count = self.router_profiles.len();
+        let flexible = self.model_mode == "flexible";
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            KeyCode::Tab => {
+                self.model_mode = if flexible { "fixed" } else { "flexible" }.to_string();
+            }
+            KeyCode::Up | KeyCode::Char('k') if flexible && self.router_profile_cursor > 0 => {
+                self.router_profile_cursor -= 1;
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if flexible
+                    && profile_count > 0
+                    && self.router_profile_cursor < profile_count - 1 =>
+            {
+                self.router_profile_cursor += 1;
+            }
+            KeyCode::Char(' ') if flexible && profile_count > 0 => {
+                let checked = &mut self.router_profiles[self.router_profile_cursor].1;
+                *checked = !*checked;
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') if flexible => {
+                self.cost_budget_idx = (self.cost_budget_idx + 1) % COST_BUDGET_OPTIONS.len();
+            }
+            KeyCode::Char('-') if flexible => {
+                self.cost_budget_idx = if self.cost_budget_idx == 0 {
+                    COST_BUDGET_OPTIONS.len() - 1
+                } else {
+                    self.cost_budget_idx - 1
+                };
+            }
+            KeyCode::Enter => {
+                if let Some(ref detail) = self.detail {
+                    // In fixed mode the allowlist and budget describe a routing
+                    // decision that will not happen, so they are not sent — the
+                    // server clears the override wholesale.
+                    let (allowed_profiles, cost_budget) = if flexible {
+                        (
+                            self.router_profiles
+                                .iter()
+                                .filter(|(_, checked)| *checked)
+                                .map(|(name, _)| name.clone())
+                                .collect(),
+                            COST_BUDGET_OPTIONS[self.cost_budget_idx]
+                                .1
+                                .map(str::to_string),
+                        )
+                    } else {
+                        (Vec::new(), None)
+                    };
+                    return AgentAction::UpdateModelRouting {
+                        id: detail.id.clone(),
+                        mode: self.model_mode.clone(),
+                        allowed_profiles,
+                        cost_budget,
+                    };
+                }
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
     fn handle_edit_mcp_servers(&mut self, key: KeyEvent) -> AgentAction {
         let len = self.available_mcp.len();
         match key.code {
@@ -1032,8 +1086,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             draw_edit_allowlist(f, area, state);
             return;
         }
-        AgentSubScreen::EditModelParams => {
-            draw_edit_model_params(f, area, state);
+        AgentSubScreen::EditModelRouting => {
+            draw_edit_model_routing(f, area, state);
             return;
         }
         _ => {}
@@ -1045,7 +1099,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::EditSkills
         | AgentSubScreen::EditMcpServers
         | AgentSubScreen::EditChannels
-        | AgentSubScreen::EditModelParams => unreachable!(),
+        | AgentSubScreen::EditModelRouting => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
@@ -1660,99 +1714,102 @@ fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     );
 }
 
-/// Width of the label column in the inference-parameter editor, in cells.
-const LABEL_COLUMN_WIDTH: usize = 22;
-
-/// The {24d8} info glyph the TUI convention puts in front of a field hint.
-const INFO_ICON: char = '\u{24d8}';
-
-/// Render the inference-parameter editor.
+/// Model routing editor: mode, profile allowlist, cost budget.
 ///
-/// Every row shows the resolved-looking value or the word `inherit`, so "this
-/// agent has no opinion" reads as a state rather than as a blank. The ladder
-/// fields also show which rungs exist, which is the whole reason for replacing
-/// the free slider: the useful values are a short list, not a continuum.
-fn draw_edit_model_params(f: &mut Frame, area: Rect, state: &AgentSelectState) {
-    use super::model_params::FIELDS;
-
+/// Labels are the human-readable names an operator recognises; the wire
+/// values (`fixed` / `flexible`, `cheap` / `medium` / `expensive`) are shown
+/// in the value column rather than as the label itself.
+fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     let inner = widgets::render_screen_block(
         f,
         area,
-        crate::i18n::t("tui-agents-title-model-params").trim(),
+        crate::i18n::t("tui-agents-title-model-routing").trim(),
     );
+
     let chunks = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(3),
         Constraint::Min(3),
         Constraint::Length(2),
         Constraint::Length(1),
     ])
     .split(inner);
 
+    let flexible = state.model_mode == "flexible";
+    let mode_label = if flexible {
+        crate::i18n::t("tui-agents-label-routing-flexible")
+    } else {
+        crate::i18n::t("tui-agents-label-routing-fixed")
+    };
+    // Label and value are joined inside the Fluent message rather than by a
+    // format literal here, so a locale can reorder or re-punctuate the line.
+    let mode_line = crate::i18n::t_args("tui-agents-line-routing-mode", &[("mode", &mode_label)]);
     f.render_widget(
         Paragraph::new(format!(
-            "  {}",
-            crate::i18n::t("tui-agents-prompt-model-params")
+            "{}\n{}",
+            mode_line,
+            crate::i18n::t("tui-agents-hint-routing-mode"),
         )),
         chunks[0],
     );
 
-    let editor = &state.model_params;
-    let rows: Vec<ListItem> = FIELDS
-        .iter()
-        .enumerate()
-        .map(|(i, field)| {
-            let selected = i == editor.cursor();
-            let value = match (selected, editor.custom_buffer()) {
-                (true, Some(buf)) => format!("{buf}\u{2588}"),
-                _ => editor.display(i),
-            };
-            let style = if selected {
-                Style::default()
-                    .fg(theme::CYAN)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let marker = if editor.value(i).is_none() {
-                "\u{25cb}"
-            } else {
-                "\u{25c9}"
-            };
-            // Assembled by pushes rather than a format literal: the layout
-            // string would otherwise read as untranslated user-facing text to
-            // the i18n scanner, which cannot tell padding from prose.
-            let mut cell = String::from("  ");
-            cell.push_str(marker);
-            cell.push(' ');
-            cell.push_str(&field.label());
-            while cell.chars().count() < LABEL_COLUMN_WIDTH {
-                cell.push(' ');
-            }
-            ListItem::new(Line::from(vec![
-                Span::styled(cell, style),
-                Span::styled(value, style),
-            ]))
-        })
-        .collect();
-    f.render_widget(List::new(rows), chunks[1]);
+    if !flexible {
+        // Nothing below applies while the agent is pinned to its own model;
+        // showing a disabled picker would imply the values still matter.
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-agents-label-routing-fixed-explainer")),
+            chunks[1],
+        );
+    } else if state.router_profiles.is_empty() {
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-agents-label-no-router-profiles")),
+            chunks[1],
+        );
+    } else {
+        let items: Vec<ListItem> = state
+            .router_profiles
+            .iter()
+            .enumerate()
+            .map(|(i, (name, checked))| {
+                let check = if *checked { "\u{25c9}" } else { "\u{25cb}" };
+                let style = if i == state.router_profile_cursor {
+                    Style::default()
+                        .fg(theme::CYAN)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(format!("  {check} {name}")).style(style)
+            })
+            .collect();
+        f.render_widget(List::new(items), chunks[1]);
+    }
 
-    let mut hint_line = String::from("  ");
-    hint_line.push(INFO_ICON);
-    hint_line.push(' ');
-    hint_line.push_str(&FIELDS[editor.cursor()].hint());
+    let budget_label = crate::i18n::t(COST_BUDGET_OPTIONS[state.cost_budget_idx].0);
+    let allowed = state
+        .router_profiles
+        .iter()
+        .filter(|(_, checked)| *checked)
+        .count();
+    let allowlist_summary = if !flexible {
+        String::new()
+    } else if allowed == 0 {
+        crate::i18n::t("tui-agents-label-routing-any-profile")
+    } else {
+        format!("{allowed}")
+    };
     f.render_widget(
-        Paragraph::new(hint_line).style(Style::default().fg(theme::DIM)),
+        Paragraph::new(crate::i18n::t_args(
+            "tui-agents-line-routing-summary",
+            &[("budget", &budget_label), ("allowed", &allowlist_summary)],
+        )),
         chunks[2],
     );
 
-    let hints = if editor.custom_buffer().is_some() {
-        crate::i18n::t("tui-agents-hints-model-params-custom")
-    } else if editor.status.is_empty() {
-        crate::i18n::t("tui-agents-hints-model-params")
-    } else {
-        editor.status.clone()
-    };
-    f.render_widget(widgets::hint_bar(&hints), chunks[3]);
+    f.render_widget(
+        Paragraph::new(crate::i18n::t("tui-agents-hints-model-routing"))
+            .style(Style::default().fg(theme::DIM)),
+        chunks[3],
+    );
 }
 
 fn draw_checkbox_list(
