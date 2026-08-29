@@ -2455,3 +2455,6 @@ tui-groups-header-description = DESCRIPTION
 tui-groups-loading = Loading groups…
 tui-groups-empty = No groups configured. Create one with `librefang group create <name>`.
 tui-groups-hints = ↑/↓ navigate · r refresh
+
+tui-goals-judge-label = { "  " }Goal Judge:{ " " }
+tui-goals-phase-label = { "  " }Run Phase:{ " " }

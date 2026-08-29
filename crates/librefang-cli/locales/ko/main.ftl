@@ -2454,3 +2454,6 @@ tui-groups-header-description = 설명
 tui-groups-loading = 그룹을 불러오는 중…
 tui-groups-empty = 구성된 그룹이 없습니다. `librefang group create <name>`으로 만드세요.
 tui-groups-hints = ↑/↓ 이동 · r 새로고침
+
+tui-goals-judge-label = { "  " }목표 심사자:{ " " }
+tui-goals-phase-label = { "  " }실행 단계:{ " " }
