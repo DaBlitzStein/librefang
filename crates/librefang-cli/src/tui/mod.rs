@@ -943,6 +943,19 @@ impl App {
                     )
                 };
             }
+            AppEvent::CapabilityRoutingLoaded(routing) => {
+                self.settings.capability_routing = routing;
+                if self.settings.capability_list.selected().is_none() {
+                    self.settings.capability_list.select(Some(0));
+                }
+            }
+            AppEvent::CapabilityRoutingSaved(capability) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    "tui-mod-capability-routing-saved",
+                    &[("capability", &capability)],
+                );
+                self.refresh_settings_capabilities();
+            }
             AppEvent::PeersLoaded(list) => {
                 self.peers.peers = list;
                 if !self.peers.peers.is_empty() && self.peers.list_state.selected().is_none() {
@@ -1694,6 +1707,12 @@ impl App {
         if let Some(backend) = self.backend.to_ref() {
             self.groups.loading = true;
             event::spawn_fetch_groups(backend, self.event_tx.clone());
+        }
+    }
+
+    fn refresh_settings_capabilities(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            event::spawn_fetch_capability_routing(backend, self.event_tx.clone());
         }
     }
 
