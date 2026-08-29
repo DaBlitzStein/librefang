@@ -1081,6 +1081,9 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.capabilities.ofp_connect = asStringArray(capTable.ofp_connect);
   form.capabilities.agent_spawn = asBoolean(capTable.agent_spawn, false);
   form.capabilities.ofp_discover = asBoolean(capTable.ofp_discover, false);
+  for (const key of CAPABILITY_ROUTING_KEYS) {
+    form.capabilities[key] = readCapabilityRouting(capTable, key);
+  }
   extras.capabilities = stripKnown(capTable, FORM_CAPABILITY_KEYS);
 
   // [thinking]
