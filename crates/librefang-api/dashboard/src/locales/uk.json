@@ -1077,6 +1077,7 @@
     "pending_tab": "В очікуванні",
     "install": "Встановити",
     "installing": "Встановлення...",
+    "viewOnMarketplace": "Переглянути на {{marketplace}}",
     "installed_count": "{{count}} встановлено",
     "browse": "Перегляд",
     "browse_registry": "Реєстр",

@@ -56,7 +56,7 @@ import {
   type HubHealthMap,
   type HubQueryState,
 } from "../components/SkillHubBar";
-import { getSkillHub, SKILL_HUBS } from "../lib/skillHubs";
+import { getSkillHub, SKILL_HUBS, skillHubUrl } from "../lib/skillHubs";
 import { isMarketplaceUnavailable } from "../lib/http/errors";
 import {
   Wrench,
@@ -91,6 +91,7 @@ import {
   Upload,
   AlertCircle,
   CloudOff,
+  ExternalLink,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -268,6 +269,10 @@ interface SkillCardProps {
   variant: SkillCardVariant;
   installPending?: boolean;
   source?: MarketplaceSource;
+  /** Registry slug on `source`. Present, it turns the card title into a link
+   *  to the skill's page on its marketplace. Installed skills carry it from
+   *  the manifest's recorded install source. */
+  sourceSlug?: string;
   /** Optional hub origin badge rendered top-right (used by the unified
    *  "all hubs" view to make every card's source obvious). */
   hubBadge?: React.ReactNode;
@@ -291,6 +296,7 @@ const SkillCard = React.memo(function SkillCard({
   variant,
   installPending,
   source,
+  sourceSlug,
   hubBadge,
   onInstall,
   onUninstall,
@@ -318,6 +324,7 @@ const SkillCard = React.memo(function SkillCard({
     variant === "installed"
       ? "group-hover:text-success"
       : "group-hover:text-brand";
+  const marketplaceHref = skillHubUrl(source, sourceSlug);
 
   const icon =
     variant === "installed" ? (
@@ -360,11 +367,30 @@ const SkillCard = React.memo(function SkillCard({
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <h3
-                className={`font-bold text-sm truncate transition-colors ${hoverTextClass}`}
-              >
-                {name}
-              </h3>
+              {marketplaceHref ? (
+                <a
+                  href={marketplaceHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 min-w-0"
+                  title={t("skills.viewOnMarketplace", {
+                    marketplace: getSkillHub(source!)?.name ?? source,
+                  })}
+                >
+                  <h3
+                    className={`font-bold text-sm truncate transition-colors ${hoverTextClass} hover:underline`}
+                  >
+                    {name}
+                  </h3>
+                  <ExternalLink className="w-3 h-3 shrink-0 text-text-dim/60" />
+                </a>
+              ) : (
+                <h3
+                  className={`font-bold text-sm truncate transition-colors ${hoverTextClass}`}
+                >
+                  {name}
+                </h3>
+              )}
               {variant === "installed" && (
                 <Badge variant="success">{t("skills.installed")}</Badge>
               )}
@@ -2173,6 +2199,8 @@ export function SkillsPage() {
                 author={s.author}
                 toolsCount={s.tools_count}
                 tags={s.tags}
+                source={s.source?.type as MarketplaceSource | undefined}
+                sourceSlug={s.source?.slug}
                 onUninstall={() => setUninstalling(s.name)}
                 onViewDetail={() => setDetailSkillName(s.name)}
                 t={t}
@@ -2278,6 +2306,7 @@ export function SkillsPage() {
                   isInstalled={entry.is_installed}
                   installPending={installingId === marketplaceInstallKey("fanghub", entry.name)}
                   source="fanghub"
+                  sourceSlug={entry.name}
                   hubBadge={<HubBadge hub="fanghub" />}
                   onInstall={() => handleInstall(entry.name, "fanghub")}
                   onViewDetail={() => setDetailsFangHub(entry as FangHubSkill)}
@@ -2296,6 +2325,7 @@ export function SkillsPage() {
                   isInstalled={entry.is_installed}
                   installPending={installingId === marketplaceInstallKey(entry._hub, entry.slug)}
                   source={entry._hub}
+                  sourceSlug={entry.slug}
                   hubBadge={<HubBadge hub={entry._hub} />}
                   onInstall={() => handleInstall(entry.slug, entry._hub)}
                   onViewDetail={() => {

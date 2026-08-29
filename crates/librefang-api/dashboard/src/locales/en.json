@@ -1077,6 +1077,7 @@
     "pending_tab": "Pending",
     "install": "Install",
     "installing": "Installing...",
+    "viewOnMarketplace": "View on {{marketplace}}",
     "installed_count": "{{count}} Installed",
     "browse": "Browse",
     "browse_registry": "Registry",
