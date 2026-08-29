@@ -2134,6 +2134,13 @@ model-header-resolves-to = 解析到
 model-header-auth = 认证
 model-header-models = 模型
 model-header-base-url = 基础 URL
+model-overrides-cleared = 已清除模型 { $model } 的覆盖设置。
+model-overrides-clear-failed = 清除 { $model } 的覆盖设置失败：{ $status }
+model-overrides-header-field = 字段
+model-overrides-header-value = 值
+model-overrides-none-set = 模型 { $model } 未设置覆盖。
+model-overrides-saved = 已保存模型 { $model } 的覆盖设置。
+model-overrides-save-failed = 保存 { $model } 的覆盖设置失败：{ $status }
 model-picker-item =     { $idx }. { $id } { $tier }
 # Approvals command specific keys
 approval-none-pending = 没有待处理的批准请求。
