@@ -6,6 +6,7 @@ import {
   promoteAgentType,
   restoreTemplateVersion,
   spawnEphemeral,
+  putAgentTemplateToml,
 } from "../http/client";
 import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
 import { agentTypeKeys, budgetKeys, usageKeys } from "../queries/keys";
@@ -31,6 +32,18 @@ export function useUpdateAgentType() {
   return useMutation({
     mutationFn: ({ name, spec }: { name: string; spec: AgentTypeSpec }) =>
       updateAgentType(name, spec),
+    onSuccess: (_data, { name }) => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
+    },
+  });
+}
+
+export function useUpdateAgentTypeToml() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, toml }: { name: string; toml: string }) =>
+      putAgentTemplateToml(name, toml),
     onSuccess: (_data, { name }) => {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });

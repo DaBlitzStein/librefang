@@ -146,6 +146,7 @@ export {
   getAgentChannels,
   getAgentTemplateToml,
   getTemplateHistory,
+  putAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
