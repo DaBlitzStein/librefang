@@ -4161,6 +4161,16 @@
     "title": "에이전트 타입",
     "tools": "도구",
     "tools_hint": "이 데몬이 제공하는 도구 목록에서 선택하며, 목록에 없는 식별자도 입력할 수 있습니다.",
-    "tools_search": "도구 검색…"
+    "tools_search": "도구 검색…",
+    "restore": "Restore",
+    "restore_title": "Restore from registry — {{name}}",
+    "restore_confirm": "Overwrite the local agent type with the registry version? This cannot be undone.",
+    "restore_identical": "This agent type is identical to the registry version.",
+    "restore_no_registry": "This agent type does not exist in the registry.",
+    "restore_success": "Agent type restored from registry",
+    "restore_failed": "Could not restore from registry",
+    "restore_diff_field": "Field",
+    "restore_diff_local": "Local",
+    "restore_diff_registry": "Registry"
   }
 }
