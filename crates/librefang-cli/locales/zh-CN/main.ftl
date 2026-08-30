@@ -2328,3 +2328,6 @@ tui-groups-header-description = 描述
 tui-groups-loading = 正在加载用户组…
 tui-groups-empty = 未配置任何用户组。使用 `librefang group create <name>` 创建。
 tui-groups-hints = ↑/↓ 导航 · r 刷新
+
+tui-goals-judge-label = { "  " }目标裁判:{ " " }
+tui-goals-phase-label = { "  " }运行阶段:{ " " }

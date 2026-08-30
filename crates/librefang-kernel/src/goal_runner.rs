@@ -41,6 +41,7 @@ use librefang_types::goal::{
 };
 
 use crate::background::{classify_tick_error, TickOutcome};
+use crate::KernelApi;
 
 fn lock_goal_run_start_stop(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
     match lock.lock() {
@@ -62,6 +63,80 @@ const TICK_INTERVAL: Duration = Duration::from_secs(2);
 /// the background executor's circuit breaker (#5168) so a quota-exhausted
 /// provider does not get hammered on every iteration.
 const MAX_RATE_LIMIT_STREAK: u32 = 3;
+
+/// Result of [`create_and_start_goal`]: the persisted goal id and whether a
+/// run was scheduled for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoalLaunch {
+    pub goal_id: GoalId,
+    pub started: bool,
+}
+
+impl GoalLaunch {
+    /// Confirmation text for surfaces without a localized message catalog
+    /// (channel adapters, dashboard chat WebSocket).
+    pub fn message(&self, description: &str) -> String {
+        let goal_id = self.goal_id;
+        if self.started {
+            format!("Goal created and started: {description} (ID: {goal_id})")
+        } else {
+            format!(
+                "Goal created (ID: {goal_id}) but the run could not start — \
+                 kernel self-handle unset. Restart the daemon and resume the goal."
+            )
+        }
+    }
+}
+
+/// Persist a goal for `agent_id` and immediately start a run for it.
+///
+/// Every chat surface that exposes `/goal` — the channel bridge, the dashboard
+/// chat WebSocket and the TUI chat runner — goes through this one function, so
+/// a goal created from Telegram is identical in shape to one created from the
+/// dashboard (upstream #3355).
+pub fn create_and_start_goal(
+    kernel: &dyn KernelApi,
+    agent_id: AgentId,
+    description: &str,
+    loop_engineering: bool,
+) -> Result<GoalLaunch, String> {
+    if description.chars().count() > 4096 {
+        return Err(format!(
+            "Goal description too long ({} chars, max 4096)",
+            description.chars().count()
+        ));
+    }
+
+    let goal_id = GoalId::new();
+    let now = Utc::now().to_rfc3339();
+    let title: String = description.chars().take(256).collect();
+    let entry = serde_json::json!({
+        "id": goal_id.to_string(),
+        "title": title,
+        "description": description,
+        "status": GoalStatus::Pending.to_string(),
+        "progress": 0,
+        "agent_id": agent_id.to_string(),
+        "loop_engineering": loop_engineering,
+        "created_at": now,
+        "updated_at": now,
+    });
+
+    kernel
+        .memory_substrate()
+        .structured_modify(goals_storage_agent_id(), GOALS_STORAGE_KEY, |current| {
+            let mut goals: Vec<serde_json::Value> = match current {
+                Some(serde_json::Value::Array(arr)) => arr,
+                _ => Vec::new(),
+            };
+            goals.push(entry.clone());
+            Ok((serde_json::Value::Array(goals), ()))
+        })
+        .map_err(|e| format!("Failed to create goal: {e}"))?;
+
+    let started = kernel.start_goal_run(goal_id, agent_id, None);
+    Ok(GoalLaunch { goal_id, started })
+}
 
 /// Result of parsing one agent reply for goal-control markers.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

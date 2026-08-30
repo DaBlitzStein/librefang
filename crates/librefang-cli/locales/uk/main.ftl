@@ -2397,3 +2397,6 @@ tui-groups-header-description = ОПИС
 tui-groups-loading = Завантаження груп…
 tui-groups-empty = Груп не налаштовано. Створіть за допомогою `librefang group create <name>`.
 tui-groups-hints = ↑/↓ навігація · r оновити
+
+tui-goals-judge-label = { "  " }Суддя цілі:{ " " }
+tui-goals-phase-label = { "  " }Фаза запуску:{ " " }
