@@ -64,6 +64,7 @@ import {
   type ManifestFormState,
 } from "../lib/agentManifest";
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
+import { agentKeys } from "../lib/queries/keys";
 import {
   agentQueries,
   useAgentEvents,
@@ -424,16 +425,20 @@ export function AgentsPage() {
       "error",
     );
   const deleteMutation = {
-    mutate: (agentId: string) =>
+    mutate: (agentId: string) => {
+      qc.cancelQueries({ queryKey: agentKeys.detail(agentId) });
       rawDeleteMutation.mutate(agentId, {
         onSuccess: () => handleDeleteSuccess(agentId),
         onError: handleDeleteError,
-      }),
-    mutateAsync: (agentId: string) =>
-      rawDeleteMutation.mutateAsync(agentId, {
+      });
+    },
+    mutateAsync: (agentId: string) => {
+      qc.cancelQueries({ queryKey: agentKeys.detail(agentId) });
+      return rawDeleteMutation.mutateAsync(agentId, {
         onSuccess: () => handleDeleteSuccess(agentId),
         onError: handleDeleteError,
-      }),
+      });
+    },
   };
 
   function mergeHandFlag(agent: AgentDetail, fallback?: boolean) {
