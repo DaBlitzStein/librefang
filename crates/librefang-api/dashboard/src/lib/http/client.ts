@@ -145,6 +145,7 @@ export {
   getAgentMcpServers,
   getAgentTemplateToml,
   getTemplateHistory,
+  putAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
