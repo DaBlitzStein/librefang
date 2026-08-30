@@ -791,6 +791,12 @@
           "api_key_env": "",
           "key_required": false,
           "model": null
+        },
+        "custom_image": {
+          "base_url": "",
+          "api_key_env": "",
+          "key_required": false,
+          "model": null
         }
       },
       "allOf": [
@@ -3189,6 +3195,35 @@
         }
       ]
     },
+    "CustomImageConfig": {
+      "description": "Custom / self-hosted vision endpoint for image description.\n\nSame idea as [`CustomSttConfig`] but for multimodal chat-completion endpoints (OpenAI-compatible `/v1/chat/completions` that accept image content parts).\n\n## Example (`config.toml`) ```toml [media] image_provider = \"local-llava\"\n\n[media.custom_image] base_url = \"http://localhost:8080/v1/chat/completions\" model = \"llava-v1.6\" ```",
+      "type": "object",
+      "properties": {
+        "api_key_env": {
+          "description": "Environment variable that holds the API key.",
+          "default": "",
+          "type": "string"
+        },
+        "base_url": {
+          "description": "Full URL of the OpenAI-compatible chat completions endpoint.",
+          "default": "",
+          "type": "string"
+        },
+        "key_required": {
+          "description": "Reject immediately if the key env var is unset.",
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "description": "Model identifier forwarded to the endpoint.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
     "CustomSttConfig": {
       "description": "Configuration for a self-hosted / custom-URL speech-to-text provider.\n\nPoints STT at any OpenAI-compatible `/v1/audio/transcriptions` endpoint — e.g. a local `faster-whisper-server`, `whisper.cpp` HTTP server, or any other Whisper-API-compatible service. No new dependencies are needed: the same multipart HTTP path used for cloud providers is reused here.\n\n## Example (`config.toml`) ```toml [media] audio_provider = \"local-whisper\"\n\n[media.custom_stt] base_url = \"http://localhost:8080/v1/audio/transcriptions\" # api_key_env = \"MY_LOCAL_WHISPER_KEY\"  # omit for keyless servers  # pragma: allowlist secret key_required = false model = \"large-v3\" ```",
       "type": "object",
@@ -4712,6 +4747,20 @@
           "description": "Enable audio transcription. Default: true.",
           "default": true,
           "type": "boolean"
+        },
+        "custom_image": {
+          "description": "Custom / self-hosted vision endpoint for image description.\n\nUsed when `image_provider` is set to a name that is not one of the built-in providers (`anthropic`, `openai`, `groq`, `gemini`).",
+          "default": {
+            "base_url": "",
+            "api_key_env": "",
+            "key_required": false,
+            "model": null
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/CustomImageConfig"
+            }
+          ]
         },
         "custom_stt": {
           "description": "Custom / self-hosted STT endpoint configuration.\n\nWhen `audio_provider` is set to a name that is not one of the built-in providers (`groq`, `openai`, `minimax`, `fireworks`, `together`, `siliconflow`, `gemini`, `elevenlabs`), this block is consulted and the request is forwarded to an OpenAI-compatible Whisper endpoint at `custom_stt.base_url`.",
