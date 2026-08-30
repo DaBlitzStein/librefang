@@ -2785,6 +2785,8 @@
     "cmd_peers": "Pokaż połączone węzły",
     "cmd_a2a": "Pokaż agentów A2A",
     "cmd_queue": "Pokaż status kolejki agenta",
+    "cmd_goal": "Utwórz i uruchom autonomiczny cel",
+    "commands_loading": "Wczytywanie poleceń — naciśnij Enter ponownie za chwilę.",
     "cmd_col_command": "Polecenie",
     "cmd_col_desc": "Opis",
     "no_agents_available": "Brak dostępnych agentów.",
