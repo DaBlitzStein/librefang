@@ -1307,6 +1307,18 @@ async function getText(path: string): Promise<string> {
   return response.text();
 }
 
+async function putText<T>(path: string, body: string): Promise<T> {
+  const response = await fetchWithTimeout(path, {
+    method: "PUT",
+    headers: buildHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
+    body,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as T;
+}
+
 export async function postQuickInit(): Promise<{ status: string; provider?: string; model?: string; message?: string }> {
   return post("/api/init", {});
 }
@@ -1714,6 +1726,10 @@ export async function listAgentTemplates(): Promise<AgentTemplate[]> {
 
 export async function getAgentTemplateToml(name: string): Promise<string> {
   return getText(`/api/templates/${encodeURIComponent(name)}/toml`);
+}
+
+export async function putAgentTemplateToml(name: string, toml: string): Promise<AgentTypeDetail> {
+  return putText<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}/toml`, toml);
 }
 
 export async function getAgentType(name: string): Promise<AgentTypeDetail> {

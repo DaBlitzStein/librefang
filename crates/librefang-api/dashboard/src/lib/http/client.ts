@@ -144,6 +144,7 @@ export {
   // per-agent MCP server assignment — read (#7713)
   getAgentMcpServers,
   getAgentTemplateToml,
+  putAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,

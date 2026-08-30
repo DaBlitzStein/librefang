@@ -34,7 +34,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         )
         .route(
             "/templates/{name}/toml",
-            axum::routing::get(get_agent_template_toml),
+            axum::routing::get(get_agent_template_toml).put(put_agent_template_toml),
         )
 }
 
@@ -504,6 +504,72 @@ pub async fn get_agent_template_toml(
                 read_failed,
             )
                 .into_response()
+        }
+    }
+}
+
+/// PUT /api/templates/:name/toml — Replace the template manifest with raw TOML.
+///
+/// Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.
+/// This is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.
+#[utoipa::path(put, path = "/api/templates/{name}/toml", tag = "system", operation_id = "put_agent_template_toml", params(("name" = String, Path, description = "Template name")), request_body(content = String, content_type = "text/plain"), responses((status = 200, description = "Template updated", body = crate::types::JsonObject), (status = 400, description = "Invalid TOML"), (status = 404, description = "No such agent type"), (status = 409, description = "Name belongs to a live agent")))]
+pub async fn put_agent_template_toml(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    body: String,
+) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
+    let (not_found, invalid_manifest, _read_failed) = template_error_messages(lang, &name);
+    let (invalid_name, managed_elsewhere) = {
+        let t = ErrorTranslator::new(lang);
+        (
+            t.t("api-error-template-invalid-name"),
+            t.t_args("api-error-agent-type-not-editable", &[("name", &name)]),
+        )
+    };
+
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::bad_request(invalid_name)
+            .with_code("template_invalid_name")
+            .into_json_tuple();
+    }
+
+    if !agent_type_path(&name).exists() {
+        return if workspace_agent_manifest_path(&name).exists() {
+            ApiErrorResponse::conflict(managed_elsewhere)
+                .with_code("template_not_editable")
+                .into_json_tuple()
+        } else {
+            ApiErrorResponse::not_found(not_found)
+                .with_code("template_not_found")
+                .into_json_tuple()
+        };
+    }
+
+    let mut manifest: AgentManifest = match toml::from_str(&body) {
+        Ok(m) => m,
+        Err(e) => {
+            return ApiErrorResponse::bad_request(format!("{invalid_manifest}: {e}"))
+                .with_code("template_invalid_toml")
+                .into_json_tuple();
+        }
+    };
+
+    manifest.name = name.clone();
+
+    match persist_agent_type(&name, &manifest) {
+        Ok(rendered) => (
+            StatusCode::OK,
+            Json(agent_type_detail(
+                &name,
+                TemplateSource::AgentType,
+                &manifest,
+                &rendered,
+            )),
+        ),
+        Err(e) => {
+            tracing::error!("{e}");
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
     }
 }
