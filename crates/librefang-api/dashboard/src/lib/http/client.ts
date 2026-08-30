@@ -200,6 +200,7 @@ export {
   createAgentType,
   updateAgentType,
   deleteAgentType,
+  promoteAgentType,
   spawnEphemeral,
   spawnAgent,
   cloneAgent,

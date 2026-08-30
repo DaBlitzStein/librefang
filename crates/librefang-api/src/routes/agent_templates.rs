@@ -9,7 +9,7 @@
 use super::AppState;
 use crate::middleware::RequestLanguage;
 use crate::types::ApiErrorResponse;
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -35,6 +35,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route(
             "/templates/{name}/toml",
             axum::routing::get(get_agent_template_toml),
+        )
+        .route(
+            "/templates/{name}/promote",
+            axum::routing::post(promote_agent_type),
         )
 }
 
@@ -695,6 +699,154 @@ pub async fn delete_agent_type(
             tracing::error!("Failed to delete agent type '{name}': {e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Promote to registry (#8027)
+// ---------------------------------------------------------------------------
+
+/// Resolve a GitHub token: env first, vault fallback.
+///
+/// Mirrors `routes::skills::resolve_github_token` — duplicated here (8
+/// lines) because that function is `pub(super)` to the skills module and
+/// extracting it to a shared location is more churn than the duplication.
+fn resolve_github_token(state: &Arc<AppState>) -> Option<String> {
+    if let Ok(tok) = std::env::var("GITHUB_TOKEN") {
+        if !tok.trim().is_empty() {
+            return Some(tok);
+        }
+    }
+    state
+        .kernel
+        .vault_get("GITHUB_TOKEN")
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// POST /api/templates/:name/promote — open a PR contributing this agent
+/// type to the configured public registry.
+///
+/// Sanitizes the manifest for publication (stripping private fields),
+/// renders it as TOML, then forks the registry repo, pushes the file to
+/// `agent-types/<name>/agent.toml`, and opens a pull request.
+/// Requires `GITHUB_TOKEN` (env or vault).
+#[utoipa::path(
+    post,
+    path = "/api/templates/{name}/promote",
+    tag = "system",
+    operation_id = "promote_agent_type",
+    params(("name" = String, Path, description = "Agent type name")),
+    responses(
+        (status = 200, description = "PR opened against the registry", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid manifest or name"),
+        (status = 401, description = "No GitHub token configured"),
+        (status = 404, description = "Agent type not found"),
+        (status = 502, description = "GitHub request failed")
+    )
+)]
+pub async fn promote_agent_type(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
+    let (not_found, invalid_manifest, read_failed) = template_error_messages(lang, &name);
+
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::not_found(not_found).into_json_tuple();
+    }
+
+    // Read the manifest.
+    let manifest = match read_agent_type(&name).await {
+        Ok(Some((_source, content))) => match toml::from_str::<AgentManifest>(&content) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Invalid template manifest for '{name}': {e}");
+                return ApiErrorResponse::internal(invalid_manifest).into_json_tuple();
+            }
+        },
+        Ok(None) => return ApiErrorResponse::not_found(not_found).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("Failed to read template '{name}': {e}");
+            return ApiErrorResponse::internal(read_failed).into_json_tuple();
+        }
+    };
+
+    // Token check.
+    let Some(token) = resolve_github_token(&state) else {
+        return ApiErrorResponse::unauthorized(
+            "No GitHub token configured. Connect GitHub in Settings or set GITHUB_TOKEN.",
+        )
+        .into_json_tuple();
+    };
+
+    // Sanitize for publication and render.
+    let publishable = librefang_types::manifest_privacy::sanitize_for_publication(&manifest);
+    let manifest_toml = match toml::to_string_pretty(&publishable) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Could not render publishable manifest for '{name}': {e}");
+            return ApiErrorResponse::bad_request(format!(
+                "Cannot render the sanitized manifest as TOML: {e}"
+            ))
+            .into_json_tuple();
+        }
+    };
+
+    let registry_repo = state
+        .kernel
+        .config_snapshot()
+        .skills
+        .registry_repo
+        .clone()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| librefang_skills::registry_pr::DEFAULT_REGISTRY_REPO.to_string());
+
+    // Build the PR body.
+    let mut body = format!("Contributes the `{name}` agent type to the registry.\n\n");
+    if !publishable.description.is_empty() {
+        body.push_str(&format!("- **Description**: {}\n", publishable.description));
+    }
+    body.push_str(&format!(
+        "- **Provider**: {}\n- **Model**: {}\n",
+        publishable.model.provider, publishable.model.model
+    ));
+    if !publishable.tags.is_empty() {
+        body.push_str(&format!("- **Tags**: {}\n", publishable.tags.join(", ")));
+    }
+
+    let req = librefang_skills::registry_pr::GenericProposeRequest {
+        name: &name,
+        registry_repo: &registry_repo,
+        token: &token,
+        prefix: "agent-types",
+        files: vec![("agent.toml".to_string(), manifest_toml.into_bytes())],
+        pr_title: format!("agent-type: contribute `{name}`"),
+        pr_body: body,
+    };
+
+    match librefang_skills::registry_pr::propose_files_to_registry(req).await {
+        Ok(pr) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "pr_url": pr.pr_url,
+                "repo": pr.repo,
+                "branch": pr.branch,
+            })),
+        ),
+        Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
+            ApiErrorResponse::unauthorized(msg).into_json_tuple()
+        }
+        Err(librefang_skills::SkillError::InvalidManifest(msg)) => {
+            ApiErrorResponse::bad_request(msg).into_json_tuple()
+        }
+        Err(librefang_skills::SkillError::NotFound(msg)) => {
+            ApiErrorResponse::not_found(msg).into_json_tuple()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
     }
 }
 

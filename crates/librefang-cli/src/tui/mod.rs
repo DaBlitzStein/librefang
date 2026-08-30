@@ -549,6 +549,18 @@ impl App {
                     );
                 }
             },
+            AppEvent::AgentTypePromoted { name, result } => match result {
+                Ok(pr_url) => {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-promoted", &[("url", &pr_url)]);
+                }
+                Err(err) => {
+                    self.templates.status_msg = crate::i18n::t_args(
+                        "tui-templates-promote-failed",
+                        &[("name", &name), ("error", &err)],
+                    );
+                }
+            },
             AppEvent::TemplateProvidersLoaded(providers) => {
                 self.templates.providers = providers;
             }
@@ -1931,6 +1943,13 @@ impl App {
                     }
                 }
             },
+            templates::TemplatesAction::PromoteTemplate { name } => {
+                self.templates.status_msg =
+                    crate::i18n::t_args("tui-templates-promoting", &[("name", &name)]);
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_promote_agent_type(backend, name, self.event_tx.clone());
+                }
+            }
         }
     }
 

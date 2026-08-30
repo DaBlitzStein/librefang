@@ -4169,6 +4169,12 @@
     "title": "Typy agentów",
     "tools": "Narzędzia",
     "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
-    "tools_search": "Szukaj narzędzi…"
+    "tools_search": "Szukaj narzędzi…",
+    "promote": "Opublikuj w rejestrze",
+    "confirm_promote": "Opublikować typ agenta '{{name}}' w publicznym rejestrze? Manifest zostanie oczyszczony i przesłany jako pull request na GitHubie.",
+    "promoted": "PR w rejestrze utworzony",
+    "promote_failed": "Nie udało się opublikować typu agenta",
+    "promote_success": "Pull request został utworzony w rejestrze. Sprawdź i scal, gdy będzie gotowy.",
+    "view_pr": "Zobacz pull request"
   }
 }
