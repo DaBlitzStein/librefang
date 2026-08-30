@@ -131,6 +131,13 @@ export interface ManifestFormState {
   tools_disabled: boolean;
   inherit_parent_context: boolean;
   generate_identity_files: boolean;
+
+  workspaces: Array<{
+    _uid: string;
+    name: string;
+    path: string;
+    mode: "rw" | "r";
+  }>;
 }
 
 export interface ManifestExtras {
@@ -223,6 +230,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
   tools_disabled: false,
   inherit_parent_context: true,
   generate_identity_files: true,
+  workspaces: [],
 });
 
 // Keys the form fully owns within each scope. Anything else is preserved
@@ -260,6 +268,7 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "context_injection",
   "response_format",
   "exec_policy",
+  "workspaces",
 ]);
 const FORM_MODEL_KEYS = new Set([
   "provider",
@@ -435,6 +444,19 @@ export const serializeManifestForm = (
   }
   if (!form.generate_identity_files) {
     writeBoolScalar(lines, "generate_identity_files", false);
+  }
+
+  if (form.workspaces.length) {
+    const wsBody: string[] = [];
+    for (const ws of form.workspaces) {
+      const n = ws.name.trim();
+      const p = ws.path.trim();
+      if (!n || !p) continue;
+      const parts = [`path = ${escapeTomlString(p)}`];
+      if (ws.mode === "r") parts.push(`mode = "r"`);
+      wsBody.push(`${tomlBareKeyOrQuoted(n)} = { ${parts.join(", ")} }`);
+    }
+    if (wsBody.length) lines.push("", "[workspaces]", ...wsBody);
   }
 
   if (form.tags.length) lines.push(`tags = ${tomlArray(form.tags)}`);
@@ -1037,6 +1059,17 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
         content: asString(ci.content),
         position: asEnum(ci.position, INJECTION_POSITIONS, "system"),
         condition: asString(ci.condition),
+      }));
+  }
+
+  if (isTomlTable(parsed.workspaces)) {
+    form.workspaces = Object.entries(parsed.workspaces)
+      .filter(([, v]) => isTomlTable(v))
+      .map(([name, v]) => ({
+        _uid: generateParsedUid(),
+        name,
+        path: asString((v as TomlTable).path),
+        mode: asString((v as TomlTable).mode) === "r" ? "r" as const : "rw" as const,
       }));
   }
 
