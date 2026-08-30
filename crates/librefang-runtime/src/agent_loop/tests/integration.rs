@@ -367,6 +367,7 @@ fn fresh_session() -> librefang_memory::session::Session {
     librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -478,6 +479,7 @@ async fn test_empty_response_after_tool_use_returns_fallback() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -543,6 +545,7 @@ async fn test_empty_response_max_tokens_returns_fallback() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -608,6 +611,7 @@ async fn test_normal_response_not_replaced_by_fallback() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -664,6 +668,7 @@ async fn test_success_response_preserves_reply_directives() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -725,6 +730,7 @@ async fn test_max_tokens_partial_response_preserves_reply_directives() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1038,6 +1044,7 @@ async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles(
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1169,6 +1176,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1348,6 +1356,7 @@ async fn test_streaming_max_continuations_return_preserves_reply_directives() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1555,6 +1564,7 @@ fn cascade_leak_fixture() -> (
     let session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1670,6 +1680,7 @@ async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1762,6 +1773,7 @@ async fn test_streaming_max_continuations_with_directives_preserves_reply_direct
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1827,6 +1839,7 @@ async fn test_streaming_empty_response_after_tool_use_returns_fallback() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1968,6 +1981,7 @@ async fn test_empty_first_response_retries_and_recovers() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2027,6 +2041,7 @@ async fn test_empty_first_response_fallback_when_retry_also_empty() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2092,6 +2107,7 @@ async fn test_streaming_empty_response_max_tokens_returns_fallback() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2516,6 +2532,7 @@ fn run_agent_loop_future_size_stays_within_its_order_of_magnitude() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
