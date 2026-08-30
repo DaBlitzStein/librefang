@@ -50,6 +50,7 @@ use crate::types;
         routes::create_agent_type,
         routes::update_agent_type,
         routes::delete_agent_type,
+        routes::promote_agent_type,
         routes::list_commands,
         routes::get_command,
         routes::queue_status,

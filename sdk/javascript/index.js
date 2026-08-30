@@ -1642,6 +1642,10 @@ class SystemResource {
     return this._c._request("DELETE", `/api/templates/${name}`);
   }
 
+  async promoteAgentType(name) {
+    return this._c._request("POST", `/api/templates/${name}/promote`);
+  }
+
   async getAgentTemplateToml(name) {
     return this._c._request("GET", `/api/templates/${name}/toml`);
   }

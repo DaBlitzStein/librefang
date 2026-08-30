@@ -1325,6 +1325,9 @@ class _SystemResource(_Resource):
     def delete_agent_type(self, name: str):
         return self._c._request("DELETE", f"/api/templates/{name}")
 
+    def promote_agent_type(self, name: str):
+        return self._c._request("POST", f"/api/templates/{name}/promote")
+
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
 
