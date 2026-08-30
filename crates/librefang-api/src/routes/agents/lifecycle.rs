@@ -1105,6 +1105,7 @@ pub async fn get_agent(
             },
             "system_prompt": entry.manifest.model.system_prompt,
             "description": entry.manifest.description,
+            "source_template": entry.manifest.source_template,
             "tags": entry.manifest.tags,
             "identity": {
                 "emoji": entry.identity.emoji,

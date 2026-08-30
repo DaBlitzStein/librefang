@@ -363,6 +363,7 @@ pub(crate) fn enrich_agent_json(
         "supports_thinking": supports_thinking,
         "ready": ready,
         "profile": e.manifest.profile,
+        "source_template": e.manifest.source_template,
         "schedule": schedule,
         "sessions_24h": sessions_24h,
         "cost_24h": cost_24h,
