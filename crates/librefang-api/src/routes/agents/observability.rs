@@ -687,3 +687,77 @@ pub async fn list_agent_ephemeral_runs(
     })
     .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// Agent manifest version history
+// ---------------------------------------------------------------------------
+
+/// GET /api/agents/{id}/manifest-history — how this agent's config changed over time.
+///
+/// Returns an array of manifest snapshots, newest first.
+/// Each entry carries the full TOML so the dashboard can render a diff
+/// between consecutive versions and offer a one-click restore.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/manifest-history",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent UUID"),
+        ("limit" = Option<u32>, Query, description = "Max entries to return (default 30, max 200)")
+    ),
+    responses(
+        (status = 200, description = "Manifest version history", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid agent id"),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn list_agent_manifest_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let agent_uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => librefang_types::agent::AgentId(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid agent id" })),
+            )
+                .into_response();
+        }
+    };
+    if state.kernel.agent_registry().get(agent_uuid).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "agent not found" })),
+        )
+            .into_response();
+    }
+
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(30)
+        .min(200) as usize;
+
+    let store = librefang_memory::ManifestVersionStore::new(state.kernel.memory_substrate().pool());
+    match store.list_for_agent(&agent_uuid.0.to_string(), limit) {
+        Ok(versions) => {
+            let items: Vec<serde_json::Value> = versions
+                .iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "id": v.id,
+                        "agent_id": v.agent_id,
+                        "agent_name": v.agent_name,
+                        "timestamp": v.timestamp,
+                        "manifest_toml": v.manifest_toml,
+                        "change_source": v.change_source,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "versions": items })).into_response()
+        }
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
+    }
+}
