@@ -314,6 +314,14 @@ pub(crate) enum Commands {
         #[arg(long)]
         watch: bool,
     },
+    /// Purge every trace of an agent: roster entry, sessions, memories,
+    /// workspace directory and any agent-type with the same name. For agents
+    /// the operator already deleted but whose data lingers.
+    Purge {
+        /// Agent name to purge.
+        #[arg(long)]
+        agent: String,
+    },
     /// Manage execution approvals (list, approve, reject) [*].
     #[command(
         subcommand,

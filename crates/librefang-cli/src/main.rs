@@ -398,6 +398,9 @@ fn main() {
             spawned,
         }) => cmd_start(cli.config, tail, spawned, foreground),
         Some(Commands::Restart { tail, foreground }) => cmd_restart(cli.config, tail, foreground),
+        Some(Commands::Purge { agent }) => {
+            std::process::exit(commands::purge::cmd_purge(&agent));
+        }
         Some(Commands::Spawn(args)) => cmd_spawn_alias(
             cli.config,
             args.target,
