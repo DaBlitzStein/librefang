@@ -305,7 +305,6 @@
     "from_template": "З темплейту",
     "from_toml": "З TOML",
     "origin_template": "З {{name}}",
-    "custom_agent": "Власний",
     "template_name": "Назва темплейту",
     "template_placeholder": "-- Виберіть темплейт --",
     "template_custom_name": "Ім'я агента (опціонально)",

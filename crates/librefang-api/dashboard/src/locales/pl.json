@@ -305,7 +305,6 @@
     "from_template": "Z szablonu",
     "from_toml": "Z TOML",
     "origin_template": "Z {{name}}",
-    "custom_agent": "Niestandardowy",
     "template_name": "Nazwa szablonu",
     "template_placeholder": "-- Wybierz szablon --",
     "template_custom_name": "Nazwa agenta (opcjonalnie)",
