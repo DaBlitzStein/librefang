@@ -173,7 +173,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         max_iterations: Option<u32>,
     ) -> bool {
-        self.goal_run_start(goal_id, agent_id, max_iterations)
+        self.goal_run_start(goal_id, agent_id, max_iterations, false, None, None, None)
     }
 
     /// Snapshot the observable state of a goal's run, if one is active.
