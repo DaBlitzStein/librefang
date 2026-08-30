@@ -8111,7 +8111,7 @@ prompt_template = "go"
             .filter(|e| {
                 e.path()
                     .to_str()
-                    .map_or(false, |s| s.ends_with(".workflow.json"))
+                    .is_some_and(|s| s.ends_with(".workflow.json"))
             })
             .collect();
         assert_eq!(
@@ -8121,7 +8121,7 @@ prompt_template = "go"
         );
         let tmp_files: Vec<_> = on_disk
             .iter()
-            .filter(|e| e.path().to_str().map_or(false, |s| s.ends_with(".tmp")))
+            .filter(|e| e.path().to_str().is_some_and(|s| s.ends_with(".tmp")))
             .collect();
         assert!(
             tmp_files.is_empty(),
