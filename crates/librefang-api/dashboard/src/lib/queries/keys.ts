@@ -531,3 +531,10 @@ export const pairingKeys = {
   request: () => [...pairingKeys.all, "request"] as const,
   devices: () => [...pairingKeys.all, "devices"] as const,
 };
+
+// Server-owned chat slash-command catalog (`GET /api/commands`).
+export const chatCommandKeys = {
+  all: ["chat-commands"] as const,
+  lists: () => [...chatCommandKeys.all, "list"] as const,
+  list: () => [...chatCommandKeys.lists()] as const,
+};
