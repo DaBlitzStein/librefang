@@ -477,6 +477,22 @@ impl App {
             AppEvent::AgentTokenUsageLoaded(usage) => {
                 self.agents.token_usage = Some(usage);
             }
+            AppEvent::AgentModelParamsLoaded {
+                model,
+                context_cap,
+                output_cap,
+            } => {
+                self.agents.model_params.load(&model);
+                self.agents.model_params.set_caps(context_cap, output_cap);
+            }
+            AppEvent::AgentModelParamsUpdated { id, warnings } => {
+                self.agents.status_msg = if warnings.is_empty() {
+                    crate::i18n::t_args("tui-mod-agent-model-params-updated", &[("id", &id)])
+                } else {
+                    warnings.join(" \u{2022} ")
+                };
+                self.agents.sub = agents::AgentSubScreen::AgentDetail;
+            }
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
                 match self.active_tab {
@@ -1816,6 +1832,21 @@ impl App {
                         mode,
                         allowed_profiles,
                         cost_budget,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
+            agents::AgentAction::FetchAgentModelParams(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_model_params(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateModelParams { id, changes } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_model_params(
+                        backend,
+                        id,
+                        changes,
                         self.event_tx.clone(),
                     );
                 }
