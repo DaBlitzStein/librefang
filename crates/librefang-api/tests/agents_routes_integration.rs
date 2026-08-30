@@ -2971,3 +2971,92 @@ async fn test_put_skills_rejects_unknown_name_without_internal_error_wording() {
         "a validation failure must not read as a server fault, got: {msg}"
     );
 }
+
+/// #8018 — spawning an agent from a template records the template's name on
+/// the manifest as `source_template`, so it round-trips through both the
+/// detail endpoint and the list endpoint the dashboard reads from.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_from_template_records_source_template() {
+    let h = boot(TEST_TOKEN).await;
+
+    let tmpl_dir = h
+        .state
+        .kernel
+        .config_ref()
+        .home_dir
+        .join("workspaces")
+        .join("agents")
+        .join("origin-tmpl");
+    std::fs::create_dir_all(&tmpl_dir).expect("create template dir");
+    std::fs::write(
+        tmpl_dir.join("agent.toml"),
+        r#"name = "origin-tmpl"
+version = "0.1.0"
+description = "template used to test source_template tracking"
+module = "builtin:chat"
+
+[model]
+provider = "default"
+model = "default"
+"#,
+    )
+    .expect("write agent.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "template": "origin-tmpl", "name": "origin-tmpl-instance" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["agent_id"].as_str().expect("agent_id present");
+
+    let (status, detail) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        detail["source_template"], "origin-tmpl",
+        "GET /api/agents/{{id}} must report the template an agent was spawned from: {detail}"
+    );
+
+    let (status, list) = send(h.app.clone(), get("/api/agents")).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = list["items"].as_array().expect("items array");
+    let entry = entries
+        .iter()
+        .find(|a| a["id"] == id)
+        .expect("spawned agent present in list");
+    assert_eq!(
+        entry["source_template"], "origin-tmpl",
+        "GET /api/agents list entry must also report source_template: {entry}"
+    );
+}
+
+/// A directly-supplied `manifest_toml` (no `template`) must leave
+/// `source_template` unset — provenance is only recorded when the manifest
+/// actually came from a named template.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_without_template_leaves_source_template_unset() {
+    let h = boot(TEST_TOKEN).await;
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({
+                "manifest_toml": "name = \"no-template-agent\"\nversion = \"0.1.0\"\ndescription = \"d\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"default\"\nmodel = \"default\"\n",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["agent_id"].as_str().expect("agent_id present");
+
+    let (status, detail) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        detail["source_template"].is_null(),
+        "an agent spawned from an inline manifest must not report a source_template: {detail}"
+    );
+}
