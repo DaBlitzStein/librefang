@@ -133,6 +133,149 @@ async fn configure_rolls_back_secrets_when_config_write_fails() {
     );
 }
 
+async fn get_channels(app: &axum::Router) -> serde_json::Value {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/channels")
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).expect("channels payload is JSON")
+}
+
+fn channel_row<'a>(payload: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    payload["items"]
+        .as_array()
+        .expect("items is an array")
+        .iter()
+        .find(|row| row["name"] == name)
+        .unwrap_or_else(|| panic!("no row named {name} in {payload}"))
+}
+
+async fn configure(
+    app: &axum::Router,
+    channel_type: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/channels/sidecar/{channel_type}/configure"))
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// Multi-instance support (#8xxx): two `[[sidecar_channels]]` of the same
+/// catalog type, distinguished by `instance_name`, must both configure
+/// successfully, keep independent secrets and default agents, and both
+/// surface on `GET /api/channels` with the shared `channel_type` and their
+/// own `agent`.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_supports_a_second_named_instance_of_the_same_type() {
+    let harness = boot_router().await;
+
+    let (status, _) = configure(
+        &harness.app,
+        "telegram",
+        serde_json::json!({
+            "values": {"TELEGRAM_BOT_TOKEN": "token-default"},
+            "agent": "ops-bot",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = configure(
+        &harness.app,
+        "telegram",
+        serde_json::json!({
+            "values": {"TELEGRAM_BOT_TOKEN": "token-support"},
+            "instance_name": "telegram-support",
+            "agent": "support-bot",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let payload = get_channels(&harness.app).await;
+    let default_row = channel_row(&payload, "telegram");
+    let support_row = channel_row(&payload, "telegram-support");
+
+    assert_eq!(default_row["channel_type"], "telegram");
+    assert_eq!(support_row["channel_type"], "telegram");
+    assert_eq!(default_row["agent"], "ops-bot");
+    assert_eq!(support_row["agent"], "support-bot");
+    assert!(default_row["configured"].as_bool().unwrap());
+    assert!(support_row["configured"].as_bool().unwrap());
+
+    // Each instance's own secret namespace, not a shared bare key —
+    // otherwise the second save would have clobbered the first bot's token.
+    let secrets =
+        std::fs::read_to_string(harness.home.join("secrets.env")).expect("secrets.env exists");
+    assert!(secrets.contains("TELEGRAM_BOT_TOKEN=token-default"));
+    assert!(secrets.contains("TELEGRAM_SUPPORT__TELEGRAM_BOT_TOKEN=token-support"));
+
+    // The catalog picker entry for "telegram" must still be present so a
+    // third instance can be added — it must not disappear once any
+    // instance is configured.
+    let discovery_row = payload["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "telegram" && row["configured"] == false);
+    assert!(
+        discovery_row.is_some(),
+        "telegram catalog row must remain pickable after being configured: {payload}"
+    );
+}
+
+/// A second catalog type cannot steal an instance name already used by a
+/// different type — see `find_conflicting_channel_type`.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_rejects_name_conflict_with_a_different_channel_type() {
+    let harness = boot_router().await;
+
+    let (status, _) = configure(
+        &harness.app,
+        "telegram",
+        serde_json::json!({
+            "values": {"TELEGRAM_BOT_TOKEN": "token"},
+            "instance_name": "shared-bot",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = configure(
+        &harness.app,
+        "ntfy",
+        serde_json::json!({
+            "values": {"NTFY_TOPIC": "alerts"},
+            "instance_name": "shared-bot",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    let payload = get_channels(&harness.app).await;
+    let row = channel_row(&payload, "shared-bot");
+    assert_eq!(
+        row["channel_type"], "telegram",
+        "rejected save must not have reassigned the existing instance's type: {payload}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn registry_returns_typed_metadata_array() {
     let harness = boot_router().await;

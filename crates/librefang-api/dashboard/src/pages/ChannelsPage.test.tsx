@@ -457,6 +457,11 @@ describe("ChannelsPage", () => {
           name: "telegram",
           display_name: "Telegram",
           configured: false,
+          // Discovery rows never carry `channel_type` on the wire (only
+          // configured rows do) — `makeChannel`'s default is a leftover
+          // from its "slack" base, so it's overridden here to match a real
+          // discovery row shape and get the right instance-name default.
+          channel_type: undefined,
           fields: [
             {
               key: "TELEGRAM_BOT_TOKEN",
@@ -481,6 +486,7 @@ describe("ChannelsPage", () => {
     expect(arg).toMatchObject({
       name: "telegram",
       values: { TELEGRAM_BOT_TOKEN: "abc-123" },
+      instanceName: "telegram",
     });
   });
 
@@ -493,6 +499,7 @@ describe("ChannelsPage", () => {
           name: "telegram",
           display_name: "Telegram",
           configured: false,
+          channel_type: undefined,
           fields: [{ key: "TOKEN", label: "Token", type: "secret" }],
         }),
       ]),

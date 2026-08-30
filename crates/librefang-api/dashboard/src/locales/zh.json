@@ -1062,7 +1062,18 @@
     "qr_expired_restart": "二维码已过期 — 请重启 sidecar 后重试",
     "qr_login": "二维码登录",
     "qr_scan_with_app": "请使用 {{channel}} 应用扫码",
-    "sidecar_details": "作为进程外 sidecar 适配器运行。请在 config.toml ([[sidecar_channels]]) 中管理，路径为 Config → Sidecar Channels，或使用通道卡片上的齿轮打开配置抽屉。"
+    "sidecar_details": "作为进程外 sidecar 适配器运行。请在 config.toml ([[sidecar_channels]]) 中管理，路径为 Config → Sidecar Channels，或使用通道卡片上的齿轮打开配置抽屉。",
+    "instance_count_one": "{{count}} 个实例",
+    "instance_count_other": "{{count}} 个实例",
+    "instance_name_label": "实例名称",
+    "instance_name_placeholder": "例如：telegram-support",
+    "instance_name_hint_first": "此实例的唯一名称。由于尚未配置任何实例，默认使用渠道类型。",
+    "instance_name_hint_next": "此渠道类型已配置 {{count}} 个实例。请选择一个唯一名称以创建新实例，而不是覆盖现有的机器人。",
+    "instance_name_hint_edit": "此处无法更改实例名称——如需重命名，请删除后重新添加。",
+    "default_agent_label": "默认代理",
+    "default_agent_none": "无默认值（第一个可用代理）",
+    "default_agent_none_short": "无",
+    "default_agent_hint": "此实例上没有更具体绑定的入站消息将路由到此代理。"
   },
   "skills": {
     "title": "技能",

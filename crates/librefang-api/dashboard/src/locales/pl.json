@@ -1062,7 +1062,20 @@
     "qr_expired_restart": "Kod QR wygasł — uruchom ponownie sidecar, aby spróbować ponownie",
     "qr_login": "Logowanie QR",
     "qr_scan_with_app": "Zeskanuj za pomocą swojej aplikacji {{channel}}",
-    "sidecar_details": "Działa jako zewnętrzny proces sidecar. Zarządzaj nim w config.toml ([[sidecar_channels]]) — Konfiguracja → Kanały Sidecar, lub użyj ikony koła zębatego na karcie kanału, aby otworzyć panel konfiguracji."
+    "sidecar_details": "Działa jako zewnętrzny proces sidecar. Zarządzaj nim w config.toml ([[sidecar_channels]]) — Konfiguracja → Kanały Sidecar, lub użyj ikony koła zębatego na karcie kanału, aby otworzyć panel konfiguracji.",
+    "instance_count_one": "{{count}} instancja",
+    "instance_count_few": "{{count}} instancje",
+    "instance_count_many": "{{count}} instancji",
+    "instance_count_other": "{{count}} instancji",
+    "instance_name_label": "Nazwa instancji",
+    "instance_name_placeholder": "np. telegram-support",
+    "instance_name_hint_first": "Unikalna nazwa dla tej instancji. Domyślnie ustawiana na typ kanału, ponieważ żadna nie jest jeszcze skonfigurowana.",
+    "instance_name_hint_next": "Ten typ kanału ma już skonfigurowane {{count}} instancje. Wybierz unikalną nazwę, aby utworzyć nową zamiast nadpisywać istniejącego bota.",
+    "instance_name_hint_edit": "Nazwy instancji nie można tutaj zmienić — usuń i dodaj ponownie, aby ją zmienić.",
+    "default_agent_label": "Domyślny agent",
+    "default_agent_none": "Brak domyślnego (pierwszy dostępny agent)",
+    "default_agent_none_short": "Brak",
+    "default_agent_hint": "Wiadomości przychodzące na tej instancji bez bardziej szczegółowego powiązania trafiają do tego agenta."
   },
   "skills": {
     "title": "Umiejętności",
