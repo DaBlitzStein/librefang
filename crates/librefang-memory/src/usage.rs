@@ -8,6 +8,17 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
+/// One recorded LLM call, as the per-agent history surfaces it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsageEventRow {
+    pub timestamp: String,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+    pub tool_calls: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Date-range filtering (#7891)
 // ---------------------------------------------------------------------------
@@ -990,6 +1001,42 @@ impl UsageStore {
 
         tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
+    }
+
+    /// The agent's most recent calls, newest first.
+    ///
+    /// Backed by the existing `idx_usage_agent_time` index, so this is an
+    /// index scan bounded by `limit`, not a table walk.
+    pub fn recent_events(
+        &self,
+        agent_id: AgentId,
+        limit: u32,
+    ) -> LibreFangResult<Vec<UsageEventRow>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls
+                 FROM usage_events
+                 WHERE agent_id = ?1
+                 ORDER BY timestamp DESC
+                 LIMIT ?2",
+            )
+            .map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map(rusqlite::params![agent_id.0.to_string(), limit], |row| {
+                Ok(UsageEventRow {
+                    timestamp: row.get(0)?,
+                    model: row.get(1)?,
+                    input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
+                    output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
+                    cost_usd: row.get(4)?,
+                    tool_calls: row.get(5)?,
+                })
+            })
+            .map_err(LibreFangError::memory)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(LibreFangError::memory)?;
+        Ok(rows)
     }
 
     /// Query total cost in the last hour for an agent.
