@@ -239,6 +239,7 @@ pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
     ),
     ("reconcile_orphans", FieldClass::Portable),
     ("async_tasks", FieldClass::Portable),
+    ("source_template", FieldClass::Portable),
 ];
 
 /// One privacy risk in a manifest that is about to be published.
@@ -334,6 +335,7 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         triggers: _,
         reconcile_orphans,
         async_tasks,
+        source_template,
     } = manifest.clone();
 
     // Exhaustive construction — no `..Default::default()`.
@@ -400,6 +402,7 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         triggers: Vec::new(),
         reconcile_orphans,
         async_tasks,
+        source_template,
     }
 }
 

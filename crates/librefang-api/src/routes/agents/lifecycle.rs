@@ -123,6 +123,10 @@ async fn resolve_manifest(
         }
     }
 
+    if let Some(ref tmpl_name) = req.template {
+        manifest.source_template = Some(tmpl_name.clone());
+    }
+
     let name = manifest.name.clone();
     Ok(ResolvedManifest { manifest, name })
 }

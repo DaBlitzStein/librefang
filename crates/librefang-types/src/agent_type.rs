@@ -192,6 +192,7 @@ impl AgentTypeSpec {
             triggers: Vec::new(),
             reconcile_orphans: Default::default(),
             async_tasks: Default::default(),
+            source_template: None,
         }
     }
 }
