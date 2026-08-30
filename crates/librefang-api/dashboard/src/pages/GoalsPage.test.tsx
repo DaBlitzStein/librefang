@@ -16,6 +16,8 @@ import {
   useDeleteGoal,
   useStartGoalRun,
   useStopGoalRun,
+  usePauseGoalRun,
+  useResumeGoalRun,
 } from "../lib/mutations/goals";
 import type { GoalItem, GoalTemplate } from "../api";
 
@@ -31,6 +33,8 @@ vi.mock("../lib/mutations/goals", () => ({
   useDeleteGoal: vi.fn(),
   useStartGoalRun: vi.fn(),
   useStopGoalRun: vi.fn(),
+  usePauseGoalRun: vi.fn(),
+  useResumeGoalRun: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -54,6 +58,8 @@ const useUpdateGoalMock = useUpdateGoal as unknown as ReturnType<typeof vi.fn>;
 const useDeleteGoalMock = useDeleteGoal as unknown as ReturnType<typeof vi.fn>;
 const useStartGoalRunMock = useStartGoalRun as unknown as ReturnType<typeof vi.fn>;
 const useStopGoalRunMock = useStopGoalRun as unknown as ReturnType<typeof vi.fn>;
+const usePauseGoalRunMock = usePauseGoalRun as unknown as ReturnType<typeof vi.fn>;
+const useResumeGoalRunMock = useResumeGoalRun as unknown as ReturnType<typeof vi.fn>;
 
 interface QueryShape<T> {
   data: T;
@@ -98,6 +104,8 @@ function setMutations(opts: {
   useDeleteGoalMock.mockReturnValue({ mutateAsync: del, isPending: false });
   useStartGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   useStopGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
+  usePauseGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
+  useResumeGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   return { create, update, del };
 }
 
