@@ -440,6 +440,17 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Workflows not available.".to_string()
     }
 
+    /// Create an autonomous goal and start driving it with the given agent.
+    /// Returns a user-facing message like "Goal created and started: ... (ID: ...)".
+    async fn create_and_start_goal(
+        &self,
+        _agent_id: AgentId,
+        _description: &str,
+        _loop_engineering: bool,
+    ) -> Result<String, String> {
+        Err("Goals not available.".to_string())
+    }
+
     /// List all registered triggers as formatted text.
     async fn list_triggers_text(&self) -> String {
         "Triggers not available.".to_string()
@@ -7303,6 +7314,30 @@ async fn handle_command(
                 "Usage: /workflow run <name> [input]".to_string()
             }
         }
+        "goal" => {
+            if args.is_empty() {
+                return "Usage: /goal <description> [--loop-engineering]".to_string();
+            }
+            let mut full_text = args.join(" ");
+            let has_loop_engineering = full_text.contains("--loop-engineering");
+            if has_loop_engineering {
+                full_text = full_text
+                    .replace("--loop-engineering", "")
+                    .trim()
+                    .to_string();
+            }
+            let description = full_text;
+            if description.is_empty() {
+                return "Usage: /goal <description> [--loop-engineering]".to_string();
+            }
+            match resolve_for_command() {
+                Some(aid) => handle
+                    .create_and_start_goal(aid, &description, has_loop_engineering)
+                    .await
+                    .unwrap_or_else(|e| format!("Error: {e}")),
+                None => "No agent selected. Use /agent <name> first.".to_string(),
+            }
+        }
         "triggers" => handle.list_triggers_text().await,
         "trigger" => {
             if args.len() >= 4 && args[0] == "add" {
@@ -8310,6 +8345,64 @@ mod tests {
         )
         .await;
         assert!(result.contains("/agents"));
+    }
+
+    /// `/goal` is declared in the channel `CommandDef` table with
+    /// `telegram_menu: true`, so Telegram advertises it in the bot menu. A
+    /// conflict resolution once dropped the handler while leaving the
+    /// declaration in place, and the command answered "Unknown command: /goal"
+    /// straight from the bot menu. Assert the arm exists and is reachable.
+    #[tokio::test]
+    async fn test_handle_command_goal_is_dispatched() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "user1".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        // No description → the arm's own usage string, never the fallthrough.
+        let usage = handle_command(
+            "goal",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+            None,
+            &sender.platform_id,
+        )
+        .await;
+        assert!(
+            usage.contains("Usage: /goal"),
+            "expected the /goal usage string, got: {usage}"
+        );
+
+        // With a description the command reaches the handle. MockHandle keeps
+        // the trait's default `create_and_start_goal`, so the reply is either
+        // the default's error or the no-agent-selected notice — both prove the
+        // arm is wired. The one thing it must never be is the fallthrough.
+        let dispatched = handle_command(
+            "goal",
+            &["ship".to_string(), "the report".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+            None,
+            &sender.platform_id,
+        )
+        .await;
+        assert!(
+            !dispatched.contains("Unknown command"),
+            "/goal fell through to the unknown-command arm: {dispatched}"
+        );
     }
 
     #[tokio::test]
