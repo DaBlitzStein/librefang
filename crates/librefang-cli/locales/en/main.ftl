@@ -2118,12 +2118,11 @@ tui-agents-opt-create-new = Create new agent
 
 tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
 tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [w] Shared folders  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-title-model-params = Model parameters
 tui-agents-prompt-model-params = This agent's own settings win over the model's. `inherit` means the model's setting applies.
 tui-agents-hints-model-params =   [←→] Change  [i] Inherit  [e] Custom value  [Enter] Save  [Esc] Cancel
 tui-agents-hints-model-params-custom =   Type a value  [Enter] Confirm  [Esc] Cancel  (empty = inherit)
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-hints-navigate =     [↑↓] Navigate  [Enter] Select  [Esc] Back
 tui-agents-hints-input =     [Enter] Next  [Esc] Back
 tui-agents-hints-tools =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back

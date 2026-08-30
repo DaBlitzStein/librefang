@@ -2123,12 +2123,11 @@ tui-agents-opt-create-new = Створити нового агента
 
 tui-agents-hints-filter =   [Введення] Фільтр  [Enter] Застосувати  [Esc] Скасувати пошук
 tui-agents-hints-list =   [↑↓] Навігація  [Enter] Деталі  [/] Пошук  [Esc] Назад
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [p] Параметри моделі  [c] Чат  [k] Зупинити  [Esc] Назад
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [p] Параметри моделі  [w] Спільні папки  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-title-model-params = Параметри моделі
 tui-agents-prompt-model-params = Налаштування цього агента мають перевагу над налаштуваннями моделі. `inherit` означає налаштування моделі.
 tui-agents-hints-model-params =   [←→] Змінити  [i] Успадкувати  [e] Своє значення  [Enter] Зберегти  [Esc] Скасувати
 tui-agents-hints-model-params-custom =   Введіть значення  [Enter] Підтвердити  [Esc] Скасувати  (порожнє = успадкувати)
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [w] Спільні папки  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-hints-navigate =     [↑↓] Навігація  [Enter] Обрати  [Esc] Назад
 tui-agents-hints-input =     [Enter] Далі  [Esc] Назад
 tui-agents-hints-tools =     [↑↓] Навігація  [Space] Перемкнути  [Enter] Створити  [Esc] Назад

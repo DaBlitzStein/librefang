@@ -2113,12 +2113,11 @@ tui-agents-opt-create-new = 새 에이전트 생성
 
 tui-agents-hints-filter =   [입력] 필터  [Enter] 적용  [Esc] 검색 취소
 tui-agents-hints-list =   [↑↓] 탐색  [Enter] 상세  [/] 검색  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [p] 모델 파라미터  [c] 채팅  [k] 종료  [Esc] 뒤로
+tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [p] 모델 파라미터  [w] 공유 폴더  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-title-model-params = 모델 파라미터
 tui-agents-prompt-model-params = 이 에이전트의 설정이 모델 설정보다 우선합니다. `inherit`는 모델 설정을 따릅니다.
 tui-agents-hints-model-params =   [←→] 변경  [i] 상속  [e] 직접 입력  [Enter] 저장  [Esc] 취소
 tui-agents-hints-model-params-custom =   값 입력  [Enter] 확인  [Esc] 취소  (비우면 상속)
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [w] 공유 폴더  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-hints-navigate =     [↑↓] 탐색  [Enter] 선택  [Esc] 뒤로
 tui-agents-hints-input =     [Enter] 다음  [Esc] 뒤로
 tui-agents-hints-tools =     [↑↓] 탐색  [Space] 전환  [Enter] 생성  [Esc] 뒤로
