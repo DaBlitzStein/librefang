@@ -8,6 +8,8 @@ import {
   useDeleteGoal,
   useStartGoalRun,
   useStopGoalRun,
+  usePauseGoalRun,
+  useResumeGoalRun,
 } from "../lib/mutations/goals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -19,7 +21,7 @@ import { Badge, type BadgeVariant } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight, Zap, Ban, Activity } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Pause, Square, ChevronDown, ChevronRight, Zap, Ban, Activity } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -105,12 +107,14 @@ async function runSequentialBatch<T>(
 
 export function progressForGoalStatus(status: string, current: number): number {
   if (status === "completed") return 100;
+  if (status === "paused") return Math.max(current, 50);
   if (status === "in_progress") return Math.max(current, 50);
   return 0;
 }
 
 export function goalStatusBadgeVariant(status: string) {
   if (status === "completed") return "success";
+  if (status === "paused") return "default";
   if (status === "in_progress") return "warning";
   return "default";
 }
@@ -190,9 +194,12 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
   const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
   const startMutation = useStartGoalRun();
   const stopMutation = useStopGoalRun();
+  const pauseMutation = usePauseGoalRun();
+  const resumeMutation = useResumeGoalRun();
 
   const run = runQuery.data?.run;
   const isRunning = runQuery.data?.running === true && run?.phase === "running";
+  const isPaused = run?.phase === "paused";
 
   if (!hasAgent) {
     return (
@@ -221,23 +228,85 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
       addToast(toastErr(err, t("common.error")), "error");
     }
   };
+  const onPause = async () => {
+    try {
+      await pauseMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
+  const onResume = async () => {
+    try {
+      await resumeMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
 
   // No `&& run` guard: `isRunning` already requires `run?.phase === "running"`, and the daemon computes `running` as `run.phase == GoalRunPhase::Running` with no `run` field at all when there is no run, so the two cannot disagree. Written as a guard it would have rendered the *start* button for a live run — the opposite of safe for a state it implied it was handling.
   if (isRunning) {
     return (
-      <button
-        type="button"
-        onClick={() => void onStop()}
-        disabled={stopMutation.isPending}
-        className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-        title={t("goals.run_stop")}
-      >
-        {stopMutation.isPending ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Square className="h-3.5 w-3.5" />
-        )}
-      </button>
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => void onPause()}
+          disabled={pauseMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-colors"
+          title={t("goals.run_pause", { defaultValue: "Pause" })}
+        >
+          {pauseMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Pause className="h-3.5 w-3.5" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onStop()}
+          disabled={stopMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+          title={t("goals.run_stop")}
+        >
+          {stopMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Square className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
+    );
+  }
+
+  if (isPaused) {
+    return (
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => void onResume()}
+          disabled={resumeMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
+          title={t("goals.run_resume", { defaultValue: "Resume" })}
+        >
+          {resumeMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Play className="h-3.5 w-3.5" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onStop()}
+          disabled={stopMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+          title={t("goals.run_stop", { defaultValue: "Stop" })}
+        >
+          {stopMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Square className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
     );
   }
 
