@@ -345,6 +345,7 @@ mod tests {
             id: AgentId::new(),
             name: "capped-reactive-agent".to_string(),
             manifest: AgentManifest {
+                source_template: None,
                 autonomous: Some(AutonomousConfig::default()),
                 // schedule stays ScheduleMode::Reactive (the default)
                 ..Default::default()
@@ -372,6 +373,7 @@ mod tests {
         // (`has_processed_message: true`) so the heartbeat must flag it
         // as unresponsive.
         let autonomous_manifest = AgentManifest {
+            source_template: None,
             autonomous: Some(AutonomousConfig::default()),
             schedule: ScheduleMode::Continuous {
                 check_interval_secs: 30,
@@ -431,6 +433,7 @@ mod tests {
         let five_min_ago = Utc::now() - Duration::seconds(300);
         // A non-reactive schedule is what makes the heartbeat consider this agent at all, so it must be set for this test to exercise anything.
         let autonomous_manifest = AgentManifest {
+            source_template: None,
             autonomous: Some(AutonomousConfig::default()),
             schedule: ScheduleMode::Continuous {
                 check_interval_secs: 30,
@@ -488,6 +491,7 @@ mod tests {
         let last_active = one_hour_ago + Duration::seconds(1800);
         // A non-reactive schedule is what makes the heartbeat consider this agent at all, so it must be set for this test to exercise anything.
         let autonomous_manifest = AgentManifest {
+            source_template: None,
             autonomous: Some(AutonomousConfig::default()),
             schedule: ScheduleMode::Continuous {
                 check_interval_secs: 30,
@@ -541,6 +545,7 @@ mod tests {
             id: AgentId::new(),
             name: "processed-then-silent".to_string(),
             manifest: AgentManifest {
+                source_template: None,
                 autonomous: Some(AutonomousConfig::default()),
                 // Non-reactive so the heartbeat considers this agent at all.
                 schedule: ScheduleMode::Continuous {
@@ -592,6 +597,7 @@ mod tests {
         let last_active = Utc::now() - Duration::seconds(300);
         // A non-reactive schedule is what makes the heartbeat consider this agent at all, so it must be set for this test to exercise anything.
         let autonomous_manifest = AgentManifest {
+            source_template: None,
             autonomous: Some(AutonomousConfig::default()),
             schedule: ScheduleMode::Continuous {
                 check_interval_secs: 30,

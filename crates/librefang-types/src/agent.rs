@@ -2463,6 +2463,7 @@ mod tests {
     #[test]
     fn test_manifest_with_routing_and_autonomous() {
         let manifest = AgentManifest {
+            source_template: None,
             routing: Some(ModelRoutingConfig::default()),
             autonomous: Some(AutonomousConfig::default()),
             pinned_model: Some("sonnet".into()),
@@ -2479,6 +2480,7 @@ mod tests {
     fn test_agent_manifest_serialization() {
         let manifest = AgentManifest {
             name: "test-agent".to_string(),
+            source_template: None,
             description: "A test agent".to_string(),
             author: "test".to_string(),
             module: "test.wasm".to_string(),
@@ -2818,6 +2820,7 @@ mod tests {
     #[test]
     fn test_manifest_with_new_fields() {
         let manifest = AgentManifest {
+            source_template: None,
             profile: Some(ToolProfile::Coding),
             fallback_models: Some(vec![FallbackModel {
                 provider: "groq".to_string(),
@@ -3242,6 +3245,7 @@ model = "llama-3.3-70b-versatile"
     #[test]
     fn test_manifest_allowed_plugins_roundtrip_json() {
         let manifest = AgentManifest {
+            source_template: None,
             allowed_plugins: vec!["qdrant-recall".to_string(), "web-search".to_string()],
             ..Default::default()
         };
@@ -3262,6 +3266,7 @@ model = "llama-3.3-70b-versatile"
     #[test]
     fn test_manifest_thinking_config_roundtrip_json() {
         let manifest = AgentManifest {
+            source_template: None,
             thinking: Some(crate::config::ThinkingConfig {
                 budget_tokens: 5000,
                 stream_thinking: true,
@@ -3749,6 +3754,7 @@ model = "claude-3-haiku-20240307"
     #[test]
     fn mcp_disabled_json_roundtrip() {
         let manifest = AgentManifest {
+            source_template: None,
             mcp_disabled: true,
             mcp_servers: vec!["foo".to_string()],
             ..Default::default()
@@ -4012,6 +4018,7 @@ model = "claude-3-haiku-20240307"
         // declarative-trigger field must survive the round-trip.
         let manifest = AgentManifest {
             name: "rt".to_string(),
+            source_template: None,
             reconcile_orphans: OrphanPolicy::Warn,
             triggers: vec![ManifestTrigger {
                 // `task_posted` is a struct variant that accepts the empty

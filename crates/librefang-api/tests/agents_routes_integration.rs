@@ -102,6 +102,7 @@ async fn boot_with_mcp_servers(
 fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
     let manifest = AgentManifest {
         name: name.to_string(),
+        source_template: None,
         ..AgentManifest::default()
     };
     state
@@ -267,6 +268,7 @@ async fn test_get_agent_reports_injected_footprint_tokens_from_system_prompt() {
         .kernel
         .spawn_agent_typed(AgentManifest {
             name: "footprint-short".to_string(),
+            source_template: None,
             ..AgentManifest::default()
         })
         .expect("spawn_agent");
@@ -275,6 +277,7 @@ async fn test_get_agent_reports_injected_footprint_tokens_from_system_prompt() {
         .kernel
         .spawn_agent_typed(AgentManifest {
             name: "footprint-long".to_string(),
+            source_template: None,
             model: librefang_types::agent::ModelConfig {
                 system_prompt: "You are a helpful AI agent. ".repeat(200),
                 ..Default::default()
@@ -306,6 +309,7 @@ async fn test_get_agent_exposes_the_full_mcp_grant_state_6565() {
     let h = boot(TEST_TOKEN).await;
     let manifest = AgentManifest {
         name: "mcp-granted".to_string(),
+        source_template: None,
         mcp_servers: vec!["server-x".to_string()],
         ..AgentManifest::default()
     };
@@ -330,6 +334,7 @@ async fn test_get_agent_reports_mcp_disabled_even_with_a_wildcard_grant_6565() {
     let h = boot(TEST_TOKEN).await;
     let manifest = AgentManifest {
         name: "mcp-off".to_string(),
+        source_template: None,
         // The combination that used to read as "all servers granted".
         mcp_servers: vec!["*".to_string()],
         mcp_disabled: true,
@@ -2050,6 +2055,7 @@ fn spawn_on_model(
 ) -> AgentId {
     let manifest = AgentManifest {
         name: name.to_string(),
+        source_template: None,
         model: librefang_types::agent::ModelConfig {
             provider: provider.to_string(),
             model: model.to_string(),

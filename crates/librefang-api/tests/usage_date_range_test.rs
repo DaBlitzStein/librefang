@@ -49,6 +49,7 @@ fn register_agent(state: &AppState, name: &str) -> AgentId {
         name: name.to_string(),
         manifest: AgentManifest {
             name: name.to_string(),
+            source_template: None,
             description: "test agent".to_string(),
             author: "test".to_string(),
             module: "builtin:chat".to_string(),
