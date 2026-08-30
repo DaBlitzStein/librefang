@@ -62,7 +62,9 @@ use tracing::{debug, info, warn};
 use librefang_memory::{GoalRunRow, GoalRunStore, MemorySubstrate};
 use librefang_types::agent::AgentId;
 use librefang_types::goal::{
-    goals_storage_agent_id, Goal, GoalId, GoalRunPhase, GoalRunState, GoalStatus, GOALS_STORAGE_KEY,
+    goals_storage_agent_id, Goal, GoalId, GoalRunPhase, GoalRunState, GoalStatus,
+    DEFAULT_GOAL_TICK_INTERVAL_SECS, GOALS_STORAGE_KEY, MAX_GOAL_TICK_INTERVAL_SECS,
+    MIN_GOAL_TICK_INTERVAL_SECS,
 };
 
 use crate::background::{classify_tick_error, TickOutcome};
@@ -78,10 +80,6 @@ fn lock_goal_run_start_stop(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuar
         }
     }
 }
-
-/// Pause between iterations. Short — the agent turn itself dominates wall-clock;
-/// this just yields and lets shutdown / stop signals be observed promptly.
-const TICK_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Consecutive provider rate-limit ticks before the loop gives up, mirroring
 /// the background executor's circuit breaker (#5168) so a quota-exhausted
@@ -351,6 +349,85 @@ fn patch_goal(
     }
 }
 
+/// Shared-memory key holding a paused run's resume checkpoint.
+///
+/// ## Why not the `goal_runs` table
+///
+/// That table is the durable mirror of *active* runs, and its schema pins
+/// `phase` with `CHECK (phase IN ('running','finished',
+/// 'max_iterations_reached','rate_limited','stopped'))`, which SQLite cannot
+/// alter in place to admit a `paused` value. A paused run is by definition not
+/// an active run, so the mirror is the wrong home for it regardless — the
+/// shared KV is where the goal-adjacent durable state already lives (the
+/// goals array itself), and it holds the whole checkpoint as one value, which
+/// makes the pause write atomic rather than a multi-column update that could
+/// tear.
+fn goal_pause_key(goal_id: GoalId) -> String {
+    format!("goal_pause_{goal_id}")
+}
+
+/// The state a paused run hands to its successor.
+struct ResumePoint {
+    agent_id: AgentId,
+    iteration: u32,
+    max_iterations: u32,
+    last_progress: u8,
+}
+
+/// Write the checkpoint a paused run resumes from.
+fn persist_pause_checkpoint(substrate: &MemorySubstrate, goal_id: GoalId, state: &GoalRunState) {
+    if let Err(e) = substrate.structured_set(
+        goals_storage_agent_id(),
+        &goal_pause_key(goal_id),
+        serde_json::json!({
+            "agent_id": state.agent_id.to_string(),
+            "iteration": state.iteration,
+            "max_iterations": state.max_iterations,
+            "last_progress": state.last_progress,
+            "paused_at": Utc::now().to_rfc3339(),
+        }),
+    ) {
+        warn!(goal_id = %goal_id, error = %e,
+              "Failed to persist goal pause checkpoint — resume will restart the goal");
+    }
+}
+
+/// Read a paused run's checkpoint, if one is stored.
+fn load_pause_checkpoint(substrate: &MemorySubstrate, goal_id: GoalId) -> Option<ResumePoint> {
+    let value = substrate
+        .structured_get(goals_storage_agent_id(), &goal_pause_key(goal_id))
+        .ok()
+        .flatten()?;
+    Some(ResumePoint {
+        agent_id: value
+            .get("agent_id")
+            .and_then(|v| v.as_str())?
+            .parse()
+            .ok()?,
+        iteration: value.get("iteration").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        max_iterations: value
+            .get("max_iterations")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        last_progress: value
+            .get("last_progress")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(100) as u8,
+    })
+}
+
+/// Drop a pause checkpoint once it has been consumed or cancelled.
+///
+/// Load-bearing: a checkpoint that outlives its pause would silently seed the
+/// *next* fresh start of the same goal with a stale iteration count.
+fn clear_pause_checkpoint(substrate: &MemorySubstrate, goal_id: GoalId) {
+    if let Err(e) = substrate.structured_delete(goals_storage_agent_id(), &goal_pause_key(goal_id))
+    {
+        warn!(goal_id = %goal_id, error = %e, "Failed to clear goal pause checkpoint");
+    }
+}
+
 /// Flatten a `GoalRunState` into the `goal_runs` row shape the store persists.
 fn row_from_state(state: &GoalRunState) -> GoalRunRow {
     GoalRunRow {
@@ -407,6 +484,10 @@ struct RunHandle {
     task: Option<JoinHandle<()>>,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
+    /// Cooperative pause flag. Distinct from `stop` because the two mean
+    /// opposite things to the durable row: `stop` deletes it, `pause`
+    /// checkpoints it.
+    pause: Arc<AtomicBool>,
     /// Monotonic id for this run, used by the task's self-cleanup so it only
     /// removes its OWN registry entry — never a newer run that replaced it.
     generation: u64,
@@ -424,6 +505,13 @@ pub struct GoalRunner {
     /// `run_loop` directly); the in-memory DashMap remains the hot path either
     /// way.
     store: Option<GoalRunStore>,
+    /// Shared-memory handle for pause checkpoints.
+    ///
+    /// Held at construction rather than taken from `start`'s argument, because
+    /// `stop`, `pause`, and `state` must reach a checkpoint written by a
+    /// *previous* process — a goal paused before a daemon restart has to stay
+    /// cancellable and observable without anyone calling `start` first.
+    substrate: Option<Arc<MemorySubstrate>>,
     /// Serializes the compound `start()` / `stop()` sequences for one goal so a
     /// concurrent `start()` cannot observe an empty registry slot between an
     /// in-flight `start()`'s stop and its insert and spawn a second, orphaned
@@ -443,27 +531,76 @@ impl GoalRunner {
             shutdown_rx,
             next_gen: Arc::new(AtomicU64::new(0)),
             store: None,
+            substrate: None,
             start_lock: std::sync::Mutex::new(()),
         }
     }
 
     /// Create a runner backed by a [`GoalRunStore`] so active runs survive a
     /// daemon restart. Boot wires this with the shared memory connection pool.
-    pub fn new_with_store(shutdown_rx: watch::Receiver<bool>, store: GoalRunStore) -> Self {
+    pub fn new_with_store(
+        shutdown_rx: watch::Receiver<bool>,
+        store: GoalRunStore,
+        substrate: Arc<MemorySubstrate>,
+    ) -> Self {
         Self {
             runs: Arc::new(DashMap::new()),
             shutdown_rx,
             next_gen: Arc::new(AtomicU64::new(0)),
             store: Some(store),
+            substrate: Some(substrate),
             start_lock: std::sync::Mutex::new(()),
         }
     }
 
     /// Snapshot the observable state of a goal's run, if one exists.
+    ///
+    /// Falls back to a persisted pause checkpoint when the registry has no
+    /// live entry. A paused run's loop task exits and self-cleans its
+    /// registry slot, so without this fallback pausing a goal would make it
+    /// vanish from `GET /api/goals/{id}/run` entirely.
     pub fn state(&self, goal_id: GoalId) -> Option<GoalRunState> {
-        let handle = self.runs.get(&goal_id)?;
-        // try_lock: None → `running:false`; run_loop must never hold this lock across I/O.
-        handle.state.try_lock().ok().map(|s| s.clone())
+        if let Some(handle) = self.runs.get(&goal_id) {
+            // try_lock: None → `running:false`; run_loop must never hold this lock across I/O.
+            return handle.state.try_lock().ok().map(|s| s.clone());
+        }
+        let substrate = self.substrate.as_ref()?;
+        let checkpoint = load_pause_checkpoint(substrate, goal_id)?;
+        let now = Utc::now();
+        Some(GoalRunState {
+            goal_id,
+            agent_id: checkpoint.agent_id,
+            phase: GoalRunPhase::Paused,
+            iteration: checkpoint.iteration,
+            max_iterations: checkpoint.max_iterations,
+            last_progress: checkpoint.last_progress,
+            last_error: None,
+            started_at: now,
+            updated_at: now,
+        })
+    }
+
+    /// Pause a goal's run, checkpointing its iteration count and progress.
+    ///
+    /// Returns whether a live run was signalled. The loop finishes the turn
+    /// it is on, checkpoints, and exits in [`GoalRunPhase::Paused`]; a later
+    /// [`GoalRunner::start`] picks up from that checkpoint.
+    ///
+    /// Deliberately does NOT abort the task the way [`GoalRunner::stop`]
+    /// does — the loop needs to run to completion of its current turn to
+    /// reach the checkpoint write.
+    pub fn pause(&self, goal_id: GoalId) -> bool {
+        let _guard = lock_goal_run_start_stop(&self.start_lock);
+        let Some(handle) = self.runs.get(&goal_id) else {
+            return false;
+        };
+        // A recovered terminal entry has no loop to signal.
+        if handle.task.is_none() {
+            return false;
+        }
+        handle.pause.store(true, Ordering::SeqCst);
+        info!(goal_id = %goal_id, "Goal run pause requested");
+        true
     }
 
     /// Stop a goal's run if active. Returns whether a run was stopped.
@@ -483,6 +620,22 @@ impl GoalRunner {
     /// `start()` can run it inside its own critical section without re-locking
     /// the non-reentrant `start_lock` (which would deadlock).
     fn stop_locked(&self, goal_id: GoalId) -> bool {
+        // Cancelling discards the resume checkpoint, whether or not a loop is
+        // live: a goal paused before a daemon restart has no registry entry,
+        // so the checkpoint is the ONLY thing cancel has to remove. Leaving
+        // it would make the next start silently resume a run the operator
+        // cancelled.
+        let had_checkpoint = match self.substrate.as_ref() {
+            Some(substrate) => {
+                let existed = load_pause_checkpoint(substrate, goal_id).is_some();
+                if existed {
+                    clear_pause_checkpoint(substrate, goal_id);
+                }
+                existed
+            }
+            None => false,
+        };
+
         if let Some((_, handle)) = self.runs.remove(&goal_id) {
             handle.stop.store(true, Ordering::SeqCst);
             // A recovered terminal entry has no live loop task to abort.
@@ -492,7 +645,7 @@ impl GoalRunner {
             delete_persisted_run(&self.store, goal_id);
             true
         } else {
-            false
+            had_checkpoint
         }
     }
 
@@ -548,6 +701,23 @@ impl GoalRunner {
             return false;
         }
 
+        // Read any pause checkpoint BEFORE `stop_locked`, which clears it —
+        // reading after would make every start look like a fresh one and
+        // silently reset a paused goal back to iteration 0.
+        let resume = self
+            .substrate
+            .as_ref()
+            .and_then(|s| load_pause_checkpoint(s, goal_id));
+        if let Some(r) = resume.as_ref() {
+            info!(
+                goal_id = %goal_id,
+                agent_id = %agent_id,
+                from_iteration = r.iteration,
+                last_progress = r.last_progress,
+                "Resuming goal run from persisted checkpoint"
+            );
+        }
+
         // Replace any prior run for this goal. `stop_locked` (not `stop`)
         // because we already hold `start_lock`, which is non-reentrant.
         self.stop_locked(goal_id);
@@ -556,9 +726,9 @@ impl GoalRunner {
             goal_id,
             agent_id,
             phase: GoalRunPhase::Running,
-            iteration: 0,
+            iteration: resume.as_ref().map(|r| r.iteration).unwrap_or(0),
             max_iterations,
-            last_progress: 0,
+            last_progress: resume.as_ref().map(|r| r.last_progress).unwrap_or(0),
             last_error: None,
             // The verifier is only ever consulted under loop engineering, so
             // do not record one on a run that is not using it — a stored
@@ -590,12 +760,14 @@ impl GoalRunner {
         persist_new_run(&self.store, &initial);
         let state = Arc::new(Mutex::new(initial));
         let stop = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicBool::new(false));
         let generation = self.next_gen.fetch_add(1, Ordering::SeqCst);
 
         let runs = self.runs.clone();
         let shutdown_rx = self.shutdown_rx.clone();
         let loop_state = state.clone();
         let loop_stop = stop.clone();
+        let loop_pause = pause.clone();
         let loop_store = self.store.clone();
 
         // Do not let the task reach self-cleanup before its entry is in the
@@ -637,6 +809,7 @@ impl GoalRunner {
                 loop_engineering,
                 loop_state,
                 loop_stop,
+                loop_pause,
                 shutdown_rx,
                 loop_store,
             )
@@ -657,6 +830,7 @@ impl GoalRunner {
                 task: Some(task),
                 state,
                 stop,
+                pause,
                 generation,
             },
         );
@@ -786,6 +960,7 @@ impl GoalRunner {
                             task: None,
                             state: Arc::new(Mutex::new(state)),
                             stop: Arc::new(AtomicBool::new(true)),
+                            pause: Arc::new(AtomicBool::new(false)),
                             generation: self.next_gen.fetch_add(1, Ordering::SeqCst),
                         },
                     );
@@ -826,6 +1001,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
     loop_engineering: bool,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
     store: Option<GoalRunStore>,
 ) where
@@ -862,6 +1038,12 @@ async fn run_loop<F, Fut, L, E, Efut>(
     let final_phase = loop {
         if stop.load(Ordering::SeqCst) {
             break GoalRunPhase::Stopped;
+        }
+        // Checked before shutdown: a pause that lands as the daemon goes down
+        // must still checkpoint, and a paused row is not auto-resumed at the
+        // next boot the way a shutdown-interrupted run is.
+        if pause.load(Ordering::SeqCst) {
+            break GoalRunPhase::Paused;
         }
         if *shutdown_rx.borrow() {
             interrupted_by_shutdown = true;
@@ -1083,8 +1265,12 @@ async fn run_loop<F, Fut, L, E, Efut>(
 
         iteration += 1;
 
+        let tick_secs = goal
+            .tick_interval_secs
+            .unwrap_or(DEFAULT_GOAL_TICK_INTERVAL_SECS)
+            .clamp(MIN_GOAL_TICK_INTERVAL_SECS, MAX_GOAL_TICK_INTERVAL_SECS);
         tokio::select! {
-            _ = tokio::time::sleep(TICK_INTERVAL) => {}
+            _ = tokio::time::sleep(Duration::from_secs(tick_secs)) => {}
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
                     interrupted_by_shutdown = true;
@@ -1094,11 +1280,34 @@ async fn run_loop<F, Fut, L, E, Efut>(
         }
     };
 
-    {
+    let snapshot = {
         let mut s = state.lock().await;
         s.phase = final_phase;
         s.updated_at = Utc::now();
+        s.clone()
+    };
+
+    if final_phase == GoalRunPhase::Paused {
+        // A pause is a checkpoint, not an ending. The `goal_runs` mirror
+        // tracks *active* runs (and its schema's CHECK constraint does not
+        // even admit a `paused` phase), so the paused run leaves it, exactly
+        // as a cancelled one does — otherwise boot recovery would auto-resume
+        // a goal the operator deliberately suspended.
+        persist_pause_checkpoint(&substrate, goal_id, &snapshot);
+        delete_persisted_run(&store, goal_id);
+        info!(
+            goal_id = %goal_id,
+            iteration = snapshot.iteration,
+            last_progress = snapshot.last_progress,
+            "Goal run paused — state checkpointed for resume"
+        );
+        return;
     }
+
+    // Any other exit settles the run, so a checkpoint from an earlier pause
+    // of the same goal must not survive to seed a later fresh start.
+    clear_pause_checkpoint(&substrate, goal_id);
+
     // A run that reaches a natural terminal phase (completed, capped, rate-
     // limited, agent-blocked, or an operator stop) is settled — drop its
     // durable row so it is never resurfaced as "stale" at the next boot. A
@@ -1225,6 +1434,7 @@ mod tests {
             loop_engineering: false,
             verify_agent_id: None,
             evaluator_model: None,
+            tick_interval_secs: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1267,6 +1477,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -1317,6 +1528,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -1399,6 +1611,7 @@ mod tests {
             false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
         )
@@ -1438,6 +1651,7 @@ mod tests {
             false,
             state.clone(),
             Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
         )
@@ -1473,6 +1687,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -1510,6 +1725,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -1577,6 +1793,7 @@ mod tests {
             false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             rx,
             Some(store.clone()),
         )
@@ -1636,6 +1853,7 @@ mod tests {
             false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             rx,
             Some(store.clone()),
         )
@@ -1672,7 +1890,7 @@ mod tests {
             .unwrap();
 
         let (_tx, rx) = watch::channel(false);
-        let runner = GoalRunner::new_with_store(rx, store.clone());
+        let runner = GoalRunner::new_with_store(rx, store.clone(), substrate.clone());
         runner.start(
             goal_id,
             agent_id,
@@ -1831,7 +2049,7 @@ mod tests {
         let goal_id = GoalId::new();
         let agent_id = AgentId::new();
         let (_tx, rx) = watch::channel(false);
-        let runner = GoalRunner::new_with_store(rx, store.clone());
+        let runner = GoalRunner::new_with_store(rx, store.clone(), substrate.clone());
 
         let started =
             runner.start(
@@ -1857,7 +2075,7 @@ mod tests {
 
     #[test]
     fn recover_stale_run_marks_it_stopped_at_boot() {
-        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let store = store_from(&substrate);
         let goal_id = GoalId::new();
         let agent_id = AgentId::new();
@@ -1879,7 +2097,7 @@ mod tests {
             .unwrap();
 
         let (_tx, rx) = watch::channel(false);
-        let runner = GoalRunner::new_with_store(rx, store.clone());
+        let runner = GoalRunner::new_with_store(rx, store.clone(), substrate.clone());
 
         // 10-minute staleness window → the hour-old run is recovered.
         let recovered = runner.recover_stale_runs(Duration::from_secs(600));
@@ -1901,7 +2119,7 @@ mod tests {
         // surfaces it, instead of returning `None` for a row that exists only
         // on disk (write-only invisibility). Mirrors WorkflowEngine, which
         // loads persisted rows back into memory before the stale sweep.
-        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let store = store_from(&substrate);
         let goal_id = GoalId::new();
         let agent_id = AgentId::new();
@@ -1922,7 +2140,7 @@ mod tests {
             .unwrap();
 
         let (_tx, rx) = watch::channel(false);
-        let runner = GoalRunner::new_with_store(rx, store.clone());
+        let runner = GoalRunner::new_with_store(rx, store.clone(), substrate.clone());
 
         // Before recovery the registry is empty — nothing observable yet.
         assert!(runner.state(goal_id).is_none());
@@ -1954,7 +2172,7 @@ mod tests {
 
     #[test]
     fn recover_skips_fresh_running_run() {
-        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let store = store_from(&substrate);
         let goal_id = GoalId::new();
         let agent_id = AgentId::new();
@@ -1975,7 +2193,7 @@ mod tests {
             .unwrap();
 
         let (_tx, rx) = watch::channel(false);
-        let runner = GoalRunner::new_with_store(rx, store.clone());
+        let runner = GoalRunner::new_with_store(rx, store.clone(), substrate.clone());
         let recovered = runner.recover_stale_runs(Duration::from_secs(600));
         assert!(recovered.is_empty(), "a fresh run must not be recovered");
 
@@ -2115,9 +2333,6 @@ mod tests {
 
     #[test]
     fn parse_tick_keeps_a_learning_in_the_agents_own_words() {
-        // The marker is matched case-insensitively like every other marker,
-        // but the lesson itself is prose that gets replayed into later prompts
-        // and written into a skill. Uppercasing it would corrupt both.
         let p = parse_tick("goal_learned: Retry the API with backoff, not immediately");
         assert_eq!(
             p.learnings,
@@ -2148,7 +2363,6 @@ mod tests {
         assert!(!verdict_is_pass("VERDICT: NEEDS_REWORK"));
         assert!(!verdict_is_pass(""));
         assert!(!verdict_is_pass("Looks good to me!"));
-        // A model that parrots the instruction line has not chosen anything.
         assert!(!verdict_is_pass("VERDICT: PASS|FAIL|NEEDS_REWORK"));
     }
 
@@ -2156,9 +2370,6 @@ mod tests {
     fn plain_goal_prompt_is_unchanged_by_the_new_sections() {
         let goal = test_goal(AgentId::new());
         let plain = build_goal_prompt(&goal, 0, 10, false, false, &[]);
-        // Even with learnings on hand and a verifier configured, a goal that
-        // did not opt in must get the exact prompt it got before, or every
-        // existing goal's provider-side prompt cache is invalidated for free.
         let with_ignored_extras =
             build_goal_prompt(&goal, 0, 10, false, true, &["a lesson".to_string()]);
         assert_eq!(plain, with_ignored_extras);
@@ -2174,7 +2385,6 @@ mod tests {
         let with_verifier = build_goal_prompt(&goal, 0, 10, true, true, &lessons);
         assert!(with_verifier.contains("verifier agent judges this output"));
         assert!(with_verifier.contains("GOAL_LEARNED"));
-        // Only the most recent window is replayed, oldest first.
         assert!(!with_verifier.contains("lesson 2"));
         assert!(with_verifier.contains("lesson 3"));
         assert!(with_verifier.contains("lesson 8"));
@@ -2184,9 +2394,6 @@ mod tests {
         assert!(without_verifier.contains("GOAL_LEARNED"));
     }
 
-    /// The gate has to be able to say no. An agent that claims `GOAL_DONE`
-    /// while the verifier keeps rejecting the work must not close its own
-    /// goal — that is the single failure mode the verifier exists to stop.
     #[tokio::test(start_paused = true)]
     async fn verifier_rejection_blocks_the_agents_own_goal_done() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2227,10 +2434,6 @@ mod tests {
             GoalRunPhase::MaxIterationsReached,
             "a rejected iteration must not finish the run"
         );
-        // The operator needs both halves: that verification is what blocked
-        // the iteration, and the verifier's own stated reason — a bare "did
-        // not pass" would leave them with a healthy-looking run making no
-        // progress and nothing to act on.
         let last_error = s.last_error.as_deref().unwrap_or_default();
         assert!(
             last_error.contains("did not pass verification"),
@@ -2289,10 +2492,6 @@ mod tests {
         assert_eq!(stored.progress, 100);
     }
 
-    /// A "retry" that re-asks the same verifier about the same unchanged text
-    /// just replays the same verdict. The rejection has to go back to the
-    /// generator, carrying the verifier's reason, and the reworked reply has
-    /// to be what the verifier sees next.
     #[tokio::test]
     async fn verifier_rejection_sends_the_work_back_to_the_generator() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2303,8 +2502,6 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         let state = mk_verified_state(goal.id, agent_id, verifier, 1, 3);
 
-        // The verifier rejects the first submission and accepts the reworked
-        // one; the generator only emits GOAL_DONE after being asked to rework.
         let verifier_calls = Arc::new(AtomicU64::new(0));
         let rework_prompts = Arc::new(AtomicU64::new(0));
         let vc = verifier_calls.clone();
@@ -2367,9 +2564,6 @@ mod tests {
         assert_eq!(s.phase, GoalRunPhase::Finished);
     }
 
-    /// A verifier that cannot be reached is an open gate, and an open gate is
-    /// exactly what this mechanism exists to prevent. Its failure must count
-    /// as a rejection, not as a pass.
     #[tokio::test(start_paused = true)]
     async fn an_unreachable_verifier_does_not_wave_the_work_through() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2410,9 +2604,6 @@ mod tests {
         assert_eq!(stored.status, GoalStatus::InProgress);
     }
 
-    /// Loop engineering is opt-in, and the reason it can afford to be is that
-    /// switching it off costs nothing: no verifier turn, no evaluator turn,
-    /// one LLM call per iteration exactly as before.
     #[tokio::test(start_paused = true)]
     async fn a_plain_run_makes_no_extra_llm_calls() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2465,8 +2656,6 @@ mod tests {
         );
     }
 
-    /// The evaluator can conclude the goal is met even when the agent never
-    /// says so — that is the point of having a judge that is not the worker.
     #[tokio::test]
     async fn the_evaluator_can_finish_a_goal_the_agent_never_claimed() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2515,8 +2704,6 @@ mod tests {
         assert_eq!(stored.status, GoalStatus::Completed);
     }
 
-    /// An evaluator outage must not stall a run that the agent itself has
-    /// already reported complete.
     #[tokio::test]
     async fn an_evaluator_failure_falls_back_to_the_agents_marker() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2563,8 +2750,6 @@ mod tests {
         assert_eq!(state.lock().await.phase, GoalRunPhase::Finished);
     }
 
-    /// Lessons are only worth capturing if they outlive the run. They must
-    /// reach the durable store AND the caller's hook.
     #[tokio::test]
     async fn captured_learnings_are_persisted_and_handed_to_the_caller() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2653,9 +2838,6 @@ mod tests {
             .is_none());
     }
 
-    /// A permanently broken condition — deleted agent, revoked key, network
-    /// down — fails identically on every tick. Without a breaker the loop
-    /// spends its whole iteration budget rediscovering that.
     #[tokio::test(start_paused = true)]
     async fn repeated_tick_failures_stop_the_run_before_the_iteration_cap() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2699,24 +2881,6 @@ mod tests {
         );
     }
 
-    /// The registry must never retain an entry for a loop that has ended.
-    ///
-    /// `start()` used to spawn the loop and register its handle afterwards. A
-    /// loop that finishes inside that window runs its self-cleanup `remove_if`
-    /// against a registry that does not hold it yet; the removal finds
-    /// nothing, the registration then lands a handle for a run that is already
-    /// over, and nothing ever collects it — `state()` reports the run forever
-    /// and the map grows by one every time it happens.
-    ///
-    /// Shutdown is pre-signalled here so the loop breaks on its very first
-    /// check, before any store read or agent turn: the shortest path from
-    /// `tokio::spawn` to `remove_if`, and so the widest that window ever gets.
-    ///
-    /// Hitting the race is probabilistic, which is why this runs many rounds
-    /// on a multi-threaded runtime. The invariant it asserts is not: with the
-    /// handle registered before the spawn there is no ordering in which a
-    /// finished loop leaves an entry behind, so this test cannot fail
-    /// spuriously — only when the ordering regresses.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_run_that_ends_immediately_leaves_no_entry_behind() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2741,14 +2905,6 @@ mod tests {
                 None,
             );
 
-            // Probe the registry directly rather than through `state()`:
-            // `state()` answers `None` both for "no entry" and for "the state
-            // lock was momentarily held", and the run loop takes that lock on
-            // its way out. Conflating the two would let a transient lock read
-            // as a clean registry.
-            //
-            // A stale entry is never collected, so exhausting this budget is a
-            // real failure rather than a slow machine.
             for _ in 0..200 {
                 if !runner.runs.contains_key(&goal_id) {
                     break;
@@ -2761,5 +2917,158 @@ mod tests {
                 "round {round}: a finished goal loop left its registry entry behind"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pause / resume (#5744 follow-up)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pause_checkpoints_and_start_resumes_from_it() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let mut goal = test_goal(agent_id);
+        goal.tick_interval_secs = Some(MIN_GOAL_TICK_INTERVAL_SECS);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone(), substrate.clone());
+
+        let turns = Arc::new(AtomicU64::new(0));
+        let send = {
+            let turns = turns.clone();
+            move |_a: AgentId, _p: String| {
+                let turns = turns.clone();
+                async move {
+                    turns.fetch_add(1, Ordering::SeqCst);
+                    Ok("GOAL_PROGRESS: 40".to_string())
+                }
+            }
+        };
+
+        assert!(runner.start(goal_id, agent_id, 100, substrate.clone(), send));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while turns.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(runner.pause(goal_id), "pause must signal the live run");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if runner
+                .state(goal_id)
+                .is_some_and(|s| s.phase == GoalRunPhase::Paused)
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "pause never landed");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let paused_iteration = runner.state(goal_id).unwrap().iteration;
+        assert!(paused_iteration >= 1, "at least one turn must be counted");
+
+        assert!(store.get_run(&goal_id.to_string()).unwrap().is_none());
+
+        let send_pending = |_a: AgentId, _m: String| async move {
+            std::future::pending::<Result<String, String>>().await
+        };
+        assert!(runner.start(goal_id, agent_id, 100, substrate.clone(), send_pending));
+        let resumed = runner.state(goal_id).unwrap();
+        assert_eq!(resumed.phase, GoalRunPhase::Running);
+        assert_eq!(resumed.iteration, paused_iteration);
+        assert_eq!(resumed.last_progress, 40);
+
+        assert!(runner.stop(goal_id));
+    }
+
+    #[test]
+    fn pause_on_an_idle_goal_reports_false() {
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new(rx);
+        assert!(!runner.pause(GoalId::new()));
+    }
+
+    #[tokio::test]
+    async fn stop_discards_a_pause_checkpoint_so_the_next_start_is_fresh() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+
+        persist_pause_checkpoint(
+            &substrate,
+            goal_id,
+            &GoalRunState {
+                goal_id,
+                agent_id,
+                phase: GoalRunPhase::Paused,
+                iteration: 7,
+                max_iterations: 25,
+                last_progress: 65,
+                last_error: None,
+                started_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        );
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store, substrate.clone());
+
+        let observed = runner.state(goal_id).expect("checkpoint must be visible");
+        assert_eq!(observed.phase, GoalRunPhase::Paused);
+        assert_eq!(observed.iteration, 7);
+
+        assert!(
+            runner.stop(goal_id),
+            "cancelling a paused goal must report that it discarded something"
+        );
+        assert!(load_pause_checkpoint(&substrate, goal_id).is_none());
+        assert!(runner.state(goal_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn run_loop_waits_the_goals_configured_tick_interval() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let mut goal = test_goal(agent_id);
+        goal.tick_interval_secs = Some(MIN_GOAL_TICK_INTERVAL_SECS);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 1);
+
+        let send = |_a: AgentId, _p: String| async move { Ok("GOAL_PROGRESS: 5".to_string()) };
+
+        let began = std::time::Instant::now();
+        run_loop(
+            goal.id,
+            agent_id,
+            1,
+            substrate.clone(),
+            send,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+        let elapsed = began.elapsed();
+
+        assert_eq!(state.lock().await.phase, GoalRunPhase::MaxIterationsReached);
+        assert!(
+            elapsed >= Duration::from_secs(MIN_GOAL_TICK_INTERVAL_SECS),
+            "expected at least {MIN_GOAL_TICK_INTERVAL_SECS}s of tick sleep, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(DEFAULT_GOAL_TICK_INTERVAL_SECS),
+            "took as long as the {DEFAULT_GOAL_TICK_INTERVAL_SECS}s default — the goal's \
+             tick_interval_secs override was not honoured, took {elapsed:?}"
+        );
     }
 }
