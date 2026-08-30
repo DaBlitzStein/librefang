@@ -2449,3 +2449,6 @@ purge-removed-roster-entry =   - 名册条目、会话、记忆和 KV 行
 purge-removed-workspace =   - 工作区目录
 purge-removed-agent-type =   - 代理类型模板
 purge-failed = 清除失败：{ $error }
+
+tui-goals-judge-label = { "  " }目标裁判:{ " " }
+tui-goals-phase-label = { "  " }运行阶段:{ " " }

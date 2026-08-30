@@ -7320,27 +7320,20 @@ async fn handle_command(
             }
         }
         "goal" => {
-            if args.is_empty() {
-                return "Usage: /goal <description> [--loop-engineering]".to_string();
-            }
-            let mut full_text = args.join(" ");
-            let has_loop_engineering = full_text.contains("--loop-engineering");
-            if has_loop_engineering {
-                full_text = full_text
-                    .replace("--loop-engineering", "")
-                    .trim()
-                    .to_string();
-            }
-            let description = full_text;
-            if description.is_empty() {
-                return "Usage: /goal <description> [--loop-engineering]".to_string();
-            }
-            match resolve_for_command() {
-                Some(aid) => handle
-                    .create_and_start_goal(aid, &description, has_loop_engineering)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}")),
-                None => "No agent selected. Use /agent <name> first.".to_string(),
+            let usage = || {
+                crate::commands::lookup("goal")
+                    .map(|def| def.usage())
+                    .unwrap_or_default()
+            };
+            match librefang_types::goal::parse_goal_args(&args.join(" ")) {
+                None => usage(),
+                Some((description, loop_engineering)) => match resolve_for_command() {
+                    Some(aid) => handle
+                        .create_and_start_goal(aid, &description, loop_engineering)
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {e}")),
+                    None => "No agent selected. Use /agent <name> first.".to_string(),
+                },
             }
         }
         "triggers" => handle.list_triggers_text().await,
@@ -8392,6 +8385,54 @@ mod tests {
         // the trait's default `create_and_start_goal`, so the reply is either
         // the default's error or the no-agent-selected notice — both prove the
         // arm is wired. The one thing it must never be is the fallthrough.
+        let dispatched = handle_command(
+            "goal",
+            &["ship".to_string(), "the report".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+            None,
+            &sender.platform_id,
+        )
+        .await;
+        assert!(
+            !dispatched.contains("Unknown command"),
+            "/goal fell through to the unknown-command arm: {dispatched}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_goal_is_dispatched() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "user1".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        let usage = handle_command(
+            "goal",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+            None,
+            &sender.platform_id,
+        )
+        .await;
+        assert!(
+            usage.contains("Usage: /goal"),
+            "expected the /goal usage string, got: {usage}"
+        );
+
         let dispatched = handle_command(
             "goal",
             &["ship".to_string(), "the report".to_string()],

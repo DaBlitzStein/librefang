@@ -326,6 +326,7 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "api_key_env = \"{env_var}\"",
         "init wizard: failed to persist verified API key",
         "init wizard: retry of save_env_key failed",
+        "`{other}` is listed in CLI_DISPATCH but has no match arm",
     ];
     if exclusions.contains(&trimmed) {
         return false;

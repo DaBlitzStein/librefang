@@ -590,11 +590,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
-        dashboard_exec: None,
+        dashboard_exec: Some(DashboardExec::Client),
     },
 ];
 
 impl CommandDef {
+    /// One-line usage hint, e.g. `Usage: /goal <description> [--loop-engineering]`.
     pub fn usage(&self) -> String {
         if self.args_hint.is_empty() {
             format!("Usage: /{}", self.name)
@@ -810,6 +811,7 @@ mod tests {
             "budget",
             "peers",
             "a2a",
+            "goal",
         ];
 
         let actual: std::collections::BTreeSet<&str> =

@@ -2495,3 +2495,6 @@ purge-removed-roster-entry =   - roster entry, sessions, memories and KV rows
 purge-removed-workspace =   - workspace directory
 purge-removed-agent-type =   - agent-type template
 purge-failed = Purge failed: { $error }
+
+tui-goals-judge-label = { "  " }Goal Judge:{ " " }
+tui-goals-phase-label = { "  " }Run Phase:{ " " }

@@ -2518,3 +2518,6 @@ purge-removed-roster-entry =   - запис у реєстрі, сесії, сп�
 purge-removed-workspace =   - каталог робочого простору
 purge-removed-agent-type =   - шаблон типу агента
 purge-failed = Не вдалося очистити: { $error }
+
+tui-goals-judge-label = { "  " }Суддя цілі:{ " " }
+tui-goals-phase-label = { "  " }Фаза запуску:{ " " }

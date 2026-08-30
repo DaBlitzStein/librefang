@@ -2493,3 +2493,6 @@ purge-removed-roster-entry =   - 로스터 항목, 세션, 기억 및 KV 행
 purge-removed-workspace =   - 작업 공간 디렉터리
 purge-removed-agent-type =   - 에이전트 유형 템플릿
 purge-failed = 삭제 실패: { $error }
+
+tui-goals-judge-label = { "  " }목표 심사자:{ " " }
+tui-goals-phase-label = { "  " }실행 단계:{ " " }
