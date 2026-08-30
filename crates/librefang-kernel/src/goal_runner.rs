@@ -1580,7 +1580,7 @@ mod tests {
             let store = store_from(&substrate);
             // `true` = shutdown already signalled.
             let (_tx, rx) = watch::channel(true);
-            let runner = GoalRunner::new_with_store(rx, store.clone());
+            let runner = GoalRunner::new_with_store(rx, store.clone(), substrate.clone());
             let agent_id = AgentId::new();
             let goal = test_goal(agent_id);
             seed_goal(&substrate, &goal);
@@ -1637,7 +1637,11 @@ mod tests {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let store = store_from(&substrate);
         let (_tx, rx) = watch::channel(false);
-        let runner = Arc::new(GoalRunner::new_with_store(rx, store.clone()));
+        let runner = Arc::new(GoalRunner::new_with_store(
+            rx,
+            store.clone(),
+            substrate.clone(),
+        ));
         let agent_id = AgentId::new();
         let goal = test_goal(agent_id);
         seed_goal(&substrate, &goal);
