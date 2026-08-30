@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 57;
+const SCHEMA_VERSION: u32 = 58;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -288,6 +288,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // v57: narrow the `memories_fts_au` trigger to the columns it mirrors.
     // As created by v50 it fired on every UPDATE of `memories`, including the per-fragment access bump every recall performs and the bulk confidence decay each consolidation sweep runs — rebuilding FTS rows whose content was byte-identical before and after.
     run_step!(57, migrate_v57);
+
+    // v58: agent manifest version history so operators can see how an
+    // agent's config changed over time and roll back to a prior state.
+    // Purely additive: one new table, no existing row changes meaning.
+    run_step!(58, migrate_v58);
+
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1324,6 +1330,37 @@ fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (57, datetime('now'), 'Guard memories_fts_au with a WHEN clause so the recall access bump and the decay sweep stop rebuilding identical memories_fts rows')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v58: agent manifest version history.
+///
+/// Every write to `agent.toml` (dashboard edits, model changes, skill
+/// allowlist updates, hot-reload from disk) records the full serialized
+/// manifest so an operator can see what changed and when.
+/// `change_source` is a short tag: `"dashboard"`, `"api"`, `"file-watch"`,
+/// `"boot"`, or `"unknown"`.
+///
+/// Retention is per-agent, trimmed on insert by the store (not here).
+fn migrate_v58(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS manifest_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id        TEXT NOT NULL,
+            agent_name      TEXT NOT NULL DEFAULT '',
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id
+            ON manifest_versions(agent_id, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (58, datetime('now'), 'Agent manifest version history table')",
         [],
     )?;
     Ok(())
