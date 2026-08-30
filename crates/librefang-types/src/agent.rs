@@ -1110,6 +1110,9 @@ pub struct AgentManifest {
     /// A malformed spec is reported as a `WARN` once at resolution and treated as absent rather than failing the turn, because an unparseable owner must not take an agent down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// Template this agent was created from, if any (#8018).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_template: Option<String>,
     /// Path to the agent module (WASM or Python file).
     pub module: String,
     /// Scheduling mode.
@@ -1669,6 +1672,7 @@ impl Default for AgentManifest {
             description: String::new(),
             author: String::new(),
             owner: None,
+            source_template: None,
             module: "builtin:chat".to_string(),
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),

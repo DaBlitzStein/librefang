@@ -280,6 +280,8 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         // Instance-specific: the principal an agent acts for names a `[[users]]` /
         // `[[groups]]` entry in *this* deployment, which means nothing in another one.
         owner: _,
+        // Instance-specific: names a template in *this* deployment's workspace.
+        source_template: _,
         module,
         schedule,
         session_mode,
@@ -344,6 +346,7 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         description,
         author: String::new(),
         owner: None,
+        source_template: None,
         module,
         schedule,
         session_mode,
