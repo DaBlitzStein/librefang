@@ -1741,7 +1741,14 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("stranded", "body", Some(&agent.to_string()), Some("boss"))
+            .task_post(
+                "stranded",
+                "body",
+                Some(&agent.to_string()),
+                Some("boss"),
+                0,
+                None,
+            )
             .await
             .expect("post");
         backdate(&kernel, &task, 120).await;
@@ -1769,7 +1776,14 @@ mod task_board_reconcile_tests {
         kernel
             .memory
             .substrate
-            .task_post("fresh", "body", Some(&agent.to_string()), Some("boss"))
+            .task_post(
+                "fresh",
+                "body",
+                Some(&agent.to_string()),
+                Some("boss"),
+                0,
+                None,
+            )
             .await
             .expect("post");
 
@@ -1795,7 +1809,7 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("stuck", "body", Some(&agent.to_string()), None)
+            .task_post("stuck", "body", Some(&agent.to_string()), None, 0, None)
             .await
             .expect("post");
         backdate(&kernel, &task, 120).await;
@@ -1839,7 +1853,14 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("unclaimable", "body", Some(&agent.to_string()), None)
+            .task_post(
+                "unclaimable",
+                "body",
+                Some(&agent.to_string()),
+                None,
+                0,
+                None,
+            )
             .await
             .expect("post");
         backdate(&kernel, &task, 120).await;
@@ -1865,7 +1886,7 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("ignored", "body", Some(&agent.to_string()), None)
+            .task_post("ignored", "body", Some(&agent.to_string()), None, 0, None)
             .await
             .expect("post");
         backdate(&kernel, &task, 120).await;
@@ -1888,7 +1909,7 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("pool", "body", None, None)
+            .task_post("pool", "body", None, None, 0, None)
             .await
             .expect("post");
         backdate(&kernel, &task, 120).await;
@@ -1911,7 +1932,7 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("stranded", "body", Some(&agent.to_string()), None)
+            .task_post("stranded", "body", Some(&agent.to_string()), None, 0, None)
             .await
             .expect("post");
         backdate(&kernel, &task, 3600).await;
@@ -1943,7 +1964,14 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("addressed only", "body", Some(&addressed.to_string()), None)
+            .task_post(
+                "addressed only",
+                "body",
+                Some(&addressed.to_string()),
+                None,
+                0,
+                None,
+            )
             .await
             .expect("post");
         backdate(&kernel, &task, 120).await;
@@ -1979,13 +2007,13 @@ mod task_board_reconcile_tests {
         let newer = kernel
             .memory
             .substrate
-            .task_post("newer", "body", Some(&agent.to_string()), None)
+            .task_post("newer", "body", Some(&agent.to_string()), None, 0, None)
             .await
             .expect("post");
         let older = kernel
             .memory
             .substrate
-            .task_post("older", "body", Some(&agent.to_string()), None)
+            .task_post("older", "body", Some(&agent.to_string()), None, 0, None)
             .await
             .expect("post");
         // Force age and id order to disagree, rather than hoping two random
@@ -2045,7 +2073,7 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("in flight", "body", Some(&agent.to_string()), None)
+            .task_post("in flight", "body", Some(&agent.to_string()), None, 0, None)
             .await
             .expect("post");
 
@@ -2088,7 +2116,14 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("never claimed", "body", Some(&agent.to_string()), None)
+            .task_post(
+                "never claimed",
+                "body",
+                Some(&agent.to_string()),
+                None,
+                0,
+                None,
+            )
             .await
             .expect("post");
         kernel
@@ -2132,7 +2167,7 @@ mod task_board_reconcile_tests {
         let task = kernel
             .memory
             .substrate
-            .task_post("slow turn", "body", Some(&agent.to_string()), None)
+            .task_post("slow turn", "body", Some(&agent.to_string()), None, 0, None)
             .await
             .expect("post");
         kernel
