@@ -2083,6 +2083,9 @@ tui-agents-detail-tokens = Token footprint  ($ to refresh)
 tui-agents-detail-tokens-injected = injected
 tui-agents-title-custom-tools = Custom — Tools
 tui-agents-title-custom-skills = Custom — Skills
+tui-agents-workspaces-help = a add · d delete · Enter edit · s save · Esc back
+tui-agents-workspaces-empty = No shared folders yet. Press a to add one.
+tui-event-workspaces-update-failed = Failed to update shared folders
 tui-agents-title-custom-mcp = Custom — MCP Servers
 tui-agents-title-edit-channels = Edit — Channels
 tui-agents-title-spawning = Spawning...
@@ -2120,6 +2123,7 @@ tui-agents-title-model-params = Model parameters
 tui-agents-prompt-model-params = This agent's own settings win over the model's. `inherit` means the model's setting applies.
 tui-agents-hints-model-params =   [←→] Change  [i] Inherit  [e] Custom value  [Enter] Save  [Esc] Cancel
 tui-agents-hints-model-params-custom =   Type a value  [Enter] Confirm  [Esc] Cancel  (empty = inherit)
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-hints-navigate =     [↑↓] Navigate  [Enter] Select  [Esc] Back
 tui-agents-hints-input =     [Enter] Next  [Esc] Back
 tui-agents-hints-tools =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back

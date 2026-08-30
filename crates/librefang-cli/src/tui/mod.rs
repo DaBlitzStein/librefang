@@ -1724,6 +1724,21 @@ impl App {
 
     fn handle_agent_action(&mut self, action: agents::AgentAction) {
         match action {
+            agents::AgentAction::FetchAgentWorkspaces(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_workspaces(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateWorkspaces { id, workspaces } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_workspaces(
+                        backend,
+                        id,
+                        workspaces,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
             agents::AgentAction::Continue => {}
             agents::AgentAction::Back => {
                 // In Main phase, Esc from agents just stays on the tab
