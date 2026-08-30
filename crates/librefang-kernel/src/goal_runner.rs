@@ -146,6 +146,18 @@ fn load_goal(substrate: &MemorySubstrate, goal_id: GoalId) -> Option<Goal> {
     let target = goal_id.to_string();
     arr.into_iter()
         .find(|g| g.get("id").and_then(|v| v.as_str()) == Some(target.as_str()))
+        .map(|mut v| {
+            // Goals written before the loop-engineering PR may store
+            // UUID-typed Option fields as "" instead of null.  An empty
+            // string fails UUID parsing and silently drops the whole
+            // Goal via the downstream `.ok()`.  Normalise here.
+            for key in ["verify_agent_id", "agent_id", "parent_id"] {
+                if v.get(key).and_then(|s| s.as_str()) == Some("") {
+                    v[key] = serde_json::Value::Null;
+                }
+            }
+            v
+        })
         .and_then(|v| serde_json::from_value(v).ok())
 }
 
