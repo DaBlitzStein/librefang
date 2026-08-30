@@ -373,6 +373,7 @@ fn redacted_config_json(
         "audio_language": config.media.audio_language,
         "audio_prompt": config.media.audio_prompt,
         "custom_stt": serde_json::to_value(&config.media.custom_stt).unwrap_or_default(),
+        "custom_image": serde_json::to_value(&config.media.custom_image).unwrap_or_default(),
         "stt_available": stt_available,
     });
 
