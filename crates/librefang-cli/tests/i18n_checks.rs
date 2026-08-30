@@ -118,6 +118,7 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "pip install librefang-sdk",
         "models list",
         "models set",
+        "models overrides",
         "models aliases",
         "models providers",
         "models connect",

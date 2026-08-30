@@ -1119,6 +1119,13 @@ model-header-auth = AUTH
 model-header-models = MODELS
 model-header-base-url = BASE URL
 model-picker-item =     { $idx }. { $id } { $tier }
+model-overrides-cleared = Overrides cleared for model { $model }.
+model-overrides-clear-failed = Failed to clear overrides for { $model }: { $status }
+model-overrides-header-field = FIELD
+model-overrides-header-value = VALUE
+model-overrides-none-set = No overrides set for { $model }.
+model-overrides-saved = Overrides saved for { $model }.
+model-overrides-save-failed = Failed to save overrides for { $model }: { $status }
 
 # Approvals command specific keys
 approval-none-pending = No pending approvals.
