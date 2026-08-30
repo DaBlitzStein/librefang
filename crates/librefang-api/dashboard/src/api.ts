@@ -1735,6 +1735,39 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
+/** A single field-level difference between local and registry manifests. */
+export interface FieldDiff {
+  field: string;
+  local: unknown;
+  registry: unknown;
+}
+
+/** Result of comparing a local agent type with its registry original. */
+export interface RegistryDiffResult {
+  name: string;
+  identical: boolean;
+  diffs: FieldDiff[];
+  local_toml: string;
+  registry_toml: string;
+}
+
+export async function getAgentTypeRegistryDiff(
+  name: string,
+): Promise<RegistryDiffResult> {
+  return get<RegistryDiffResult>(
+    `/api/templates/${encodeURIComponent(name)}/registry-diff`,
+  );
+}
+
+export async function restoreAgentTypeFromRegistry(
+  name: string,
+): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>(
+    `/api/templates/${encodeURIComponent(name)}/restore`,
+    {},
+  );
+}
+
 /**
  * One ephemeral worker run (#6699).
  *

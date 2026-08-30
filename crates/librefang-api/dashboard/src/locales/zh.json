@@ -4161,6 +4161,16 @@
     "title": "智能体类型",
     "tools": "工具",
     "tools_hint": "从本守护进程提供的工具中选择，也可手动输入目录之外的标识符。",
-    "tools_search": "搜索工具…"
+    "tools_search": "搜索工具…",
+    "restore": "恢复",
+    "restore_title": "从注册表恢复 — {{name}}",
+    "restore_confirm": "用注册表版本覆盖本地智能体类型？此操作无法撤销。",
+    "restore_identical": "此智能体类型与注册表版本完全一致。",
+    "restore_no_registry": "注册表中不存在此智能体类型。",
+    "restore_success": "已从注册表恢复智能体类型",
+    "restore_failed": "无法从注册表恢复",
+    "restore_diff_field": "字段",
+    "restore_diff_local": "本地",
+    "restore_diff_registry": "注册表"
   }
 }
