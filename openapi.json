@@ -12596,6 +12596,56 @@
             }
           }
         }
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "PUT /api/templates/:name/toml — Replace the template manifest with raw TOML.",
+        "description": "Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.\nThis is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.",
+        "operationId": "put_agent_template_toml",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Template updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid TOML"
+          },
+          "404": {
+            "description": "No such agent type"
+          },
+          "409": {
+            "description": "Name belongs to a live agent"
+          }
+        }
       }
     },
     "/api/tools": {
