@@ -1389,6 +1389,7 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
+  source_template?: string;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {

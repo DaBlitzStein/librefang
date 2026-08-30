@@ -386,6 +386,7 @@ pub(crate) fn enrich_agent_json(
         "resume_pending": e.resume_pending,
         "reset_reason": e.reset_reason,
         "has_processed_message": e.has_processed_message,
+        "source_template": e.manifest.source_template,
     })
 }
 

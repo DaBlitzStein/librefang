@@ -222,6 +222,7 @@ impl SetupWizard {
             triggers: vec![],
             reconcile_orphans: librefang_types::agent::OrphanPolicy::default(),
             async_tasks: librefang_types::agent::AsyncTasksConfig::default(),
+            source_template: None,
         };
 
         let skills_to_install: Vec<String> = intent

@@ -115,6 +115,10 @@ async fn resolve_manifest(
         }
     };
 
+    if let Some(ref tmpl_name) = req.template {
+        manifest.source_template = Some(tmpl_name.clone());
+    }
+
     // Allow callers to override the manifest name, enabling multiple agents
     // from the same template with distinct names.
     if let Some(ref custom_name) = req.name {

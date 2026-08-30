@@ -1161,6 +1161,7 @@ export function AgentsPage() {
                   ? ` · ${agent.model?.model || (agent as AgentView).model_name}`
                   : ""}
                 {(agent as AgentView).profile ? ` · ${(agent as AgentView).profile}` : ""}
+                {(agent as AgentView).source_template ? ` · from ${(agent as AgentView).source_template}` : ""}
               </p>
             </div>
             {/* Action cluster — labels collapse on mobile so the row keeps

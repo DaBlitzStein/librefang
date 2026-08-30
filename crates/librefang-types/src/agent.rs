@@ -1495,6 +1495,8 @@ pub struct AgentManifest {
     /// kernel does not impose a hard ceiling.
     #[serde(default)]
     pub async_tasks: AsyncTasksConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_template: Option<String>,
 }
 
 /// Per-agent override for the kernel-global `[compaction]` configuration
@@ -1723,6 +1725,7 @@ impl Default for AgentManifest {
             triggers: Vec::new(),
             reconcile_orphans: OrphanPolicy::default(),
             async_tasks: AsyncTasksConfig::default(),
+            source_template: None,
         }
     }
 }
