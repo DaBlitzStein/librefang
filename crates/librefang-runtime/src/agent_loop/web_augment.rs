@@ -391,6 +391,7 @@ mod tests {
 
     fn test_manifest() -> AgentManifest {
         AgentManifest {
+            source_template: None,
             model: ModelConfig {
                 provider: "test".to_string(),
                 model: "test-model".to_string(),

@@ -128,6 +128,7 @@ fn register_metrics_agent(
     let id = AgentId::new();
     let mut manifest = AgentManifest {
         name: name.to_string(),
+        source_template: None,
         description: "metrics escaping test".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),

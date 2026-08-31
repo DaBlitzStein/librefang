@@ -2322,6 +2322,8 @@ admin_role = "admin"
             // global `KernelConfig` section — `default_owner` is a scalar
             // fallback, not an `[owner]` table an operator could relocate.
             owner,
+            // Instance provenance, not a config.toml-facing override.
+            source_template,
             module,
             schedule,
             session_mode,
