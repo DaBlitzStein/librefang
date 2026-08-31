@@ -297,6 +297,14 @@ pub(crate) enum Commands {
         long_about = "Low-level daemon control commands.\n\nExamples:\n  librefang gateway start          # Start the daemon\n  librefang gateway stop           # Stop the daemon\n  librefang gateway restart        # Restart the daemon\n  librefang gateway status         # Show daemon status"
     )]
     Gateway(GatewayCommands),
+    /// Purge every trace of an agent: roster entry, sessions, memories,
+    /// workspace directory and any agent-type with the same name. For agents
+    /// the operator already deleted but whose data lingers.
+    Purge {
+        /// Agent name to purge.
+        #[arg(long)]
+        agent: String,
+    },
     /// Manage execution approvals (list, approve, reject) [*].
     #[command(
         subcommand,
