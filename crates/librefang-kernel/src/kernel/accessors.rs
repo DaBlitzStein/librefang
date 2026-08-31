@@ -1716,6 +1716,7 @@ mod tests {
             .spawn_agent_inner(
                 AgentManifest {
                     name: "atomic-resolver-test-agent".to_string(),
+                    source_template: None,
                     description: "persistent + cap=4 forces the clamp branch".to_string(),
                     author: "test".to_string(),
                     module: "builtin:chat".to_string(),

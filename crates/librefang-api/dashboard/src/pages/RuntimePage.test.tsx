@@ -367,14 +367,17 @@ describe("RuntimePage", () => {
     expect(notice).toHaveClass("text-warning");
   });
 
-  it("invokes createBackup mutation when create backup button is clicked", () => {
-    const mutate = vi.fn();
-    useCreateBackupMock.mockReturnValue(makeMutation({ mutate }));
+  it("opens create backup confirm dialog and fires createBackup on confirm", async () => {
+    const mutateAsync = vi.fn().mockImplementation((_vars, options) => {
+      options?.onSuccess?.();
+      return Promise.resolve(undefined);
+    });
+    useCreateBackupMock.mockReturnValue(makeMutation({ mutateAsync }));
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "runtime.create_backup" }));
-    expect(mutate).toHaveBeenCalledTimes(1);
-    const options = mutate.mock.calls[0][1] as { onSuccess?: () => void };
-    options.onSuccess?.();
+    fireEvent.click(screen.getByRole("button", { name: "runtime.create_backup_confirm" }));
+    await act(async () => {});
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
     expect(useUIStore.getState().toasts).toEqual([
       expect.objectContaining({
         message: "runtime.backup_created",

@@ -17,6 +17,12 @@ fn read_existing_or_empty(path: &Path) -> Result<String, String> {
     }
 }
 
+// `agent` (multi-instance support) pushed this to 8 positional params — a
+// dedicated params struct would help call-site readability more than it
+// would help correctness here (every call site is already a well-commented
+// test or the one production caller), so the lint is silenced rather than
+// churned into a struct.
+#[allow(clippy::too_many_arguments)]
 pub fn upsert_sidecar_block(
     path: &Path,
     name: &str,
@@ -25,6 +31,7 @@ pub fn upsert_sidecar_block(
     args: &[&str],
     env: &BTreeMap<String, String>,
     managed_env_keys: &[&str],
+    agent: Option<&str>,
 ) -> Result<(), String> {
     let original = read_existing_or_empty(path)?;
     let mut doc: DocumentMut = original
@@ -90,9 +97,23 @@ pub fn upsert_sidecar_block(
         channel_type: &str,
         env: &BTreeMap<String, String>,
         managed_env_keys: &[&str],
+        agent: Option<&str>,
     ) {
         block["name"] = value(name);
         block["channel_type"] = value(channel_type);
+        // `agent` is the per-instance default-agent binding (multi-instance
+        // support, #8xxx). Always normalize to the current field name —
+        // drop the pre-#5671 `default_agent` alias key too, so a config
+        // hand-edited (or written by an older dashboard build) under the
+        // old key doesn't leave a stale duplicate sitting next to the one
+        // this save actually intends.
+        match agent {
+            Some(a) if !a.is_empty() => block["agent"] = value(a),
+            _ => {
+                block.remove("agent");
+            }
+        }
+        block.remove("default_agent");
         // Start from the existing env table (clone it) so non-schema
         // keys survive the rewrite. If it's missing or shaped wrong,
         // fall back to a fresh empty table.
@@ -142,7 +163,7 @@ pub fn upsert_sidecar_block(
             if !args_present(existing) {
                 write_args_default(existing, args);
             }
-            write_form_managed(existing, name, channel_type, env, managed_env_keys);
+            write_form_managed(existing, name, channel_type, env, managed_env_keys, agent);
             replaced = true;
             break;
         }
@@ -150,7 +171,7 @@ pub fn upsert_sidecar_block(
     if !replaced {
         let mut block = Table::new();
         write_command_and_args_defaults(&mut block, command, args);
-        write_form_managed(&mut block, name, channel_type, env, managed_env_keys);
+        write_form_managed(&mut block, name, channel_type, env, managed_env_keys, agent);
         aot.push(block);
     }
 
