@@ -1091,6 +1091,12 @@ export interface GoalItem {
   agent_id?: string;
   status?: string;
   progress?: number;
+  /** Opt into the verifier gate, the evaluator and captured lessons. */
+  loop_engineering?: boolean;
+  /** Agent that judges the worker's output; only used with loop_engineering. */
+  verify_agent_id?: string;
+  /** Model that judges goal completion; only used with loop_engineering. */
+  evaluator_model?: string;
   created_at?: string;
   updated_at?: string;
   loop_engineering?: boolean;
@@ -4314,6 +4320,7 @@ export async function updateGoal(
     progress?: number;
     parent_id?: string | null;
     agent_id?: string | null;
+    loop_engineering?: boolean;
     verify_agent_id?: string | null;
     verify_max_retries?: number;
     evaluator_model?: string | null;
@@ -4338,6 +4345,9 @@ export interface GoalRunState {
   max_iterations: number;
   last_progress: number;
   last_error?: string;
+  verify_agent_id?: string;
+  verify_max_retries?: number;
+  evaluator_model?: string;
   started_at: string;
   updated_at: string;
 }

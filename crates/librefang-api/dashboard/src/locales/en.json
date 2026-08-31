@@ -2940,14 +2940,14 @@
     "status": "Status",
     "run_pause": "Pause",
     "run_resume": "Resume",
-    "assigned_agent": "Assigned agent",
-    "evaluator_model": "Evaluator model",
-    "evaluator_model_placeholder": "Default model",
     "loop_engineering": "Loop engineering",
-    "loop_engineering_hint": "Enable iterative goal refinement",
+    "loop_engineering_hint": "A verifier agent judges each iteration before it counts, and an evaluator model decides when the goal is met.",
+    "assigned_agent": "Assigned agent",
     "no_agent_selected": "No agent selected",
-    "no_verifier_selected": "No verifier selected",
-    "verifier_agent": "Verifier agent"
+    "verifier_agent": "Verifier agent",
+    "no_verifier_selected": "No verifier (run ungated)",
+    "evaluator_model": "Evaluator model",
+    "evaluator_model_placeholder": "Evaluator model (optional)"
   },
   "sessions": {
     "title": "Sessions",

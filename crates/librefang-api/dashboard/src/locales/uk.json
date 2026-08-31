@@ -2944,14 +2944,14 @@
     "status": "Статус",
     "run_pause": "Pause",
     "run_resume": "Resume",
-    "assigned_agent": "Assigned agent",
-    "evaluator_model": "Evaluator model",
-    "evaluator_model_placeholder": "Default model",
-    "loop_engineering": "Loop engineering",
-    "loop_engineering_hint": "Enable iterative goal refinement",
-    "no_agent_selected": "No agent selected",
-    "no_verifier_selected": "No verifier selected",
-    "verifier_agent": "Verifier agent"
+    "loop_engineering": "Інженерія циклу",
+    "loop_engineering_hint": "Агент-перевіряч оцінює кожну ітерацію, перш ніж вона зарахується, а модель-оцінювач вирішує, коли ціль досягнуто.",
+    "assigned_agent": "Призначений агент",
+    "no_agent_selected": "Агента не вибрано",
+    "verifier_agent": "Агент-перевіряч",
+    "no_verifier_selected": "Без перевіряча (без контролю)",
+    "evaluator_model": "Модель-оцінювач",
+    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)"
   },
   "sessions": {
     "title": "Сесії",
