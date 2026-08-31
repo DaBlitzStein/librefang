@@ -180,7 +180,8 @@
     "select_options": "Wybierz opcje",
     "error_loading_data": "Nie udało się załadować pamięci",
     "reload": "Przeładuj",
-    "save_changes": "Zapisz zmiany"
+    "save_changes": "Zapisz zmiany",
+    "save_failed": "Save failed"
   },
   "status": {
     "active": "Aktywny",
@@ -583,8 +584,6 @@
     "origin_root": "Agent główny",
     "origin_unknown": "Nieznane (sprzed migracji)",
     "children_count_one": "{{count}} agent podrzędny",
-    "children_count_few": "{{count}} agenty podrzędne",
-    "children_count_many": "{{count}} agentów podrzędnych",
     "children_count_other": "{{count}} agenta podrzędnego",
     "show_hand_agents": "Pokaż agenty dłoni",
     "show_hand_agents_short": "Dłoń",
@@ -911,7 +910,9 @@
       "saved": "Model routing saved",
       "someProfiles": "The router may only pick from the selected profiles.",
       "title": "Model routing"
-    }
+    },
+    "children_count_few": "{{count}} agenta podrzędnego",
+    "children_count_many": "{{count}} agenta podrzędnego"
   },
   "providers": {
     "title": "Dostawcy",
@@ -1797,14 +1798,14 @@
       "submitting": "Wysyłanie…",
       "submit_action": "Wyślij {{action}}",
       "pending_review_one": "1 uruchomienie przepływu pracy oczekuje na weryfikację operatora",
-      "pending_review_few": "{{count}} uruchomienia przepływu pracy oczekują na weryfikację operatora",
-      "pending_review_many": "{{count}} uruchomień przepływu pracy oczekuje na weryfikację operatora",
       "pending_review_other": "{{count}} uruchomień przepływu pracy oczekujących na weryfikację operatora",
       "empty_artifact": "(pusty artefakt)",
       "load_failed": "Nie udało się wczytać oczekujących weryfikacji operatora.",
       "review_run": "Zweryfikuj {{workflow}} — {{step}}",
       "more_pending": "+{{count}} oczekujących",
-      "pending_review": "{{count}} workflow runs awaiting operator review"
+      "pending_review": "{{count}} workflow runs awaiting operator review",
+      "pending_review_few": "{{count}} uruchomień przepływu pracy oczekujących na weryfikację operatora",
+      "pending_review_many": "{{count}} uruchomień przepływu pracy oczekujących na weryfikację operatora"
     },
     "console_completed": "Completed",
     "console_executing": "Executing…",
@@ -2771,7 +2772,21 @@
     "reset_all": "Zresetuj wszystko",
     "reset_section": "Zresetuj sekcję",
     "searching_all": "Przeszukiwanie wszystkich sekcji...",
-    "comma_separated_values": "wartości rozdzielane przecinkami"
+    "comma_separated_values": "wartości rozdzielane przecinkami",
+    "auxiliary_llm_title": "Auxiliary LLM Chains",
+    "auxiliary_llm_description": "Route internal side-tasks to cheaper models. Empty = uses primary model.",
+    "auxiliary_task_compression": "Compression",
+    "auxiliary_task_title": "Title generation",
+    "auxiliary_task_search": "Search",
+    "auxiliary_task_vision": "Vision",
+    "auxiliary_task_browser_vision": "Browser vision",
+    "auxiliary_task_fold": "History fold",
+    "auxiliary_task_skill_review": "Skill review",
+    "auxiliary_task_skill_workshop_review": "Skill workshop review",
+    "auxiliary_task_session_summary": "Session summary",
+    "auxiliary_chain_default": "Primary (default)",
+    "auxiliary_chain_placeholder": "provider:model",
+    "auxiliary_chain_add": "Add model"
   },
   "chat": {
     "title": "Czat",
@@ -3316,8 +3331,6 @@
     "identity_fingerprint_hint": "Przed przypięciem porównaj bezpośrednio (kanałem out-of-band) z operatorem zdalnym.",
     "identity_missing": "Nie załadowano tożsamości Ed25519. OFP działa w trybie dziedziczonym tylko z HMAC; ochrona przed podszywaniem się pod węzły (#3873) jest nieaktywna.",
     "pinned_peers_count_one": "{{count}} przypięty węzeł TOFU",
-    "pinned_peers_count_few": "{{count}} przypięte węzły TOFU",
-    "pinned_peers_count_many": "{{count}} przypiętych węzłów TOFU",
     "pinned_peers_count_other": "{{count}} przypiętych węzłów TOFU",
     "trusted_peers": "Zaufane węzły",
     "trusted_peers_pinned": "{{count}} przypiętych",
@@ -3325,7 +3338,9 @@
     "no_trusted_peers": "Brak zaufanych węzłów",
     "no_trusted_peers_desc": "Żadne węzły nie zostały jeszcze przypięte metodą TOFU do tożsamości tego węzła. Przypnij odcisk palca węzła, aby włączyć ochronę przed podszywaniem się pod węzły (#3873).",
     "ofp_disabled": "Sieć OFP nie jest włączona. Ustaw `network_enabled = true` oraz niepusty `shared_secret` w config.toml. Tożsamość Ed25519 jest generowana i zapisywana automatycznie przy pierwszym uruchomieniu.",
-    "help": "Sieć pokazuje status tej instancji w Open Federation Protocol (OFP) — węzły partnerskie LibreFang, które odkryłeś lub przez które zostałeś odkryty, tożsamość Twojego własnego węzła oraz używaną wersję OFP. OFP to warstwa poniżej A2A: to w ten sposób węzły odnajdują się nawzajem; A2A to to, co mówią po połączeniu.\n\nJak korzystać z tej strony:\n\n1. Tożsamość. Node-id i wersja protokołu identyfikują tę instancję LibreFang w federacji.\n\n2. Partnerzy. Pokazuje każdego połączonego partnera ze statusem online / offline. Pusta lista oznacza, że nie federujesz jeszcze z nikim.\n\n3. Status. Online oznacza, że OFP jest osiągalny, a Twój węzeł ogłasza swoją obecność.\n\nKiedy używać (w porównaniu do A2A):\n\n  · Network — federacja na poziomie węzłów: kto tam jest, kto jest połączony.\n  · A2A — rozmowa na poziomie agentów: co agenci na tych węzłach mogą dla siebie nawzajem zrobić.\n\nTypowe scenariusze:\n\n  · Potwierdzenie, że dwie instancje LibreFang rzeczywiście się widzą przed debugowaniem A2A.\n  · Odczytanie swojego node-id, aby udostępnić je partnerowi do bezpośredniego połączenia.\n\nCo warto wiedzieć:\n\n  · Federacja opiera się na zasadzie opt-in i jest kontrolowana przez konfigurację. Jeśli sekcja \"no peers\" domyślnie jest pusta, jest to zjawisko normalne, chyba że skonfigurowano partnerów.\n  · Status sieci jest odczytywany na żywo — odświeżanie odpytuje serwer, brak pamięci podręcznej."
+    "help": "Sieć pokazuje status tej instancji w Open Federation Protocol (OFP) — węzły partnerskie LibreFang, które odkryłeś lub przez które zostałeś odkryty, tożsamość Twojego własnego węzła oraz używaną wersję OFP. OFP to warstwa poniżej A2A: to w ten sposób węzły odnajdują się nawzajem; A2A to to, co mówią po połączeniu.\n\nJak korzystać z tej strony:\n\n1. Tożsamość. Node-id i wersja protokołu identyfikują tę instancję LibreFang w federacji.\n\n2. Partnerzy. Pokazuje każdego połączonego partnera ze statusem online / offline. Pusta lista oznacza, że nie federujesz jeszcze z nikim.\n\n3. Status. Online oznacza, że OFP jest osiągalny, a Twój węzeł ogłasza swoją obecność.\n\nKiedy używać (w porównaniu do A2A):\n\n  · Network — federacja na poziomie węzłów: kto tam jest, kto jest połączony.\n  · A2A — rozmowa na poziomie agentów: co agenci na tych węzłach mogą dla siebie nawzajem zrobić.\n\nTypowe scenariusze:\n\n  · Potwierdzenie, że dwie instancje LibreFang rzeczywiście się widzą przed debugowaniem A2A.\n  · Odczytanie swojego node-id, aby udostępnić je partnerowi do bezpośredniego połączenia.\n\nCo warto wiedzieć:\n\n  · Federacja opiera się na zasadzie opt-in i jest kontrolowana przez konfigurację. Jeśli sekcja \"no peers\" domyślnie jest pusta, jest to zjawisko normalne, chyba że skonfigurowano partnerów.\n  · Status sieci jest odczytywany na żywo — odświeżanie odpytuje serwer, brak pamięci podręcznej.",
+    "pinned_peers_count_few": "{{count}} przypiętych węzłów TOFU",
+    "pinned_peers_count_many": "{{count}} przypiętych węzłów TOFU"
   },
   "a2a": {
     "section": "Agent-to-Agent",
@@ -3547,8 +3562,6 @@
     "url_hint": "Adres URL musi zaczynać się od http:// lub https://",
     "env_setup_desc": "Wprowadź wymagane klucze API i zmienne środowiskowe, aby ukończyć instalację.",
     "requires_env_count_one": "{{count}} klucz",
-    "requires_env_count_few": "{{count}} klucze",
-    "requires_env_count_many": "{{count}} kluczy",
     "requires_env_count_other": "{{count}} kluczy",
     "wizard": {
       "eyebrow": "instalacja · serwer mcp",
@@ -3624,7 +3637,9 @@
     "config_env_notice": "zmienne środowiskowe są przywoływane tylko po nazwie; sekrety są pobierane ze środowiska hosta w momencie nawiązywania połączenia.",
     "tabs_label": "Widoki serwera",
     "get_key": "Pobierz klucz",
-    "requires_env_count": "{{count}} key"
+    "requires_env_count": "{{count}} key",
+    "requires_env_count_few": "{{count}} kluczy",
+    "requires_env_count_many": "{{count}} kluczy"
   },
   "toml_viewer": {
     "tab_toml": "TOML",
@@ -4175,8 +4190,6 @@
     "no_active_badge": "Brak aktywnej wersji",
     "empty_live_prompt": "(brak ustawionego promptu systemowego)",
     "version_count_one": "{{count}} wersja",
-    "version_count_few": "{{count}} wersje",
-    "version_count_many": "{{count}} wersji",
     "version_count_other": "{{count}} wersji",
     "empty_title": "Nie ma jeszcze żadnych agentów",
     "empty_body": "Uruchom agenta, aby rozpocząć zarządzanie jego promptem systemowym tutaj.",
@@ -4205,7 +4218,9 @@
     "delete_success": "Wersja usunięta",
     "delete_error": "Nie udało się usunąć wersji",
     "create_success": "Wersja utworzona",
-    "create_error": "Nie udało się utworzyć wersji"
+    "create_error": "Nie udało się utworzyć wersji",
+    "version_count_few": "{{count}} wersji",
+    "version_count_many": "{{count}} wersji"
   },
   "errors": {
     "something_went_wrong": "Coś poszło nie tak",
