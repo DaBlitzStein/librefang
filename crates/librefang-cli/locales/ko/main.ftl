@@ -605,8 +605,7 @@ agent-merge-history-not-implemented = merge-history는 아직 구현되지 않�
 agent-set-model-success = 에이전트 { $id }의 모델이 { $value }(으)로 설정되었습니다.
 agent-set-model-failed-with-reason = 모델을 설정하지 못했습니다: { $error }
 agent-set-no-daemon = 실행 중인 데몬을 찾을 수 없습니다. 다음으로 시작하십시오: librefang start
-agent-set-unknown-field = 알 수 없는 필드: { $field }. 지원되는 필드: model, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, context_window, max_output_tokens
-agent-set-field-success = 에이전트 { $id }의 { $field }이(가) { $value }(으)로 설정되었습니다.
+agent-set-unknown-field = 알 수 없는 필드: { $field }. 지원되는 필드: model
 agent-new-no-templates = 에이전트 템플릿을 찾을 수 없습니다
 agent-new-no-templates-fix = 에이전트 디렉터리를 설정하려면 `librefang init`을 실행하십시오
 agent-new-template-not-found = 템플릿 '{ $name }'을(를) 찾을 수 없습니다
@@ -2107,11 +2106,7 @@ tui-agents-opt-create-new = 새 에이전트 생성
 
 tui-agents-hints-filter =   [입력] 필터  [Enter] 적용  [Esc] 검색 취소
 tui-agents-hints-list =   [↑↓] 탐색  [Enter] 상세  [/] 검색  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [p] 모델 파라미터  [c] 채팅  [k] 종료  [Esc] 뒤로
-tui-agents-title-model-params = 모델 파라미터
-tui-agents-prompt-model-params = 이 에이전트의 설정이 모델 설정보다 우선합니다. `inherit`는 모델 설정을 따릅니다.
-tui-agents-hints-model-params =   [←→] 변경  [i] 상속  [e] 직접 입력  [Enter] 저장  [Esc] 취소
-tui-agents-hints-model-params-custom =   값 입력  [Enter] 확인  [Esc] 취소  (비우면 상속)
+tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-hints-navigate =     [↑↓] 탐색  [Enter] 선택  [Esc] 뒤로
 tui-agents-hints-input =     [Enter] 다음  [Esc] 뒤로
 tui-agents-hints-tools =     [↑↓] 탐색  [Space] 전환  [Enter] 생성  [Esc] 뒤로
@@ -2351,30 +2346,21 @@ tui-wizard-status-no-home = 홈 디렉터리를 확인할 수 없음
 tui-wizard-status-saved = 구성 저장됨 — { $provider } / { $model }
 tui-wizard-status-save-fail = 구성 저장에 실패: { $error }
 tui-wizard-status-continuing = 계속하는 중...
-tui-event-model-params-fetch-failed = 에이전트의 모델 파라미터를 불러오지 못했습니다
-tui-event-model-params-update-failed = 모델 파라미터를 저장하지 못했습니다
-tui-event-model-params-daemon-only = 모델 파라미터는 데몬을 통해 편집합니다. 데몬을 실행한 뒤 다시 연결하세요.
-tui-mod-agent-model-params-updated = 에이전트 { $id }의 모델 파라미터가 업데이트되었습니다.
-tui-agents-param-temperature = 온도
-tui-agents-param-temperature-hint = temperature — 모델이 표현을 얼마나 다양하게 하는지. 낮을수록 일관됩니다.
-tui-agents-param-top-p = Top-p
-tui-agents-param-top-p-hint = top_p — 뉴클리어스 샘플링. 보통 상속으로 둡니다.
-tui-agents-param-frequency-penalty = 빈도 페널티
-tui-agents-param-frequency-penalty-hint = frequency_penalty — 같은 단어의 반복을 억제합니다.
-tui-agents-param-presence-penalty = 존재 페널티
-tui-agents-param-presence-penalty-hint = presence_penalty — 같은 주제로 되돌아가는 것을 억제합니다.
-tui-agents-param-max-tokens = 응답 길이
-tui-agents-param-max-tokens-hint = max_tokens — 이 에이전트가 요청할 응답 길이. 모델 설정보다 우선합니다.
-tui-agents-param-context-window = 컨텍스트 창
-tui-agents-param-context-window-hint = context_window — 이 엔드포인트가 읽을 수 있는 양. 선호가 아니라 한도입니다.
-tui-agents-param-max-output-tokens = 출력 상한
-tui-agents-param-max-output-tokens-hint = max_output_tokens — 엔드포인트 자체의 출력 상한. 선호가 아니라 한도입니다.
-tui-agents-param-not-a-number = { $field }은(는) 숫자여야 합니다
-tui-agents-param-not-whole = { $field }은(는) 0보다 큰 정수여야 합니다
-tui-agents-param-out-of-range = { $field }은(는) { $min }과(와) { $max } 사이여야 합니다
-agent-set-invalid-integer = { $field }은(는) 양의 정수여야 합니다. 입력값: '{ $value }'
-agent-set-invalid-decimal = { $field }은(는) 실수여야 합니다. 입력값: '{ $value }'
-agent-set-limit-warning = 경고: { $message }
+
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = 모델 라우팅
+tui-agents-label-routing-fixed = 고정 — 항상 이 에이전트의 자체 모델 사용
+tui-agents-label-routing-flexible = 유연 — 작업별로 라우터가 선택
+tui-agents-hint-routing-mode = [Tab] 모드 전환
+tui-agents-label-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다. Tab을 눌러 작업별로 라우터가 선택하도록 하세요.
+tui-agents-label-no-router-profiles = 사용 가능한 모델 프로필이 없습니다. ~/.librefang/model_profiles.toml에 추가하세요.
+tui-agents-label-routing-any-profile = 전체
+tui-agents-hints-model-routing = [Tab] 모드  [↑↓] 탐색  [Space] 프로필 전환  [+/-] 비용 예산  [Enter] 저장  [Esc] 취소
+tui-event-model-routing-fetch-failed = 모델 라우팅을 가져오지 못했습니다
+tui-event-model-routing-update-failed = 모델 라우팅을 업데이트하지 못했습니다
+tui-mod-agent-model-routing-updated = 에이전트 { $id }의 모델 라우팅이 업데이트되었습니다.
+
+
 
 # ── 사용자 그룹 (#7745) ─────────────────────────────────────────────────────
 group-none = 구성된 그룹이 없습니다.
@@ -2410,3 +2396,21 @@ tui-groups-hints = ↑/↓ 이동 · r 새로고침
 
 tui-goals-judge-label = { "  " }목표 심사자:{ " " }
 tui-goals-phase-label = { "  " }실행 단계:{ " " }
+
+# Model routing CLI commands
+agent-routing-label-mode = 모드
+agent-routing-label-allowed = 허용된 프로필
+agent-routing-label-budget = 비용 예산
+agent-routing-label-default = 기본 프로필
+agent-routing-any-profile = 전체
+agent-routing-no-cap = 제한 없음
+agent-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다.
+agent-routing-updated = 에이전트 { $id }의 모델 라우팅이 { $mode }(으)로 설정되었습니다.
+agent-routing-failed = 모델 라우팅 업데이트 실패: { $error }
+agent-routing-profiles-header = 모델 라우터 프로필 (라우터: { $enabled }):
+tui-agents-line-routing-mode =   모드: { $mode }
+tui-agents-line-routing-summary =   비용 예산: { $budget }    허용된 프로필: { $allowed }
+tui-agents-label-routing-no-cap = 제한 없음
+tui-agents-label-routing-cheap = 저비용
+tui-agents-label-routing-medium = 중간
+tui-agents-label-routing-expensive = 고비용

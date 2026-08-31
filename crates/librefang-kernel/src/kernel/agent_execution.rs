@@ -409,7 +409,7 @@ impl LibreFangKernel {
     /// The last guard mirrors the tier router a few lines below: routing an
     /// agent onto a provider the operator never configured would turn a
     /// cost optimisation into a hard failure on every turn.
-    pub fn route_to_profile(
+    fn route_to_profile(
         &self,
         manifest: &librefang_types::agent::AgentManifest,
         message: &str,
@@ -453,14 +453,8 @@ impl LibreFangKernel {
         }
 
         if profile.provider != manifest.model.provider {
-            let provider = &profile.provider;
-            let is_local = librefang_runtime::provider_health::is_local_provider(provider);
-            let has_pool = self.llm.credential_pools.contains_key(provider.as_str());
-            let has_key = || {
-                let key_env = self.resolve_non_default_api_key_env(cfg, provider);
-                std::env::var(&key_env).is_ok()
-            };
-            if !is_local && !has_pool && !has_key() {
+            let key_env = cfg.resolve_api_key_env(&profile.provider);
+            if std::env::var(&key_env).is_err() {
                 warn!(
                     agent = %manifest.name,
                     profile = %profile.name,
@@ -1120,8 +1114,8 @@ impl LibreFangKernel {
                     message,
                 )]),
                 tools: std::sync::Arc::new(tools.clone()),
-                max_tokens: manifest.model.effective_max_tokens(),
-                temperature: manifest.model.effective_temperature(),
+                max_tokens: manifest.model.max_tokens,
+                temperature: manifest.model.temperature,
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
                 prompt_caching: false,
@@ -1178,35 +1172,43 @@ impl LibreFangKernel {
             }
         }
 
-        // Resolve this turn's inference parameters from the agent manifest and
-        // the per-model override that matches the final model.
-        //
-        // Placed AFTER model routing so the override matches the model that
-        // will actually be called, not the pre-routing one (e.g. routing may
-        // switch sonnet → haiku).
-        //
-        // Priority: agent manifest > per-model override > system defaults, for
-        // the sampling preferences. This block used to run the chain the other
-        // way round, which meant tuning the temperature of a shared model
-        // silently overwrote it for every agent using that model — two
-        // instances of one agent type could not hold different temperatures.
-        // The inversion was load-bearing only because `ModelConfig` had no
-        // "inherit" state: every agent carried a concrete 4096 / 0.7, so
-        // letting the manifest win would have made per-model overrides
-        // unreachable. Tri-state `Option` fields on `ModelConfig` removed that
-        // constraint, so the chain now runs in the order operators expect.
-        //
-        // `reasoning_effort` is deliberately excluded from that reordering —
-        // see `librefang_types::inference_params` for why the model level has
-        // to keep winning there (#7770).
+        // Apply per-model inference parameter overrides from the catalog.
+        // Placed AFTER model routing so overrides match the final model, not
+        // the pre-routing one (e.g. routing may switch sonnet → haiku).
+        // Priority: model overrides > agent manifest > system defaults.
         {
             let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
             let catalog = self.llm.model_catalog.load();
-            let resolved = librefang_types::inference_params::resolve_inference_params(
-                &manifest.model,
-                catalog.get_overrides(&override_key),
-            );
-            resolved.apply_to(&mut manifest.model);
+            if let Some(mo) = catalog.get_overrides(&override_key) {
+                if let Some(t) = mo.temperature {
+                    manifest.model.temperature = t;
+                }
+                if let Some(mt) = mo.max_tokens {
+                    manifest.model.max_tokens = mt;
+                }
+                let ep = &mut manifest.model.extra_params;
+                if let Some(tp) = mo.top_p {
+                    ep.insert("top_p".to_string(), serde_json::json!(tp));
+                }
+                if let Some(fp) = mo.frequency_penalty {
+                    ep.insert("frequency_penalty".to_string(), serde_json::json!(fp));
+                }
+                if let Some(pp) = mo.presence_penalty {
+                    ep.insert("presence_penalty".to_string(), serde_json::json!(pp));
+                }
+                if let Some(ref re) = mo.reasoning_effort {
+                    ep.insert("reasoning_effort".to_string(), serde_json::json!(re));
+                }
+                if mo.use_max_completion_tokens == Some(true) {
+                    ep.insert(
+                        "use_max_completion_tokens".to_string(),
+                        serde_json::json!(true),
+                    );
+                }
+                if mo.force_max_tokens == Some(true) {
+                    ep.insert("force_max_tokens".to_string(), serde_json::json!(true));
+                }
+            }
         }
 
         // #5980: pre-dispatch per-provider budget gate. The provider name is

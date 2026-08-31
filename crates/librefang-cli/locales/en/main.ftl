@@ -605,8 +605,7 @@ agent-merge-history-not-implemented = merge-history is not yet implemented (refs
 agent-set-model-success = Agent { $id } model set to { $value }.
 agent-set-model-failed-with-reason = Failed to set model: { $error }
 agent-set-no-daemon = No running daemon found. Start one with: librefang start
-agent-set-unknown-field = Unknown field: { $field }. Supported fields: model, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, context_window, max_output_tokens
-agent-set-field-success = Agent { $id } { $field } set to { $value }.
+agent-set-unknown-field = Unknown field: { $field }. Supported fields: model
 agent-new-no-templates = No agent templates found
 agent-new-no-templates-fix = Run `librefang init` to set up the agents directory
 agent-new-template-not-found = Template '{ $name }' not found
@@ -1422,9 +1421,6 @@ tui-event-skills-fetch-failed = Failed to fetch skills
 tui-event-mcp-fetch-failed = Failed to fetch MCP servers
 tui-event-channels-fetch-failed = Failed to fetch channels
 tui-event-skills-update-failed = Failed to update skills
-tui-event-model-params-fetch-failed = Failed to load the agent's model parameters
-tui-event-model-params-update-failed = Failed to save the model parameters
-tui-event-model-params-daemon-only = Model parameters are edited through the daemon; start it and reconnect.
 tui-event-skills-update-error = Skills update: { $error }
 tui-event-mcp-update-failed = Failed to update MCP servers
 tui-event-channels-update-failed = Failed to update channels
@@ -1537,7 +1533,6 @@ tui-mod-agent-kill-failed = Kill failed: { $error }
 tui-mod-agent-skills-updated = Skills updated for agent { $id }.
 tui-mod-agent-mcp-updated = MCP servers updated for agent { $id }.
 tui-mod-agent-channels-updated = Channels updated for agent { $id }.
-tui-mod-agent-model-params-updated = Model parameters updated for agent { $id }.
 tui-mod-ready = Ready
 tui-mod-setup = Setup
 tui-mod-workflow-created = Workflow created!
@@ -2112,17 +2107,14 @@ tui-agents-opt-create-new = Create new agent
 
 tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
 tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [c] Chat  [k] Kill  [Esc] Back
-tui-agents-title-model-params = Model parameters
-tui-agents-prompt-model-params = This agent's own settings win over the model's. `inherit` means the model's setting applies.
-tui-agents-hints-model-params =   [←→] Change  [i] Inherit  [e] Custom value  [Enter] Save  [Esc] Cancel
-tui-agents-hints-model-params-custom =   Type a value  [Enter] Confirm  [Esc] Cancel  (empty = inherit)
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-hints-navigate =     [↑↓] Navigate  [Enter] Select  [Esc] Back
 tui-agents-hints-input =     [Enter] Next  [Esc] Back
 tui-agents-hints-tools =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
 tui-agents-hints-skills =     [↑↓] Navigate  [Space] Toggle  [Enter] Next  [Esc] Back
 tui-agents-hints-mcp =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
 tui-agents-hints-save =     [↑↓] Navigate  [Space] Toggle  [Enter] Save  [Esc] Cancel
+
 
 tui-agents-placeholder-name = my-agent
 tui-agents-placeholder-desc = A custom agent
@@ -2356,26 +2348,21 @@ tui-wizard-status-no-home = Could not determine home directory
 tui-wizard-status-saved = Config saved — { $provider } / { $model }
 tui-wizard-status-save-fail = Failed to save config: { $error }
 tui-wizard-status-continuing = Continuing...
-tui-agents-param-temperature = Temperature
-tui-agents-param-temperature-hint = temperature — how much the model varies its wording. Lower is steadier.
-tui-agents-param-top-p = Top-p
-tui-agents-param-top-p-hint = top_p — nucleus sampling. Usually left to inherit.
-tui-agents-param-frequency-penalty = Frequency penalty
-tui-agents-param-frequency-penalty-hint = frequency_penalty — discourages repeating the same words.
-tui-agents-param-presence-penalty = Presence penalty
-tui-agents-param-presence-penalty-hint = presence_penalty — discourages returning to the same topics.
-tui-agents-param-max-tokens = Response length
-tui-agents-param-max-tokens-hint = max_tokens — how long a reply this agent asks for. Yours wins over the model's.
-tui-agents-param-context-window = Context window
-tui-agents-param-context-window-hint = context_window — how much this endpoint can read. A limit, not a preference.
-tui-agents-param-max-output-tokens = Output cap
-tui-agents-param-max-output-tokens-hint = max_output_tokens — the endpoint's own output cap. A limit, not a preference.
-tui-agents-param-not-a-number = { $field } must be a number
-tui-agents-param-not-whole = { $field } must be a whole number above 0
-tui-agents-param-out-of-range = { $field } must be between { $min } and { $max }
-agent-set-invalid-integer = { $field } must be a positive whole number, got '{ $value }'
-agent-set-invalid-decimal = { $field } must be a decimal number, got '{ $value }'
-agent-set-limit-warning = warning: { $message }
+
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = Model Routing
+tui-agents-label-routing-fixed = fixed — always use this agent's own model
+tui-agents-label-routing-flexible = flexible — let the router pick per task
+tui-agents-hint-routing-mode = [Tab] switch mode
+tui-agents-label-routing-fixed-explainer = This agent always uses the model in its own manifest. Press Tab to let the router choose per task.
+tui-agents-label-no-router-profiles = No model profiles available. Add them to ~/.librefang/model_profiles.toml.
+tui-agents-label-routing-any-profile = any
+tui-agents-hints-model-routing = [Tab] Mode  [↑↓] Navigate  [Space] Toggle profile  [+/-] Cost budget  [Enter] Save  [Esc] Cancel
+tui-event-model-routing-fetch-failed = Failed to fetch model routing
+tui-event-model-routing-update-failed = Failed to update model routing
+tui-mod-agent-model-routing-updated = Model routing updated for agent { $id }.
+
+
 
 # ── User groups (#7745) ─────────────────────────────────────────────────────
 group-none = No groups configured.
@@ -2411,3 +2398,21 @@ tui-groups-hints = ↑/↓ navigate · r refresh
 
 tui-goals-judge-label = { "  " }Goal Judge:{ " " }
 tui-goals-phase-label = { "  " }Run Phase:{ " " }
+
+# Model routing CLI commands
+agent-routing-label-mode = Mode
+agent-routing-label-allowed = Allowed profiles
+agent-routing-label-budget = Cost budget
+agent-routing-label-default = Default profile
+agent-routing-any-profile = any
+agent-routing-no-cap = no cap
+agent-routing-fixed-explainer = This agent always uses the model in its own manifest.
+agent-routing-updated = Model routing for agent { $id } set to { $mode }.
+agent-routing-failed = Failed to update model routing: { $error }
+agent-routing-profiles-header = Model router profiles (router is { $enabled }):
+tui-agents-line-routing-mode =   Mode: { $mode }
+tui-agents-line-routing-summary =   Cost budget: { $budget }    Allowed profiles: { $allowed }
+tui-agents-label-routing-no-cap = no cap
+tui-agents-label-routing-cheap = cheap
+tui-agents-label-routing-medium = medium
+tui-agents-label-routing-expensive = expensive
