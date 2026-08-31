@@ -1924,6 +1924,14 @@ tui-settings-backups-restore-warning = Restore overwrites existing state. Restar
 tui-settings-backups-restore-keep-config = Keep this machine's config.toml (clone mode)
 tui-settings-backups-restore-all = Everything in the archive is selected.
 tui-settings-backups-restore-none = Select at least one component, or press [Esc] to cancel.
+tui-settings-tab-auxiliary = 5 Auxiliary
+tui-settings-hints-auxiliary =   [↑↓] Navigate  [Enter] Edit chain  [r] Refresh  [Esc] Cancel
+tui-settings-auxiliary-header-task = Task
+tui-settings-auxiliary-header-chain = Fallback Chain
+tui-settings-auxiliary-loading = Loading auxiliary config…
+tui-settings-auxiliary-empty = No auxiliary tasks configured.
+tui-settings-auxiliary-not-configured = (not configured)
+tui-settings-auxiliary-editing = Editing chain for { $task } (comma-separated provider:model):
 # chat.rs
 tui-chat-input-staged =   ({ $count } staged)
 tui-chat-hints-modelpicker =     [↑↓] Navigate  [Enter] Select  [Esc] Close  [type] Filter

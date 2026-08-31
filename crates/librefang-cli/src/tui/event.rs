@@ -188,6 +188,8 @@ pub enum AppEvent {
     SettingsModelsLoaded(Vec<ModelInfo>),
     /// Settings tools loaded.
     SettingsToolsLoaded(Vec<ToolInfo>),
+    /// Settings auxiliary LLM chains loaded.
+    SettingsAuxiliaryLoaded(std::collections::BTreeMap<String, Vec<String>>),
     /// Provider key saved.
     ProviderKeySaved(String),
     /// Provider key deleted.
@@ -3023,6 +3025,81 @@ pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
                 "tui-event-backups-need-daemon",
             )));
+        }
+    });
+}
+
+/// Fetch auxiliary LLM chains from `GET /api/config`.
+pub fn spawn_fetch_auxiliary(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/config")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let mut aux = std::collections::BTreeMap::new();
+                    if let Some(obj) = body
+                        .get("llm")
+                        .and_then(|l| l.get("auxiliary"))
+                        .and_then(|a| a.as_object())
+                    {
+                        for (task, chain) in obj {
+                            if let Some(arr) = chain.as_array() {
+                                let entries: Vec<String> = arr
+                                    .iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect();
+                                aux.insert(task.clone(), entries);
+                            }
+                        }
+                    }
+                    let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
+                }
+            }
+        }
+        BackendRef::InProcess(kernel) => {
+            let mut aux = std::collections::BTreeMap::new();
+            let config = kernel.config_ref();
+            for (task, chain) in &config.llm.auxiliary.tasks {
+                aux.insert(task.as_str().to_string(), chain.clone());
+            }
+            let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
+        }
+    });
+}
+
+/// Save an auxiliary LLM chain via `POST /api/config/set`.
+pub fn spawn_save_aux_chain(
+    backend: BackendRef,
+    task: String,
+    chain: Vec<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon {
+            ref base_url,
+            ref api_key,
+        } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = serde_json::json!({
+                "path": format!("llm.auxiliary.{task}"),
+                "value": chain,
+            });
+            let _ = client
+                .post(format!("{base_url}/api/config/set"))
+                .json(&body)
+                .send();
+            spawn_fetch_auxiliary(
+                BackendRef::Daemon {
+                    base_url: base_url.clone(),
+                    api_key: api_key.clone(),
+                },
+                tx,
+            );
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(
+                std::collections::BTreeMap::new(),
+            ));
         }
     });
 }

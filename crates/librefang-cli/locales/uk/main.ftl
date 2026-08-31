@@ -1944,6 +1944,14 @@ tui-settings-backups-restore-warning = Відновлення перезапис
 tui-settings-backups-restore-keep-config = Зберегти config.toml цієї машини (режим клону)
 tui-settings-backups-restore-all = Вибрано весь вміст архіву.
 tui-settings-backups-restore-none = Виберіть хоча б один компонент або натисніть [Esc], щоб скасувати.
+tui-settings-tab-auxiliary = 5 Auxiliary
+tui-settings-hints-auxiliary =   [↑↓] Navigate  [Enter] Edit chain  [r] Refresh  [Esc] Cancel
+tui-settings-auxiliary-header-task = Task
+tui-settings-auxiliary-header-chain = Fallback Chain
+tui-settings-auxiliary-loading = Loading auxiliary config…
+tui-settings-auxiliary-empty = No auxiliary tasks configured.
+tui-settings-auxiliary-not-configured = (not configured)
+tui-settings-auxiliary-editing = Editing chain for { $task } (comma-separated provider:model):
 # chat.rs
 tui-chat-input-staged =   ({ $count } відкладено)
 tui-chat-hints-modelpicker =     [↑↓] Навігація  [Enter] Вибрати  [Esc] Закрити  [type] Фільтр
