@@ -1239,11 +1239,22 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
             created_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_template_versions_name
-            ON template_versions(template_name, timestamp DESC);",
+            ON template_versions(template_name, timestamp DESC);
+        CREATE TABLE IF NOT EXISTS manifest_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id        TEXT NOT NULL,
+            agent_name      TEXT NOT NULL DEFAULT '',
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id
+            ON manifest_versions(agent_id, timestamp DESC);",
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (55, datetime('now'), 'Template (agent-type) version history table')",
+         VALUES (55, datetime('now'), 'Template + agent manifest version history tables')",
         [],
     )?;
     Ok(())
