@@ -1313,6 +1313,7 @@ mod tests {
             loop_engineering: false,
             verify_agent_id: None,
             evaluator_model: None,
+            tick_interval_secs: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

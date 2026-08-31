@@ -1085,7 +1085,6 @@ impl LibreFangKernel {
         let goal_runner = crate::goal_runner::GoalRunner::new_with_store(
             supervisor.subscribe(),
             librefang_memory::GoalRunStore::new(memory.pool()),
-            memory.clone(),
         );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
