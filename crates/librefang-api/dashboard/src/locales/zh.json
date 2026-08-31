@@ -2916,7 +2916,13 @@
     "verifier_agent": "验证代理",
     "no_verifier_selected": "无验证代理（不设关卡）",
     "evaluator_model": "评估模型",
-    "evaluator_model_placeholder": "评估模型（可选）"
+    "evaluator_model_placeholder": "评估模型（可选）",
+    "phase_running": "Running",
+    "phase_paused": "Paused",
+    "phase_finished": "Finished",
+    "phase_max_iter": "Max Iterations",
+    "phase_rate_limited": "Rate Limited",
+    "phase_stopped": "Stopped"
   },
   "sessions": {
     "title": "会话",

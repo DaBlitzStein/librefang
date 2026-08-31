@@ -2954,7 +2954,13 @@
     "verifier_agent": "Agent weryfikujący",
     "no_verifier_selected": "Bez weryfikatora (bez kontroli)",
     "evaluator_model": "Model oceniający",
-    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)"
+    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)",
+    "phase_running": "Running",
+    "phase_paused": "Paused",
+    "phase_finished": "Finished",
+    "phase_max_iter": "Max Iterations",
+    "phase_rate_limited": "Rate Limited",
+    "phase_stopped": "Stopped"
   },
   "sessions": {
     "title": "Sesje",

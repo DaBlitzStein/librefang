@@ -2954,7 +2954,13 @@
     "verifier_agent": "Агент-перевіряч",
     "no_verifier_selected": "Без перевіряча (без контролю)",
     "evaluator_model": "Модель-оцінювач",
-    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)"
+    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)",
+    "phase_running": "Running",
+    "phase_paused": "Paused",
+    "phase_finished": "Finished",
+    "phase_max_iter": "Max Iterations",
+    "phase_rate_limited": "Rate Limited",
+    "phase_stopped": "Stopped"
   },
   "sessions": {
     "title": "Сесії",

@@ -2950,7 +2950,13 @@
     "verifier_agent": "Verifier agent",
     "no_verifier_selected": "No verifier (run ungated)",
     "evaluator_model": "Evaluator model",
-    "evaluator_model_placeholder": "Evaluator model (optional)"
+    "evaluator_model_placeholder": "Evaluator model (optional)",
+    "phase_running": "Running",
+    "phase_paused": "Paused",
+    "phase_finished": "Finished",
+    "phase_max_iter": "Max Iterations",
+    "phase_rate_limited": "Rate Limited",
+    "phase_stopped": "Stopped"
   },
   "sessions": {
     "title": "Sessions",

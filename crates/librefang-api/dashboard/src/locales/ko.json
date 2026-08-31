@@ -2950,7 +2950,13 @@
     "verifier_agent": "검증 에이전트",
     "no_verifier_selected": "검증자 없음(게이트 없이 실행)",
     "evaluator_model": "평가 모델",
-    "evaluator_model_placeholder": "평가 모델(선택)"
+    "evaluator_model_placeholder": "평가 모델(선택)",
+    "phase_running": "Running",
+    "phase_paused": "Paused",
+    "phase_finished": "Finished",
+    "phase_max_iter": "Max Iterations",
+    "phase_rate_limited": "Rate Limited",
+    "phase_stopped": "Stopped"
   },
   "sessions": {
     "title": "세션",
