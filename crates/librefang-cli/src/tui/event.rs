@@ -129,10 +129,6 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
-    /// The agent's `[workspaces]` table, as `(name, path, mode)` rows.
-    AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
-    /// The shared-folders write came back 2xx.
-    AgentWorkspacesUpdated(String),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -258,16 +254,7 @@ pub enum AppEvent {
     },
     /// Agent channel allowlist updated.
     AgentChannelsUpdated(String),
-    /// Agent model routing loaded (for the routing editor). `available` is the
-    /// resolved profile catalog; `allowed_profiles` is this agent's allowlist.
-    AgentModelRoutingLoaded {
-        mode: String,
-        allowed_profiles: Vec<String>,
-        cost_budget: Option<String>,
-        available: Vec<String>,
-    },
-    /// Agent model routing updated.
-    AgentModelRoutingUpdated(String),
+    AgentTokenUsageLoaded(crate::tui::screens::agents::AgentTokenUsage),
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -1418,105 +1405,6 @@ pub fn spawn_fetch_agent_mcp_servers(
 }
 
 /// Update an agent's skills.
-/// Read the agent's `[workspaces]` table out of its manifest TOML.
-///
-/// Goes through `GET /api/agents/{id}/manifest` rather than the JSON agent
-/// detail, because the detail response does not carry the workspace
-/// declarations at all.
-pub fn spawn_fetch_agent_workspaces(
-    backend: BackendRef,
-    agent_id: String,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
-                .send()
-            {
-                if let Ok(toml_text) = resp.text() {
-                    let entries: Vec<(String, String, String)> =
-                        toml::from_str::<toml::Value>(&toml_text)
-                            .ok()
-                            .and_then(|v| v.get("workspaces").cloned())
-                            .and_then(|w| w.as_table().cloned())
-                            .map(|t| {
-                                t.iter()
-                                    .map(|(name, decl)| {
-                                        let path = decl
-                                            .get("path")
-                                            .and_then(|p| p.as_str())
-                                            .unwrap_or("")
-                                            .to_string();
-                                        let mode = decl
-                                            .get("mode")
-                                            .and_then(|m| m.as_str())
-                                            .unwrap_or("rw")
-                                            .to_string();
-                                        (name.clone(), path, mode)
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                    let _ = tx.send(AppEvent::AgentWorkspacesLoaded(agent_id, entries));
-                }
-            }
-        }
-    });
-}
-
-/// Write the edited shared folders back.
-///
-/// `PATCH /api/agents/{id}` with `manifest_toml` replaces the whole manifest,
-/// so the current one is fetched first and only its `[workspaces]` table is
-/// replaced. Sending a manifest built from the editor alone would silently
-/// drop every field the editor does not render.
-pub fn spawn_update_agent_workspaces(
-    backend: BackendRef,
-    agent_id: String,
-    workspaces: Vec<(String, String, String)>,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            let patched = client
-                .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
-                .send()
-                .ok()
-                .and_then(|r| r.text().ok())
-                .and_then(|text| {
-                    let mut value: toml::Value = toml::from_str(&text).ok()?;
-                    let table = value.as_table_mut()?;
-                    let mut ws = toml::map::Map::new();
-                    for (name, path, mode) in &workspaces {
-                        let mut entry = toml::map::Map::new();
-                        entry.insert("path".to_string(), toml::Value::String(path.clone()));
-                        entry.insert("mode".to_string(), toml::Value::String(mode.clone()));
-                        ws.insert(name.clone(), toml::Value::Table(entry));
-                    }
-                    table.insert("workspaces".to_string(), toml::Value::Table(ws));
-                    toml::to_string(&value).ok()
-                });
-            let ok = match patched {
-                Some(toml_content) => client
-                    .patch(format!("{base_url}/api/agents/{agent_id}"))
-                    .json(&serde_json::json!({"manifest_toml": toml_content}))
-                    .send()
-                    .map(|r| r.status().is_success())
-                    .unwrap_or(false),
-                None => false,
-            };
-            let _ = tx.send(if ok {
-                AppEvent::AgentWorkspacesUpdated(agent_id)
-            } else {
-                AppEvent::FetchError(crate::i18n::t("tui-event-workspaces-update-failed"))
-            });
-        }
-    });
-}
-
 pub fn spawn_update_agent_skills(
     backend: BackendRef,
     agent_id: String,
@@ -1721,171 +1609,44 @@ pub fn spawn_update_agent_channels(
     });
 }
 
-/// Fetch an agent's model routing settings **and** the profile catalog.
-///
-/// Both in one call because the editor is unusable with either half missing:
-/// without the catalog there is nothing to tick, and without the agent's own
-/// settings the editor would show whatever the previous screen left behind and
-/// could save a value the operator never chose.
-pub fn spawn_fetch_agent_model_routing(
+pub fn spawn_fetch_agent_token_usage(
     backend: BackendRef,
     agent_id: String,
     tx: mpsc::Sender<AppEvent>,
 ) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
             let client = make_daemon_client(api_key.as_deref());
-
-            let available: Vec<String> = client
-                .get(format!("{base_url}/api/model-router/profiles"))
+            let mut usage = crate::tui::screens::agents::AgentTokenUsage::default();
+            if let Ok(body) = client
+                .get(format!("{base_url}/api/agents/{agent_id}"))
                 .send()
-                .ok()
-                .and_then(|r| r.json::<serde_json::Value>().ok())
-                .map(|body| {
-                    body["profiles"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|p| p["name"].as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
-
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/agents/{agent_id}/model_routing"))
-                .send()
+                .and_then(|r| r.json::<serde_json::Value>())
             {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let mode = body["mode"].as_str().unwrap_or("fixed").to_string();
-                    let allowed_profiles: Vec<String> = body["allowed_profiles"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let cost_budget = body["cost_budget"].as_str().map(String::from);
-                    let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
-                        mode,
-                        allowed_profiles,
-                        cost_budget,
-                        available,
-                    });
-                    return;
-                }
+                usage.total_tokens = body["injected_footprint_tokens"].as_u64().unwrap_or(0);
             }
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-event-model-routing-fetch-failed",
-            )));
-        }
-        BackendRef::InProcess(kernel) => {
-            let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) else {
-                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                    "tui-event-model-routing-fetch-failed",
-                )));
-                return;
-            };
-            let aid = librefang_types::agent::AgentId(uuid);
-            let Some(entry) = kernel.agent_registry_ref().get(aid) else {
-                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                    "tui-event-model-routing-fetch-failed",
-                )));
-                return;
-            };
-
-            let cfg = kernel.config_snapshot();
-            let available = librefang_kernel::model_router::ProfileCatalog::load_cached(
-                cfg.home_dir.as_path(),
-                &cfg.model_router,
-            )
-            .names();
-
-            let mode = match entry.manifest.model.mode {
-                librefang_types::agent::ModelMode::Fixed => "fixed",
-                librefang_types::agent::ModelMode::Flexible => "flexible",
-            }
-            .to_string();
-            let router_override = entry.manifest.model.router_override.as_ref();
-            let allowed_profiles = router_override
-                .map(|o| o.allowed_profiles.iter().cloned().collect())
-                .unwrap_or_default();
-            let cost_budget = router_override
-                .and_then(|o| o.cost_budget)
-                .map(|t| t.as_str().to_string());
-
-            let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
-                mode,
-                allowed_profiles,
-                cost_budget,
-                available,
-            });
-        }
-    });
-}
-
-/// Persist an agent's model routing mode and router override.
-pub fn spawn_update_agent_model_routing(
-    backend: BackendRef,
-    agent_id: String,
-    mode: String,
-    allowed_profiles: Vec<String>,
-    cost_budget: Option<String>,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .put(format!("{base_url}/api/agents/{agent_id}/model_routing"))
-                .json(&serde_json::json!({
-                    "mode": mode,
-                    "allowed_profiles": allowed_profiles,
-                    "cost_budget": cost_budget,
-                }))
+            if let Ok(body) = client
+                .get(format!("{base_url}/api/agents/{agent_id}/events?limit=5"))
                 .send()
+                .and_then(|r| r.json::<serde_json::Value>())
             {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::AgentModelRoutingUpdated(agent_id));
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-model-routing-update-failed",
-                    )));
-                }
+                usage.recent = body["events"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| {
+                                Some((
+                                    c["model"].as_str()?.to_string(),
+                                    c["input_tokens"].as_u64().unwrap_or(0),
+                                    c["output_tokens"].as_u64().unwrap_or(0),
+                                    c["cost_usd"].as_f64().unwrap_or(0.0),
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
             }
-        }
-        BackendRef::InProcess(kernel) => {
-            if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
-                let aid = librefang_types::agent::AgentId(uuid);
-                let flexible = mode == "flexible";
-                let router_mode = if flexible {
-                    librefang_types::agent::ModelMode::Flexible
-                } else {
-                    librefang_types::agent::ModelMode::Fixed
-                };
-                let router_override =
-                    flexible.then(|| librefang_types::model_profile::AgentRouterOverride {
-                        fixed: false,
-                        allowed_profiles: allowed_profiles.into_iter().collect(),
-                        cost_budget: cost_budget
-                            .as_deref()
-                            .and_then(librefang_types::model_profile::CostTier::parse),
-                        default_profile: None,
-                    });
-                match kernel.set_agent_model_routing(aid, router_mode, router_override) {
-                    Ok(()) => {
-                        let _ = tx.send(AppEvent::AgentModelRoutingUpdated(agent_id));
-                    }
-                    Err(_) => {
-                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                            "tui-event-model-routing-update-failed",
-                        )));
-                    }
-                }
-            }
+            let _ = tx.send(AppEvent::AgentTokenUsageLoaded(usage));
         }
     });
 }
