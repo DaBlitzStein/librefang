@@ -204,6 +204,7 @@ export {
   // agents
   createAgentType,
   updateAgentType,
+  putAgentTemplateToml,
   deleteAgentType,
   spawnEphemeral,
   spawnAgent,

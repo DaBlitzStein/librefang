@@ -5186,6 +5186,18 @@ impl SystemResource {
         .await
     }
 
+    pub async fn put_agent_template_toml(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "templates", name, "toml"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn version(&self) -> Result<Value> {
         do_req(
             &self.client,
