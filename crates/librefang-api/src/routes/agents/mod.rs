@@ -363,6 +363,7 @@ pub(crate) fn enrich_agent_json(
         "supports_thinking": supports_thinking,
         "ready": ready,
         "profile": e.manifest.profile,
+        "source_template": e.manifest.source_template,
         "schedule": schedule,
         "sessions_24h": sessions_24h,
         "cost_24h": cost_24h,
@@ -1165,6 +1166,7 @@ mod tests {
     #[test]
     fn test_clone_manifest_strips_skills_when_excluded() {
         let manifest = librefang_types::agent::AgentManifest {
+            source_template: None,
             skills: vec!["skill-a".to_string(), "skill-b".to_string()],
             tools: {
                 let mut m = std::collections::HashMap::new();
@@ -1213,6 +1215,7 @@ mod tests {
     #[test]
     fn test_clone_manifest_disables_tools_when_excluded() {
         let manifest = librefang_types::agent::AgentManifest {
+            source_template: None,
             tools: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
@@ -2069,6 +2072,7 @@ mod monitoring_tests {
     fn spawn_monitoring_test_agent(state: &Arc<AppState>, name: &str) -> AgentId {
         let manifest = AgentManifest {
             name: name.to_string(),
+            source_template: None,
             ..AgentManifest::default()
         };
         state.kernel.spawn_agent_typed(manifest).unwrap()
@@ -2175,6 +2179,7 @@ mod monitoring_tests {
         let (state, _tmp) = monitoring_test_app_state();
         let manifest = AgentManifest {
             name: "patch-top-level-mcp".to_string(),
+            source_template: None,
             mcp_servers: vec!["server-a".to_string()],
             ..AgentManifest::default()
         };
@@ -2221,6 +2226,7 @@ mod monitoring_tests {
         let (state, _tmp) = monitoring_test_app_state();
         let manifest = AgentManifest {
             name: "patch-provider-only".to_string(),
+            source_template: None,
             model: librefang_types::agent::ModelConfig {
                 provider: "openai".to_string(),
                 model: "gpt-4.1".to_string(),
@@ -2298,6 +2304,7 @@ mod monitoring_tests {
         let (state, _tmp) = monitoring_test_app_state();
         let manifest = AgentManifest {
             name: "patch-nested-mcp".to_string(),
+            source_template: None,
             mcp_servers: vec!["server-b".to_string()],
             ..AgentManifest::default()
         };

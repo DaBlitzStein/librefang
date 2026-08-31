@@ -6,6 +6,7 @@ use super::*;
 fn manifest_with_group(display_name: Option<&str>, is_group: bool) -> AgentManifest {
     let mut m = AgentManifest {
         name: "agent".to_string(),
+        source_template: None,
         ..Default::default()
     };
     if is_group {
@@ -24,6 +25,7 @@ fn manifest_with_group(display_name: Option<&str>, is_group: bool) -> AgentManif
 fn manifest_with_channel(display_name: &str, channel: &str) -> AgentManifest {
     let mut m = AgentManifest {
         name: "agent".to_string(),
+        source_template: None,
         ..Default::default()
     };
     m.metadata.insert(
@@ -197,6 +199,7 @@ fn test_build_sender_prefix_telegram_dm_emits_prefix() {
 fn test_build_sender_prefix_real_channel_falls_back_to_user_id_when_display_name_absent() {
     let mut m = AgentManifest {
         name: "agent".to_string(),
+        source_template: None,
         ..Default::default()
     };
     m.metadata.insert(

@@ -153,6 +153,7 @@ impl SetupWizard {
             version: librefang_types::VERSION.to_string(),
             description: intent.description.clone(),
             author: "wizard".to_string(),
+            source_template: None,
             // The wizard has no caller identity in hand, so the agent it drafts
             // falls back to `config.toml: default_owner` for its ownerless turns
             // rather than being pinned to a principal nobody named (#7744).
