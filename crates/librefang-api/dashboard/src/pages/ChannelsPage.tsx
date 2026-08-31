@@ -118,7 +118,8 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
   const statusLabel = livenessLabel(liveness.state, t);
   const received = c.messages_received ?? 0;
   const sent = c.messages_sent ?? 0;
-  const kind = c.channel_type || c.category || c.name;
+  const type = c.channel_type || c.category || c.name;
+  const kind = c.agent && c.name !== type ? `${type} → ${c.agent}` : type;
 
   // The card's own aria-label overrides its inner text for screen readers, so
   // the status has to be part of it — otherwise the indicator would be
@@ -879,8 +880,6 @@ export function ChannelsPage() {
 
   const channels = useMemo(() => channelsQuery.data ?? [], [channelsQuery.data]);
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
-  const unconfiguredCount = channels.length - configuredCount;
-
   // Configured channels are the main page content. Filter/sort applies
   // to those only; the unconfigured catalog lives behind the Add picker.
   const filteredChannels = useMemo(
@@ -1020,10 +1019,7 @@ export function ChannelsPage() {
               size="sm"
               onClick={openPicker}
               leftIcon={<Plus className="h-3.5 w-3.5" />}
-              disabled={unconfiguredCount === 0}
-              title={unconfiguredCount === 0
-                ? t("channels.all_configured", { defaultValue: "All channels configured" })
-                : t("channels.add_channel", { defaultValue: "Add channel" })}
+              title={t("channels.add_channel", { defaultValue: "Add channel" })}
             >
               {t("channels.add", { defaultValue: "Add" })}
             </Button>
