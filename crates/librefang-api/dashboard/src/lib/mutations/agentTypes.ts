@@ -3,6 +3,7 @@ import {
   createAgentType,
   updateAgentType,
   deleteAgentType,
+  restoreTemplateVersion,
   spawnEphemeral,
 } from "../http/client";
 import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
@@ -41,6 +42,19 @@ export function useDeleteAgentType() {
   return useMutation({
     mutationFn: (name: string) => deleteAgentType(name),
     onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
+  });
+}
+
+export function useRestoreTemplateVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, versionId }: { name: string; versionId: string }) =>
+      restoreTemplateVersion(name, versionId),
+    onSuccess: (_data, { name }) => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.history(name) });
+    },
   });
 }
 
