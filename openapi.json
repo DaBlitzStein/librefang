@@ -12566,6 +12566,45 @@
         }
       }
     },
+    "/api/templates/{name}/restore-from-registry": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/:name/restore-from-registry — Overwrite the operator's\nagent type with the registry's copy of the same name.",
+        "description": "This is the write side of [`registry_diff`]: an operator who has diverged\nfrom the registry (or deleted their local copy outright) can pull the\nregistry's current version back over it in one step, the same way the\nregistry sync's own fan-out would have installed it on a fresh machine —\nexcept opt-in, since the sync itself never overwrites an existing agent\ntype (see the fan-out's `if !dest.exists()` guard in\n`librefang-runtime::registry_sync`).\n\nRefused, same as `PUT`/`DELETE`, when the name belongs to a live agent's\nown workspace manifest — that document is edited through `/api/agents`,\nnot this store.",
+        "operationId": "restore_agent_type_from_registry",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type restored from the registry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No registry version of this name is available"
+          },
+          "409": {
+            "description": "The name belongs to a live agent, which is edited through /api/agents"
+          }
+        }
+      }
+    },
     "/api/templates/{name}/toml": {
       "get": {
         "tags": [
