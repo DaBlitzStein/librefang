@@ -36,7 +36,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch } from "lucide-react";
 import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -121,6 +121,12 @@ type AgentView = AgentDetail & {
   last_active?: string;
   triggers?: AgentTriggerSummary[];
   cron_jobs?: AgentCronSummary[];
+  /** Lineage fields the backend only emits on `GET /api/agents` (the list
+   *  endpoint's `enrich_agent_json`), not on the per-agent detail fetch.
+   *  Carried over from the `AgentItem` row when opening the detail panel. */
+  parent_agent_id?: string | null;
+  parent_unknown?: boolean;
+  children?: string[];
   capabilities?: Omit<NonNullable<AgentDetail["capabilities"]>, "tools" | "skills"> & {
     skills?: string[];
     tools?: string[];
@@ -440,6 +446,23 @@ export function AgentsPage() {
     return { ...agent, is_hand: agent.is_hand ?? fallback };
   }
 
+  /** The detail fetch (`GET /api/agents/{id}`) doesn't carry lineage —
+   *  only the list endpoint does — so origin fields must be copied over
+   *  from whatever already has them: the list row on first open, or the
+   *  previous detail state on a same-agent refresh. */
+  function mergeOriginFields<T extends AgentDetail>(
+    agent: T,
+    origin?: Pick<AgentView, "parent_agent_id" | "parent_unknown" | "children">,
+  ): T {
+    if (!origin) return agent;
+    return {
+      ...agent,
+      parent_agent_id: origin.parent_agent_id,
+      parent_unknown: origin.parent_unknown,
+      children: origin.children,
+    };
+  }
+
   function startModelEdit() {
     setModelDraft({
       provider: detailAgent?.model?.provider ?? "",
@@ -520,7 +543,7 @@ export function AgentsPage() {
     try {
       await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
       const d = await qc.fetchQuery(agentQueries.detail(agentId));
-      setDetailAgent(mergeHandFlag(d, fallback));
+      setDetailAgent(mergeOriginFields(mergeHandFlag(d, fallback), (detailAgent as AgentView) ?? undefined));
     } catch {
       // keep current state when refresh fails
     }
@@ -958,10 +981,18 @@ export function AgentsPage() {
     setAgentTab("conversation");
     try {
       const d = await qc.fetchQuery(agentQueries.detail(agent.id));
-      setDetailAgent(mergeHandFlag(d, agent.is_hand));
+      setDetailAgent(mergeOriginFields(mergeHandFlag(d, agent.is_hand), agent));
     } catch {
-      setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail);
+      setDetailAgent(mergeOriginFields({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail, agent));
     }
+  };
+
+  /** Navigate the detail panel to a parent/child agent referenced by id.
+   *  Falls back to a bare stub when the id isn't in the current (paginated)
+   *  list — `selectAgent` still fetches the real detail from its own id. */
+  const goToAgent = (id: string) => {
+    const found = agents.find(a => a.id === id);
+    void selectAgent(found ?? ({ id, name: id, is_hand: false } as AgentItem));
   };
 
   // Auto-select the first agent on desktop so the detail panel isn't blank
@@ -1006,6 +1037,11 @@ export function AgentsPage() {
           {agent.is_hand && (
             <span className="shrink-0 text-[9px] font-bold px-1.5 py-px rounded bg-brand/10 text-brand">
               {t("agents.hand_badge", { defaultValue: "HAND" })}
+            </span>
+          )}
+          {!!agent.children?.length && (
+            <span className="shrink-0 text-[10.5px] text-text-dim/80">
+              ({t("agents.children_count", { count: agent.children.length })})
             </span>
           )}
           <span className="font-mono text-[10.5px] text-text-dim/80 shrink-0 tabular-nums">
@@ -2716,6 +2752,72 @@ export function AgentsPage() {
                   </div>
                 </section>
               )}
+
+              {/* Origin */}
+              <section>
+                <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                  <GitBranch className="w-3.5 h-3.5 text-brand" />
+                  {t("agents.origin", { defaultValue: "Origin" })}
+                </h4>
+                <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
+                  <DetailRow label={t("agents.parent", { defaultValue: "Parent Agent" })}>
+                    {(() => {
+                      const parentId = (detailAgent as AgentView).parent_agent_id;
+                      if (parentId) {
+                        const parent = agents.find(a => a.id === parentId);
+                        const label = parent
+                          ? t(`agents.builtin.${parent.name}.name`, { defaultValue: parent.name })
+                          : truncateId(parentId, 16);
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => goToAgent(parentId)}
+                            className="font-mono text-brand hover:underline"
+                          >
+                            {label}
+                          </button>
+                        );
+                      }
+                      if ((detailAgent as AgentView).parent_unknown) {
+                        return (
+                          <span className="text-text-dim">
+                            {t("agents.origin_unknown", { defaultValue: "Unknown (pre-migration)" })}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span className="text-text-dim">
+                          {t("agents.origin_root", { defaultValue: "Root agent" })}
+                        </span>
+                      );
+                    })()}
+                  </DetailRow>
+                  <DetailRow label={t("agents.children", { defaultValue: "Children" })}>
+                    {(detailAgent as AgentView).children?.length ? (
+                      <div className="flex flex-wrap justify-end gap-1.5">
+                        {(detailAgent as AgentView).children!.map(childId => {
+                          const child = agents.find(a => a.id === childId);
+                          const label = child
+                            ? t(`agents.builtin.${child.name}.name`, { defaultValue: child.name })
+                            : truncateId(childId, 16);
+                          return (
+                            <button
+                              key={childId}
+                              type="button"
+                              onClick={() => goToAgent(childId)}
+                              className="font-mono text-xs px-1.5 py-0.5 rounded bg-brand/10 text-brand hover:bg-brand/20"
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <span className="text-text-dim">{t("common.none", { defaultValue: "None" })}</span>
+                    )}
+                  </DetailRow>
+                </div>
+              </section>
 
               {/* Web Search Augmentation */}
               <section>
