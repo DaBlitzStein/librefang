@@ -218,6 +218,9 @@ pub enum TemplatesAction {
     PromoteTemplate {
         name: String,
     },
+    RestoreFromRegistry {
+        name: String,
+    },
 }
 
 impl TemplatesState {
@@ -340,6 +343,16 @@ impl TemplatesState {
                 }
             }
             KeyCode::Char('r') => return TemplatesAction::Refresh,
+            KeyCode::Char('R') => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(&idx) = self.filtered.get(sel) {
+                        let t = &self.templates[idx];
+                        return TemplatesAction::RestoreFromRegistry {
+                            name: t.name.clone(),
+                        };
+                    }
+                }
+            }
             _ => {}
         }
         TemplatesAction::Continue
