@@ -2416,6 +2416,38 @@ pub fn spawn_promote_agent_type(backend: BackendRef, name: String, tx: mpsc::Sen
     });
 }
 
+pub fn spawn_restore_from_registry(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let (ok, message) = if !is_safe_template_name(&name) {
+            (false, "Invalid template name".to_string())
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    match client
+                        .post(format!("{base_url}/api/templates/{name}/restore"))
+                        .send()
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            (true, "Restored from registry".to_string())
+                        }
+                        Ok(resp) => {
+                            let status = resp.status();
+                            let body = resp.text().unwrap_or_default();
+                            (false, format!("{status}: {body}"))
+                        }
+                        Err(e) => (false, e.to_string()),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    (false, "Registry restore requires daemon mode".to_string())
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::RegistryRestoreResult { name, ok, message });
+    });
+}
+
 pub fn spawn_fetch_template_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
