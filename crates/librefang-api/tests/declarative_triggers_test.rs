@@ -96,6 +96,7 @@ async fn json_request(
 fn manifest_with_triggers(name: &str, triggers: Vec<ManifestTrigger>) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
+        source_template: None,
         triggers,
         ..AgentManifest::default()
     }
