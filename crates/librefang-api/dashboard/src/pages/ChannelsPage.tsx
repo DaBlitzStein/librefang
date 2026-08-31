@@ -118,7 +118,8 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
   const statusLabel = livenessLabel(liveness.state, t);
   const received = c.messages_received ?? 0;
   const sent = c.messages_sent ?? 0;
-  const kind = c.channel_type || c.category || c.name;
+  const type = c.channel_type || c.category || c.name;
+  const kind = c.agent && c.name !== type ? `${type} → ${c.agent}` : type;
 
   // The card's own aria-label overrides its inner text for screen readers, so
   // the status has to be part of it — otherwise the indicator would be
