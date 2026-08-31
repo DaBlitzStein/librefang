@@ -1820,11 +1820,34 @@ export interface AgentTypeSpec {
   skills?: string[];
 }
 
+/**
+ * One privacy risk the promotion preview found in a manifest (mirrors
+ * `librefang_types::manifest_privacy::Finding`).
+ *
+ * `removed_by_sanitizer: true` means the published copy already drops the
+ * value; `false` means it sits inside a field worth keeping and the operator
+ * has to edit it by hand before publishing.
+ */
+export interface PromotionFinding {
+  field: string;
+  category: string;
+  preview: string;
+  removed_by_sanitizer: boolean;
+}
+
+/** Read-only privacy pass over a manifest, ahead of promoting it to a shared registry (#7771). */
+export interface PromotionPreview {
+  requires_review: boolean;
+  findings: PromotionFinding[];
+  manifest_toml: string | null;
+}
+
 export interface AgentTypeDetail {
   name: string;
   source: AgentTypeSource;
   editable: boolean;
   spec: AgentTypeSpec;
+  promotion_preview?: PromotionPreview;
   manifest_toml: string;
 }
 
