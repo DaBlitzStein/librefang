@@ -1699,12 +1699,33 @@ export interface AgentTypeSpec {
   skills?: string[];
 }
 
+/** One field that differs between the local agent type and the registry's copy of it. */
+export interface AgentTypeRegistryDiffChange {
+  field: string;
+  local: unknown;
+  registry: unknown;
+}
+
+/**
+ * Comparison against the registry's own copy of this agent type (#7767).
+ *
+ * `available` is `false` when no registry checkout is synced yet, or the registry ships no agent
+ * type of this name — either way there is nothing to restore from.
+ */
+export interface AgentTypeRegistryDiff {
+  available: boolean;
+  differs?: boolean;
+  changed_fields?: AgentTypeRegistryDiffChange[];
+  registry_toml?: string;
+}
+
 export interface AgentTypeDetail {
   name: string;
   source: AgentTypeSource;
   editable: boolean;
   spec: AgentTypeSpec;
   manifest_toml: string;
+  registry_diff: AgentTypeRegistryDiff;
 }
 
 export async function listAgentTemplates(): Promise<AgentTemplate[]> {
@@ -1733,6 +1754,13 @@ export async function updateAgentType(
 
 export async function deleteAgentType(name: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
+}
+
+export async function restoreAgentTypeFromRegistry(name: string): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>(
+    `/api/templates/${encodeURIComponent(name)}/restore-from-registry`,
+    {},
+  );
 }
 
 /**

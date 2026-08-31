@@ -22,6 +22,7 @@ api-error-template-read-failed = Échec de la lecture du modèle
 api-error-agent-type-exists = Un type d'agent nommé '{ $name }' existe déjà
 api-error-agent-type-name-taken = '{ $name }' est le nom d'un agent actif ; choisissez un autre nom pour le type d'agent
 api-error-agent-type-not-editable = Le type d'agent '{ $name }' provient de l'espace de travail d'un agent actif et se gère via /api/agents
+api-error-agent-type-no-registry-version = Aucune version du registre du type d'agent '{ $name }' n'est disponible pour la restauration
 
 # Manifest errors
 api-error-manifest-too-large = Manifeste trop volumineux (max. 1 Mo)

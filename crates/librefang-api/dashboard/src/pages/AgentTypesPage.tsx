@@ -2,13 +2,19 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
 import { Edit2, LayoutTemplate, Lock, Play, Plus, Trash2 } from "lucide-react";
-import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
+import type {
+  AgentTemplate,
+  AgentTypeRegistryDiff,
+  AgentTypeSpec,
+  SpawnEphemeralResult,
+} from "../api";
 import { useAgentType, useAgentTypes } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
   useCreateAgentType,
   useDeleteAgentType,
+  useRestoreAgentTypeFromRegistry,
   useSpawnEphemeral,
   useUpdateAgentType,
 } from "../lib/mutations/agentTypes";
@@ -99,6 +105,94 @@ function Field({
       </label>
       {children}
       {hint && <p className="text-[11px] text-text-dim/70">{hint}</p>}
+    </div>
+  );
+}
+
+function formatDiffValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "—";
+  return String(value);
+}
+
+/**
+ * Compares the stored agent type against the registry's copy of the same name (#7767) and offers
+ * to overwrite the local one with it.
+ *
+ * The registry's own sync never does this overwrite on its own — it only pre-installs a type the
+ * operator does not have yet — so this is the opt-in path for pulling an upstream update over
+ * local edits or a local delete.
+ */
+function RegistryRestoreSection({
+  name,
+  diff,
+}: {
+  name: string;
+  diff: AgentTypeRegistryDiff;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const restore = useRestoreAgentTypeFromRegistry();
+  const [confirming, setConfirming] = useState(false);
+
+  if (!diff.available) {
+    return (
+      <p className="rounded-lg border border-border-subtle bg-main/30 px-3 py-2 text-[11px] text-text-dim">
+        {t("agentTypes.no_registry_version")}
+      </p>
+    );
+  }
+
+  async function handleRestore() {
+    try {
+      await restore.mutateAsync(name);
+      addToast(t("agentTypes.restored"), "success");
+    } catch (err) {
+      addToast(toastErr(err, t("agentTypes.restore_failed")), "error");
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-lg border border-border-subtle bg-main/30 px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-text-dim">
+          {t("agentTypes.registry_diff")}
+        </span>
+        {diff.differs ? (
+          <Button variant="ghost" onClick={() => setConfirming(true)} isLoading={restore.isPending}>
+            {t("agentTypes.restore_from_registry")}
+          </Button>
+        ) : (
+          <Badge variant="default">{t("agentTypes.registry_matches")}</Badge>
+        )}
+      </div>
+
+      {diff.differs && (diff.changed_fields ?? []).length > 0 && (
+        <ul className="space-y-1.5 text-[11px] text-text-dim">
+          {(diff.changed_fields ?? []).map((change) => (
+            <li key={change.field} className="flex flex-col gap-0.5">
+              <span className="font-semibold text-text-main">{change.field}</span>
+              <span className="truncate">
+                {t("agentTypes.registry_diff_local")}: {formatDiffValue(change.local)}
+              </span>
+              <span className="truncate">
+                {t("agentTypes.registry_diff_registry")}: {formatDiffValue(change.registry)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <ConfirmDialog
+        isOpen={confirming}
+        onClose={() => setConfirming(false)}
+        onConfirm={() => void handleRestore()}
+        title={t("agentTypes.restore_from_registry")}
+        message={t("agentTypes.restore_confirm")}
+        tone="destructive"
+      />
     </div>
   );
 }
@@ -256,6 +350,10 @@ function AgentTypeEditor({
           <p className="rounded-lg border border-border-subtle bg-main/30 px-3 py-2 text-[11px] text-text-dim">
             {t("agentTypes.preserved_note")}
           </p>
+
+          {!isCreate && detail.data?.editable && detail.data.registry_diff && (
+            <RegistryRestoreSection name={name as string} diff={detail.data.registry_diff} />
+          )}
 
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="ghost" onClick={onClose} disabled={saving}>

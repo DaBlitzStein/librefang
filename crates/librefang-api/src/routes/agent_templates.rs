@@ -36,6 +36,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/templates/{name}/toml",
             axum::routing::get(get_agent_template_toml),
         )
+        .route(
+            "/templates/{name}/restore-from-registry",
+            axum::routing::post(restore_agent_type_from_registry),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +398,72 @@ fn promotion_preview(name: &str, manifest: &AgentManifest) -> serde_json::Value 
     })
 }
 
+/// Read the registry's own copy of an agent type, if a registry checkout is
+/// present and ships one under this name.
+///
+/// The registry ships each agent type as its own directory
+/// (`agent-types/<name>/agent.toml`), the same layout the sync fan-out in
+/// `librefang-runtime::registry_sync` reads — see that module for why the
+/// installed store is flat instead. This is read-only: it never touches the
+/// checkout, only the operator's own `agent-types/<name>.toml`.
+fn read_registry_agent_type(name: &str) -> Option<(String, AgentManifest)> {
+    let registry_cache = librefang_types::agent_type_store::registry_cache_dir();
+    let agent_types_src =
+        librefang_types::registry_paths::resolve_agent_types_dir(&registry_cache)?;
+    let manifest_path = agent_types_src.join(name).join("agent.toml");
+    let content = std::fs::read_to_string(&manifest_path).ok()?;
+    match toml::from_str::<AgentManifest>(&content) {
+        Ok(manifest) => Some((content, manifest)),
+        Err(e) => {
+            tracing::warn!("Invalid registry agent type manifest for '{name}': {e}");
+            None
+        }
+    }
+}
+
+/// Compare the operator's stored agent type against the registry's copy of the
+/// same name, field by field over the same flat projection the editor reads
+/// and writes (#7740's seven keys).
+///
+/// `available: false` covers two cases a client must not conflate: no
+/// registry checkout is synced yet, and a checkout exists but ships no agent
+/// type of this name — either way there is nothing to restore from, so the
+/// dashboard should not offer the action.
+fn registry_diff(name: &str, local: &AgentManifest) -> serde_json::Value {
+    let Some((registry_toml, registry_manifest)) = read_registry_agent_type(name) else {
+        return serde_json::json!({ "available": false });
+    };
+
+    let local_spec = librefang_types::agent_type::agent_type_spec_of(local);
+    let registry_spec = librefang_types::agent_type::agent_type_spec_of(&registry_manifest);
+
+    let mut changed_fields: Vec<serde_json::Value> = Vec::new();
+    macro_rules! diff_field {
+        ($field:ident) => {
+            if local_spec.$field != registry_spec.$field {
+                changed_fields.push(serde_json::json!({
+                    "field": stringify!($field),
+                    "local": local_spec.$field,
+                    "registry": registry_spec.$field,
+                }));
+            }
+        };
+    }
+    diff_field!(description);
+    diff_field!(system_prompt);
+    diff_field!(provider);
+    diff_field!(model);
+    diff_field!(tools);
+    diff_field!(skills);
+
+    serde_json::json!({
+        "available": true,
+        "differs": !changed_fields.is_empty(),
+        "changed_fields": changed_fields,
+        "registry_toml": registry_toml,
+    })
+}
+
 /// The single detail document, shared by GET, POST and PUT so the three can never drift apart.
 ///
 /// `spec` is the flat editor projection — exactly the seven keys a `PUT` accepts back.
@@ -410,6 +480,7 @@ fn agent_type_detail(
         "editable": source.is_editable(),
         "spec": librefang_types::agent_type::agent_type_spec_of(manifest),
         "promotion_preview": promotion_preview(name, manifest),
+        "registry_diff": registry_diff(name, manifest),
         "manifest": {
             "name": manifest.name,
             "description": manifest.description,
@@ -693,6 +764,73 @@ pub async fn delete_agent_type(
         }
         Err(e) => {
             tracing::error!("Failed to delete agent type '{name}': {e}");
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
+        }
+    }
+}
+
+/// POST /api/templates/:name/restore-from-registry — Overwrite the operator's
+/// agent type with the registry's copy of the same name.
+///
+/// This is the write side of [`registry_diff`]: an operator who has diverged
+/// from the registry (or deleted their local copy outright) can pull the
+/// registry's current version back over it in one step, the same way the
+/// registry sync's own fan-out would have installed it on a fresh machine —
+/// except opt-in, since the sync itself never overwrites an existing agent
+/// type (see the fan-out's `if !dest.exists()` guard in
+/// `librefang-runtime::registry_sync`).
+///
+/// Refused, same as `PUT`/`DELETE`, when the name belongs to a live agent's
+/// own workspace manifest — that document is edited through `/api/agents`,
+/// not this store.
+#[utoipa::path(post, path = "/api/templates/{name}/restore-from-registry", tag = "system", operation_id = "restore_agent_type_from_registry", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type restored from the registry", body = crate::types::JsonObject), (status = 404, description = "No registry version of this name is available"), (status = 409, description = "The name belongs to a live agent, which is edited through /api/agents")))]
+pub async fn restore_agent_type_from_registry(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
+    let (invalid_name, managed_elsewhere, no_registry_version) = {
+        let t = ErrorTranslator::new(lang);
+        (
+            t.t("api-error-template-invalid-name"),
+            t.t_args("api-error-agent-type-not-editable", &[("name", &name)]),
+            t.t_args(
+                "api-error-agent-type-no-registry-version",
+                &[("name", &name)],
+            ),
+        )
+    };
+
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::bad_request(invalid_name)
+            .with_code("template_invalid_name")
+            .into_json_tuple();
+    }
+    if workspace_agent_manifest_path(&name).exists() {
+        return ApiErrorResponse::conflict(managed_elsewhere)
+            .with_code("template_not_editable")
+            .into_json_tuple();
+    }
+
+    let Some((_registry_toml, mut manifest)) = read_registry_agent_type(&name) else {
+        return ApiErrorResponse::not_found(no_registry_version)
+            .with_code("template_registry_not_found")
+            .into_json_tuple();
+    };
+    manifest.name = name.clone();
+
+    match persist_agent_type(&name, &manifest) {
+        Ok(rendered) => (
+            StatusCode::OK,
+            Json(agent_type_detail(
+                &name,
+                TemplateSource::AgentType,
+                &manifest,
+                &rendered,
+            )),
+        ),
+        Err(e) => {
+            tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
     }

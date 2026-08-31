@@ -56,6 +56,13 @@ pub fn workspace_agents_dir() -> PathBuf {
     librefang_home().join("workspaces").join("agents")
 }
 
+/// The registry checkout root (`~/.librefang/registry/`), the source side of a
+/// registry sync. Pass this to [`crate::registry_paths::resolve_agent_types_dir`]
+/// to find the upstream copy of an agent type this store may have diverged from.
+pub fn registry_cache_dir() -> PathBuf {
+    librefang_home().join("registry")
+}
+
 /// The `agent.toml` of a live agent, which the catalog lists but this store never writes.
 pub fn workspace_agent_manifest_path(name: &str) -> PathBuf {
     workspace_agents_dir().join(name).join("agent.toml")
