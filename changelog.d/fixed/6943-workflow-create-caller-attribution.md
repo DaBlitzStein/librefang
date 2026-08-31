@@ -1,0 +1,4 @@
+`workflow_create` now logs the calling agent instead of discarding it.
+The `caller_agent_id` parameter was threaded all the way from the tool call through `KernelHandle::create_workflow`'s trait signature into the kernel implementation, then ignored there (`_caller_agent_id`) — leaving zero audit trail for a tool that sits in `ALWAYS_NATIVE_TOOLS`, so every agent has it without configuration, and whose sibling `workflow_run` (also always-native) can immediately execute whatever `steps[].agent` the new workflow names.
+The kernel now records `caller` on the "Workflow created via tool" log line, so a security investigation can trace which agent turn produced which workflow.
+Persisting ownership on the `Workflow` type itself, and gating creation or execution against it, is a larger design decision left for a maintainer to weigh in on — it was not implemented here (#6943) (@DaBlitzStein)
