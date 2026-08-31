@@ -146,6 +146,7 @@ export {
   getAgentManifestHistory,
   getAgentTemplateToml,
   getTemplateHistory,
+  listTemplateHistory,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,

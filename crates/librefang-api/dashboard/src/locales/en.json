@@ -4235,5 +4235,13 @@
     "tools": "Tools",
     "tools_hint": "Picked from the tools this daemon exposes; unknown identifiers can still be typed.",
     "tools_search": "Search tools…"
+  },
+  "templateHistory": {
+    "button": "History",
+    "title": "Version history — {{name}}",
+    "source": "Source",
+    "restore": "Restore",
+    "restoreConfirm": "Restore this version? It becomes the current agent type; nothing else is deleted.",
+    "empty": "No saved versions yet."
   }
 }

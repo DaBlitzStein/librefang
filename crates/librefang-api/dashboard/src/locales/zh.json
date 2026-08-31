@@ -4235,5 +4235,13 @@
     "tools": "工具",
     "tools_hint": "从本守护进程提供的工具中选择，也可手动输入目录之外的标识符。",
     "tools_search": "搜索工具…"
+  },
+  "templateHistory": {
+    "button": "历史",
+    "title": "版本历史 — {{name}}",
+    "source": "来源",
+    "restore": "恢复",
+    "restoreConfirm": "恢复此版本？它将成为当前的智能体类型；不会删除其他任何内容。",
+    "empty": "尚无已保存的版本。"
   }
 }

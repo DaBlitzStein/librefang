@@ -22,6 +22,7 @@ import { Badge } from "../components/ui/Badge";
 import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
+import { TemplateHistoryModal } from "../components/TemplateHistoryModal";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { copyToClipboard } from "../lib/clipboard";
@@ -599,6 +600,7 @@ function TemplateHistoryModal({
 function AgentTypeRow({
   type,
   onQuickRun,
+  onHistory,
   onEdit,
   onDelete,
   onPromote,
@@ -606,6 +608,7 @@ function AgentTypeRow({
 }: {
   type: AgentTemplate;
   onQuickRun: () => void;
+  onHistory: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onPromote: () => void;
@@ -760,6 +763,7 @@ export function AgentTypesPage() {
               key={`${type.source}:${type.name}`}
               type={type}
               onQuickRun={() => setQuickRun(type)}
+              onHistory={() => setHistoryTarget(type.name)}
               onEdit={() => setEditing({ name: type.name })}
               onDelete={() => setPendingDelete(type.name)}
               onPromote={() => setPromoting(type.name)}

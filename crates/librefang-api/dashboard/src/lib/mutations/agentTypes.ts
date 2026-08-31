@@ -45,6 +45,19 @@ export function useDeleteAgentType() {
   });
 }
 
+export function useRestoreTemplateVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, versionId }: { name: string; versionId: string }) =>
+      restoreTemplateVersion(name, versionId),
+    onSuccess: (_data, { name }) => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.history(name) });
+    },
+  });
+}
+
 /**
  * Restore a template to a prior version from its history.
  *

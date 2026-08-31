@@ -1,5 +1,5 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { listAgentTemplates, getAgentType, getTemplateHistory } from "../http/client";
+import { listAgentTemplates, getAgentType, getTemplateHistory, listTemplateHistory } from "../http/client";
 import { agentTypeKeys } from "./keys";
 import { withOverrides, QueryOverrides } from "./options";
 
@@ -41,3 +41,5 @@ export function useAgentType(name: string, options: QueryOverrides = {}) {
 export function useAgentTypeHistory(name: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentTypeQueries.history(name), options));
 }
+
+export { useAgentTypeHistory as useTemplateHistory };
