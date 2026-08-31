@@ -3,7 +3,7 @@ import {
   createAgentType,
   updateAgentType,
   deleteAgentType,
-  restoreTemplateVersion,
+  restoreAgentTypeFromRegistry,
   spawnEphemeral,
 } from "../http/client";
 import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
@@ -45,33 +45,13 @@ export function useDeleteAgentType() {
   });
 }
 
-export function useRestoreTemplateVersion() {
+/** Overwrite the operator's agent type with the registry's copy of the same name. */
+export function useRestoreAgentTypeFromRegistry() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, versionId }: { name: string; versionId: string }) =>
-      restoreTemplateVersion(name, versionId),
-    onSuccess: (_data, { name }) => {
+    mutationFn: (name: string) => restoreAgentTypeFromRegistry(name),
+    onSuccess: (_data, name) => {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
-      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
-      qc.invalidateQueries({ queryKey: agentTypeKeys.history(name) });
-    },
-  });
-}
-
-/**
- * Restore a template to a prior version from its history.
- *
- * Invalidates the detail and history caches so both the editor and the
- * history tab reflect the restored content immediately.
- */
-export function useRestoreTemplateVersion() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ name, versionId }: { name: string; versionId: number }) =>
-      restoreTemplateVersion(name, versionId),
-    onSuccess: (_data, { name }) => {
-      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
-      qc.invalidateQueries({ queryKey: agentTypeKeys.history(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
     },
   });

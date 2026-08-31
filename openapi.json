@@ -12566,86 +12566,28 @@
         }
       }
     },
-    "/api/templates/{name}/history": {
-      "get": {
-        "tags": [
-          "system"
-        ],
-        "summary": "GET /api/templates/{name}/history — how this template's config changed over time.",
-        "operationId": "list_template_history",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "description": "Template name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Max entries (default 30, max 200)",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int32",
-              "minimum": 0
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Template version history",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid template name"
-          },
-          "404": {
-            "description": "Template not found"
-          }
-        }
-      }
-    },
-    "/api/templates/{name}/history/{version_id}/restore": {
+    "/api/templates/{name}/restore-from-registry": {
       "post": {
         "tags": [
           "system"
         ],
-        "summary": "POST /api/templates/{name}/history/{version_id}/restore — restore a template to a prior version.",
-        "operationId": "restore_template_version",
+        "summary": "POST /api/templates/:name/restore-from-registry — Overwrite the operator's\nagent type with the registry's copy of the same name.",
+        "description": "This is the write side of [`registry_diff`]: an operator who has diverged\nfrom the registry (or deleted their local copy outright) can pull the\nregistry's current version back over it in one step, the same way the\nregistry sync's own fan-out would have installed it on a fresh machine —\nexcept opt-in, since the sync itself never overwrites an existing agent\ntype (see the fan-out's `if !dest.exists()` guard in\n`librefang-runtime::registry_sync`).\n\nRefused, same as `PUT`/`DELETE`, when the name belongs to a live agent's\nown workspace manifest — that document is edited through `/api/agents`,\nnot this store.",
+        "operationId": "restore_agent_type_from_registry",
         "parameters": [
           {
             "name": "name",
             "in": "path",
-            "description": "Template name",
+            "description": "Agent type name",
             "required": true,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "name": "version_id",
-            "in": "path",
-            "description": "Version row id to restore",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
             }
           }
         ],
         "responses": {
           "200": {
-            "description": "Template restored",
+            "description": "Agent type restored from the registry",
             "content": {
               "application/json": {
                 "schema": {
@@ -12654,14 +12596,11 @@
               }
             }
           },
-          "400": {
-            "description": "Invalid template name or version id"
-          },
           "404": {
-            "description": "Template or version not found"
+            "description": "No registry version of this name is available"
           },
           "409": {
-            "description": "Template belongs to a live agent"
+            "description": "The name belongs to a live agent, which is edited through /api/agents"
           }
         }
       }

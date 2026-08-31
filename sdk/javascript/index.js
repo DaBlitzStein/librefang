@@ -1642,12 +1642,8 @@ class SystemResource {
     return this._c._request("DELETE", `/api/templates/${name}`);
   }
 
-  async listTemplateHistory(name, query) {
-    return this._c._request("GET", `/api/templates/${name}/history`, undefined, query);
-  }
-
-  async restoreTemplateVersion(name, version_id) {
-    return this._c._request("POST", `/api/templates/${name}/history/${version_id}/restore`);
+  async restoreAgentTypeFromRegistry(name) {
+    return this._c._request("POST", `/api/templates/${name}/restore-from-registry`);
   }
 
   async getAgentTemplateToml(name) {

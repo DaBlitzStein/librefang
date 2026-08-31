@@ -9,7 +9,7 @@
 use super::AppState;
 use crate::middleware::RequestLanguage;
 use crate::types::ApiErrorResponse;
-use axum::extract::{Path, Query, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -37,12 +37,8 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             axum::routing::get(get_agent_template_toml),
         )
         .route(
-            "/templates/{name}/history",
-            axum::routing::get(list_template_history),
-        )
-        .route(
-            "/templates/{name}/history/{version_id}/restore",
-            axum::routing::post(restore_template_version),
+            "/templates/{name}/restore-from-registry",
+            axum::routing::post(restore_agent_type_from_registry),
         )
 }
 
@@ -402,6 +398,72 @@ fn promotion_preview(name: &str, manifest: &AgentManifest) -> serde_json::Value 
     })
 }
 
+/// Read the registry's own copy of an agent type, if a registry checkout is
+/// present and ships one under this name.
+///
+/// The registry ships each agent type as its own directory
+/// (`agent-types/<name>/agent.toml`), the same layout the sync fan-out in
+/// `librefang-runtime::registry_sync` reads — see that module for why the
+/// installed store is flat instead. This is read-only: it never touches the
+/// checkout, only the operator's own `agent-types/<name>.toml`.
+fn read_registry_agent_type(name: &str) -> Option<(String, AgentManifest)> {
+    let registry_cache = librefang_types::agent_type_store::registry_cache_dir();
+    let agent_types_src =
+        librefang_types::registry_paths::resolve_agent_types_dir(&registry_cache)?;
+    let manifest_path = agent_types_src.join(name).join("agent.toml");
+    let content = std::fs::read_to_string(&manifest_path).ok()?;
+    match toml::from_str::<AgentManifest>(&content) {
+        Ok(manifest) => Some((content, manifest)),
+        Err(e) => {
+            tracing::warn!("Invalid registry agent type manifest for '{name}': {e}");
+            None
+        }
+    }
+}
+
+/// Compare the operator's stored agent type against the registry's copy of the
+/// same name, field by field over the same flat projection the editor reads
+/// and writes (#7740's seven keys).
+///
+/// `available: false` covers two cases a client must not conflate: no
+/// registry checkout is synced yet, and a checkout exists but ships no agent
+/// type of this name — either way there is nothing to restore from, so the
+/// dashboard should not offer the action.
+fn registry_diff(name: &str, local: &AgentManifest) -> serde_json::Value {
+    let Some((registry_toml, registry_manifest)) = read_registry_agent_type(name) else {
+        return serde_json::json!({ "available": false });
+    };
+
+    let local_spec = librefang_types::agent_type::agent_type_spec_of(local);
+    let registry_spec = librefang_types::agent_type::agent_type_spec_of(&registry_manifest);
+
+    let mut changed_fields: Vec<serde_json::Value> = Vec::new();
+    macro_rules! diff_field {
+        ($field:ident) => {
+            if local_spec.$field != registry_spec.$field {
+                changed_fields.push(serde_json::json!({
+                    "field": stringify!($field),
+                    "local": local_spec.$field,
+                    "registry": registry_spec.$field,
+                }));
+            }
+        };
+    }
+    diff_field!(description);
+    diff_field!(system_prompt);
+    diff_field!(provider);
+    diff_field!(model);
+    diff_field!(tools);
+    diff_field!(skills);
+
+    serde_json::json!({
+        "available": true,
+        "differs": !changed_fields.is_empty(),
+        "changed_fields": changed_fields,
+        "registry_toml": registry_toml,
+    })
+}
+
 /// The single detail document, shared by GET, POST and PUT so the three can never drift apart.
 ///
 /// `spec` is the flat editor projection — exactly the seven keys a `PUT` accepts back.
@@ -418,6 +480,7 @@ fn agent_type_detail(
         "editable": source.is_editable(),
         "spec": librefang_types::agent_type::agent_type_spec_of(manifest),
         "promotion_preview": promotion_preview(name, manifest),
+        "registry_diff": registry_diff(name, manifest),
         "manifest": {
             "name": manifest.name,
             "description": manifest.description,
@@ -531,7 +594,6 @@ use librefang_types::agent_type_store::{
 /// The body is the flat editor shape; `name` is required here because there is no URL segment to take it from.
 #[utoipa::path(post, path = "/api/templates", tag = "system", operation_id = "create_agent_type", request_body = crate::types::JsonObject, responses((status = 201, description = "Agent type created", body = crate::types::JsonObject), (status = 400, description = "Missing or invalid name"), (status = 409, description = "Name already taken by an agent type or a live agent")))]
 pub async fn create_agent_type(
-    State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(spec): Json<librefang_types::agent_type::AgentTypeSpec>,
 ) -> impl IntoResponse {
@@ -548,18 +610,15 @@ pub async fn create_agent_type(
     };
 
     match store_create(&name, spec) {
-        Ok(created) => {
-            record_template_version(&state, &created.name, &created.manifest_toml, "create");
-            (
-                StatusCode::CREATED,
-                Json(agent_type_detail(
-                    &created.name,
-                    TemplateSource::AgentType,
-                    &created.manifest,
-                    &created.manifest_toml,
-                )),
-            )
-        }
+        Ok(created) => (
+            StatusCode::CREATED,
+            Json(agent_type_detail(
+                &created.name,
+                TemplateSource::AgentType,
+                &created.manifest,
+                &created.manifest_toml,
+            )),
+        ),
         Err(CreateAgentTypeError::InvalidName) => ApiErrorResponse::bad_request(invalid_name)
             .with_code("template_invalid_name")
             .into_json_tuple(),
@@ -587,7 +646,6 @@ pub async fn create_agent_type(
 /// A key the client did not send leaves its field untouched; a key it did send is written through verbatim, including an empty string, because "the operator cleared this" and "the client did not mention it" are different instructions and only a typed `Option` can tell them apart.
 #[utoipa::path(put, path = "/api/templates/{name}", tag = "system", operation_id = "update_agent_type", params(("name" = String, Path, description = "Agent type name")), request_body = crate::types::JsonObject, responses((status = 200, description = "Agent type updated", body = crate::types::JsonObject), (status = 404, description = "No such agent type"), (status = 409, description = "The name belongs to a live agent, which is edited through /api/agents")))]
 pub async fn update_agent_type(
-    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(mut spec): Json<librefang_types::agent_type::AgentTypeSpec>,
@@ -647,18 +705,15 @@ pub async fn update_agent_type(
     manifest.name = name.clone();
 
     match persist_agent_type(&name, &manifest) {
-        Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "dashboard");
-            (
-                StatusCode::OK,
-                Json(agent_type_detail(
-                    &name,
-                    TemplateSource::AgentType,
-                    &manifest,
-                    &rendered,
-                )),
-            )
-        }
+        Ok(rendered) => (
+            StatusCode::OK,
+            Json(agent_type_detail(
+                &name,
+                TemplateSource::AgentType,
+                &manifest,
+                &rendered,
+            )),
+        ),
         Err(e) => {
             tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
@@ -672,7 +727,6 @@ pub async fn update_agent_type(
 /// managed-elsewhere conflict `PUT` uses — deleting an agent is `DELETE /api/agents/{id}`.
 #[utoipa::path(delete, path = "/api/templates/{name}", tag = "system", operation_id = "delete_agent_type", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type deleted", body = crate::types::JsonObject), (status = 404, description = "No such agent type"), (status = 409, description = "The name belongs to a live agent, which is deleted through /api/agents")))]
 pub async fn delete_agent_type(
-    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -693,18 +747,10 @@ pub async fn delete_agent_type(
     }
 
     match tokio::fs::remove_file(agent_type_path(&name)).await {
-        Ok(()) => {
-            // Best-effort cascade: delete version history for the removed template.
-            let store =
-                librefang_memory::TemplateVersionStore::new(state.kernel.memory_substrate().pool());
-            if let Err(e) = store.delete_for_template(&name) {
-                tracing::warn!(template = %name, error = %e, "Failed to cascade-delete template version history");
-            }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({ "deleted": true, "name": name })),
-            )
-        }
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "deleted": true, "name": name })),
+        ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if workspace_agent_manifest_path(&name).exists() {
                 ApiErrorResponse::conflict(managed_elsewhere)
@@ -723,168 +769,66 @@ pub async fn delete_agent_type(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Template version history
-// ---------------------------------------------------------------------------
-
-/// Best-effort version snapshot — a recording failure must not block the
-/// create/update that triggered it.
-fn record_template_version(state: &AppState, name: &str, toml: &str, source: &str) {
-    let store = librefang_memory::TemplateVersionStore::new(state.kernel.memory_substrate().pool());
-    if let Err(e) = store.record_version(name, toml, source) {
-        tracing::warn!(
-            template = %name,
-            error = %e,
-            "Failed to record template version snapshot"
-        );
-    }
-}
-
-/// GET /api/templates/{name}/history — how this template's config changed over time.
-#[utoipa::path(
-    get,
-    path = "/api/templates/{name}/history",
-    tag = "system",
-    operation_id = "list_template_history",
-    params(
-        ("name" = String, Path, description = "Template name"),
-        ("limit" = Option<u32>, Query, description = "Max entries (default 30, max 200)")
-    ),
-    responses(
-        (status = 200, description = "Template version history", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid template name"),
-        (status = 404, description = "Template not found")
-    )
-)]
-pub async fn list_template_history(
-    State(state): State<Arc<AppState>>,
+/// POST /api/templates/:name/restore-from-registry — Overwrite the operator's
+/// agent type with the registry's copy of the same name.
+///
+/// This is the write side of [`registry_diff`]: an operator who has diverged
+/// from the registry (or deleted their local copy outright) can pull the
+/// registry's current version back over it in one step, the same way the
+/// registry sync's own fan-out would have installed it on a fresh machine —
+/// except opt-in, since the sync itself never overwrites an existing agent
+/// type (see the fan-out's `if !dest.exists()` guard in
+/// `librefang-runtime::registry_sync`).
+///
+/// Refused, same as `PUT`/`DELETE`, when the name belongs to a live agent's
+/// own workspace manifest — that document is edited through `/api/agents`,
+/// not this store.
+#[utoipa::path(post, path = "/api/templates/{name}/restore-from-registry", tag = "system", operation_id = "restore_agent_type_from_registry", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type restored from the registry", body = crate::types::JsonObject), (status = 404, description = "No registry version of this name is available"), (status = 409, description = "The name belongs to a live agent, which is edited through /api/agents")))]
+pub async fn restore_agent_type_from_registry(
     Path(name): Path<String>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
+    let (invalid_name, managed_elsewhere, no_registry_version) = {
+        let t = ErrorTranslator::new(lang);
+        (
+            t.t("api-error-template-invalid-name"),
+            t.t_args("api-error-agent-type-not-editable", &[("name", &name)]),
+            t.t_args(
+                "api-error-agent-type-no-registry-version",
+                &[("name", &name)],
+            ),
+        )
+    };
+
     if validate_template_name(&name).is_err() {
-        return ApiErrorResponse::bad_request("invalid template name")
+        return ApiErrorResponse::bad_request(invalid_name)
             .with_code("template_invalid_name")
             .into_json_tuple();
     }
-
-    // Verify the template exists on disk (either source).
-    if read_agent_type(&name).await.ok().flatten().is_none() {
-        return ApiErrorResponse::not_found(format!("Template '{name}' not found"))
-            .with_code("template_not_found")
-            .into_json_tuple();
-    }
-
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(30)
-        .min(200) as usize;
-
-    let store = librefang_memory::TemplateVersionStore::new(state.kernel.memory_substrate().pool());
-    match store.list_for_template(&name, limit) {
-        Ok(versions) => {
-            let items: Vec<serde_json::Value> = versions
-                .iter()
-                .map(|v| {
-                    serde_json::json!({
-                        "id": v.id,
-                        "template_name": v.template_name,
-                        "timestamp": v.timestamp,
-                        "manifest_toml": v.manifest_toml,
-                        "change_source": v.change_source,
-                    })
-                })
-                .collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({ "versions": items })),
-            )
-        }
-        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
-    }
-}
-
-/// POST /api/templates/{name}/history/{version_id}/restore — restore a template to a prior version.
-#[utoipa::path(
-    post,
-    path = "/api/templates/{name}/history/{version_id}/restore",
-    tag = "system",
-    operation_id = "restore_template_version",
-    params(
-        ("name" = String, Path, description = "Template name"),
-        ("version_id" = i64, Path, description = "Version row id to restore")
-    ),
-    responses(
-        (status = 200, description = "Template restored", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid template name or version id"),
-        (status = 404, description = "Template or version not found"),
-        (status = 409, description = "Template belongs to a live agent")
-    )
-)]
-pub async fn restore_template_version(
-    State(state): State<Arc<AppState>>,
-    Path((name, version_id)): Path<(String, i64)>,
-) -> impl IntoResponse {
-    if validate_template_name(&name).is_err() {
-        return ApiErrorResponse::bad_request("invalid template name")
-            .with_code("template_invalid_name")
-            .into_json_tuple();
-    }
-
-    // Only operator-authored templates can be restored (not live agents).
-    if !agent_type_path(&name).exists() {
-        if workspace_agent_manifest_path(&name).exists() {
-            return ApiErrorResponse::conflict(
-                "that name belongs to a live agent; restore it through /api/agents",
-            )
+    if workspace_agent_manifest_path(&name).exists() {
+        return ApiErrorResponse::conflict(managed_elsewhere)
             .with_code("template_not_editable")
             .into_json_tuple();
-        }
-        return ApiErrorResponse::not_found(format!("Template '{name}' not found"))
-            .with_code("template_not_found")
-            .into_json_tuple();
     }
 
-    let store = librefang_memory::TemplateVersionStore::new(state.kernel.memory_substrate().pool());
-
-    let version = match store.get_version(version_id) {
-        Ok(Some(v)) if v.template_name == name => v,
-        Ok(Some(_)) => {
-            return ApiErrorResponse::bad_request("version does not belong to this template")
-                .with_code("version_mismatch")
-                .into_json_tuple();
-        }
-        Ok(None) => {
-            return ApiErrorResponse::not_found("version not found")
-                .with_code("version_not_found")
-                .into_json_tuple();
-        }
-        Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+    let Some((_registry_toml, mut manifest)) = read_registry_agent_type(&name) else {
+        return ApiErrorResponse::not_found(no_registry_version)
+            .with_code("template_registry_not_found")
+            .into_json_tuple();
     };
-
-    // Parse the stored TOML to validate it before writing.
-    let manifest: AgentManifest = match toml::from_str(&version.manifest_toml) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(template = %name, version_id, "Stored version TOML is unparseable: {e}");
-            return ApiErrorResponse::internal("stored version is corrupt and cannot be restored")
-                .into_json_tuple();
-        }
-    };
+    manifest.name = name.clone();
 
     match persist_agent_type(&name, &manifest) {
-        Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "restore");
-            (
-                StatusCode::OK,
-                Json(agent_type_detail(
-                    &name,
-                    TemplateSource::AgentType,
-                    &manifest,
-                    &rendered,
-                )),
-            )
-        }
+        Ok(rendered) => (
+            StatusCode::OK,
+            Json(agent_type_detail(
+                &name,
+                TemplateSource::AgentType,
+                &manifest,
+                &rendered,
+            )),
+        ),
         Err(e) => {
             tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()

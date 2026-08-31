@@ -144,7 +144,6 @@ export {
   // per-agent MCP server assignment — read (#7713)
   getAgentMcpServers,
   getAgentTemplateToml,
-  listTemplateHistory,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -201,7 +200,7 @@ export {
   createAgentType,
   updateAgentType,
   deleteAgentType,
-  restoreTemplateVersion,
+  restoreAgentTypeFromRegistry,
   spawnEphemeral,
   spawnAgent,
   cloneAgent,

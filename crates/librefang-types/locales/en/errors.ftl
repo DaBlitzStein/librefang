@@ -35,7 +35,7 @@ api-error-template-read-failed = Failed to read template
 api-error-agent-type-exists = An agent type named '{ $name }' already exists
 api-error-agent-type-name-taken = '{ $name }' is the name of a live agent; pick another name for the agent type
 api-error-agent-type-not-editable = Agent type '{ $name }' comes from a live agent workspace and is managed through /api/agents
-api-error-registry-type-not-found = Agent type '{ $name }' not found in the registry
+api-error-agent-type-no-registry-version = No registry version of agent type '{ $name }' is available to restore from
 
 # Manifest errors
 api-error-manifest-too-large = Manifest too large (max 1MB)

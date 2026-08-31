@@ -147,6 +147,20 @@ fn write_workspace_agent(name: &str, body: &str) {
 fn cleanup(name: &str) {
     let _ = std::fs::remove_file(agent_type_file(name));
     let _ = std::fs::remove_dir_all(home().join("workspaces").join("agents").join(name));
+    let _ = std::fs::remove_dir_all(registry_agent_type_dir(name));
+}
+
+/// Where the registry checkout would ship this agent type: `registry/agent-types/<name>/agent.toml`,
+/// the directory-per-type layout `resolve_agent_types_dir` reads (see `registry_paths.rs`) — distinct
+/// from the flat `agent-types/<name>.toml` this installation's own store uses.
+fn registry_agent_type_dir(name: &str) -> PathBuf {
+    home().join("registry").join("agent-types").join(name)
+}
+
+fn write_registry_agent_type(name: &str, body: &str) {
+    let dir = registry_agent_type_dir(name);
+    std::fs::create_dir_all(&dir).expect("create registry agent-types dir");
+    std::fs::write(dir.join("agent.toml"), body).expect("write registry agent.toml");
 }
 
 /// The exact body the dashboard's agent-type editor sends on save: seven flat keys, nothing else.
@@ -878,6 +892,147 @@ async fn the_tool_reports_the_defaults_it_resolved_rather_than_the_fields_it_was
         "the tool must report the provider the catalog will serve: {detail}"
     );
     assert_eq!(detail["spec"]["model"], tool_view["model"], "{detail}");
+
+    cleanup(name);
+}
+
+// ---------------------------------------------------------------------------
+// Registry diff + restore (#7767)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_diff_is_unavailable_when_no_registry_checkout_is_synced() {
+    let _g = lock().lock().await;
+    let name = "at_registry_none";
+    cleanup(name);
+    write_agent_type(name, &manifest_with_non_form_fields(name));
+
+    let h = boot().await;
+    let (status, detail) = get(&h, &format!("/api/templates/{name}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["registry_diff"]["available"], false, "{detail}");
+
+    let (status, body) = post(
+        &h,
+        &format!("/api/templates/{name}/restore-from-registry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "template_registry_not_found", "{body}");
+
+    cleanup(name);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_diff_reports_no_changes_when_local_matches_registry() {
+    let _g = lock().lock().await;
+    let name = "at_registry_same";
+    cleanup(name);
+    write_agent_type(name, &manifest_with_non_form_fields(name));
+    write_registry_agent_type(name, &manifest_with_non_form_fields(name));
+
+    let h = boot().await;
+    let (status, detail) = get(&h, &format!("/api/templates/{name}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["registry_diff"]["available"], true, "{detail}");
+    assert_eq!(detail["registry_diff"]["differs"], false, "{detail}");
+    assert_eq!(
+        detail["registry_diff"]["changed_fields"],
+        json!([]),
+        "{detail}"
+    );
+
+    cleanup(name);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_diff_reports_the_fields_that_changed() {
+    let _g = lock().lock().await;
+    let name = "at_registry_diff";
+    cleanup(name);
+    write_agent_type(name, &manifest_with_non_form_fields(name));
+    write_registry_agent_type(
+        name,
+        &manifest_with_non_form_fields(name).replace("seeded", "from the registry"),
+    );
+
+    let h = boot().await;
+    let (status, detail) = get(&h, &format!("/api/templates/{name}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["registry_diff"]["available"], true, "{detail}");
+    assert_eq!(detail["registry_diff"]["differs"], true, "{detail}");
+    let changed = detail["registry_diff"]["changed_fields"]
+        .as_array()
+        .unwrap_or_else(|| panic!("changed_fields must be an array: {detail}"));
+    assert!(
+        changed.iter().any(|c| c["field"] == "description"),
+        "description must be reported as changed: {detail}"
+    );
+    let description_change = changed
+        .iter()
+        .find(|c| c["field"] == "description")
+        .unwrap();
+    assert_eq!(description_change["local"], "seeded");
+    assert_eq!(description_change["registry"], "from the registry");
+
+    cleanup(name);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_from_registry_overwrites_local_edits() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore";
+    cleanup(name);
+    write_agent_type(name, &manifest_with_non_form_fields(name));
+    write_registry_agent_type(
+        name,
+        &manifest_with_non_form_fields(name).replace("seeded", "restored"),
+    );
+
+    let h = boot().await;
+    let (status, restored) = post(
+        &h,
+        &format!("/api/templates/{name}/restore-from-registry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["spec"]["description"], "restored", "{restored}");
+
+    // The write landed on disk, not just in the response.
+    let (status, detail) = get(&h, &format!("/api/templates/{name}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["spec"]["description"], "restored", "{detail}");
+    assert_eq!(
+        detail["registry_diff"]["differs"], false,
+        "a fresh restore must match the registry it was restored from: {detail}"
+    );
+
+    cleanup(name);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_from_registry_refuses_a_name_that_belongs_to_a_live_agent() {
+    let _g = lock().lock().await;
+    let name = "at_registry_liveagent";
+    cleanup(name);
+    write_workspace_agent(name, &manifest_with_non_form_fields(name));
+    write_registry_agent_type(name, &manifest_with_non_form_fields(name));
+
+    let h = boot().await;
+    let (status, body) = post(
+        &h,
+        &format!("/api/templates/{name}/restore-from-registry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_not_editable", "{body}");
+    assert!(
+        !agent_type_file(name).exists(),
+        "a refused restore must not create an agent-type file shadowing the live agent"
+    );
 
     cleanup(name);
 }
