@@ -128,6 +128,41 @@ function GoalStatusIcon({ status }: { status: string }) {
   return <Clock className="h-4 w-4 text-text-dim/40" />;
 }
 
+const goalRunPhaseBadge = (phase?: string): { bg: string; text: string; dot: string } => {
+  switch (phase) {
+    case "running":                 return { bg: "bg-brand/10",   text: "text-brand",    dot: "bg-brand" };
+    case "finished":                return { bg: "bg-success/10", text: "text-success",  dot: "bg-success" };
+    case "stopped":                 return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
+    case "rate_limited":            return { bg: "bg-error/10",   text: "text-error",    dot: "bg-error" };
+    case "max_iterations_reached":  return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
+    default:                        return { bg: "bg-main",       text: "text-text-dim", dot: "bg-text-dim/40" };
+  }
+};
+
+function GoalRunInfo({ goal }: { goal: GoalItem }) {
+  const { t } = useTranslation();
+  const hasAgent = !!goal.agent_id;
+  const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
+  const run = runQuery.data?.run;
+  if (!run) return null;
+
+  const badge = goalRunPhaseBadge(run.phase);
+  const phaseLabel = t(`goals.run_phase_${run.phase}`, { defaultValue: run.phase.replace(/_/g, " ") });
+
+  return (
+    <div className="mt-2 ml-[calc(1rem+4px)] flex flex-wrap items-center gap-2 text-xs">
+      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full ${badge.bg} ${badge.text} font-medium`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${badge.dot} ${run.phase === "running" ? "animate-pulse" : ""}`} />
+        {phaseLabel}
+      </span>
+      <span className="text-text-dim font-mono">{run.iteration}/{run.max_iterations}</span>
+      {run.last_error && (
+        <span className="text-error truncate max-w-[200px]" title={run.last_error}>{run.last_error}</span>
+      )}
+    </div>
+  );
+}
+
 /**
  * Start / stop the autonomous long-horizon run for a single goal (#5744).
  * Only meaningful when the goal has an agent assigned — without one there is
@@ -722,6 +757,8 @@ export function GoalsPage() {
                               </div>
                             </div>
                           )}
+                          {/* Run state — shows phase, iterations, errors like workflow runs */}
+                          {status !== "completed" && <GoalRunInfo goal={r.goal} />}
                         </div>
                       )}
                     </div>
