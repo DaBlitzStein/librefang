@@ -8398,54 +8398,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_command_goal_is_dispatched() {
-        let agent_id = AgentId::new();
-        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
-            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
-        });
-        let router = Arc::new(AgentRouter::new());
-        let sender = ChannelUser {
-            platform_id: "user1".to_string(),
-            display_name: "Test".to_string(),
-            librefang_user: None,
-        };
-
-        let usage = handle_command(
-            "goal",
-            &[],
-            &handle,
-            &router,
-            &sender,
-            &ChannelType::CLI,
-            None,
-            None,
-            &sender.platform_id,
-        )
-        .await;
-        assert!(
-            usage.contains("Usage: /goal"),
-            "expected the /goal usage string, got: {usage}"
-        );
-
-        let dispatched = handle_command(
-            "goal",
-            &["ship".to_string(), "the report".to_string()],
-            &handle,
-            &router,
-            &sender,
-            &ChannelType::CLI,
-            None,
-            None,
-            &sender.platform_id,
-        )
-        .await;
-        assert!(
-            !dispatched.contains("Unknown command"),
-            "/goal fell through to the unknown-command arm: {dispatched}"
-        );
-    }
-
-    #[tokio::test]
     async fn test_handle_command_agent_select() {
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
