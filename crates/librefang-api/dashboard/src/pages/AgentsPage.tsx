@@ -446,10 +446,9 @@ export function AgentsPage() {
     return { ...agent, is_hand: agent.is_hand ?? fallback };
   }
 
-  /** The detail fetch (`GET /api/agents/{id}`) doesn't carry lineage —
-   *  only the list endpoint does — so origin fields must be copied over
-   *  from whatever already has them: the list row on first open, or the
-   *  previous detail state on a same-agent refresh. */
+  // The single-agent detail response omits lineage — only the list
+  // endpoint includes it — so origin fields are carried over from the
+  // list row or the previous detail state on refresh.
   function mergeOriginFields<T extends AgentDetail>(
     agent: T,
     origin?: Pick<AgentView, "parent_agent_id" | "parent_unknown" | "children">,
@@ -2813,7 +2812,7 @@ export function AgentsPage() {
                         })}
                       </div>
                     ) : (
-                      <span className="text-text-dim">{t("common.none", { defaultValue: "None" })}</span>
+                      <span className="text-text-dim">{t("common.none")}</span>
                     )}
                   </DetailRow>
                 </div>
