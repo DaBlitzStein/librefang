@@ -1062,7 +1062,18 @@
     "qr_expired_restart": "QR code expired — restart the sidecar to try again",
     "qr_login": "QR Login",
     "qr_scan_with_app": "Scan with your {{channel}} app",
-    "sidecar_details": "Runs as an out-of-process sidecar adapter. Manage it in config.toml ([[sidecar_channels]]) — Config → Sidecar Channels, or use the gear on the channel card to open the configure drawer."
+    "sidecar_details": "Runs as an out-of-process sidecar adapter. Manage it in config.toml ([[sidecar_channels]]) — Config → Sidecar Channels, or use the gear on the channel card to open the configure drawer.",
+    "instance_count_one": "{{count}} instance",
+    "instance_count_other": "{{count}} instances",
+    "instance_name_label": "Instance name",
+    "instance_name_placeholder": "e.g. telegram-support",
+    "instance_name_hint_first": "Unique name for this instance. Defaults to the channel type since none is configured yet.",
+    "instance_name_hint_next": "This channel type already has {{count}} configured instance(s). Pick a unique name so this becomes a new one instead of overwriting an existing bot.",
+    "instance_name_hint_edit": "The instance name cannot be changed here — remove and re-add to rename.",
+    "default_agent_label": "Default agent",
+    "default_agent_none": "No default (first available agent)",
+    "default_agent_none_short": "None",
+    "default_agent_hint": "Inbound messages on this instance with no more specific binding route to this agent."
   },
   "skills": {
     "title": "Skills",

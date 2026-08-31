@@ -5358,7 +5358,7 @@
         "tags": [
           "channels"
         ],
-        "summary": "`POST /api/channels/sidecar/{name}/configure` — save schema-driven\nsidecar form values, splitting the payload across `secrets.env` and\n`config.toml`, then trigger a hot-reload so the kernel picks up the\nnew `[[sidecar_channels]]` block without a restart. `name` is the\n`SIDECAR_CATALOG` key (`telegram`, `ntfy`, …).",
+        "summary": "`POST /api/channels/sidecar/{name}/configure` — save schema-driven\nsidecar form values, splitting the payload across `secrets.env` and\n`config.toml`, then trigger a hot-reload so the kernel picks up the\nnew `[[sidecar_channels]]` block without a restart. `name` is always the\n`SIDECAR_CATALOG` key (`telegram`, `ntfy`, …) — it picks the adapter's\nschema/command/args and never changes across a rename. The\n`[[sidecar_channels]].name` actually written is `body.instance_name`\nwhen present, falling back to `name` (today's one-instance-per-type\nbehaviour) so multiple named instances of the same catalog type\n(e.g. two Telegram bots) can be configured side by side.",
         "operationId": "configure_sidecar_channel",
         "parameters": [
           {
@@ -5413,7 +5413,7 @@
             }
           },
           "409": {
-            "description": "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.",
+            "description": "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow; or `instance_name` already names a differently-typed instance.",
             "content": {
               "application/json": {
                 "schema": {
@@ -15167,6 +15167,20 @@
           "values"
         ],
         "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Per-instance default agent (`[[sidecar_channels]].agent`) — inbound\nmessages on this instance with no more specific binding route here.\n`None` / empty clears the field; omitted entirely leaves an existing\nvalue untouched only insofar as the whole `agent` key is untouched by\nthis form — unlike `values`, there is no partial-update semantics\nhere because there's exactly one field, so send the field's current\nvalue back to keep it."
+          },
+          "instance_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Multi-instance support: the unique `[[sidecar_channels]].name` to\nwrite. Defaults to the path `{name}` (the catalog type) when absent\nor blank, which is exactly today's one-instance-per-type behaviour —\nexisting dashboard builds and API callers that never send this field\nkeep working unchanged. Set it to a distinct value to configure a\nsecond (or third, …) instance of the same catalog type — e.g. two\nTelegram bots named `telegram` and `telegram-support`."
+          },
           "values": {
             "type": "object",
             "additionalProperties": {
