@@ -17,7 +17,6 @@ use super::screens::{
     audit::AuditEntry,
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
-    goals::GoalInfo,
     groups::GroupInfo,
     hands::{HandInfo, HandInstanceInfo},
     logs::LogEntry,
@@ -212,23 +211,6 @@ pub enum AppEvent {
     GroupsLoaded(Vec<GroupInfo>),
     /// Log entries loaded.
     LogsLoaded(Vec<LogEntry>),
-    /// Goals loaded.
-    GoalsLoaded(Vec<GoalInfo>),
-    /// Live run state fetched for one goal.
-    GoalRunLoaded {
-        goal_id: String,
-        phase: Option<String>,
-        iteration: Option<u32>,
-        max_iterations: Option<u32>,
-    },
-    /// Goal created.
-    GoalCreated(String),
-    /// Goal deleted.
-    GoalDeleted(String),
-    /// Goal run started.
-    GoalRunStarted(String),
-    /// Goal run stopped.
-    GoalRunStopped(String),
     /// Hand definitions loaded (marketplace).
     HandsLoaded(Vec<HandInfo>),
     /// Active hand instances loaded.
@@ -272,16 +254,20 @@ pub enum AppEvent {
     },
     /// Agent channel allowlist updated.
     AgentChannelsUpdated(String),
-    /// Agent model routing loaded (for the routing editor). `available` is the
-    /// resolved profile catalog; `allowed_profiles` is this agent's allowlist.
-    AgentModelRoutingLoaded {
-        mode: String,
-        allowed_profiles: Vec<String>,
-        cost_budget: Option<String>,
-        available: Vec<String>,
+    /// The agent's current inference parameters, plus the model's own limits so
+    /// the editor's ladders can stop where the endpoint does. A `null` in
+    /// `model` is the inherit state and stays `null` here.
+    AgentModelParamsLoaded {
+        model: serde_json::Value,
+        context_cap: Option<u64>,
+        output_cap: Option<u64>,
     },
-    /// Agent model routing updated.
-    AgentModelRoutingUpdated(String),
+    /// Inference parameters saved. `warnings` carries the advisory over-limit
+    /// messages the endpoint returned — the values were stored as asked.
+    AgentModelParamsUpdated {
+        id: String,
+        warnings: Vec<String>,
+    },
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -1475,6 +1461,150 @@ pub fn spawn_update_agent_skills(
     });
 }
 
+/// Fetch an agent's inference parameters, and the limits of the model it points at.
+///
+/// Daemon-only: the editor writes through `PATCH /api/agents/{id}/config`, which
+/// is where the advisory limit check lives, so an in-process TUI reports that
+/// rather than writing the registry behind the endpoint's back.
+pub fn spawn_fetch_agent_model_params(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let Ok(resp) = client
+                .get(format!("{base_url}/api/agents/{agent_id}"))
+                .send()
+            else {
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                    "tui-event-model-params-fetch-failed",
+                )));
+                return;
+            };
+            let Ok(body) = resp.json::<serde_json::Value>() else {
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                    "tui-event-model-params-fetch-failed",
+                )));
+                return;
+            };
+            let model = body["model"].clone();
+            // The model's own limits, when the catalog knows them. An unknown
+            // limit leaves the ladder untrimmed — a limit nobody measured is
+            // not a ceiling (#7780).
+            let (context_cap, output_cap) = model_limits(
+                &client,
+                &base_url,
+                model["provider"].as_str().unwrap_or(""),
+                model["model"].as_str().unwrap_or(""),
+            );
+            let _ = tx.send(AppEvent::AgentModelParamsLoaded {
+                model,
+                context_cap,
+                output_cap,
+            });
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-model-params-daemon-only",
+            )));
+        }
+    });
+}
+
+/// Look up a model's declared limits, returning `None` for either when the
+/// catalog does not vouch for it.
+fn model_limits(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    provider: &str,
+    model: &str,
+) -> (Option<u64>, Option<u64>) {
+    if model.is_empty() {
+        return (None, None);
+    }
+    let Ok(resp) = client.get(format!("{base_url}/api/models/{model}")).send() else {
+        return (None, None);
+    };
+    let Ok(body) = resp.json::<serde_json::Value>() else {
+        return (None, None);
+    };
+    // Only trust the entry when it is the model this agent actually points at
+    // and the catalog marks its capacities as sourced.
+    let same_provider = provider.is_empty() || body["provider"].as_str().unwrap_or("") == provider;
+    if !same_provider || !body["limits_known"].as_bool().unwrap_or(true) {
+        return (None, None);
+    }
+    (
+        body["context_window"].as_u64().filter(|v| *v > 0),
+        body["max_output_tokens"].as_u64().filter(|v| *v > 0),
+    )
+}
+
+/// Persist edited inference parameters through the config endpoint.
+///
+/// `None` is sent as a JSON `null`, which the endpoint reads as "hand this
+/// field back to inherit".
+pub fn spawn_update_agent_model_params(
+    backend: BackendRef,
+    agent_id: String,
+    changes: Vec<(String, Option<f64>)>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let mut payload = serde_json::Map::new();
+            for (key, value) in changes {
+                // The token counts are integers on the wire; the sampling knobs
+                // are floats. Sending 8192.0 where the schema says u32 is a 400.
+                let json = match value {
+                    None => serde_json::Value::Null,
+                    Some(v) if is_token_count(&key) => serde_json::json!(v.max(0.0) as u64),
+                    Some(v) => serde_json::json!(v),
+                };
+                payload.insert(key, json);
+            }
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .patch(format!("{base_url}/api/agents/{agent_id}/config"))
+                .json(&serde_json::Value::Object(payload))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let warnings = resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|b| b["warnings"].as_array().cloned())
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|w| w["message"].as_str().map(String::from))
+                        .collect();
+                    let _ = tx.send(AppEvent::AgentModelParamsUpdated {
+                        id: agent_id,
+                        warnings,
+                    });
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-model-params-update-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-model-params-daemon-only",
+            )));
+        }
+    });
+}
+
+/// Whether a config key carries a whole-token count rather than a sampling float.
+fn is_token_count(key: &str) -> bool {
+    matches!(key, "max_tokens" | "context_window" | "max_output_tokens")
+}
+
 /// Update an agent's MCP servers.
 pub fn spawn_update_agent_mcp_servers(
     backend: BackendRef,
@@ -1628,175 +1758,6 @@ pub fn spawn_update_agent_channels(
                         let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
                             "tui-event-channels-update-error",
                             &[("error", &e.to_string())],
-                        )));
-                    }
-                }
-            }
-        }
-    });
-}
-
-/// Fetch an agent's model routing settings **and** the profile catalog.
-///
-/// Both in one call because the editor is unusable with either half missing:
-/// without the catalog there is nothing to tick, and without the agent's own
-/// settings the editor would show whatever the previous screen left behind and
-/// could save a value the operator never chose.
-pub fn spawn_fetch_agent_model_routing(
-    backend: BackendRef,
-    agent_id: String,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-
-            let available: Vec<String> = client
-                .get(format!("{base_url}/api/model-router/profiles"))
-                .send()
-                .ok()
-                .and_then(|r| r.json::<serde_json::Value>().ok())
-                .map(|body| {
-                    body["profiles"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|p| p["name"].as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
-
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/agents/{agent_id}/model_routing"))
-                .send()
-            {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let mode = body["mode"].as_str().unwrap_or("fixed").to_string();
-                    let allowed_profiles: Vec<String> = body["allowed_profiles"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let cost_budget = body["cost_budget"].as_str().map(String::from);
-                    let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
-                        mode,
-                        allowed_profiles,
-                        cost_budget,
-                        available,
-                    });
-                    return;
-                }
-            }
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-event-model-routing-fetch-failed",
-            )));
-        }
-        BackendRef::InProcess(kernel) => {
-            let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) else {
-                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                    "tui-event-model-routing-fetch-failed",
-                )));
-                return;
-            };
-            let aid = librefang_types::agent::AgentId(uuid);
-            let Some(entry) = kernel.agent_registry_ref().get(aid) else {
-                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                    "tui-event-model-routing-fetch-failed",
-                )));
-                return;
-            };
-
-            let cfg = kernel.config_snapshot();
-            let available = librefang_kernel::model_router::ProfileCatalog::load_cached(
-                cfg.home_dir.as_path(),
-                &cfg.model_router,
-            )
-            .names();
-
-            let mode = match entry.manifest.model.mode {
-                librefang_types::agent::ModelMode::Fixed => "fixed",
-                librefang_types::agent::ModelMode::Flexible => "flexible",
-            }
-            .to_string();
-            let router_override = entry.manifest.model.router_override.as_ref();
-            let allowed_profiles = router_override
-                .map(|o| o.allowed_profiles.iter().cloned().collect())
-                .unwrap_or_default();
-            let cost_budget = router_override
-                .and_then(|o| o.cost_budget)
-                .map(|t| t.as_str().to_string());
-
-            let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
-                mode,
-                allowed_profiles,
-                cost_budget,
-                available,
-            });
-        }
-    });
-}
-
-/// Persist an agent's model routing mode and router override.
-pub fn spawn_update_agent_model_routing(
-    backend: BackendRef,
-    agent_id: String,
-    mode: String,
-    allowed_profiles: Vec<String>,
-    cost_budget: Option<String>,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .put(format!("{base_url}/api/agents/{agent_id}/model_routing"))
-                .json(&serde_json::json!({
-                    "mode": mode,
-                    "allowed_profiles": allowed_profiles,
-                    "cost_budget": cost_budget,
-                }))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::AgentModelRoutingUpdated(agent_id));
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-model-routing-update-failed",
-                    )));
-                }
-            }
-        }
-        BackendRef::InProcess(kernel) => {
-            if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
-                let aid = librefang_types::agent::AgentId(uuid);
-                let flexible = mode == "flexible";
-                let router_mode = if flexible {
-                    librefang_types::agent::ModelMode::Flexible
-                } else {
-                    librefang_types::agent::ModelMode::Fixed
-                };
-                let router_override =
-                    flexible.then(|| librefang_types::model_profile::AgentRouterOverride {
-                        fixed: false,
-                        allowed_profiles: allowed_profiles.into_iter().collect(),
-                        cost_budget: cost_budget
-                            .as_deref()
-                            .and_then(librefang_types::model_profile::CostTier::parse),
-                        default_profile: None,
-                    });
-                match kernel.set_agent_model_routing(aid, router_mode, router_override) {
-                    Ok(()) => {
-                        let _ = tx.send(AppEvent::AgentModelRoutingUpdated(agent_id));
-                    }
-                    Err(_) => {
-                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                            "tui-event-model-routing-update-failed",
                         )));
                     }
                 }
@@ -3431,241 +3392,6 @@ pub fn spawn_fetch_logs(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             let _ = tx.send(AppEvent::LogsLoaded(Vec::new()));
         }
     });
-}
-
-// ── Goals events ────────────────────────────────────────────────────────────
-
-/// Fetch the goals list.
-pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/goals")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    // `GET /api/goals` answers with a `PaginatedResponse`
-                    // (`{"items": [...]}`); the bare-array fallback keeps an
-                    // older daemon working.
-                    let goals: Vec<GoalInfo> = body
-                        .get("items")
-                        .and_then(|v| v.as_array())
-                        .or_else(|| body.as_array())
-                        .map(|arr| arr.iter().map(goal_from_json).collect())
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::GoalsLoaded(goals));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::GoalsLoaded(Vec::new()));
-        }
-    });
-}
-
-/// Read one goal document into a [`GoalInfo`].
-///
-/// Run state is deliberately absent: the stored document never carries it, so
-/// it is fetched per goal by [`spawn_fetch_goal_run`] when the detail pane opens.
-fn goal_from_json(g: &serde_json::Value) -> GoalInfo {
-    GoalInfo {
-        id: g["id"].as_str().unwrap_or_default().to_string(),
-        title: g["title"].as_str().unwrap_or_default().to_string(),
-        description: g["description"].as_str().unwrap_or_default().to_string(),
-        status: g["status"].as_str().unwrap_or_default().to_string(),
-        progress: g["progress"].as_u64().unwrap_or(0).min(100) as u8,
-        agent_id: g["agent_id"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        run_phase: None,
-        run_iteration: None,
-        run_max_iterations: None,
-    }
-}
-
-/// Fetch the live run state for a single goal.
-pub fn spawn_fetch_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || {
-        let BackendRef::Daemon { base_url, api_key } = backend else {
-            return;
-        };
-        let client = make_daemon_client(api_key.as_deref());
-        let Ok(resp) = client
-            .get(format!("{base_url}/api/goals/{goal_id}/run"))
-            .send()
-        else {
-            return;
-        };
-        let Ok(body) = resp.json::<serde_json::Value>() else {
-            return;
-        };
-        // A goal that never ran answers `{"running": false}` with no `run`
-        // object, which correctly leaves every field `None`.
-        let run = &body["run"];
-        let _ = tx.send(AppEvent::GoalRunLoaded {
-            goal_id,
-            phase: run["phase"].as_str().map(str::to_string),
-            iteration: run["iteration"].as_u64().map(|v| v as u32),
-            max_iterations: run["max_iterations"].as_u64().map(|v| v as u32),
-        });
-    });
-}
-
-/// Create a goal.
-pub fn spawn_create_goal(
-    backend: BackendRef,
-    title: String,
-    description: String,
-    agent_id: String,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            let body = serde_json::json!({
-                "title": title,
-                "description": description,
-                "agent_id": agent_id,
-            });
-            match client
-                .post(format!("{base_url}/api/goals"))
-                .json(&body)
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let resp_body: serde_json::Value = resp.json().unwrap_or_default();
-                    let id = resp_body["id"].as_str().unwrap_or_default().to_string();
-                    let _ = tx.send(AppEvent::GoalCreated(id));
-                }
-                Ok(resp) => {
-                    let _ = tx.send(AppEvent::FetchError(api_error_text(
-                        resp,
-                        "tui-goal-create-failed",
-                    )));
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-goal-create-error",
-                        &[("error", &e.to_string())],
-                    )));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-goal-inproc-unavailable",
-            )));
-        }
-    });
-}
-
-/// Delete a goal.
-pub fn spawn_delete_goal(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .delete(format!("{base_url}/api/goals/{goal_id}"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::GoalDeleted(goal_id));
-                }
-                Ok(resp) => {
-                    let _ = tx.send(AppEvent::FetchError(api_error_text(
-                        resp,
-                        "tui-goal-delete-failed",
-                    )));
-                }
-                Err(_) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-goal-delete-failed",
-                    )));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-goal-inproc-unavailable",
-            )));
-        }
-    });
-}
-
-/// Start a goal run.
-pub fn spawn_start_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/goals/{goal_id}/start"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::GoalRunStarted(goal_id));
-                }
-                Ok(resp) => {
-                    // The daemon's own message is the useful one here — it
-                    // names the cause, e.g. an unassigned or unparsable agent.
-                    let _ = tx.send(AppEvent::FetchError(api_error_text(
-                        resp,
-                        "tui-goal-start-failed",
-                    )));
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-goal-start-error",
-                        &[("error", &e.to_string())],
-                    )));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-goal-inproc-unavailable",
-            )));
-        }
-    });
-}
-
-/// Stop a goal run.
-pub fn spawn_stop_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/goals/{goal_id}/stop"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::GoalRunStopped(goal_id));
-                }
-                Ok(resp) => {
-                    let _ = tx.send(AppEvent::FetchError(api_error_text(
-                        resp,
-                        "tui-goal-stop-failed",
-                    )));
-                }
-                Err(_) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-goal-stop-failed")));
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-goal-inproc-unavailable",
-            )));
-        }
-    });
-}
-
-/// The `error` field of a failed daemon response, or the given fallback message.
-fn api_error_text(resp: reqwest::blocking::Response, fallback_key: &str) -> String {
-    let body: serde_json::Value = resp.json().unwrap_or_default();
-    body["error"]
-        .as_str()
-        .filter(|e| !e.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| crate::i18n::t(fallback_key))
 }
 
 // ── Hands events ────────────────────────────────────────────────────────────
