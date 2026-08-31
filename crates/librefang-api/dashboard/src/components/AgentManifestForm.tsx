@@ -1299,6 +1299,66 @@ export function AgentManifestForm({
           />
         </div>
       </CollapsibleSection>
+
+      <CollapsibleSection title={t("agents.form.shared_folders")} defaultOpen={false}>
+        <p className="text-[10px] text-text-dim/70 mb-2">
+          {t("agents.form.shared_folders_hint")}
+        </p>
+        {value.workspaces.map((ws, idx) => (
+          <div
+            key={ws._uid}
+            className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2"
+          >
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={ws.name}
+                onChange={(e) => update({ workspaces: patchListItem(value.workspaces, idx, { ...ws, name: e.target.value }) })}
+                placeholder={t("agents.form.folder_name")}
+                className={`${inputClass} flex-1`}
+              />
+              <input
+                type="text"
+                value={ws.path}
+                onChange={(e) => update({ workspaces: patchListItem(value.workspaces, idx, { ...ws, path: e.target.value }) })}
+                placeholder={t("agents.form.folder_path")}
+                className={`${inputClass} flex-[2]`}
+              />
+              <select
+                value={ws.mode}
+                onChange={(e) => update({ workspaces: patchListItem(value.workspaces, idx, { ...ws, mode: e.target.value as "rw" | "r" }) })}
+                className={`${inputClass} w-20`}
+              >
+                <option value="rw">rw</option>
+                <option value="r">r</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => update({ workspaces: value.workspaces.filter((_, i) => i !== idx) })}
+                className="text-text-dim hover:text-error"
+                aria-label={t("agents.form.remove_folder")}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() =>
+            update({
+              workspaces: [
+                ...value.workspaces,
+                { _uid: generateUid(), name: "", path: "", mode: "rw" },
+              ],
+            })
+          }
+          className="flex items-center gap-1 text-xs text-brand hover:underline"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          {t("agents.form.add_folder")}
+        </button>
+      </CollapsibleSection>
     </div>
   );
 }
