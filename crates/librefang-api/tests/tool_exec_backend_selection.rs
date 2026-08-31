@@ -169,6 +169,7 @@ fn agent_manifest_no_field_resolves_to_global() {
 #[test]
 fn agent_manifest_override_wins_over_global() {
     let manifest = AgentManifest {
+        source_template: None,
         tool_exec_backend: Some(BackendKind::Ssh),
         ..Default::default()
     };

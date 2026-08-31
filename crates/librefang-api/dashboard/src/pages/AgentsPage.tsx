@@ -1058,6 +1058,14 @@ export function AgentsPage() {
           <span className="truncate min-w-0">
             {agent.schedule || t("agents.schedule_manual", { defaultValue: "manual" })}
           </span>
+          {agent.source_template && (
+            <>
+              <span className="text-text-dim/60">·</span>
+              <span className="truncate min-w-0">
+                {t("agents.origin_template", { name: agent.source_template })}
+              </span>
+            </>
+          )}
           <span className="ml-auto shrink-0 tabular-nums">
             {stats.sessions24h} · ${stats.cost24h.toFixed(2)}
           </span>

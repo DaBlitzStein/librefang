@@ -405,6 +405,7 @@ impl From<LegacyHandAgentConfig> for AgentManifest {
         });
         AgentManifest {
             name: legacy.name,
+            source_template: None,
             description: legacy.description,
             module: legacy.module,
             model: ModelConfig {

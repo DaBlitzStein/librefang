@@ -304,6 +304,7 @@
     "from_form": "Через форму",
     "from_template": "З темплейту",
     "from_toml": "З TOML",
+    "origin_template": "З {{name}}",
     "template_name": "Назва темплейту",
     "template_placeholder": "-- Виберіть темплейт --",
     "template_custom_name": "Ім'я агента (опціонально)",

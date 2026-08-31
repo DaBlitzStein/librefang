@@ -360,6 +360,8 @@ export interface AgentItem {
   supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
   /** Human-readable schedule summary: "manual" for reactive agents,
    *  the cron expression for periodic agents, "proactive", or
    *  "continuous · Ns" for continuous agents. */
@@ -1394,6 +1396,8 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {

@@ -304,6 +304,7 @@
     "from_form": "양식에서",
     "from_template": "템플릿에서",
     "from_toml": "TOML에서",
+    "origin_template": "{{name}}에서",
     "template_name": "템플릿 이름",
     "template_placeholder": "-- 템플릿 선택 --",
     "template_custom_name": "대리인 이름(선택사항)",
