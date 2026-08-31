@@ -1319,6 +1319,37 @@ mod tests {
         }
     }
 
+    /// Goals written before UUID `Option` fields were reliably serialised as
+    /// `null` may store `agent_id` / `parent_id` as `""` instead. An empty
+    /// string fails UUID parsing inside `serde_json::from_value`, and the
+    /// caller's `.ok()` used to swallow that error and drop the whole goal —
+    /// turning every `start` / `pause` / `resume` on it into a bare 500.
+    #[test]
+    fn load_goal_sanitizes_empty_string_uuid_fields() {
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let goal_id = GoalId::new();
+        let now = Utc::now().to_rfc3339();
+        let raw = serde_json::json!([{
+            "id": goal_id.to_string(),
+            "title": "Legacy goal",
+            "description": "",
+            "status": "in_progress",
+            "progress": 0,
+            "agent_id": "",
+            "parent_id": "",
+            "created_at": now,
+            "updated_at": now,
+        }]);
+        substrate
+            .structured_set(goals_storage_agent_id(), GOALS_STORAGE_KEY, raw)
+            .unwrap();
+
+        let loaded = load_goal(&substrate, goal_id)
+            .expect("empty-string UUID fields must not drop the goal");
+        assert_eq!(loaded.agent_id, None);
+        assert_eq!(loaded.parent_id, None);
+    }
+
     #[tokio::test]
     async fn run_loop_stops_and_completes_on_goal_done() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
