@@ -213,6 +213,11 @@ export interface ChannelItem {
    *  **Sticky**: never cleared, not even by the successful respawn that follows.
    *  A connected channel carrying one is degraded, not dead. */
   last_error?: string | null;
+  /** Per-instance default agent (`[[sidecar_channels]].agent`) — inbound
+   *  messages on this instance with no more specific binding route here.
+   *  `null` / absent when this instance has no default agent configured.
+   *  Only present on configured rows; a discovery (catalog) row never has one. */
+  agent?: string | null;
 }
 
 export interface SkillItem {
@@ -2178,13 +2183,26 @@ export interface SidecarSaveResult {
 // else + the `[[sidecar_channels]]` boilerplate) on the server. Triggers
 // hot-reload of the channels registry; whether the sidecar child needs an
 // out-of-band restart is reported via `restart_required`.
+//
+// `channelType` is always the `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …)
+// — it picks the adapter's schema/command/args and never changes across a
+// rename. `instanceName` is the `[[sidecar_channels]].name` actually
+// written; omit it (or pass the same value as `channelType`) to save the
+// type's default single instance, exactly as before multi-instance support.
+// Pass a distinct `instanceName` to configure a second (third, …) instance
+// of the same catalog type — e.g. two Telegram bots.
 export async function saveSidecarConfig(
-  name: string,
+  channelType: string,
   values: Record<string, string>,
+  options: { instanceName?: string; agent?: string | null } = {},
 ): Promise<SidecarSaveResult> {
   return post<SidecarSaveResult>(
-    `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
-    { values },
+    `/api/channels/sidecar/${encodeURIComponent(channelType)}/configure`,
+    {
+      values,
+      instance_name: options.instanceName,
+      agent: options.agent,
+    },
   );
 }
 

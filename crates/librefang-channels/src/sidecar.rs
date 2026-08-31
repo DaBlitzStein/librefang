@@ -737,7 +737,12 @@ fn strip_matching_outer_quotes(s: &str) -> &str {
 /// `Command::env_clear` not being called.
 /// Uppercase + non-alphanumeric→`_` form of a sidecar instance `name`, used as the
 /// `<PREFIX>__<KEY>` namespace for per-instance secrets in `secrets.env` (#6169).
-fn instance_secret_prefix(name: &str) -> String {
+///
+/// `pub` so the dashboard's sidecar-configure handler
+/// (`librefang-api::routes::channels`) can write a second (third, …) named
+/// instance's secrets under its own namespace instead of clobbering the
+/// first instance's bare key — see `configure_sidecar_channel`.
+pub fn instance_secret_prefix(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {

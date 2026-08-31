@@ -1062,7 +1062,20 @@
     "qr_expired_restart": "QR-код застарів — перезапустіть sidecar, щоб спробувати ще раз",
     "qr_login": "QR-вхід",
     "qr_scan_with_app": "Відскануйте у застосунку {{channel}}",
-    "sidecar_details": "Запускається як зовнішній sidecar-адаптер. Керуйте ним у config.toml ([[sidecar_channels]]) — Config → Sidecar Channels, або відкрийте drawer налаштування через шестерню на картці каналу."
+    "sidecar_details": "Запускається як зовнішній sidecar-адаптер. Керуйте ним у config.toml ([[sidecar_channels]]) — Config → Sidecar Channels, або відкрийте drawer налаштування через шестерню на картці каналу.",
+    "instance_count_one": "{{count}} екземпляр",
+    "instance_count_few": "{{count}} екземпляри",
+    "instance_count_many": "{{count}} екземплярів",
+    "instance_count_other": "{{count}} екземпляра",
+    "instance_name_label": "Ім'я екземпляра",
+    "instance_name_placeholder": "напр. telegram-support",
+    "instance_name_hint_first": "Унікальне ім'я для цього екземпляра. За замовчуванням — тип каналу, оскільки жодного ще не налаштовано.",
+    "instance_name_hint_next": "Цей тип каналу вже має {{count}} налаштованих екземплярів. Виберіть унікальне ім'я, щоб створити новий, а не перезаписати наявного бота.",
+    "instance_name_hint_edit": "Ім'я екземпляра тут змінити не можна — видаліть і додайте знову, щоб перейменувати.",
+    "default_agent_label": "Агент за замовчуванням",
+    "default_agent_none": "Без значення за замовчуванням (перший доступний агент)",
+    "default_agent_none_short": "Немає",
+    "default_agent_hint": "Вхідні повідомлення цього екземпляра без більш конкретної прив'язки маршрутизуються до цього агента."
   },
   "skills": {
     "title": "Скіли",

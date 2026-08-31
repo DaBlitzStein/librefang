@@ -1062,7 +1062,18 @@
     "qr_expired_restart": "QR 코드가 만료되었습니다. 다시 시도하려면 사이드카를 다시 시작하세요.",
     "qr_login": "QR 로그인",
     "qr_scan_with_app": "{{channel}} 앱으로 스캔하세요",
-    "sidecar_details": "Out-of-Process 사이드카 어댑터로 실행됩니다. config.toml에서 관리하세요([[sidecar_channels]]) — 구성 → 사이드카 채널 또는 채널 카드의 기어를 사용하여 구성 서랍을 엽니다."
+    "sidecar_details": "Out-of-Process 사이드카 어댑터로 실행됩니다. config.toml에서 관리하세요([[sidecar_channels]]) — 구성 → 사이드카 채널 또는 채널 카드의 기어를 사용하여 구성 서랍을 엽니다.",
+    "instance_count_one": "{{count}}개 인스턴스",
+    "instance_count_other": "{{count}}개 인스턴스",
+    "instance_name_label": "인스턴스 이름",
+    "instance_name_placeholder": "예: telegram-support",
+    "instance_name_hint_first": "이 인스턴스의 고유한 이름입니다. 아직 구성된 인스턴스가 없으므로 채널 유형으로 기본 설정됩니다.",
+    "instance_name_hint_next": "이 채널 유형에는 이미 {{count}}개의 구성된 인스턴스가 있습니다. 기존 봇을 덮어쓰지 않도록 고유한 이름을 선택하세요.",
+    "instance_name_hint_edit": "여기서는 인스턴스 이름을 변경할 수 없습니다 — 이름을 바꾸려면 제거 후 다시 추가하세요.",
+    "default_agent_label": "기본 에이전트",
+    "default_agent_none": "기본값 없음(사용 가능한 첫 번째 에이전트)",
+    "default_agent_none_short": "없음",
+    "default_agent_hint": "더 구체적인 바인딩이 없는 이 인스턴스의 수신 메시지는 이 에이전트로 라우팅됩니다."
   },
   "skills": {
     "title": "기술",
