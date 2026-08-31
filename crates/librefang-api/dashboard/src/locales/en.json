@@ -304,6 +304,7 @@
     "from_form": "From Form",
     "from_template": "From Template",
     "from_toml": "From TOML",
+    "origin_template": "From {{name}}",
     "template_name": "Template Name",
     "template_placeholder": "-- Select a template --",
     "template_custom_name": "Agent Name (optional)",

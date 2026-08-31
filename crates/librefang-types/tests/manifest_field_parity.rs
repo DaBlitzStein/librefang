@@ -38,6 +38,7 @@ fn fully_populated_manifest() -> AgentManifest {
         description: "a manifest with nothing left at its default".into(),
         author: "houko".into(),
         owner: Some("group:platform".into()),
+        source_template: None,
         module: "builtin:chat".into(),
         schedule: ScheduleMode::Periodic {
             cron: "0 9 * * *".into(),

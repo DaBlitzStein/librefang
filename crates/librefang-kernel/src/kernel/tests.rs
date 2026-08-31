@@ -456,6 +456,7 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
 fn test_manifest_to_capabilities() {
     let mut manifest = AgentManifest {
         name: "test".to_string(),
+        source_template: None,
         description: "test".to_string(),
         author: "test".to_string(),
         module: "test".to_string(),
@@ -473,6 +474,7 @@ fn test_manifest_to_capabilities() {
 fn test_manifest(name: &str, description: &str, tags: Vec<String>) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
+        source_template: None,
         description: description.to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -596,6 +598,7 @@ fn test_find_agents_by_tag() {
 fn test_manifest_to_capabilities_with_profile() {
     use librefang_types::agent::ToolProfile;
     let manifest = AgentManifest {
+        source_template: None,
         profile: Some(ToolProfile::Coding),
         ..Default::default()
     };
@@ -615,6 +618,7 @@ fn test_manifest_to_capabilities_with_profile() {
 fn test_manifest_to_capabilities_profile_overridden_by_explicit_tools() {
     use librefang_types::agent::ToolProfile;
     let mut manifest = AgentManifest {
+        source_template: None,
         profile: Some(ToolProfile::Coding),
         ..Default::default()
     };
@@ -698,6 +702,7 @@ fn test_spawn_agent_applies_local_default_model_override() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "local-model-agent".to_string(),
+                source_template: None,
                 description: "uses local model override".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -866,6 +871,7 @@ fn spawn_still_succeeds_when_group_trigger_pattern_has_control_char_6732() {
 
     let manifest = AgentManifest {
         name: "vivi".to_string(),
+        source_template: None,
         description: "has a mis-escaped group alias".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -933,6 +939,7 @@ fn test_spawn_child_exceeding_parent_is_rejected() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "restricted-parent".to_string(),
+                source_template: None,
                 description: "can only read".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -954,6 +961,7 @@ fn test_spawn_child_exceeding_parent_is_rejected() {
     let escalation = kernel.spawn_agent_inner(
         AgentManifest {
             name: "escalated-child".to_string(),
+            source_template: None,
             description: "requests full privileges".to_string(),
             author: "test".to_string(),
             module: "builtin:chat".to_string(),
@@ -1009,6 +1017,7 @@ fn test_spawn_child_with_subset_capabilities_is_allowed() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "parent-with-file-tools".to_string(),
+                source_template: None,
                 description: "file-reading parent".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -1028,6 +1037,7 @@ fn test_spawn_child_with_subset_capabilities_is_allowed() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "subset-child".to_string(),
+                source_template: None,
                 description: "narrower read-only child".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -1073,6 +1083,7 @@ fn test_spawn_with_unknown_parent_fails_closed() {
     let result = kernel.spawn_agent_inner(
         AgentManifest {
             name: "orphan".to_string(),
+            source_template: None,
             description: "parent does not exist".to_string(),
             author: "test".to_string(),
             module: "builtin:chat".to_string(),
@@ -1175,6 +1186,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "switch-provider-agent".to_string(),
+                source_template: None,
                 description: "carries stale overrides from prior provider".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -2457,6 +2469,7 @@ fn test_available_tools_returns_empty_when_tools_disabled() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let manifest = AgentManifest {
         name: "no-tools".to_string(),
+        source_template: None,
         description: "agent with tools disabled".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -2499,6 +2512,7 @@ fn test_available_tools_glob_pattern_matches_mcp_tools() {
     // Agent with a glob pattern in declared tools — should match builtins
     let manifest = AgentManifest {
         name: "glob-tools".to_string(),
+        source_template: None,
         description: "agent using glob in tools".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -2558,6 +2572,7 @@ fn test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy
 
     let manifest = AgentManifest {
         name: "shell-agent".to_string(),
+        source_template: None,
         description: "agent with shell_exec in tools, no exec_policy".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -3080,6 +3095,7 @@ fn test_peer_scoped_key() {
 #[test]
 fn test_apply_thinking_override_none_leaves_manifest_untouched() {
     let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
         thinking: Some(librefang_types::config::ThinkingConfig {
             budget_tokens: 4242,
             stream_thinking: true,
@@ -3095,6 +3111,7 @@ fn test_apply_thinking_override_none_leaves_manifest_untouched() {
 #[test]
 fn test_apply_thinking_override_force_off_clears_thinking() {
     let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
         thinking: Some(librefang_types::config::ThinkingConfig::default()),
         ..Default::default()
     };
@@ -3117,6 +3134,7 @@ fn test_apply_thinking_override_force_on_inserts_default() {
 #[test]
 fn test_apply_thinking_override_force_on_keeps_existing_budget() {
     let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
         thinking: Some(librefang_types::config::ThinkingConfig {
             budget_tokens: 1234,
             stream_thinking: false,
@@ -3540,6 +3558,7 @@ fn test_set_agent_skills_persists_allowlist_to_agent_toml() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "skill-persist-agent".to_string(),
+                source_template: None,
                 description: "skill persistence regression".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -3588,6 +3607,7 @@ fn test_set_agent_mcp_servers_persists_allowlist_to_agent_toml() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "mcp-persist-agent".to_string(),
+                source_template: None,
                 description: "MCP persistence regression".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -3645,6 +3665,7 @@ fn spawn_allowlist_test_agent(kernel: &LibreFangKernel, name: &str) -> AgentId {
         .spawn_agent_inner(
             AgentManifest {
                 name: name.to_string(),
+                source_template: None,
                 description: "allowlist validation regression".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -3986,6 +4007,7 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "concurrent-manifest-writers".to_string(),
+                source_template: None,
                 ..Default::default()
             },
             None,
@@ -4440,6 +4462,7 @@ fn hand_agent_mcp_update_is_rejected_without_touching_shared_manifest() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "test-hand:worker".to_string(),
+                source_template: None,
                 tags: vec!["hand:test-hand".to_string()],
                 ..Default::default()
             },
@@ -4649,6 +4672,7 @@ fn test_skill_evolve_tools_present_when_both_flags_true() {
     // Restricted agent: only memory tools declared; both evolution paths on.
     let manifest = AgentManifest {
         name: "matrix-tt-agent".to_string(),
+        source_template: None,
         description: "matrix (T,T) test agent".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -4779,6 +4803,7 @@ fn test_skill_evolve_tool_survives_when_explicitly_declared_and_evolution_disabl
     // still honour the explicit declaration.
     let manifest = AgentManifest {
         name: "explicit-evolve-agent".to_string(),
+        source_template: None,
         description: "agent with explicit evolve tool and evolution disabled".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -6024,6 +6049,7 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
 
         let mut manifest = librefang_types::agent::AgentManifest {
             name: "orphan-hand-agent".to_string(),
+            source_template: None,
             description: "stale hand-agent row".to_string(),
             module: "builtin:chat".to_string(),
             ..Default::default()
@@ -6117,6 +6143,7 @@ fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
 
         let mut manifest = librefang_types::agent::AgentManifest {
             name: "orphan-hand-agent-corrupt".to_string(),
+            source_template: None,
             description: "stale hand-agent row".to_string(),
             module: "builtin:chat".to_string(),
             ..Default::default()
@@ -6488,6 +6515,7 @@ async fn kill_agent_aborts_in_flight_run_5142() {
 
     let manifest = AgentManifest {
         name: "victim".to_string(),
+        source_template: None,
         description: "agent whose run must be aborted on kill".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -6574,6 +6602,7 @@ async fn kill_agent_dispatch_insert_race_leaves_no_orphan_5142() {
 
     let manifest = AgentManifest {
         name: "race-victim".to_string(),
+        source_template: None,
         description: "agent for kill/dispatch race".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -6758,6 +6787,7 @@ async fn gc_sweep_reaps_finished_agent_watchers() {
 
     let manifest = AgentManifest {
         name: "gc-agent-watcher".to_string(),
+        source_template: None,
         description: "agent for watcher GC".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -6836,6 +6866,7 @@ async fn gc_sweep_does_not_abort_live_successor_turn() {
     // is exactly the path the successor race lives on.
     let manifest = AgentManifest {
         name: "gc-successor-victim".to_string(),
+        source_template: None,
         description: "agent for gc successor TOCTOU".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -7254,6 +7285,7 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
         name: format!("toctou-agent-{}", agent_id),
         manifest: librefang_types::agent::AgentManifest {
             name: format!("toctou-agent-{}", agent_id),
+            source_template: None,
             description: "test".into(),
             author: "test".into(),
             module: "test".into(),
@@ -7459,6 +7491,7 @@ fn test_agent_concurrency_for_resolves_new_mode_cap() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "parallel-trigger-agent".to_string(),
+                source_template: None,
                 description: "new-mode agent allowed to fan out".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -7501,6 +7534,7 @@ fn test_agent_concurrency_for_clamps_persistent_cap() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "misconfigured-persistent-agent".to_string(),
+                source_template: None,
                 description: "persistent + cap=4 must clamp".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -7543,6 +7577,7 @@ fn test_agent_concurrency_for_floors_zero_to_one() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "typo-zero-agent".to_string(),
+                source_template: None,
                 description: "Some(0) must floor to 1".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -7582,6 +7617,7 @@ fn test_agent_concurrency_for_returns_cached_semaphore() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "cache-test-agent".to_string(),
+                source_template: None,
                 description: "second resolve returns same Arc".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -7645,6 +7681,7 @@ async fn workflow_send_message_closure_honours_per_agent_semaphore() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "wf-fanout-cap-agent".to_string(),
+                source_template: None,
                 description: "cap=1 + 3 parallel fan-out steps must serialise".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -9100,6 +9137,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
     let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
     let manifest = AgentManifest {
         name: "mcp-order".to_string(),
+        source_template: None,
         description: "agent for mcp order regression".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -9207,6 +9245,7 @@ fn mcp_disabled_suppresses_all_mcp_tools() {
 
     let manifest = AgentManifest {
         name: "no-mcp".to_string(),
+        source_template: None,
         description: "agent with mcp_disabled".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -9260,6 +9299,7 @@ fn mcp_disabled_false_preserves_mcp_tools() {
 
     let manifest = AgentManifest {
         name: "with-mcp".to_string(),
+        source_template: None,
         description: "agent with mcp enabled".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -9364,6 +9404,7 @@ fn mcp_tool_names_for_servers(
 
     let manifest = AgentManifest {
         name: "allowlist-agent".to_string(),
+        source_template: None,
         description: "agent under mcp_servers allowlist test".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -9521,6 +9562,7 @@ fn mcp_disabled_hot_reload_takes_effect_without_respawn() {
     // Start with MCP enabled.
     let manifest = AgentManifest {
         name: "hot-reload-mcp".to_string(),
+        source_template: None,
         description: "agent for mcp_disabled hot-reload test".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -9715,6 +9757,7 @@ fn concurrency_manifest(
 ) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
+        source_template: None,
         description: "concurrency test agent".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -10554,6 +10597,7 @@ fn spawn_agent_allows_empty_name() {
 
     let manifest = AgentManifest {
         name: "".to_string(),
+        source_template: None,
         ..Default::default()
     };
 
@@ -10579,6 +10623,7 @@ fn spawn_agent_allows_special_chars_in_name() {
 
     let manifest = AgentManifest {
         name: "invalid/name".to_string(),
+        source_template: None,
         ..Default::default()
     };
 
@@ -10607,6 +10652,7 @@ fn spawn_agent_rejects_duplicate_name() {
 
     let manifest = AgentManifest {
         name: "duplicate-test-agent".to_string(),
+        source_template: None,
         module: "builtin:chat".to_string(),
         ..Default::default()
     };
@@ -10642,6 +10688,7 @@ fn spawn_agent_with_parent_rejects_unregistered_parent() {
     let parent_id = AgentId::from_name("non-existent-parent");
     let manifest = AgentManifest {
         name: "child-agent".to_string(),
+        source_template: None,
         module: "builtin:chat".to_string(),
         ..Default::default()
     };
@@ -11126,6 +11173,7 @@ fn test_spawn_agent_rejects_absolute_module_path() {
 
     let result = kernel.spawn_agent(AgentManifest {
         name: "evil-abs".to_string(),
+        source_template: None,
         description: "tries to exec /etc/passwd.py".to_string(),
         author: "test".to_string(),
         module: "python:/etc/passwd.py".to_string(),
@@ -11162,6 +11210,7 @@ fn test_spawn_agent_rejects_parent_traversal_module_path() {
 
     let result = kernel.spawn_agent(AgentManifest {
         name: "evil-traversal".to_string(),
+        source_template: None,
         description: "tries ../../etc/shadow.py".to_string(),
         author: "test".to_string(),
         module: "python:../../etc/shadow.py".to_string(),
@@ -12910,6 +12959,7 @@ fn kill_agent_with_purge_removes_agent_row_from_sqlite() {
 
     let manifest = AgentManifest {
         name: "agent-5117".to_string(),
+        source_template: None,
         description: "agent for #5117 regression".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -13410,6 +13460,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
         name: format!("recovery-agent-{}", agent_id),
         manifest: librefang_types::agent::AgentManifest {
             name: format!("recovery-agent-{}", agent_id),
+            source_template: None,
             description: "test".into(),
             author: "test".into(),
             module: "test".into(),
@@ -13546,6 +13597,7 @@ async fn compact_session_serializes_with_message_writers_without_self_deadlock()
 
     let manifest = AgentManifest {
         name: "compact-session-lock-test".to_string(),
+        source_template: None,
         description: "test".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -13686,6 +13738,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
 
     let manifest = AgentManifest {
         name: "compact-token-gate-test".to_string(),
+        source_template: None,
         description: "test".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -13803,6 +13856,7 @@ fn test_context_report_uses_catalog_context_window_not_200k() {
 
     let manifest = AgentManifest {
         name: "ctx-report-test-agent".to_string(),
+        source_template: None,
         description: "agent for context_report regression test".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -13852,6 +13906,7 @@ fn test_context_report_honours_manifest_context_window_override() {
 
     let manifest = AgentManifest {
         name: "ctx-override-test-agent".to_string(),
+        source_template: None,
         description: "agent with explicit context_window in manifest".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -13905,6 +13960,7 @@ fn suspend_resume_actually_transition_in_memory_state() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "suspend-resume-agent".to_string(),
+                source_template: None,
                 description: "exercises suspend/resume state propagation".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -13967,6 +14023,7 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "default-tracking-agent".to_string(),
+                source_template: None,
                 description: "tracks the kernel default model".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -13994,6 +14051,7 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "legacy-default-agent".to_string(),
+                source_template: None,
                 description: "contains a previously resolved default".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -14301,6 +14359,7 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "migrated-agent".to_string(),
+                source_template: None,
                 description: "agent pinned to delisted model".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -14329,6 +14388,7 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
         .spawn_agent_inner(
             AgentManifest {
                 name: "spared-agent".to_string(),
+                source_template: None,
                 description: "agent pinned to different model".to_string(),
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
@@ -14757,6 +14817,7 @@ fn spawn_evolution_agent(
 ) -> AgentId {
     let manifest = AgentManifest {
         name: name.to_string(),
+        source_template: None,
         description: "evolution-mode test agent".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -15207,6 +15268,7 @@ fn engine_manifest(
 ) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
+        source_template: None,
         description: "ctx engine resolution fixture".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -15682,6 +15744,7 @@ fn boot_gate_kernel(slug: &str) -> (LibreFangKernel, tempfile::TempDir) {
 fn gate_manifest(name: &str, caps: ManifestCapabilities) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
+        source_template: None,
         description: "semantic memory gate test agent".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -16240,6 +16303,7 @@ async fn step_agent_by_type_reuses_the_registered_agent() {
     let existing = kernel
         .spawn_agent(AgentManifest {
             name: "researcher".to_string(),
+            source_template: None,
             ..AgentManifest::default()
         })
         .expect("seed agent");

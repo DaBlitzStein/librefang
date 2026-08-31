@@ -355,6 +355,8 @@ export interface AgentItem {
   supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
   /** Human-readable schedule summary: "manual" for reactive agents,
    *  the cron expression for periodic agents, "proactive", or
    *  "continuous · Ns" for continuous agents. */
@@ -617,19 +619,10 @@ export interface WorkflowLastRunSummary {
   completed_at: string | null;
 }
 
-export interface WorkflowInputParam {
-  name: string;
-  param_type?: string;
-  required?: boolean;
-  description?: string;
-  default?: unknown;
-}
-
 export interface WorkflowItem {
   id: string;
   name: string;
   description?: string;
-  input_schema?: WorkflowInputParam[];
   steps?: number | WorkflowStep[];
   created_at?: string;
   layout?: unknown;
@@ -1098,12 +1091,6 @@ export interface GoalItem {
   agent_id?: string;
   status?: string;
   progress?: number;
-  /** Opt into the verifier gate, the evaluator and captured lessons. */
-  loop_engineering?: boolean;
-  /** Agent that judges the worker's output; only used with loop_engineering. */
-  verify_agent_id?: string;
-  /** Model that judges goal completion; only used with loop_engineering. */
-  evaluator_model?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -1322,18 +1309,6 @@ async function getText(path: string): Promise<string> {
   return response.text();
 }
 
-async function putText<T>(path: string, body: string): Promise<T> {
-  const response = await fetchWithTimeout(path, {
-    method: "PUT",
-    headers: buildHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
-    body,
-  });
-  if (!response.ok) {
-    throw await parseError(response);
-  }
-  return (await response.json()) as T;
-}
-
 export async function postQuickInit(): Promise<{ status: string; provider?: string; model?: string; message?: string }> {
   return post("/api/init", {});
 }
@@ -1366,19 +1341,8 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
 export interface AgentModelDetail {
   provider?: string;
   model?: string;
-  /**
-   * Tri-state on the wire. `null` is the inherit state — the agent has no
-   * opinion, so the per-model override supplies the value and, failing that,
-   * the system default. It is not zero and not "the default happens to be N".
-   */
-  max_tokens?: number | null;
-  temperature?: number | null;
-  top_p?: number | null;
-  frequency_penalty?: number | null;
-  presence_penalty?: number | null;
-  /** Endpoint limits rather than sampling preferences. */
-  context_window?: number | null;
-  max_output_tokens?: number | null;
+  max_tokens?: number;
+  temperature?: number;
 }
 
 export interface AgentDetail {
@@ -1427,7 +1391,8 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
-  injected_footprint_tokens?: number;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
@@ -1480,28 +1445,13 @@ export async function listAgentEvents(
   return data.events ?? [];
 }
 
-/**
- * PATCH /api/agents/{id}/config.
- *
- * The numeric knobs are tri-state: omit a key to leave it unchanged, send
- * `null` to hand the field back to inherit, send a number to pin it for this
- * agent. A pinned value wins over the per-model override.
- *
- * An over-limit value is reported in `warnings` and stored as sent — never
- * clamped. See `librefang_types::inference_params`.
- */
 export async function patchAgentConfig(
   agentId: string,
   config: {
-    max_tokens?: number | null;
+    max_tokens?: number;
     model?: string;
     provider?: string;
-    temperature?: number | null;
-    top_p?: number | null;
-    frequency_penalty?: number | null;
-    presence_penalty?: number | null;
-    context_window?: number | null;
-    max_output_tokens?: number | null;
+    temperature?: number;
     web_search_augmentation?: "off" | "auto" | "always";
   },
 ): Promise<ApiActionResponse> {
@@ -1525,10 +1475,10 @@ function trimOptionalHandRuntimeString(value: string | undefined): string | unde
  * do not silently inherit those semantics.
  */
 function serializeHandAgentRuntimeConfigPatch(config: {
-  max_tokens?: number | null;
+  max_tokens?: number;
   model?: string;
   provider?: string;
-  temperature?: number | null;
+  temperature?: number;
   api_key_env?: string;
   base_url?: string;
   web_search_augmentation?: "off" | "auto" | "always";
@@ -1543,13 +1493,6 @@ function serializeHandAgentRuntimeConfigPatch(config: {
 } {
   return {
     ...config,
-    // A hand override has no per-field clear: `DELETE /hand-runtime-config`
-    // drops the whole thing. Dropping the key is therefore the honest
-    // translation of `null` here — sending it would read as "leave unchanged"
-    // on the backend anyway, and omitting it says the same thing without
-    // implying the endpoint supports a clear it does not.
-    max_tokens: config.max_tokens ?? undefined,
-    temperature: config.temperature ?? undefined,
     api_key_env: trimOptionalHandRuntimeString(config.api_key_env),
     base_url: trimOptionalHandRuntimeString(config.base_url),
   };
@@ -1563,10 +1506,10 @@ function serializeHandAgentRuntimeConfigPatch(config: {
 export async function patchHandAgentRuntimeConfig(
   agentId: string,
   config: {
-    max_tokens?: number | null;
+    max_tokens?: number;
     model?: string;
     provider?: string;
-    temperature?: number | null;
+    temperature?: number;
     api_key_env?: string;
     base_url?: string;
     web_search_augmentation?: "off" | "auto" | "always";
@@ -1612,60 +1555,9 @@ export type AgentSchedulePatch =
 
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
  * system_prompt, mcp_servers, model, schedule). Distinct from `/agents/{id}/config`
- * which only accepts the model-tuning subset.
- *
- * `manifest_toml`, when present, takes a wholly different path server-side
- * (`lifecycle.rs: patch_agent` — the `PUT /agents/{id}/update` full-manifest
- * replacement folded into this endpoint by #3748): the entire body is parsed
- * as an `AgentManifest` and every other field on this request is ignored.
- * Powers the dashboard's full manifest editor (#7742), seeded from
- * `getAgentManifest` and serialized via `serializeManifestForm`. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean }): Promise<ApiActionResponse> {
+ * which only accepts the model-tuning subset. */
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
-}
-
-/** GET /api/agents/{id}/manifest — the agent's full manifest as raw TOML.
- *
- * Seeds the dashboard's full manifest editor (#7742): unlike the curated
- * `AgentDetail` shape returned by `getAgentDetail`, this carries every
- * `AgentManifest` field (resources, autonomous, thinking, response_format,
- * routing, context_injection, …), the same content `PATCH .../manifest_toml`
- * writes back. Reflects the live in-memory manifest, not necessarily the
- * on-disk `agent.toml` (they can differ for a moment after a partial PATCH
- * that hasn't flushed to disk yet). */
-export async function getAgentManifest(agentId: string): Promise<string> {
-  return getText(`/api/agents/${encodeURIComponent(agentId)}/manifest`);
-}
-
-/** Response shape for `GET /api/agents/{id}/channels`. */
-export interface AgentChannelsResponse {
-  /** Channel-type allowlist currently pinned on the agent. Empty means "all". */
-  assigned: string[];
-  /** Every channel type configured on this instance (`[[sidecar_channels]]`),
-   *  regardless of whether it's assigned to this agent — the picker's option list. */
-  available: string[];
-  /** 'all' when `assigned` is empty, 'allowlist' otherwise. */
-  mode: "all" | "allowlist";
-}
-
-/** GET /api/agents/{id}/channels — the agent's channel allowlist plus the
- *  catalog of channels configured on this instance (#7742). Empty
- *  `assigned` means the agent is reachable from every configured channel. */
-export async function getAgentChannels(agentId: string): Promise<AgentChannelsResponse> {
-  return get<AgentChannelsResponse>(`/api/agents/${encodeURIComponent(agentId)}/channels`);
-}
-
-/** PUT /api/agents/{id}/channels — replace the agent's channel allowlist
- *  (`agent.toml: channels`). An empty array clears the allowlist, making
- *  the agent reachable from every configured channel again (#7742). */
-export async function setAgentChannels(
-  agentId: string,
-  channels: string[],
-): Promise<{ status: string; channels: string[] }> {
-  return put<{ status: string; channels: string[] }>(
-    `/api/agents/${encodeURIComponent(agentId)}/channels`,
-    { channels },
-  );
 }
 
 export interface AgentToolsResponse {
@@ -1756,27 +1648,6 @@ export async function setAgentSkills(
   );
 }
 
-/**
- * PUT /api/agents/{id}/mcp_servers — replace the agent's MCP server grant
- * list (`agent.toml: mcp_servers`).
- *
- * Distinct from `updateAgentTools` (`PUT /agents/{id}/tools`), which only
- * carries `capabilities_tools` / `tool_allowlist` / `tool_blocklist` — MCP
- * tools are granted through this allowlist instead, not through
- * `capabilities_tools` (#6565). An empty array clears the grant (mode
- * "none"); `["*"]` grants every connected server (mode "all"); anything
- * else pins a specific set of server names (mode "allowlist").
- */
-export async function setAgentMcpServers(
-  agentId: string,
-  mcpServers: string[],
-): Promise<{ status: string; mcp_servers: string[] }> {
-  return put<{ status: string; mcp_servers: string[] }>(
-    `/api/agents/${encodeURIComponent(agentId)}/mcp_servers`,
-    { mcp_servers: mcpServers },
-  );
-}
-
 export async function listAgents(
   opts: { includeHands?: boolean } = {},
 ): Promise<AgentItem[]> {
@@ -1832,34 +1703,11 @@ export interface AgentTypeSpec {
   skills?: string[];
 }
 
-/**
- * One privacy risk the promotion preview found in a manifest (mirrors
- * `librefang_types::manifest_privacy::Finding`).
- *
- * `removed_by_sanitizer: true` means the published copy already drops the
- * value; `false` means it sits inside a field worth keeping and the operator
- * has to edit it by hand before publishing.
- */
-export interface PromotionFinding {
-  field: string;
-  category: string;
-  preview: string;
-  removed_by_sanitizer: boolean;
-}
-
-/** Read-only privacy pass over a manifest, ahead of promoting it to a shared registry (#7771). */
-export interface PromotionPreview {
-  requires_review: boolean;
-  findings: PromotionFinding[];
-  manifest_toml: string | null;
-}
-
 export interface AgentTypeDetail {
   name: string;
   source: AgentTypeSource;
   editable: boolean;
   spec: AgentTypeSpec;
-  promotion_preview?: PromotionPreview;
   manifest_toml: string;
 }
 
@@ -1870,10 +1718,6 @@ export async function listAgentTemplates(): Promise<AgentTemplate[]> {
 
 export async function getAgentTemplateToml(name: string): Promise<string> {
   return getText(`/api/templates/${encodeURIComponent(name)}/toml`);
-}
-
-export async function putAgentTemplateToml(name: string, toml: string): Promise<AgentTypeDetail> {
-  return putText<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}/toml`, toml);
 }
 
 export async function getAgentType(name: string): Promise<AgentTypeDetail> {
@@ -2085,13 +1929,6 @@ export interface ModelItem {
   // sentinel — never a limit. Refs #7774.
   context_window?: number;
   max_output_tokens?: number;
-  /**
-   * Whether the two capacities above were actually sourced.
-   * `false` marks them as discovery placeholders rather than measurements (#7780) — the daemon has
-   * to put *some* number in for compaction and budget math, but nothing may present it as measured.
-   * Absent on older daemons, where the field did not exist; treat that as `true`.
-   */
-  limits_known?: boolean;
   input_cost_per_m?: number;
   output_cost_per_m?: number;
   pricing_known?: boolean;
@@ -2119,54 +1956,6 @@ export interface ModelItem {
   // live config (codex/claude-code/gemini/qwen) rather than a catalog entry — it
   // is not a user-added custom model, so it must not show a delete control.
   source?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Model router (profile-based routing)
-// ---------------------------------------------------------------------------
-
-export type CostTier = "cheap" | "medium" | "expensive";
-
-export interface ModelProfile {
-  name: string;
-  tags: string[];
-  provider: string;
-  model: string;
-  context_window?: number;
-  cost_tier: CostTier;
-  priority: number;
-  max_complexity: number;
-  description?: string;
-}
-
-export interface ModelRouterProfiles {
-  enabled: boolean;
-  default_profile?: string | null;
-  profiles: ModelProfile[];
-}
-
-/// The resolved profile catalog: the builtin asset with
-/// `~/.librefang/model_profiles.toml` merged over it.
-export async function listModelRouterProfiles(): Promise<ModelRouterProfiles> {
-  return get<ModelRouterProfiles>("/api/model-router/profiles");
-}
-
-export interface AgentModelRouting {
-  mode: "fixed" | "flexible";
-  allowed_profiles: string[];
-  cost_budget?: CostTier | null;
-  default_profile?: string | null;
-}
-
-export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {
-  return get<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`);
-}
-
-export async function updateAgentModelRouting(
-  agentId: string,
-  routing: AgentModelRouting,
-): Promise<AgentModelRouting> {
-  return put<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`, routing);
 }
 
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
@@ -2938,7 +2727,6 @@ export interface WorkflowStepResult {
   duration_ms: number;
   /** Step-level failure message; present on the step that failed. */
   error?: string;
-  variables?: Record<string, string>;
 }
 
 /** Full detail for a single workflow run. */
@@ -2953,8 +2741,6 @@ export interface WorkflowRunDetail {
   started_at: string;
   completed_at?: string | null;
   step_results: WorkflowStepResult[];
-  total_steps?: number;
-  current_step_index?: number;
 }
 
 /** Per-step preview returned by dry-run. */
@@ -3337,7 +3123,6 @@ export interface TaskQueueItem {
   result?: string;
   claimed_at?: string;
   priority?: number;
-  timeout_secs?: number | null;
   [key: string]: unknown;
 }
 
@@ -3346,8 +3131,6 @@ export interface CreateTaskPayload {
   description: string;
   assigned_to?: string;
   created_by?: string;
-  priority?: number;
-  timeout_secs?: number;
 }
 
 export interface CreateTaskResult {
@@ -4461,9 +4244,6 @@ export async function createGoal(payload: {
   agent_id?: string;
   status?: string;
   progress?: number;
-  loop_engineering?: boolean;
-  verify_agent_id?: string;
-  evaluator_model?: string;
 }): Promise<GoalItem> {
   return post<GoalItem>("/api/goals", payload);
 }
@@ -4477,9 +4257,6 @@ export async function updateGoal(
     progress?: number;
     parent_id?: string | null;
     agent_id?: string | null;
-    loop_engineering?: boolean;
-    verify_agent_id?: string | null;
-    evaluator_model?: string | null;
   }
 ): Promise<GoalItem> {
   // Issue #3832: handler now returns the mutated GoalItem instead of an ack
@@ -4496,14 +4273,11 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 export interface GoalRunState {
   goal_id: string;
   agent_id: string;
-  phase: "running" | "paused" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
+  phase: "running" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
   iteration: number;
   max_iterations: number;
   last_progress: number;
   last_error?: string;
-  verify_agent_id?: string;
-  verify_max_retries?: number;
-  evaluator_model?: string;
   started_at: string;
   updated_at: string;
 }
@@ -4511,7 +4285,7 @@ export interface GoalRunState {
 /** Begin an autonomous run that drives the goal's assigned agent. */
 export async function startGoalRun(
   goalId: string,
-  payload?: { max_iterations?: number; verify_max_retries?: number }
+  payload?: { max_iterations?: number }
 ): Promise<{ ok: boolean; run: GoalRunState | null }> {
   return post<{ ok: boolean; run: GoalRunState | null }>(
     `/api/goals/${encodeURIComponent(goalId)}/start`,
@@ -4527,16 +4301,6 @@ export async function stopGoalRun(
     `/api/goals/${encodeURIComponent(goalId)}/stop`,
     {}
   );
-}
-
-/** Pause a running autonomous goal run so it can be resumed later. */
-export async function pauseGoalRun(goalId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/goals/${encodeURIComponent(goalId)}/pause`, {});
-}
-
-/** Resume a paused autonomous goal run from its checkpoint. */
-export async function resumeGoalRun(goalId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/goals/${encodeURIComponent(goalId)}/resume`, {});
 }
 
 /** Observe the autonomous run state for a goal. */
