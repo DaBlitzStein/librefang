@@ -383,33 +383,6 @@ impl App {
                     .collect();
                 self.agents.mcp_cursor = 0;
             }
-            AppEvent::AgentModelRoutingLoaded {
-                mode,
-                allowed_profiles,
-                cost_budget,
-                available,
-            } => {
-                // Populate the routing editor from the agent's real stored
-                // state, not from whatever the previous screen left behind.
-                self.agents.model_mode = mode;
-                self.agents.router_profiles = available
-                    .into_iter()
-                    .map(|name| {
-                        let checked = allowed_profiles.contains(&name);
-                        (name, checked)
-                    })
-                    .collect();
-                self.agents.router_profile_cursor = 0;
-                self.agents.cost_budget_idx = agents::COST_BUDGET_OPTIONS
-                    .iter()
-                    .position(|(_, wire)| *wire == cost_budget.as_deref())
-                    .unwrap_or(0);
-            }
-            AppEvent::AgentModelRoutingUpdated(id) => {
-                self.agents.status_msg =
-                    crate::i18n::t_args("tui-mod-agent-model-routing-updated", &[("id", &id)]);
-                self.agents.sub = agents::AgentSubScreen::AgentDetail;
-            }
             AppEvent::AgentSkillsUpdated(id) => {
                 self.agents.status_msg =
                     crate::i18n::t_args("tui-mod-agent-skills-updated", &[("id", &id)]);
@@ -464,9 +437,6 @@ impl App {
                     };
                 }
             }
-            AppEvent::AgentTokenUsageLoaded(usage) => {
-                self.agents.token_usage = Some(usage);
-            }
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
                 match self.active_tab {
@@ -500,16 +470,12 @@ impl App {
                 self.memory.config = Some(config);
                 self.memory.loading = false;
             }
-            AppEvent::AgentWorkspacesLoaded(id, entries) => {
-                if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id) {
-                    self.agents.workspaces = entries;
-                    if !self.agents.workspaces.is_empty() {
-                        self.agents.ws_cursor = 0;
-                    }
-                }
-            }
-            AppEvent::AgentWorkspacesUpdated(_id) => {
-                // The detail view reloads on the next agent refresh.
+            AppEvent::MemoryConfigSaved(ok) => {
+                self.memory.status_msg = if ok {
+                    crate::i18n::t("tui-memory-config-on")
+                } else {
+                    crate::i18n::t("tui-memory-config-save-failed")
+                };
             }
             AppEvent::MemoryAgentsLoaded(agents) => {
                 self.memory.agents = agents;
@@ -1628,21 +1594,6 @@ impl App {
 
     fn handle_agent_action(&mut self, action: agents::AgentAction) {
         match action {
-            agents::AgentAction::FetchAgentWorkspaces(id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_fetch_agent_workspaces(backend, id, self.event_tx.clone());
-                }
-            }
-            agents::AgentAction::UpdateWorkspaces { id, workspaces } => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_update_agent_workspaces(
-                        backend,
-                        id,
-                        workspaces,
-                        self.event_tx.clone(),
-                    );
-                }
-            }
             agents::AgentAction::Continue => {}
             agents::AgentAction::Back => {
                 // In Main phase, Esc from agents just stays on the tab
@@ -1718,39 +1669,12 @@ impl App {
                     event::spawn_fetch_agent_channels(backend, id, self.event_tx.clone());
                 }
             }
-            agents::AgentAction::FetchAgentTokenUsage(id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_fetch_agent_token_usage(backend, id, self.event_tx.clone());
-                }
-            }
             agents::AgentAction::UpdateChannels { id, channels } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_update_agent_channels(
                         backend,
                         id,
                         channels,
-                        self.event_tx.clone(),
-                    );
-                }
-            }
-            agents::AgentAction::FetchAgentModelRouting(id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_fetch_agent_model_routing(backend, id, self.event_tx.clone());
-                }
-            }
-            agents::AgentAction::UpdateModelRouting {
-                id,
-                mode,
-                allowed_profiles,
-                cost_budget,
-            } => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_update_agent_model_routing(
-                        backend,
-                        id,
-                        mode,
-                        allowed_profiles,
-                        cost_budget,
                         self.event_tx.clone(),
                     );
                 }
@@ -1898,6 +1822,21 @@ impl App {
             memory::MemoryUIAction::DeleteKv { agent_id, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_delete_memory_kv(backend, agent_id, key, self.event_tx.clone());
+                }
+            }
+            memory::MemoryUIAction::SaveConfig {
+                auto_memorize,
+                auto_retrieve,
+                extraction_model,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_memory_config(
+                        backend,
+                        auto_memorize,
+                        auto_retrieve,
+                        extraction_model,
+                        self.event_tx.clone(),
+                    );
                 }
             }
         }
