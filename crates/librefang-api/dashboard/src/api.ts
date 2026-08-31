@@ -213,11 +213,6 @@ export interface ChannelItem {
    *  **Sticky**: never cleared, not even by the successful respawn that follows.
    *  A connected channel carrying one is degraded, not dead. */
   last_error?: string | null;
-  /** Per-instance default agent (`[[sidecar_channels]].agent`) — inbound
-   *  messages on this instance with no more specific binding route here.
-   *  `null` / absent when this instance has no default agent configured.
-   *  Only present on configured rows; a discovery (catalog) row never has one. */
-  agent?: string | null;
 }
 
 export interface SkillItem {
@@ -1740,20 +1735,33 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
-/** Result of promoting an agent type to the public registry as a PR. */
-export interface PromoteAgentTypeResult {
-  pr_url: string;
-  repo: string;
-  branch: string;
+// ---------------------------------------------------------------------------
+// Template version history
+// ---------------------------------------------------------------------------
+
+export interface TemplateVersionEntry {
+  id: number;
+  template_name: string;
+  timestamp: string;
+  manifest_toml: string;
+  change_source: string;
 }
 
-/**
- * Promote an agent type to the configured registry repo as a GitHub PR.
- * Sanitizes the manifest for publication, pushes it to `agent-types/<name>/agent.toml`,
- * and opens a pull request. Requires `GITHUB_TOKEN` on the daemon side.
- */
-export async function promoteAgentType(name: string): Promise<PromoteAgentTypeResult> {
-  return post<PromoteAgentTypeResult>(`/api/templates/${encodeURIComponent(name)}/promote`, {});
+export async function getTemplateHistory(
+  name: string,
+  limit = 30,
+): Promise<{ versions: TemplateVersionEntry[] }> {
+  return get(`/api/templates/${encodeURIComponent(name)}/history?limit=${limit}`);
+}
+
+export async function restoreTemplateVersion(
+  name: string,
+  versionId: number,
+): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>(
+    `/api/templates/${encodeURIComponent(name)}/history/${versionId}/restore`,
+    {},
+  );
 }
 
 /**
@@ -2176,26 +2184,13 @@ export interface SidecarSaveResult {
 // else + the `[[sidecar_channels]]` boilerplate) on the server. Triggers
 // hot-reload of the channels registry; whether the sidecar child needs an
 // out-of-band restart is reported via `restart_required`.
-//
-// `channelType` is always the `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …)
-// — it picks the adapter's schema/command/args and never changes across a
-// rename. `instanceName` is the `[[sidecar_channels]].name` actually
-// written; omit it (or pass the same value as `channelType`) to save the
-// type's default single instance, exactly as before multi-instance support.
-// Pass a distinct `instanceName` to configure a second (third, …) instance
-// of the same catalog type — e.g. two Telegram bots.
 export async function saveSidecarConfig(
-  channelType: string,
+  name: string,
   values: Record<string, string>,
-  options: { instanceName?: string; agent?: string | null } = {},
 ): Promise<SidecarSaveResult> {
   return post<SidecarSaveResult>(
-    `/api/channels/sidecar/${encodeURIComponent(channelType)}/configure`,
-    {
-      values,
-      instance_name: options.instanceName,
-      agent: options.agent,
-    },
+    `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
+    { values },
   );
 }
 

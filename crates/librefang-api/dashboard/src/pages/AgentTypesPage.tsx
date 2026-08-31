@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
-import { Edit2, ExternalLink, LayoutTemplate, Lock, Play, Plus, Share2, Trash2 } from "lucide-react";
+import { Edit2, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, Trash2 } from "lucide-react";
 import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
-import { useAgentType, useAgentTypes } from "../lib/queries/agentTypes";
+import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
   useCreateAgentType,
   useDeleteAgentType,
-  usePromoteAgentType,
+  useRestoreTemplateVersion,
   useSpawnEphemeral,
   useUpdateAgentType,
 } from "../lib/mutations/agentTypes";
@@ -416,18 +416,106 @@ function QuickRunModal({
   );
 }
 
+function TemplateHistoryModal({
+  name,
+  onClose,
+}: {
+  name: string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const history = useAgentTypeHistory(name, { enabled: true });
+  const restore = useRestoreTemplateVersion();
+  const [expanded, setExpanded] = useState<number | null>(null);
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      variant="panel-right"
+      size="lg"
+      title={t("agentTypes.history_title", { name, defaultValue: `History: ${name}` })}
+    >
+      {history.isLoading ? (
+        <ListSkeleton rows={4} />
+      ) : history.isError ? (
+        <ErrorState message={history.error?.message} onRetry={() => void history.refetch()} />
+      ) : (history.data?.versions ?? []).length === 0 ? (
+        <EmptyState
+          icon={<History className="h-5 w-5" />}
+          title={t("agentTypes.history_empty", { defaultValue: "No version history yet" })}
+          description={t("agentTypes.history_empty_desc", {
+            defaultValue: "Version snapshots are recorded when a template is created or edited.",
+          })}
+        />
+      ) : (
+        <div className="space-y-2">
+          {(history.data?.versions ?? []).map((v) => (
+            <div
+              key={v.id}
+              className="rounded-lg border border-border-subtle bg-surface-dim px-3 py-2"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="text-[12px] font-medium text-text-main">
+                    {new Date(v.timestamp + "Z").toLocaleString()}
+                  </span>
+                  <Badge variant="default" className="ml-2">{v.change_source}</Badge>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setExpanded(expanded === v.id ? null : v.id)}
+                    className="rounded-lg px-2 py-1 text-[11px] text-text-dim hover:bg-main/50 hover:text-text-main"
+                  >
+                    {expanded === v.id ? t("common.collapse", { defaultValue: "Collapse" }) : t("common.expand", { defaultValue: "Expand" })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await restore.mutateAsync({ name, versionId: v.id });
+                        addToast(t("agentTypes.restored", { defaultValue: "Version restored" }), "success");
+                        onClose();
+                      } catch (err) {
+                        addToast(toastErr(err, t("agentTypes.restore_failed", { defaultValue: "Restore failed" })), "error");
+                      }
+                    }}
+                    disabled={restore.isPending}
+                    className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-text-dim hover:bg-brand/10 hover:text-brand"
+                    title={t("agentTypes.restore", { defaultValue: "Restore this version" })}
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    {t("agentTypes.restore_btn", { defaultValue: "Restore" })}
+                  </button>
+                </div>
+              </div>
+              {expanded === v.id && (
+                <pre className="mt-2 max-h-64 overflow-auto rounded border border-border-subtle bg-surface p-2 text-[11px] text-text-dim">
+                  {v.manifest_toml}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function AgentTypeRow({
   type,
   onQuickRun,
   onEdit,
   onDelete,
-  onPromote,
+  onHistory,
 }: {
   type: AgentTemplate;
   onQuickRun: () => void;
   onEdit: () => void;
   onDelete: () => void;
-  onPromote: () => void;
+  onHistory: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -467,12 +555,12 @@ function AgentTypeRow({
           <>
             <button
               type="button"
-              onClick={onPromote}
-              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
-              aria-label={t("agentTypes.promote")}
-              title={t("agentTypes.promote")}
+              onClick={onHistory}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-text-main"
+              aria-label={t("agentTypes.history", { defaultValue: "History" })}
+              title={t("agentTypes.history", { defaultValue: "History" })}
             >
-              <Share2 className="h-3.5 w-3.5" />
+              <History className="h-3.5 w-3.5" />
             </button>
             <button
               type="button"
@@ -513,13 +601,11 @@ export function AgentTypesPage() {
   const addToast = useUIStore((s) => s.addToast);
   const types = useAgentTypes();
   const deleteMutation = useDeleteAgentType();
-  const promoteMutation = usePromoteAgentType();
 
   const [editing, setEditing] = useState<{ name: string | null } | null>(null);
   const [quickRun, setQuickRun] = useState<AgentTemplate | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  const [pendingPromote, setPendingPromote] = useState<string | null>(null);
-  const [promotedPrUrl, setPromotedPrUrl] = useState<string | null>(null);
+  const [historyName, setHistoryName] = useState<string | null>(null);
 
   async function confirmDelete() {
     if (!pendingDelete) return;
@@ -530,19 +616,6 @@ export function AgentTypesPage() {
       addToast(toastErr(err, t("agentTypes.delete_failed")), "error");
     } finally {
       setPendingDelete(null);
-    }
-  }
-
-  async function confirmPromote() {
-    if (!pendingPromote) return;
-    try {
-      const result = await promoteMutation.mutateAsync(pendingPromote);
-      setPromotedPrUrl(result.pr_url);
-      addToast(t("agentTypes.promoted"), "success");
-    } catch (err) {
-      addToast(toastErr(err, t("agentTypes.promote_failed")), "error");
-    } finally {
-      setPendingPromote(null);
     }
   }
 
@@ -584,7 +657,7 @@ export function AgentTypesPage() {
               onQuickRun={() => setQuickRun(type)}
               onEdit={() => setEditing({ name: type.name })}
               onDelete={() => setPendingDelete(type.name)}
-              onPromote={() => setPendingPromote(type.name)}
+              onHistory={() => setHistoryName(type.name)}
             />
           ))}
         </div>
@@ -596,6 +669,10 @@ export function AgentTypesPage() {
 
       {quickRun && <QuickRunModal type={quickRun} onClose={() => setQuickRun(null)} />}
 
+      {historyName && (
+        <TemplateHistoryModal name={historyName} onClose={() => setHistoryName(null)} />
+      )}
+
       <ConfirmDialog
         isOpen={pendingDelete !== null}
         onClose={() => setPendingDelete(null)}
@@ -604,40 +681,6 @@ export function AgentTypesPage() {
         message={t("agentTypes.confirm_delete", { name: pendingDelete ?? "" })}
         tone="destructive"
       />
-
-      <ConfirmDialog
-        isOpen={pendingPromote !== null}
-        onClose={() => setPendingPromote(null)}
-        onConfirm={() => void confirmPromote()}
-        title={t("agentTypes.promote")}
-        message={t("agentTypes.confirm_promote", { name: pendingPromote ?? "" })}
-      />
-
-      {/* Success dialog after promotion — shows the PR link */}
-      <Modal
-        isOpen={promotedPrUrl !== null}
-        onClose={() => setPromotedPrUrl(null)}
-        title={t("agentTypes.promoted")}
-        size="sm"
-      >
-        <div className="space-y-3">
-          <p className="text-[13px] text-text-main">{t("agentTypes.promote_success")}</p>
-          <a
-            href={promotedPrUrl ?? "#"}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-brand/30 bg-brand/10 px-3 py-1.5 text-[13px] font-medium text-brand hover:bg-brand/20"
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-            {t("agentTypes.view_pr")}
-          </a>
-          <div className="flex justify-end pt-1">
-            <Button variant="ghost" onClick={() => setPromotedPrUrl(null)}>
-              {t("common.close")}
-            </Button>
-          </div>
-        </div>
-      </Modal>
     </div>
   );
 }

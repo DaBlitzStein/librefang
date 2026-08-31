@@ -5024,12 +5024,24 @@ impl SystemResource {
         .await
     }
 
-    pub async fn promote_agent_type(&self, name: &str) -> Result<Value> {
+    pub async fn list_template_history(&self, name: &str, limit: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "templates", name, "history"],
+            None,
+            &[("limit", limit)],
+        )
+        .await
+    }
+
+    pub async fn restore_template_version(&self, name: &str, version_id: &str) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &["api", "templates", name, "promote"],
+            &["api", "templates", name, "history", version_id, "restore"],
             None,
             &[],
         )

@@ -1,9 +1,5 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import {
-  listAgentTemplates,
-  getAgentType,
-  getAgentTypeRegistryDiff,
-} from "../http/client";
+import { listAgentTemplates, getAgentType, getTemplateHistory } from "../http/client";
 import { agentTypeKeys } from "./keys";
 import { withOverrides, QueryOverrides } from "./options";
 
@@ -25,10 +21,11 @@ export const agentTypeQueries = {
       queryFn: () => getAgentType(name),
       staleTime: STALE_MS,
     }),
-  registryDiff: (name: string) =>
+  history: (name: string) =>
     queryOptions({
-      queryKey: [...agentTypeKeys.detail(name), "registry-diff"] as const,
-      queryFn: () => getAgentTypeRegistryDiff(name),
+      queryKey: agentTypeKeys.history(name),
+      queryFn: () => getTemplateHistory(name),
+      enabled: !!name,
       staleTime: STALE_MS,
     }),
 };
@@ -41,9 +38,6 @@ export function useAgentType(name: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentTypeQueries.detail(name), options));
 }
 
-export function useAgentTypeRegistryDiff(
-  name: string,
-  options: QueryOverrides = {},
-) {
-  return useQuery(withOverrides(agentTypeQueries.registryDiff(name), options));
+export function useAgentTypeHistory(name: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentTypeQueries.history(name), options));
 }
