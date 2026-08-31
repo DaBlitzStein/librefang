@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
-import { Edit2, LayoutTemplate, Lock, Play, Plus, Trash2 } from "lucide-react";
+import { Edit2, LayoutTemplate, Lock, Play, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
 import { useAgentType, useAgentTypes } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
@@ -23,6 +23,7 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
+import { copyToClipboard } from "../lib/clipboard";
 
 /**
  * The subset of an agent type this editor writes.
@@ -415,16 +416,109 @@ function QuickRunModal({
   );
 }
 
+/**
+ * Read-only privacy pass over an agent type, ahead of contributing it to a
+ * shared registry (#7771). The backend already sanitizes and scans the
+ * manifest; this just shows the operator what would ship.
+ */
+function PromotionPreviewModal({ name, onClose }: { name: string; onClose: () => void }) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const detail = useAgentType(name);
+  const preview = detail.data?.promotion_preview;
+
+  async function copyToml() {
+    if (!preview?.manifest_toml) return;
+    if (await copyToClipboard(preview.manifest_toml)) {
+      addToast(t("agentTypes.promote_copied"), "success");
+    } else {
+      addToast(t("agentTypes.promote_copy_failed"), "error");
+    }
+  }
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      variant="panel-right"
+      size="lg"
+      title={t("agentTypes.promote_title", { name })}
+    >
+      {detail.isLoading ? (
+        <ListSkeleton rows={4} />
+      ) : detail.isError ? (
+        <ErrorState message={detail.error?.message} onRetry={() => void detail.refetch()} />
+      ) : !preview ? (
+        <p className="text-[12px] text-text-dim">{t("agentTypes.promote_unavailable")}</p>
+      ) : (
+        <div className="space-y-4">
+          {preview.requires_review && (
+            <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[12px] text-warning">
+              {t("agentTypes.promote_review_warning")}
+            </p>
+          )}
+
+          {preview.findings.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-text-dim">
+                {t("agentTypes.promote_findings")}
+              </p>
+              {preview.findings.map((finding, i) => (
+                <div
+                  key={`${finding.field}:${i}`}
+                  className="flex items-start justify-between gap-2 rounded-lg border border-border-subtle bg-main/30 px-2.5 py-1.5"
+                >
+                  <div className="min-w-0">
+                    <span className="font-mono text-[12px] text-text-main">{finding.field}</span>
+                    <p className="truncate text-[11px] text-text-dim">{finding.preview}</p>
+                  </div>
+                  <Badge variant={finding.removed_by_sanitizer ? "default" : "warning"}>
+                    {finding.removed_by_sanitizer
+                      ? t("agentTypes.promote_stripped")
+                      : t("agentTypes.promote_review")}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-text-dim">
+                {t("agentTypes.promote_toml")}
+              </p>
+              <Button variant="ghost" size="sm" onClick={() => void copyToml()} disabled={!preview.manifest_toml}>
+                {t("agentTypes.promote_copy")}
+              </Button>
+            </div>
+            <pre className="max-h-96 overflow-auto rounded-lg border border-border-subtle bg-main/40 p-3 text-[11px] text-text-main whitespace-pre-wrap">
+              {preview.manifest_toml ?? t("agentTypes.promote_toml_unavailable")}
+            </pre>
+          </div>
+
+          <div className="flex justify-end pt-1">
+            <Button variant="ghost" onClick={onClose}>
+              {t("common.close")}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function AgentTypeRow({
   type,
   onQuickRun,
   onEdit,
   onDelete,
+  onPromote,
 }: {
   type: AgentTemplate;
   onQuickRun: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onPromote: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -455,6 +549,16 @@ function AgentTypeRow({
           title={t("agentTypes.quick_run")}
         >
           <Play className="h-3.5 w-3.5" />
+        </button>
+
+        <button
+          type="button"
+          onClick={onPromote}
+          className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
+          aria-label={t("agentTypes.promote")}
+          title={t("agentTypes.promote")}
+        >
+          <ShieldCheck className="h-3.5 w-3.5" />
         </button>
 
         {/* A workspace-sourced row is a live agent's own manifest. The write verbs
@@ -505,6 +609,7 @@ export function AgentTypesPage() {
   const [editing, setEditing] = useState<{ name: string | null } | null>(null);
   const [quickRun, setQuickRun] = useState<AgentTemplate | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [promoting, setPromoting] = useState<string | null>(null);
 
   async function confirmDelete() {
     if (!pendingDelete) return;
@@ -556,6 +661,7 @@ export function AgentTypesPage() {
               onQuickRun={() => setQuickRun(type)}
               onEdit={() => setEditing({ name: type.name })}
               onDelete={() => setPendingDelete(type.name)}
+              onPromote={() => setPromoting(type.name)}
             />
           ))}
         </div>
@@ -566,6 +672,10 @@ export function AgentTypesPage() {
       )}
 
       {quickRun && <QuickRunModal type={quickRun} onClose={() => setQuickRun(null)} />}
+
+      {promoting && (
+        <PromotionPreviewModal name={promoting} onClose={() => setPromoting(null)} />
+      )}
 
       <ConfirmDialog
         isOpen={pendingDelete !== null}
