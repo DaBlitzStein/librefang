@@ -106,6 +106,8 @@ pub enum AppEvent {
     WorkflowRunResult(String),
     /// Workflow created successfully.
     WorkflowCreated(String),
+    /// Workflow declared parameters loaded for the run-input form.
+    WorkflowParamsLoaded(Vec<crate::tui::screens::workflows::WorkflowParamField>),
     /// Trigger list loaded.
     TriggerListLoaded(Vec<TriggerInfo>),
     /// Trigger created.
@@ -933,6 +935,59 @@ pub fn spawn_fetch_workflow_runs(
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::WorkflowRunsLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Fetch a workflow's declared `input_schema` parameters for the run-input form.
+pub fn spawn_fetch_workflow_params(
+    backend: BackendRef,
+    workflow_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let params = client
+                .get(format!("{base_url}/api/workflows/{workflow_id}"))
+                .send()
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok())
+                .and_then(|body| body.get("input_schema").cloned())
+                .and_then(|v| v.as_array().cloned())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| {
+                            let name = p.get("name")?.as_str()?.to_string();
+                            Some(crate::tui::screens::workflows::WorkflowParamField {
+                                name,
+                                param_type: p
+                                    .get("param_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("string")
+                                    .to_string(),
+                                required: p
+                                    .get("required")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true),
+                                description: p
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                value: p
+                                    .get("default")
+                                    .map(|d| match d.as_str() {
+                                        Some(s) => s.to_string(),
+                                        None => d.to_string(),
+                                    })
+                                    .unwrap_or_default(),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let _ = tx.send(AppEvent::WorkflowParamsLoaded(params));
         }
     });
 }
