@@ -1834,6 +1834,26 @@ export async function restoreTemplateVersion(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Template promotion
+// ---------------------------------------------------------------------------
+
+/** Result of promoting an agent type to the public registry as a PR. */
+export interface PromoteAgentTypeResult {
+  pr_url: string;
+  repo: string;
+  branch: string;
+}
+
+/**
+ * Promote an agent type to the configured registry repo as a GitHub PR.
+ * Sanitizes the manifest for publication, pushes it to `agent-types/<name>/agent.toml`,
+ * and opens a pull request. Requires `GITHUB_TOKEN` on the daemon side.
+ */
+export async function promoteAgentType(name: string): Promise<PromoteAgentTypeResult> {
+  return post<PromoteAgentTypeResult>(`/api/templates/${encodeURIComponent(name)}/promote`, {});
+}
+
 /**
  * One ephemeral worker run (#6699).
  *

@@ -4,6 +4,7 @@ import {
   updateAgentType,
   deleteAgentType,
   restoreTemplateVersion,
+  promoteAgentType,
   spawnEphemeral,
 } from "../http/client";
 import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
@@ -74,6 +75,19 @@ export function useRestoreTemplateVersion() {
       qc.invalidateQueries({ queryKey: agentTypeKeys.history(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
     },
+  });
+}
+
+/**
+ * Promote an agent type to the public registry as a GitHub PR.
+ *
+ * Read-only with respect to local state — it forks the registry repo,
+ * pushes the sanitized manifest, and opens a PR. No local invalidation
+ * needed since the agent type itself is unchanged.
+ */
+export function usePromoteAgentType() {
+  return useMutation({
+    mutationFn: (name: string) => promoteAgentType(name),
   });
 }
 

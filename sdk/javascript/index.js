@@ -42,7 +42,6 @@ class LibreFang {
     this.hands = new HandsResource(this);
     this.inbox = new InboxResource(this);
     this.mcp = new McpResource(this);
-    this.media = new MediaResource(this);
     this.memory = new MemoryResource(this);
     this.models = new ModelsResource(this);
     this.network = new NetworkResource(this);
@@ -898,40 +897,6 @@ class McpResource {
   }
 }
 
-// ── Media Resource
-
-class MediaResource {
-  constructor(client) { this._c = client; }
-
-  async generateImage(data) {
-    return this._c._request("POST", "/api/media/image", data, undefined);
-  }
-
-  async generateMusic(data) {
-    return this._c._request("POST", "/api/media/music", data, undefined);
-  }
-
-  async listMediaProviders() {
-    return this._c._request("GET", "/api/media/providers");
-  }
-
-  async synthesizeSpeech(data) {
-    return this._c._request("POST", "/api/media/speech", data, undefined);
-  }
-
-  async transcribeAudio(data) {
-    return this._c._request("POST", "/api/media/transcribe", data, undefined);
-  }
-
-  async submitVideo(data) {
-    return this._c._request("POST", "/api/media/video", data, undefined);
-  }
-
-  async pollVideoTask(task_id, query) {
-    return this._c._request("GET", `/api/media/video/${task_id}`, undefined, query);
-  }
-}
-
 // ── Memory Resource
 
 class MemoryResource {
@@ -1677,12 +1642,8 @@ class SystemResource {
     return this._c._request("DELETE", `/api/templates/${name}`);
   }
 
-  async listTemplateHistory(name, query) {
-    return this._c._request("GET", `/api/templates/${name}/history`, undefined, query);
-  }
-
-  async restoreTemplateVersion(name, version_id) {
-    return this._c._request("POST", `/api/templates/${name}/history/${version_id}/restore`);
+  async promoteAgentType(name) {
+    return this._c._request("POST", `/api/templates/${name}/promote`);
   }
 
   async getAgentTemplateToml(name) {
