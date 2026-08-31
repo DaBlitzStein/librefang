@@ -243,6 +243,7 @@ async fn test_tool_failure_allows_retry_on_next_iteration() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -308,6 +309,7 @@ async fn test_repeated_tool_failures_cap_exits_loop() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -372,6 +374,7 @@ async fn test_streaming_tool_failure_allows_retry() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -439,6 +442,7 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -520,6 +524,7 @@ fn fresh_session() -> librefang_memory::session::Session {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1774,6 +1779,7 @@ async fn test_normal_turn_persists_session_as_incognito_control() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1849,6 +1855,7 @@ async fn test_heartbeat_pruning_keeps_new_messages_start_on_current_turn() {
         messages,
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
@@ -1925,6 +1932,7 @@ async fn test_incognito_skips_session_save_on_end_turn() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -2007,6 +2015,7 @@ async fn test_incognito_skips_proactive_memory_auto_memorize() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -2090,6 +2099,7 @@ async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,

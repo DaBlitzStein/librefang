@@ -372,6 +372,7 @@ fn fresh_session() -> librefang_memory::session::Session {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
@@ -484,6 +485,7 @@ async fn test_empty_response_after_tool_use_returns_fallback() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -550,6 +552,7 @@ async fn test_empty_response_max_tokens_returns_fallback() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -616,6 +619,7 @@ async fn test_normal_response_not_replaced_by_fallback() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -673,6 +677,7 @@ async fn test_success_response_preserves_reply_directives() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -735,6 +740,7 @@ async fn test_max_tokens_partial_response_preserves_reply_directives() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1049,6 +1055,7 @@ async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles(
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1181,6 +1188,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1361,6 +1369,7 @@ async fn test_streaming_max_continuations_return_preserves_reply_directives() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1569,6 +1578,7 @@ fn cascade_leak_fixture() -> (
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1685,6 +1695,7 @@ async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
@@ -1778,6 +1789,7 @@ async fn test_streaming_max_continuations_with_directives_preserves_reply_direct
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1844,6 +1856,7 @@ async fn test_streaming_empty_response_after_tool_use_returns_fallback() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1986,6 +1999,7 @@ async fn test_empty_first_response_retries_and_recovers() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -2046,6 +2060,7 @@ async fn test_empty_first_response_fallback_when_retry_also_empty() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -2112,6 +2127,7 @@ async fn test_streaming_empty_response_max_tokens_returns_fallback() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -2537,6 +2553,7 @@ fn run_agent_loop_future_size_stays_within_its_order_of_magnitude() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,

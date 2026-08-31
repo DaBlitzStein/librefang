@@ -276,9 +276,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
     run_step!(54, migrate_v54);
 
-    // v55: template (agent-type) version history so operators can see
-    // how an agent type's manifest changed over time and restore a
-    // prior configuration from the dashboard.
+    // v55: template + manifest version history + sessions.parent_session_id.
     run_step!(55, migrate_v55);
 
     // v56: per-task claim TTL override on task_queue.
@@ -287,9 +285,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // v57: persist agent lineage (parent_id).
     run_step!(57, migrate_v57);
 
-    // v58: template_versions table (re-slotted from v55 collision
-    // with an earlier binary; the DDL is identical to v55 and
-    // idempotent via IF NOT EXISTS).
+    // v58: template_versions table (re-slotted from v55 collision).
     run_step!(58, migrate_v58);
 
     // Audit-trail consistency (#3538): user_version must match the count
@@ -1267,9 +1263,19 @@ fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
             [],
         )?;
     }
+    if !try_column_exists(conn, "sessions", "parent_session_id")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL",
+        [],
+    )?;
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (56, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
+         VALUES (56, datetime('now'), 'Per-task claim TTL override + sessions.parent_session_id')",
         [],
     )?;
     Ok(())

@@ -691,6 +691,7 @@ async fn test_text_tool_call_recovery_e2e() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -777,6 +778,7 @@ async fn test_normal_flow_unaffected_by_recovery() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -845,6 +847,7 @@ async fn test_text_tool_call_recovery_streaming_e2e() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
