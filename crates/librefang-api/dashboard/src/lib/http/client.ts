@@ -145,7 +145,6 @@ export {
   getAgentMcpServers,
   getAgentManifestHistory,
   getAgentTemplateToml,
-  getAgentManifestHistory,
   listTemplateHistory,
   listModelRouterProfiles,
   getAgentModelRouting,

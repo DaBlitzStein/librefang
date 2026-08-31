@@ -1096,12 +1096,9 @@ export interface GoalItem {
   /** Agent that judges the worker's output; only used with loop_engineering. */
   verify_agent_id?: string;
   /** Model that judges goal completion; only used with loop_engineering. */
-  evaluator_model?: string;
+  evaluator_model?: string | null;
   created_at?: string;
   updated_at?: string;
-  loop_engineering?: boolean;
-  verify_agent_id?: string | null;
-  evaluator_model?: string | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -5851,20 +5848,7 @@ export async function updateAgentModelRouting(
 }
 
 // ── Agent manifest history (#8053) ───────────────────────────────────
-export interface ManifestHistoryEntry {
-  version: number;
-  changed_at: string;
-  diff_summary?: string;
-}
-
-export async function getAgentManifestHistory(
-  agentId: string,
-): Promise<ManifestHistoryEntry[]> {
-  const data = await get<{ versions?: ManifestHistoryEntry[] }>(
-    `/api/agents/${encodeURIComponent(agentId)}/manifest-history`,
-  );
-  return data.versions ?? [];
-}
+export type ManifestHistoryEntry = ManifestVersionEntry;
 
 // ── Template version history (#8052) ─────────────────────────────────
 export interface TemplateVersion {
