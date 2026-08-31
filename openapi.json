@@ -12566,14 +12566,13 @@
         }
       }
     },
-    "/api/templates/{name}/promote": {
-      "post": {
+    "/api/templates/{name}/registry-diff": {
+      "get": {
         "tags": [
           "system"
         ],
-        "summary": "POST /api/templates/:name/promote — open a PR contributing this agent\ntype to the configured public registry.",
-        "description": "Sanitizes the manifest for publication (stripping private fields),\nrenders it as TOML, then forks the registry repo, pushes the file to\n`agent-types/<name>/agent.toml`, and opens a pull request.\nRequires `GITHUB_TOKEN` (env or vault).",
-        "operationId": "promote_agent_type",
+        "summary": "GET /api/templates/:name/registry-diff — Compare local agent type with its registry original.",
+        "operationId": "get_agent_type_registry_diff",
         "parameters": [
           {
             "name": "name",
@@ -12587,26 +12586,41 @@
         ],
         "responses": {
           "200": {
-            "description": "PR opened against the registry",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid manifest or name"
-          },
-          "401": {
-            "description": "No GitHub token configured"
+            "description": "Diff between local and registry versions"
           },
           "404": {
-            "description": "Agent type not found"
+            "description": "Agent type or registry version not found"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/restore": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/:name/restore — Overwrite local agent type with the registry version.",
+        "operationId": "restore_agent_type_from_registry",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type restored from registry"
           },
-          "502": {
-            "description": "GitHub request failed"
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
           }
         }
       }

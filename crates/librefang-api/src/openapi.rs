@@ -53,6 +53,8 @@ use crate::types;
         routes::list_template_history,
         routes::restore_template_version,
         routes::promote_agent_type,
+        routes::get_registry_diff,
+        routes::restore_from_registry,
         routes::list_commands,
         routes::get_command,
         routes::queue_status,

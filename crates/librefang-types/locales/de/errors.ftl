@@ -22,6 +22,7 @@ api-error-template-read-failed = Vorlage konnte nicht gelesen werden
 api-error-agent-type-exists = Ein Agententyp namens '{ $name }' existiert bereits
 api-error-agent-type-name-taken = '{ $name }' ist der Name eines laufenden Agenten; waehlen Sie einen anderen Namen fuer den Agententyp
 api-error-agent-type-not-editable = Agententyp '{ $name }' stammt aus dem Arbeitsbereich eines laufenden Agenten und wird ueber /api/agents verwaltet
+api-error-registry-type-not-found = Agententyp '{ $name }' nicht im Registry gefunden
 
 # Manifest errors
 api-error-manifest-too-large = Manifest zu gross (max 1MB)
