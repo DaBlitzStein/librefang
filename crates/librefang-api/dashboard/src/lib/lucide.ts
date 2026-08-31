@@ -7,7 +7,9 @@ export { default as AlertTriangle } from "lucide-react/dist/esm/icons/triangle-a
 export { default as Archive } from "lucide-react/dist/esm/icons/archive.mjs";
 export { default as ArrowLeft } from "lucide-react/dist/esm/icons/arrow-left.mjs";
 export { default as ArrowRight } from "lucide-react/dist/esm/icons/arrow-right.mjs";
+export { default as ArrowUpNarrowWide } from "lucide-react/dist/esm/icons/arrow-up-narrow-wide.mjs";
 export { default as ArrowsUpFromLine } from "lucide-react/dist/esm/icons/arrows-up-from-line.mjs";
+export { default as Ban } from "lucide-react/dist/esm/icons/ban.mjs";
 export { default as BarChart3 } from "lucide-react/dist/esm/icons/chart-column.mjs";
 export { default as Bell } from "lucide-react/dist/esm/icons/bell.mjs";
 export { default as BookCopy } from "lucide-react/dist/esm/icons/book-copy.mjs";

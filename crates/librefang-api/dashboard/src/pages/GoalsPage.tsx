@@ -19,8 +19,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Pause, Square, ChevronDown, ChevronRight } from "lucide-react";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight, Pause, Zap, Ban } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Pause, Square, ChevronDown, ChevronRight, Zap, Ban } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -262,7 +261,6 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
             <Pause className="h-3.5 w-3.5" />
           )}
         </button>
-      <>
         <GoalRunPhaseBadge phase={run!.phase} iteration={run!.iteration} maxIterations={run!.max_iterations} />
         <button
           type="button"
@@ -315,7 +313,6 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
           )}
         </button>
       </div>
-      </>
     );
   }
 

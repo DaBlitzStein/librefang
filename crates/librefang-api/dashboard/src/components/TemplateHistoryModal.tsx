@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { History, RotateCcw } from "lucide-react";
-import type { TemplateVersion } from "../api";
+import type { TemplateVersionEntry } from "../api";
 import { useTemplateHistory } from "../lib/queries/agentTypes";
 import { useRestoreTemplateVersion } from "../lib/mutations/agentTypes";
 import { Modal } from "./ui/Modal";
@@ -28,10 +28,10 @@ export function TemplateHistoryModal({
   const history = useTemplateHistory(name, { enabled: open });
   const restoreMutation = useRestoreTemplateVersion();
 
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [pendingRestore, setPendingRestore] = useState<TemplateVersion | null>(null);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [pendingRestore, setPendingRestore] = useState<TemplateVersionEntry | null>(null);
 
-  const versions = history.data ?? [];
+  const versions = history.data?.versions ?? [];
 
   async function confirmRestore() {
     if (!pendingRestore) return;
@@ -70,9 +70,9 @@ export function TemplateHistoryModal({
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="truncate text-[13px] font-semibold text-text-main">
-                      {new Date(v.created_at).toLocaleString()}
+                      {new Date(v.timestamp).toLocaleString()}
                     </span>
-                    <Badge variant="default">{`${t("templateHistory.source")}: ${v.source}`}</Badge>
+                    <Badge variant="default">{`${t("templateHistory.source")}: ${v.change_source}`}</Badge>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
                     <button
@@ -94,7 +94,7 @@ export function TemplateHistoryModal({
                 </div>
                 {expandedId === v.id && (
                   <pre className="mt-2 max-h-64 overflow-auto rounded-lg border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text whitespace-pre-wrap">
-                    {v.toml_snapshot}
+                    {v.manifest_toml}
                   </pre>
                 )}
               </div>

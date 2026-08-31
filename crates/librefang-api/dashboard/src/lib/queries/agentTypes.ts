@@ -3,7 +3,6 @@ import {
   listAgentTemplates,
   getAgentType,
   getTemplateHistory,
-  listTemplateHistory,
   getAgentTypeRegistryDiff,
 } from "../http/client";
 import { agentTypeKeys } from "./keys";

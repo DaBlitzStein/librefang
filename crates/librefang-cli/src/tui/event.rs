@@ -190,6 +190,17 @@ pub enum AppEvent {
     SettingsToolsLoaded(Vec<ToolInfo>),
     /// Settings auxiliary LLM chains loaded.
     SettingsAuxiliaryLoaded(std::collections::BTreeMap<String, Vec<String>>),
+    /// Registry restore result.
+    RegistryRestoreResult {
+        name: String,
+        ok: bool,
+        message: String,
+    },
+    /// Template version history loaded.
+    TemplateHistoryLoaded {
+        name: String,
+        versions: Vec<serde_json::Value>,
+    },
     /// Provider key saved.
     ProviderKeySaved(String),
     /// Provider key deleted.
@@ -2445,6 +2456,28 @@ pub fn spawn_restore_from_registry(backend: BackendRef, name: String, tx: mpsc::
             }
         };
         let _ = tx.send(AppEvent::RegistryRestoreResult { name, ok, message });
+    });
+}
+
+pub fn spawn_fetch_template_history(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let versions = match client
+                .get(format!("{base_url}/api/templates/{name}/history"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => resp.json().unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let _ = tx.send(AppEvent::TemplateHistoryLoaded { name, versions });
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::TemplateHistoryLoaded {
+                name,
+                versions: Vec::new(),
+            });
+        }
     });
 }
 

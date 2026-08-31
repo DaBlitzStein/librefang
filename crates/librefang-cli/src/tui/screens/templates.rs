@@ -205,6 +205,11 @@ pub struct TemplatesState {
     pub loading: bool,
     pub tick: usize,
     pub status_msg: String,
+    /// Version history entries: (version_id, timestamp, source).
+    pub version_history: Vec<(String, String, String)>,
+    pub showing_history: bool,
+    pub history_list: ListState,
+    pub history_name: String,
 }
 
 pub enum TemplatesAction {
@@ -216,6 +221,14 @@ pub enum TemplatesAction {
     },
     /// Promote the selected manifest-backed agent type to the registry.
     PromoteTemplate {
+        name: String,
+    },
+    /// Restore the selected manifest-backed agent type from the registry.
+    RestoreFromRegistry {
+        name: String,
+    },
+    /// Show version history for a template.
+    ShowVersionHistory {
         name: String,
     },
 }
@@ -233,6 +246,10 @@ impl TemplatesState {
             loading: false,
             tick: 0,
             status_msg: String::new(),
+            version_history: Vec::new(),
+            showing_history: false,
+            history_list: ListState::default(),
+            history_name: String::new(),
         };
         state.list_state.select(Some(0));
         state
@@ -292,6 +309,27 @@ impl TemplatesState {
             return TemplatesAction::Continue;
         }
 
+        if self.showing_history {
+            let total = self.version_history.len();
+            match key.code {
+                KeyCode::Esc => {
+                    self.showing_history = false;
+                }
+                KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                    let i = self.history_list.selected().unwrap_or(0);
+                    let next = if i == 0 { total - 1 } else { i - 1 };
+                    self.history_list.select(Some(next));
+                }
+                KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                    let i = self.history_list.selected().unwrap_or(0);
+                    let next = (i + 1) % total;
+                    self.history_list.select(Some(next));
+                }
+                _ => {}
+            }
+            return TemplatesAction::Continue;
+        }
+
         let total = self.filtered.len();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if total > 0 => {
@@ -339,6 +377,31 @@ impl TemplatesState {
                     }
                 }
             }
+            KeyCode::Char('R') => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(&idx) = self.filtered.get(sel) {
+                        let t = &self.templates[idx];
+                        if t.source == TemplateSource::Manifest {
+                            return TemplatesAction::RestoreFromRegistry {
+                                name: t.name.clone(),
+                            };
+                        }
+                        self.status_msg =
+                            "Restore from registry is only available for custom templates"
+                                .to_string();
+                    }
+                }
+            }
+            KeyCode::Char('v') => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(&idx) = self.filtered.get(sel) {
+                        let t = &self.templates[idx];
+                        return TemplatesAction::ShowVersionHistory {
+                            name: t.name.clone(),
+                        };
+                    }
+                }
+            }
             KeyCode::Char('r') => return TemplatesAction::Refresh,
             _ => {}
         }
@@ -354,6 +417,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
         area,
         &format!("{} {}", "\u{25a2}", crate::i18n::t("tui-templates-title")),
     );
+
+    if state.showing_history {
+        draw_version_history(f, inner, state);
+        return;
+    }
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header + category filter
@@ -523,6 +591,60 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
             chunks[3],
         );
     }
+}
+
+fn draw_version_history(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled(
+                format!("  Version History for {}", state.history_name),
+                Style::default()
+                    .fg(theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                format!("  {:<40} {:<24} {}", "Version ID", "Created", "Source"),
+                theme::table_header(),
+            )]),
+        ]),
+        chunks[0],
+    );
+
+    if state.version_history.is_empty() {
+        f.render_widget(
+            widgets::empty_state("No version history available"),
+            chunks[1],
+        );
+    } else {
+        let items: Vec<ListItem> = state
+            .version_history
+            .iter()
+            .map(|(id, ts, source)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<40}", widgets::truncate(id, 39)),
+                        Style::default().fg(theme::YELLOW),
+                    ),
+                    Span::styled(
+                        format!(" {:<24}", widgets::truncate(ts, 23)),
+                        theme::dim_style(),
+                    ),
+                    Span::styled(format!(" {}", source), Style::default().fg(theme::BLUE)),
+                ]))
+            })
+            .collect();
+        let list = widgets::themed_list(items);
+        f.render_stateful_widget(list, chunks[1], &mut state.history_list);
+    }
+
+    f.render_widget(widgets::hint_bar("  [Esc] Back  [↑↓] Navigate"), chunks[2]);
 }
 
 /// `i18n::t` renders an unknown key as `[key]`, so a bare `rendered == key` comparison never fires.

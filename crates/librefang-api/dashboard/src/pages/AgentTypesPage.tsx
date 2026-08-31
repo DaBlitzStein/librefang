@@ -26,8 +26,6 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
-import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
-import { TemplateHistoryModal } from "../components/TemplateHistoryModal";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import type { ManifestCatalogEntry } from "../components/AgentManifestForm";
 import {
@@ -657,106 +655,6 @@ function RestoreDiffModal({
   );
 }
 
-function RestoreDiffModal({
-  name,
-  onClose,
-}: {
-  name: string;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const addToast = useUIStore((s) => s.addToast);
-  const diff = useAgentTypeRegistryDiff(name);
-  const restore = useRestoreAgentType();
-
-  async function handleRestore() {
-    try {
-      await restore.mutateAsync(name);
-      addToast(t("agentTypes.restore_success"), "success");
-      onClose();
-    } catch (err) {
-      addToast(toastErr(err, t("agentTypes.restore_failed")), "error");
-    }
-  }
-
-  return (
-    <Modal
-      isOpen
-      onClose={onClose}
-      variant="panel-right"
-      size="lg"
-      title={t("agentTypes.restore_title", { name })}
-    >
-      {diff.isLoading ? (
-        <ListSkeleton rows={4} />
-      ) : diff.isError ? (
-        <div className="space-y-3">
-          <p className="text-[13px] text-text-dim">
-            {t("agentTypes.restore_no_registry")}
-          </p>
-          <div className="flex justify-end">
-            <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
-          </div>
-        </div>
-      ) : diff.data?.identical ? (
-        <div className="space-y-3">
-          <p className="text-[13px] text-text-dim">
-            {t("agentTypes.restore_identical")}
-          </p>
-          <div className="flex justify-end">
-            <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="overflow-auto rounded-lg border border-border-subtle">
-            <table className="w-full text-[12px]">
-              <thead>
-                <tr className="border-b border-border-subtle bg-main/30">
-                  <th className="px-3 py-1.5 text-left font-semibold text-text-dim">{t("agentTypes.restore_diff_field")}</th>
-                  <th className="px-3 py-1.5 text-left font-semibold text-text-dim">{t("agentTypes.restore_diff_local")}</th>
-                  <th className="px-3 py-1.5 text-left font-semibold text-text-dim">{t("agentTypes.restore_diff_registry")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(diff.data?.diffs ?? []).map((d) => (
-                  <tr key={d.field} className="border-b border-border-subtle last:border-0">
-                    <td className="px-3 py-1.5 font-mono text-text-main">{d.field}</td>
-                    <td className="max-w-[200px] truncate px-3 py-1.5 text-error/80">
-                      {typeof d.local === "string" ? d.local : JSON.stringify(d.local)}
-                    </td>
-                    <td className="max-w-[200px] truncate px-3 py-1.5 text-green-500/80">
-                      {typeof d.registry === "string" ? d.registry : JSON.stringify(d.registry)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <p className="rounded-lg border border-border-subtle bg-main/30 px-3 py-2 text-[11px] text-text-dim">
-            {t("agentTypes.restore_confirm")}
-          </p>
-
-          <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={onClose} disabled={restore.isPending}>
-              {t("common.cancel")}
-            </Button>
-            <Button
-              variant="primary"
-              leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
-              onClick={() => void handleRestore()}
-              isLoading={restore.isPending}
-            >
-              {t("agentTypes.restore")}
-            </Button>
-          </div>
-        </div>
-      )}
-    </Modal>
-  );
-}
-
 function AgentTypeRow({
   type,
   onQuickRun,
@@ -764,7 +662,6 @@ function AgentTypeRow({
   onEdit,
   onDelete,
   onPromote,
-  onHistory,
   onRestore,
 }: {
   type: AgentTemplate;
@@ -952,11 +849,10 @@ export function AgentTypesPage() {
               key={`${type.source}:${type.name}`}
               type={type}
               onQuickRun={() => setQuickRun(type)}
-              onHistory={() => setHistoryTarget(type.name)}
+              onHistory={() => setHistoryName(type.name)}
               onEdit={() => setEditing({ name: type.name })}
               onDelete={() => setPendingDelete(type.name)}
               onPromote={() => setPendingPromote(type.name)}
-              onHistory={() => setHistoryName(type.name)}
               onRestore={() => setRestoring(type.name)}
             />
           ))}

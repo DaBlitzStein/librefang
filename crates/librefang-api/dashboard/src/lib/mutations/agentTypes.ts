@@ -63,7 +63,7 @@ export function useDeleteAgentType() {
 export function useRestoreTemplateVersion() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, versionId }: { name: string; versionId: string }) =>
+    mutationFn: ({ name, versionId }: { name: string; versionId: number | string }) =>
       restoreTemplateVersion(name, versionId),
     onSuccess: (_data, { name }) => {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });

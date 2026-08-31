@@ -742,6 +742,36 @@ impl App {
                     )
                 };
             }
+            AppEvent::RegistryRestoreResult { name, ok, message } => {
+                self.templates.status_msg = if ok {
+                    format!("Restored {name}: {message}")
+                } else {
+                    format!("Restore failed for {name}: {message}")
+                };
+                self.templates.loading = false;
+            }
+            AppEvent::TemplateHistoryLoaded { name, versions } => {
+                self.templates.history_name = name;
+                self.templates.version_history = versions
+                    .iter()
+                    .filter_map(|v| {
+                        let id = v.get("id")?.to_string();
+                        let ts = v.get("created_at")?.as_str()?.to_string();
+                        let source = v
+                            .get("source")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        Some((id, ts, source))
+                    })
+                    .collect();
+                self.templates.showing_history = true;
+                self.templates.history_list = ratatui::widgets::ListState::default();
+                if !self.templates.version_history.is_empty() {
+                    self.templates.history_list.select(Some(0));
+                }
+                self.templates.loading = false;
+            }
             AppEvent::PeersLoaded(list) => {
                 self.peers.peers = list;
                 if !self.peers.peers.is_empty() && self.peers.list_state.selected().is_none() {
@@ -2013,6 +2043,19 @@ impl App {
                     crate::i18n::t_args("tui-templates-promoting", &[("name", &name)]);
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_promote_agent_type(backend, name, self.event_tx.clone());
+                }
+            }
+            templates::TemplatesAction::RestoreFromRegistry { name } => {
+                self.templates.status_msg = format!("Restoring {name} from registry...");
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_restore_from_registry(backend, name, self.event_tx.clone());
+                }
+            }
+            templates::TemplatesAction::ShowVersionHistory { name } => {
+                self.templates.status_msg = format!("Loading history for {name}...");
+                self.templates.loading = true;
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_template_history(backend, name, self.event_tx.clone());
                 }
             }
         }
