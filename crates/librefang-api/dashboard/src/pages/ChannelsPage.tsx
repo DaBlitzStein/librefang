@@ -879,8 +879,6 @@ export function ChannelsPage() {
 
   const channels = useMemo(() => channelsQuery.data ?? [], [channelsQuery.data]);
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
-  const unconfiguredCount = channels.length - configuredCount;
-
   // Configured channels are the main page content. Filter/sort applies
   // to those only; the unconfigured catalog lives behind the Add picker.
   const filteredChannels = useMemo(
@@ -1020,10 +1018,7 @@ export function ChannelsPage() {
               size="sm"
               onClick={openPicker}
               leftIcon={<Plus className="h-3.5 w-3.5" />}
-              disabled={unconfiguredCount === 0}
-              title={unconfiguredCount === 0
-                ? t("channels.all_configured", { defaultValue: "All channels configured" })
-                : t("channels.add_channel", { defaultValue: "Add channel" })}
+              title={t("channels.add_channel", { defaultValue: "Add channel" })}
             >
               {t("channels.add", { defaultValue: "Add" })}
             </Button>
