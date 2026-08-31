@@ -180,7 +180,8 @@
     "select_options": "Wybierz opcje",
     "error_loading_data": "Nie udało się załadować pamięci",
     "reload": "Przeładuj",
-    "save_changes": "Zapisz zmiany"
+    "save_changes": "Zapisz zmiany",
+    "save_failed": "Save failed"
   },
   "status": {
     "active": "Aktywny",
@@ -2699,7 +2700,21 @@
     "reset_all": "Zresetuj wszystko",
     "reset_section": "Zresetuj sekcję",
     "searching_all": "Przeszukiwanie wszystkich sekcji...",
-    "comma_separated_values": "wartości rozdzielane przecinkami"
+    "comma_separated_values": "wartości rozdzielane przecinkami",
+    "auxiliary_llm_title": "Auxiliary LLM Chains",
+    "auxiliary_llm_description": "Route internal side-tasks to cheaper models. Empty = uses primary model.",
+    "auxiliary_task_compression": "Compression",
+    "auxiliary_task_title": "Title generation",
+    "auxiliary_task_search": "Search",
+    "auxiliary_task_vision": "Vision",
+    "auxiliary_task_browser_vision": "Browser vision",
+    "auxiliary_task_fold": "History fold",
+    "auxiliary_task_skill_review": "Skill review",
+    "auxiliary_task_skill_workshop_review": "Skill workshop review",
+    "auxiliary_task_session_summary": "Session summary",
+    "auxiliary_chain_default": "Primary (default)",
+    "auxiliary_chain_placeholder": "provider:model",
+    "auxiliary_chain_add": "Add model"
   },
   "chat": {
     "title": "Czat",
