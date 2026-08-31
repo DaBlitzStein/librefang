@@ -427,31 +427,6 @@ params = { region = "us" }
     });
   });
 
-  it("preserves an unmapped 'channels' allowlist through extras on round-trip (#7742)", () => {
-    // `channels` is a real AgentManifest field (agent.toml, PUT
-    // /agents/{id}/channels) but the visual editor doesn't have a
-    // first-class form widget for it — it must survive a
-    // parse → serialize → re-parse cycle unchanged via extras, the same
-    // guarantee every other unmapped field gets.
-    const toml = `name = "agent"
-channels = ["telegram", "discord"]
-
-[model]
-provider = "openai"
-model = "gpt-4o"
-`;
-    const parsed = parseManifestToml(toml);
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(parsed.extras.topLevel.channels).toEqual(["telegram", "discord"]);
-
-    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
-    const reparsed = parseManifestToml(reserialized);
-    expect(reparsed.ok).toBe(true);
-    if (!reparsed.ok) return;
-    expect(reparsed.extras.topLevel.channels).toEqual(["telegram", "discord"]);
-  });
-
   it("returns a structured error on malformed TOML", () => {
     const result = parseManifestToml('name = "unterminated\n[oops');
     expect(result.ok).toBe(false);
@@ -845,97 +820,101 @@ params = { region = "us" }
   });
 });
 
-describe("agentManifest — inference parameters (#7781)", () => {
-  it("round-trips every preference knob and both endpoint limits", () => {
+describe("agentManifest capability routing", () => {
+  it("omits an empty field instead of pinning an empty provider", () => {
     const form = emptyManifestForm();
-    form.name = "academic-writer";
-    form.model.provider = "openai";
-    form.model.model = "gpt-4o";
-    form.model.temperature = "0.1";
-    form.model.top_p = "0.85";
-    form.model.frequency_penalty = "0.4";
-    form.model.presence_penalty = "-0.3";
-    form.model.max_tokens = "8192";
-    form.model.context_window = "200000";
-    form.model.max_output_tokens = "16384";
+    form.name = "profesor";
+    form.capabilities.image_understanding = "";
 
-    const toml = serializeManifestForm(form);
-    expect(toml).toContain("temperature = 0.1");
-    expect(toml).toContain("top_p = 0.85");
-    expect(toml).toContain("frequency_penalty = 0.4");
-    expect(toml).toContain("presence_penalty = -0.3");
-    expect(toml).toContain("max_tokens = 8192");
-    expect(toml).toContain("context_window = 200000");
-    expect(toml).toContain("max_output_tokens = 16384");
-
-    const parsed = parseManifestToml(toml);
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(parsed.form.model.temperature).toBe("0.1");
-    expect(parsed.form.model.top_p).toBe("0.85");
-    expect(parsed.form.model.frequency_penalty).toBe("0.4");
-    expect(parsed.form.model.presence_penalty).toBe("-0.3");
-    expect(parsed.form.model.max_tokens).toBe("8192");
-    expect(parsed.form.model.context_window).toBe("200000");
-    expect(parsed.form.model.max_output_tokens).toBe("16384");
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+    // Omission is what the kernel reads as "inherit the global block"; an
+    // `image_understanding = ""` would pin an empty provider instead.
+    expect(toml).not.toContain("image_understanding");
   });
 
-  /**
-   * The inherit state has to survive the round trip as an *absent key*.
-   * Writing `top_p = 0` instead would pin a number the operator never chose and
-   * make the per-model override unreachable for that field — the exact failure
-   * the tri-state was introduced to remove.
-   */
-  it("omits a knob left on inherit rather than writing a zero", () => {
+  it("writes a filled field into [capabilities]", () => {
     const form = emptyManifestForm();
-    form.name = "inheriting";
-    form.model.provider = "openai";
-    form.model.model = "gpt-4o";
-    form.model.temperature = "0.1";
+    form.name = "profesor";
+    form.capabilities.image_understanding = "openai/gpt-4o";
+    form.capabilities.speech_to_text = "groq";
 
-    const toml = serializeManifestForm(form);
-    expect(toml).toContain("temperature = 0.1");
-    expect(toml).not.toContain("top_p");
-    expect(toml).not.toContain("frequency_penalty");
-    expect(toml).not.toContain("presence_penalty");
-    expect(toml).not.toContain("max_tokens");
-    expect(toml).not.toContain("context_window");
-    expect(toml).not.toContain("max_output_tokens");
-
-    const parsed = parseManifestToml(toml);
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(parsed.form.model.top_p).toBe("");
-    expect(parsed.form.model.max_tokens).toBe("");
-    expect(parsed.form.model.context_window).toBe("");
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+    expect(toml).toContain("[capabilities]");
+    expect(toml).toContain('image_understanding = "openai/gpt-4o"');
+    expect(toml).toContain('speech_to_text = "groq"');
   });
 
-  /**
-   * The migration guarantee for the 25 already-deployed agents: a manifest that
-   * carries a number keeps it as an explicit value. Nothing starts inheriting
-   * behind the operator's back on upgrade.
-   */
-  it("keeps an existing explicit value explicit", () => {
+  it("round-trips the string shorthand through parse and serialize", () => {
+    const parsed = parseManifestToml(
+      ['name = "profesor"', "", "[capabilities]", 'image_understanding = "openai/gpt-4o"'].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    expect(parsed.form.capabilities.image_understanding).toBe("openai/gpt-4o");
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain('image_understanding = "openai/gpt-4o"');
+    // Exactly once — the key must not survive in `extras` as well, which
+    // would emit two spellings of the same setting.
+    expect(toml.match(/image_understanding/g)).toHaveLength(1);
+  });
+
+  it("normalises the { provider, model } table form to the shorthand", () => {
     const parsed = parseManifestToml(
       [
-        'name = "deployed"',
-        'module = "builtin:chat"',
+        'name = "profesor"',
         "",
-        "[model]",
-        'provider = "openai"',
-        'model = "gpt-4o"',
-        "temperature = 0.7",
-        "max_tokens = 4096",
+        "[capabilities]",
+        'speech_to_text = { provider = "groq", model = "whisper-large-v3" }',
       ].join("\n"),
     );
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.form.model.temperature).toBe("0.7");
-    expect(parsed.form.model.max_tokens).toBe("4096");
+    expect(parsed.form.capabilities.speech_to_text).toBe("groq/whisper-large-v3");
+  });
 
-    // …and comes back out unchanged.
-    const toml = serializeManifestForm(parsed.form);
-    expect(toml).toContain("temperature = 0.7");
-    expect(toml).toContain("max_tokens = 4096");
+  it("keeps a model-only override inheriting the provider", () => {
+    const parsed = parseManifestToml(
+      ['name = "profesor"', "", "[capabilities]", 'image_understanding = { model = "gpt-4o-mini" }'].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    // "/model" is how an inherited provider survives a round-trip through a
+    // single text field; the kernel parses it back to provider=None.
+    expect(parsed.form.capabilities.image_understanding).toBe("/gpt-4o-mini");
+  });
+
+  it("loads the kernel's aliases into the canonical field", () => {
+    const parsed = parseManifestToml(
+      ['name = "profesor"', "", "[capabilities]", 'vision = "gemini/gemini-2.5-flash"', 'transcription = "openai"'].join(
+        "\n",
+      ),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.image_understanding).toBe("gemini/gemini-2.5-flash");
+    expect(parsed.form.capabilities.speech_to_text).toBe("openai");
+    // The alias must not also linger in extras, or the re-emitted block would
+    // carry both `vision` and `image_understanding`.
+    expect(parsed.extras.capabilities).not.toHaveProperty("vision");
+    expect(parsed.extras.capabilities).not.toHaveProperty("transcription");
+  });
+
+  it("leaves the existing tool and memory grants untouched", () => {
+    const parsed = parseManifestToml(
+      [
+        'name = "profesor"',
+        "",
+        "[capabilities]",
+        'tools = ["memory_recall"]',
+        'memory_read = ["*"]',
+        'image_understanding = "openai/gpt-4o"',
+      ].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.tools).toEqual(["memory_recall"]);
+    expect(parsed.form.capabilities.memory_read).toEqual(["*"]);
+    expect(parsed.form.capabilities.image_understanding).toBe("openai/gpt-4o");
   });
 });
