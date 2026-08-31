@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 54;
+const SCHEMA_VERSION: u32 = 58;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -275,6 +275,18 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     //
     // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
     run_step!(54, migrate_v54);
+
+    // v55: template + agent manifest version-history tables.
+    run_step!(55, migrate_v55);
+
+    // v56: per-task claim TTL override + sessions.parent_session_id for sub-agent lineage.
+    run_step!(56, migrate_v56);
+
+    // v57: agents.parent_id lineage (idempotent over v54 which also adds it).
+    run_step!(57, migrate_v57);
+
+    // v58: template_versions table (idempotent over v55 which also creates it).
+    run_step!(58, migrate_v58);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1207,6 +1219,106 @@ fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (54, datetime('now'), 'Persist agent lineage: agents.parent_id + idx_agents_parent_id + agents.parent_recorded so a pre-v54 row reads as unknown rather than root (#7930)')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS template_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_name   TEXT NOT NULL,
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_template_versions_name
+            ON template_versions(template_name, timestamp DESC);
+        CREATE TABLE IF NOT EXISTS manifest_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id        TEXT NOT NULL,
+            agent_name      TEXT NOT NULL DEFAULT '',
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id
+            ON manifest_versions(agent_id, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (55, datetime('now'), 'Template + agent manifest version history tables')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "task_queue", "timeout_secs")? {
+        conn.execute(
+            "ALTER TABLE task_queue ADD COLUMN timeout_secs INTEGER DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !try_column_exists(conn, "sessions", "parent_session_id")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (56, datetime('now'), 'Per-task claim TTL override + sessions.parent_session_id')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "agents", "parent_id")? {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN parent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !try_column_exists(conn, "agents", "parent_recorded")? {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN parent_recorded INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_agents_parent_id ON agents(parent_id);")?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (57, datetime('now'), 'Persist agent lineage (idempotent over v54)')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v58(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS template_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_name   TEXT NOT NULL,
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_template_versions_name
+            ON template_versions(template_name, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (58, datetime('now'), 'Create template_versions table (idempotent over v55)')",
         [],
     )?;
     Ok(())
