@@ -808,7 +808,10 @@ pub fn build_reload_plan_with_caps(
         );
         restart_if_changed(old.log_dir != new.log_dir, "log_dir");
         restart_if_changed(old.workspaces_dir != new.workspaces_dir, "workspaces_dir");
-        restart_if_changed(field_changed(&old.llm, &new.llm), "llm");
+        if field_changed(&old.llm, &new.llm) {
+            plan.noop_changes
+                .push("llm.auxiliary changed (AuxClient rebuilt on config swap)".to_string());
+        }
         restart_if_changed(field_changed(&old.reload, &new.reload), "reload");
         restart_if_changed(
             old.max_request_body_bytes != new.max_request_body_bytes,
