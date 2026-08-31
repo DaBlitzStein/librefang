@@ -2643,6 +2643,7 @@ profile = "research"
             .spawn_agent_inner(
                 AgentManifest {
                     name: name.to_string(),
+                    source_template: None,
                     description: "declared-but-unavailable fixture".to_string(),
                     author: "test".to_string(),
                     module: "builtin:chat".to_string(),
@@ -2717,6 +2718,7 @@ input_schema = {{ type = "object" }}
             .spawn_agent_inner(
                 AgentManifest {
                     name: name.to_string(),
+                    source_template: None,
                     description: "skills-off fixture".to_string(),
                     author: "test".to_string(),
                     module: "builtin:chat".to_string(),
@@ -3045,6 +3047,7 @@ input_schema = {{ type = "object" }}
             .spawn_agent_inner(
                 AgentManifest {
                     name: "disabled-both".to_string(),
+                    source_template: None,
                     description: "skills and MCP switched off".to_string(),
                     author: "test".to_string(),
                     module: "builtin:chat".to_string(),
