@@ -36,7 +36,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, History } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch } from "lucide-react";
 import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -64,7 +64,6 @@ import {
   type ManifestFormState,
 } from "../lib/agentManifest";
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
-import { agentKeys } from "../lib/queries/keys";
 import {
   agentQueries,
   useAgentEvents,
@@ -74,7 +73,6 @@ import {
   useAgentTools,
   useAgentSkills,
   useAgentMcpServers,
-  useAgentManifestHistory,
   usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
@@ -123,6 +121,12 @@ type AgentView = AgentDetail & {
   last_active?: string;
   triggers?: AgentTriggerSummary[];
   cron_jobs?: AgentCronSummary[];
+  /** Lineage fields the backend only emits on `GET /api/agents` (the list
+   *  endpoint's `enrich_agent_json`), not on the per-agent detail fetch.
+   *  Carried over from the `AgentItem` row when opening the detail panel. */
+  parent_agent_id?: string | null;
+  parent_unknown?: boolean;
+  children?: string[];
   capabilities?: Omit<NonNullable<AgentDetail["capabilities"]>, "tools" | "skills"> & {
     skills?: string[];
     tools?: string[];
@@ -372,7 +376,7 @@ export function AgentsPage() {
   // the PUT — leaving the tab discards the draft (the "change your mind" path).
   const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "tools" | "schedule" | "logs" | "history"
+    "conversation" | "memory" | "skills" | "tools" | "schedule" | "logs"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -426,24 +430,36 @@ export function AgentsPage() {
       "error",
     );
   const deleteMutation = {
-    mutate: (agentId: string) => {
-      qc.cancelQueries({ queryKey: agentKeys.detail(agentId) });
+    mutate: (agentId: string) =>
       rawDeleteMutation.mutate(agentId, {
         onSuccess: () => handleDeleteSuccess(agentId),
         onError: handleDeleteError,
-      });
-    },
-    mutateAsync: (agentId: string) => {
-      qc.cancelQueries({ queryKey: agentKeys.detail(agentId) });
-      return rawDeleteMutation.mutateAsync(agentId, {
+      }),
+    mutateAsync: (agentId: string) =>
+      rawDeleteMutation.mutateAsync(agentId, {
         onSuccess: () => handleDeleteSuccess(agentId),
         onError: handleDeleteError,
-      });
-    },
+      }),
   };
 
   function mergeHandFlag(agent: AgentDetail, fallback?: boolean) {
     return { ...agent, is_hand: agent.is_hand ?? fallback };
+  }
+
+  // The single-agent detail response omits lineage — only the list
+  // endpoint includes it — so origin fields are carried over from the
+  // list row or the previous detail state on refresh.
+  function mergeOriginFields<T extends AgentDetail>(
+    agent: T,
+    origin?: Pick<AgentView, "parent_agent_id" | "parent_unknown" | "children">,
+  ): T {
+    if (!origin) return agent;
+    return {
+      ...agent,
+      parent_agent_id: origin.parent_agent_id,
+      parent_unknown: origin.parent_unknown,
+      children: origin.children,
+    };
   }
 
   function startModelEdit() {
@@ -526,7 +542,7 @@ export function AgentsPage() {
     try {
       await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
       const d = await qc.fetchQuery(agentQueries.detail(agentId));
-      setDetailAgent(mergeHandFlag(d, fallback));
+      setDetailAgent(mergeOriginFields(mergeHandFlag(d, fallback), (detailAgent as AgentView) ?? undefined));
     } catch {
       // keep current state when refresh fails
     }
@@ -662,11 +678,6 @@ export function AgentsPage() {
     enabled: !!detailAgent && agentTab === "skills",
   });
   const setAgentSkillsMutation = useSetAgentSkills();
-
-  // Manifest version history — fetched only when the History tab is active.
-  const manifestHistoryQuery = useAgentManifestHistory(detailAgent?.id ?? "", {
-    enabled: !!detailAgent && agentTab === "history",
-  });
 
   useEffect(() => {
     if (agentTab !== "tools") {
@@ -969,10 +980,18 @@ export function AgentsPage() {
     setAgentTab("conversation");
     try {
       const d = await qc.fetchQuery(agentQueries.detail(agent.id));
-      setDetailAgent(mergeHandFlag(d, agent.is_hand));
+      setDetailAgent(mergeOriginFields(mergeHandFlag(d, agent.is_hand), agent));
     } catch {
-      setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail);
+      setDetailAgent(mergeOriginFields({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail, agent));
     }
+  };
+
+  /** Navigate the detail panel to a parent/child agent referenced by id.
+   *  Falls back to a bare stub when the id isn't in the current (paginated)
+   *  list — `selectAgent` still fetches the real detail from its own id. */
+  const goToAgent = (id: string) => {
+    const found = agents.find(a => a.id === id);
+    void selectAgent(found ?? ({ id, name: id, is_hand: false } as AgentItem));
   };
 
   // Auto-select the first agent on desktop so the detail panel isn't blank
@@ -1019,6 +1038,11 @@ export function AgentsPage() {
               {t("agents.hand_badge", { defaultValue: "HAND" })}
             </span>
           )}
+          {!!agent.children?.length && (
+            <span className="shrink-0 text-[10.5px] text-text-dim/80">
+              ({t("agents.children_count", { count: agent.children.length })})
+            </span>
+          )}
           <span className="font-mono text-[10.5px] text-text-dim/80 shrink-0 tabular-nums">
             {agent.last_active ? formatRelativeTime(agent.last_active) : "—"}
           </span>
@@ -1054,7 +1078,6 @@ export function AgentsPage() {
       { id: "tools",        label: t("agents.tab.tools",        { defaultValue: "Tools" }),        Icon: Wrench },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
-      { id: "history",      label: t("agents.tab.history",      { defaultValue: "History" }),      Icon: History },
     ];
 
     const live = agentStatsQuery.data;
@@ -1303,7 +1326,6 @@ export function AgentsPage() {
       case "tools":             return renderToolsTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
-      case "history":           return renderHistoryTab(agent);
     }
   };
 
@@ -2314,51 +2336,6 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- History tab — manifest version timeline
-  const renderHistoryTab = (_agent: AgentDetail) => {
-    const versions = manifestHistoryQuery.data ?? [];
-    const fmtTs = (s?: string): string => {
-      if (!s) return "—";
-      try {
-        return new Date(s + "Z").toLocaleString();
-      } catch {
-        return s;
-      }
-    };
-    return (
-      <div className="flex flex-col gap-3">
-        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-          {t("agents.detail.manifest_history", { defaultValue: "Manifest history" })} · {versions.length}
-        </div>
-        {manifestHistoryQuery.isLoading ? (
-          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
-        ) : versions.length === 0 ? (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_history", { defaultValue: "No config changes recorded yet." })}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {versions.map((v) => (
-              <details
-                key={v.id}
-                className="rounded-md border border-border-subtle bg-main/40 group"
-              >
-                <summary className="px-3 py-2 cursor-pointer text-[12px] flex items-center gap-2 select-none">
-                  <History className="w-3.5 h-3.5 text-text-dim shrink-0" />
-                  <span className="font-medium">{fmtTs(v.timestamp)}</span>
-                  <span className="text-text-dim">· {v.change_source}</span>
-                </summary>
-                <pre className="px-3 pb-3 text-[11px] font-mono leading-[1.6] max-h-60 overflow-auto whitespace-pre-wrap break-all text-text-dim">
-                  {v.manifest_toml}
-                </pre>
-              </details>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  };
-
   return (
     <div className="flex flex-col gap-4 sm:gap-6 transition-colors duration-300">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-3">
@@ -2774,6 +2751,72 @@ export function AgentsPage() {
                   </div>
                 </section>
               )}
+
+              {/* Origin */}
+              <section>
+                <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                  <GitBranch className="w-3.5 h-3.5 text-brand" />
+                  {t("agents.origin", { defaultValue: "Origin" })}
+                </h4>
+                <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
+                  <DetailRow label={t("agents.parent", { defaultValue: "Parent Agent" })}>
+                    {(() => {
+                      const parentId = (detailAgent as AgentView).parent_agent_id;
+                      if (parentId) {
+                        const parent = agents.find(a => a.id === parentId);
+                        const label = parent
+                          ? t(`agents.builtin.${parent.name}.name`, { defaultValue: parent.name })
+                          : truncateId(parentId, 16);
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => goToAgent(parentId)}
+                            className="font-mono text-brand hover:underline"
+                          >
+                            {label}
+                          </button>
+                        );
+                      }
+                      if ((detailAgent as AgentView).parent_unknown) {
+                        return (
+                          <span className="text-text-dim">
+                            {t("agents.origin_unknown", { defaultValue: "Unknown (pre-migration)" })}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span className="text-text-dim">
+                          {t("agents.origin_root", { defaultValue: "Root agent" })}
+                        </span>
+                      );
+                    })()}
+                  </DetailRow>
+                  <DetailRow label={t("agents.children", { defaultValue: "Children" })}>
+                    {(detailAgent as AgentView).children?.length ? (
+                      <div className="flex flex-wrap justify-end gap-1.5">
+                        {(detailAgent as AgentView).children!.map(childId => {
+                          const child = agents.find(a => a.id === childId);
+                          const label = child
+                            ? t(`agents.builtin.${child.name}.name`, { defaultValue: child.name })
+                            : truncateId(childId, 16);
+                          return (
+                            <button
+                              key={childId}
+                              type="button"
+                              onClick={() => goToAgent(childId)}
+                              className="font-mono text-xs px-1.5 py-0.5 rounded bg-brand/10 text-brand hover:bg-brand/20"
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <span className="text-text-dim">{t("common.none")}</span>
+                    )}
+                  </DetailRow>
+                </div>
+              </section>
 
               {/* Web Search Augmentation */}
               <section>
