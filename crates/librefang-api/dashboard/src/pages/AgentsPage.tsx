@@ -389,17 +389,22 @@ export function AgentsPage() {
   const templatesQuery = useAgentTemplates({
     enabled: showCreate && createMode === "template",
   });
-  const localizedTemplates = useMemo(
-    () =>
-      (templatesQuery.data ?? []).map((template) => ({
+  const localizedTemplates = useMemo(() => {
+    const seen = new Set<string>();
+    return (templatesQuery.data ?? [])
+      .filter((t) => {
+        if (seen.has(t.name)) return false;
+        seen.add(t.name);
+        return true;
+      })
+      .map((template) => ({
         ...template,
         displayName: t(`agents.builtin.${template.name}.name`, { defaultValue: template.name }),
         displayDescription: t(`agents.builtin.${template.name}.description`, {
           defaultValue: template.description || template.name,
         }),
-      })),
-    [templatesQuery.data, t],
-  );
+      }));
+  }, [templatesQuery.data, t]);
   const selectedTemplate = useMemo(
     () => localizedTemplates.find((template) => template.name === templateName) ?? null,
     [localizedTemplates, templateName],
