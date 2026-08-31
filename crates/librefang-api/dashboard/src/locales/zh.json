@@ -4173,7 +4173,6 @@
     "delete": "删除",
     "delete_failed": "无法删除智能体类型",
     "deleted": "已删除智能体类型",
-    "description": "描述",
     "edit": "编辑",
     "edit_title": "编辑 {{name}}",
     "empty_description": "创建一个类型，以便在多个智能体之间复用系统提示词、工具集和技能集。",
@@ -4185,8 +4184,6 @@
     "inherit_placeholder": "default",
     "managed_elsewhere": "在“智能体”中管理",
     "managed_elsewhere_hint": "该条目是运行中智能体自身的清单，请在“智能体”页面编辑。",
-    "model": "模型",
-    "model_hint": "保持为 'default' 表示继承守护进程配置的模型。",
     "name": "名称",
     "name_hint": "仅支持字母、数字、连字符和下划线，创建后不可更改。",
     "name_placeholder": "customer-support",
@@ -4194,6 +4191,7 @@
     "no_registry_version": "没有可用的注册表版本",
     "preserved_note": "保存只会重写以上字段。该类型 agent.toml 中的其他内容——触发器、压缩配置、MCP 允许列表、会话模式——都会原样保留。",
     "promote": "推广到注册表",
+    "promote": "提升",
     "promote_copied": "已复制脱敏后的 TOML",
     "promote_copy": "复制 TOML",
     "promote_copy_failed": "无法复制 TOML",
@@ -4205,8 +4203,6 @@
     "promote_toml": "脱敏后的清单",
     "promote_toml_unavailable": "无法将脱敏后的清单渲染为 TOML。",
     "promote_unavailable": "该类型没有可用的提升预览。",
-    "provider": "提供方",
-    "provider_hint": "保持为 'default' 表示继承守护进程配置的提供方。",
     "quick_run": "快速运行",
     "quick_run_cost": "${{cost}}",
     "quick_run_ephemeral_note": "工作实例及其任务工作区已经销毁，只剩下这段结果。",
@@ -4220,12 +4216,10 @@
     "quick_run_task": "任务",
     "quick_run_task_placeholder": "总结本周的发布说明…",
     "quick_run_title": "快速运行 — {{name}}",
-<<<<<<< HEAD
     "restore": "Restore this version",
     "restore_btn": "Restore",
     "restore_failed": "Restore failed",
     "restored": "Version restored",
-=======
     "registry_diff": "与注册表的差异",
     "registry_diff_local": "本地",
     "registry_diff_registry": "注册表",
@@ -4234,12 +4228,8 @@
     "restore_failed": "无法从注册表恢复",
     "restore_from_registry": "从注册表恢复",
     "restored": "已从注册表恢复",
->>>>>>> fork/feat/dashboard-registry-restore
     "save_failed": "无法保存智能体类型",
     "saved": "已保存智能体类型",
-    "skills": "技能",
-    "skills_hint": "从已安装技能目录中选择，也可手动输入目录之外的标识符。",
-    "skills_search": "搜索已安装技能…",
     "subtitle": "可重复使用的智能体清单，可直接据此创建智能体。",
     "system_prompt": "系统提示词",
     "system_prompt_hint": "留空即保存为空，不会自动替换成任何默认文案。",
@@ -4268,5 +4258,6 @@
     "restore": "恢复",
     "restoreConfirm": "恢复此版本？它将成为当前的智能体类型；不会删除其他任何内容。",
     "empty": "尚无已保存的版本。"
+    "title": "智能体类型"
   }
 }

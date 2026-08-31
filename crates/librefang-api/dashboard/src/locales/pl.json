@@ -4182,7 +4182,6 @@
     "delete": "Usuń",
     "delete_failed": "Nie udało się usunąć typu agenta",
     "deleted": "Usunięto typ agenta",
-    "description": "Opis",
     "edit": "Edytuj",
     "edit_title": "Edytuj {{name}}",
     "empty_description": "Utwórz typ, aby ponownie wykorzystać prompt systemowy oraz zestaw narzędzi i umiejętności.",
@@ -4194,8 +4193,6 @@
     "inherit_placeholder": "default",
     "managed_elsewhere": "Zarządzane w Agentach",
     "managed_elsewhere_hint": "Ten wpis to manifest działającego agenta. Edytuj go na stronie Agenci.",
-    "model": "Model",
-    "model_hint": "Wartość 'default' oznacza dziedziczenie modelu skonfigurowanego w demonie.",
     "name": "Nazwa",
     "name_hint": "Tylko litery, cyfry, myślnik i podkreślenie. Nazwy nie da się później zmienić.",
     "name_placeholder": "customer-support",
@@ -4203,6 +4200,7 @@
     "no_registry_version": "Brak dostępnej wersji z rejestru",
     "preserved_note": "Zapis nadpisuje wyłącznie powyższe pola. Reszta pliku agent.toml tego typu — wyzwalacze, kompaktowanie, listy MCP, tryb sesji — zostaje zachowana.",
     "promote": "Opublikuj w rejestrze",
+    "promote": "Promuj",
     "promote_copied": "Skopiowano oczyszczony plik TOML",
     "promote_copy": "Kopiuj TOML",
     "promote_copy_failed": "Nie udało się skopiować pliku TOML",
@@ -4214,8 +4212,6 @@
     "promote_toml": "Oczyszczony manifest",
     "promote_toml_unavailable": "Nie udało się wyrenderować oczyszczonego manifestu jako TOML.",
     "promote_unavailable": "Dla tego typu nie ma dostępnego podglądu promocji.",
-    "provider": "Dostawca",
-    "provider_hint": "Wartość 'default' oznacza dziedziczenie dostawcy skonfigurowanego w demonie.",
     "quick_run": "Szybkie uruchomienie",
     "quick_run_cost": "${{cost}}",
     "quick_run_ephemeral_note": "Pracownik i jego przestrzeń robocza już nie istnieją; został tylko ten wynik.",
@@ -4229,12 +4225,10 @@
     "quick_run_task": "Zadanie",
     "quick_run_task_placeholder": "Streść informacje o wydaniu z tego tygodnia…",
     "quick_run_title": "Szybkie uruchomienie — {{name}}",
-<<<<<<< HEAD
     "restore": "Restore this version",
     "restore_btn": "Restore",
     "restore_failed": "Restore failed",
     "restored": "Version restored",
-=======
     "registry_diff": "Różnice względem rejestru",
     "registry_diff_local": "Lokalnie",
     "registry_diff_registry": "Rejestr",
@@ -4243,12 +4237,8 @@
     "restore_failed": "Nie udało się przywrócić z rejestru",
     "restore_from_registry": "Przywróć z rejestru",
     "restored": "Przywrócono z rejestru",
->>>>>>> fork/feat/dashboard-registry-restore
     "save_failed": "Nie udało się zapisać typu agenta",
     "saved": "Zapisano typ agenta",
-    "skills": "Umiejętności",
-    "skills_hint": "Wybierane z katalogu zainstalowanych umiejętności; nieznane identyfikatory można wpisać ręcznie.",
-    "skills_search": "Szukaj zainstalowanych umiejętności…",
     "subtitle": "Manifesty agentów wielokrotnego użytku, z których można tworzyć agentów.",
     "system_prompt": "Prompt systemowy",
     "system_prompt_hint": "Pozostawiony pusty zostanie zapisany jako pusty — nic nie jest podstawiane automatycznie.",
@@ -4277,5 +4267,6 @@
     "restore": "Przywróć",
     "restoreConfirm": "Przywrócić tę wersję? Stanie się bieżącym typem agenta; nic innego nie zostanie usunięte.",
     "empty": "Brak zapisanych wersji."
+    "title": "Typy agentów"
   }
 }
