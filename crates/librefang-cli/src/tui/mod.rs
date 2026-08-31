@@ -470,6 +470,16 @@ impl App {
                     );
                 }
             },
+            AppEvent::RegistryRestoreResult { name, ok, message } => {
+                self.templates.status_msg = if ok {
+                    format!("✓ {name}: {message}")
+                } else {
+                    format!("✗ {name}: {message}")
+                };
+                if ok {
+                    self.refresh_templates();
+                }
+            }
             AppEvent::TemplateProvidersLoaded(providers) => {
                 self.templates.providers = providers;
             }
@@ -1694,6 +1704,12 @@ impl App {
                     }
                 }
             },
+            templates::TemplatesAction::RestoreFromRegistry { name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg = format!("Restoring {name} from registry…");
+                    event::spawn_restore_from_registry(backend, name, self.event_tx.clone());
+                }
+            }
         }
     }
 
