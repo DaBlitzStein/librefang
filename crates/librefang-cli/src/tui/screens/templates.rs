@@ -6,7 +6,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{ListItem, ListState, Paragraph};
+use ratatui::widgets::{Cell, ListItem, ListState, Paragraph, Row, Table};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -205,6 +205,10 @@ pub struct TemplatesState {
     pub loading: bool,
     pub tick: usize,
     pub status_msg: String,
+    pub version_history: Vec<(String, String, String)>,
+    pub showing_history: bool,
+    pub history_list: ListState,
+    pub history_name: String,
 }
 
 pub enum TemplatesAction {
@@ -215,6 +219,9 @@ pub enum TemplatesAction {
         source: TemplateSource,
     },
     RestoreFromRegistry {
+        name: String,
+    },
+    ShowVersionHistory {
         name: String,
     },
 }
@@ -232,6 +239,10 @@ impl TemplatesState {
             loading: false,
             tick: 0,
             status_msg: String::new(),
+            version_history: Vec::new(),
+            showing_history: false,
+            history_list: ListState::default(),
+            history_name: String::new(),
         };
         state.list_state.select(Some(0));
         state
@@ -291,6 +302,27 @@ impl TemplatesState {
             return TemplatesAction::Continue;
         }
 
+        if self.showing_history {
+            let total = self.version_history.len();
+            match key.code {
+                KeyCode::Esc => {
+                    self.showing_history = false;
+                }
+                KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                    let i = self.history_list.selected().unwrap_or(0);
+                    let next = if i == 0 { total - 1 } else { i - 1 };
+                    self.history_list.select(Some(next));
+                }
+                KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                    let i = self.history_list.selected().unwrap_or(0);
+                    let next = (i + 1) % total;
+                    self.history_list.select(Some(next));
+                }
+                _ => {}
+            }
+            return TemplatesAction::Continue;
+        }
+
         let total = self.filtered.len();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if total > 0 => {
@@ -336,6 +368,16 @@ impl TemplatesState {
                     }
                 }
             }
+            KeyCode::Char('v') => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(&idx) = self.filtered.get(sel) {
+                        let t = &self.templates[idx];
+                        return TemplatesAction::ShowVersionHistory {
+                            name: t.name.clone(),
+                        };
+                    }
+                }
+            }
             _ => {}
         }
         TemplatesAction::Continue
@@ -350,6 +392,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
         area,
         &format!("{} {}", "\u{25a2}", crate::i18n::t("tui-templates-title")),
     );
+
+    if state.showing_history {
+        draw_version_history(f, inner, state);
+        return;
+    }
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header + category filter
@@ -747,4 +794,86 @@ mod tests {
         );
         assert!(!state.provider_configured("openai"));
     }
+}
+
+fn draw_version_history(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!("  Version History: {} ", state.history_name),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("({} versions)", state.version_history.len()),
+            Style::default().fg(theme::DIM),
+        ),
+    ]));
+    f.render_widget(header, chunks[0]);
+
+    let rows: Vec<Row> = state
+        .version_history
+        .iter()
+        .map(|(id, ts, source)| {
+            Row::new(vec![
+                Cell::from(Span::styled(id.as_str(), Style::default().fg(theme::DIM))),
+                Cell::from(Span::styled(
+                    ts.as_str(),
+                    Style::default().fg(theme::TEXT),
+                )),
+                Cell::from(Span::styled(
+                    source.as_str(),
+                    Style::default().fg(theme::ACCENT),
+                )),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(6),
+            Constraint::Min(20),
+            Constraint::Length(12),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from(Span::styled(
+                "ID",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "Timestamp",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "Source",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ])
+        .bottom_margin(1),
+    )
+    .row_highlight_style(Style::default().bg(theme::HIGHLIGHT));
+
+    f.render_stateful_widget(table, chunks[1], &mut state.history_list);
+
+    let hints = Paragraph::new(Line::from(vec![Span::styled(
+        "  [Esc] Back",
+        Style::default().fg(theme::DIM),
+    )]));
+    f.render_widget(hints, chunks[2]);
 }
