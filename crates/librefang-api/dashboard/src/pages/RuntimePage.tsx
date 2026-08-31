@@ -64,7 +64,7 @@ const BACKUP_COMPONENTS = [
 ];
 
 type BackupConfirmState = {
-  type: "restore" | "delete";
+  type: "create" | "restore" | "delete";
   filename: string;
   keepConfig: boolean;
   components: string[];
@@ -801,12 +801,7 @@ export function RuntimePage() {
                     size="sm"
                     leftIcon={<Download className="w-3 h-3" />}
                     isLoading={backupMutation.isPending}
-                    onClick={() =>
-                      backupMutation.mutate(undefined, {
-                        onSuccess: () =>
-                          addToast(t("runtime.backup_created"), "success"),
-                      })
-                    }
+                    onClick={() => setBackupConfirm({ type: "create", filename: "", keepConfig: false, components: [] })}
                   >
                     {t("runtime.create_backup")}
                   </Button>
@@ -827,6 +822,9 @@ export function RuntimePage() {
                           {formatBytes(b.size_bytes)}
                           {b.created_at ? ` · ${new Date(b.created_at).toLocaleDateString()}` : null}
                         </p>
+                        {b.components && b.components.length > 0 && (
+                          <p className="text-[9px] text-text-dim/70 truncate">{b.components.join(", ")}</p>
+                        )}
                       </div>
                       <button
                         onClick={() => {
@@ -940,6 +938,19 @@ export function RuntimePage() {
         tone="destructive"
         onConfirm={async () => { await shutdownMutation.mutateAsync(); }}
         onClose={() => setShowShutdownConfirm(false)}
+      />
+
+      <ConfirmDialog
+        isOpen={backupConfirm?.type === "create"}
+        title={t("runtime.create_backup_confirm_title")}
+        message={t("runtime.create_backup_confirm_desc")}
+        confirmLabel={t("runtime.create_backup_confirm")}
+        onConfirm={async () => {
+          await backupMutation.mutateAsync(undefined, {
+            onSuccess: () => addToast(t("runtime.backup_created"), "success"),
+          });
+        }}
+        onClose={() => setBackupConfirm(null)}
       />
 
       {/* Restore options: keep the target's own config, and/or limit the

@@ -869,6 +869,7 @@ fn staged_hard_error_mid_batch_preserves_all_real_results() {
 #[test]
 fn test_should_augment_web_search_off() {
     let manifest = AgentManifest {
+        source_template: None,
         web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Off,
         ..Default::default()
     };
@@ -878,6 +879,7 @@ fn test_should_augment_web_search_off() {
 #[test]
 fn test_should_augment_web_search_always() {
     let manifest = AgentManifest {
+        source_template: None,
         web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Always,
         ..Default::default()
     };
@@ -887,6 +889,7 @@ fn test_should_augment_web_search_always() {
 #[test]
 fn test_should_augment_web_search_auto_with_tools() {
     let mut manifest = AgentManifest {
+        source_template: None,
         web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Auto,
         ..Default::default()
     };
@@ -901,6 +904,7 @@ fn test_should_augment_web_search_auto_with_tools() {
 #[test]
 fn test_should_augment_web_search_auto_without_tools() {
     let mut manifest = AgentManifest {
+        source_template: None,
         web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Auto,
         ..Default::default()
     };
@@ -915,6 +919,7 @@ fn test_should_augment_web_search_auto_without_tools() {
 #[test]
 fn test_should_augment_web_search_auto_no_metadata() {
     let manifest = AgentManifest {
+        source_template: None,
         web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Auto,
         ..Default::default()
     };
@@ -1039,6 +1044,7 @@ fn agent_loop_result_actual_provider_can_be_set() {
 fn resolve_max_history_uses_manifest_when_set() {
     let manifest = AgentManifest {
         name: "agent-a".into(),
+        source_template: None,
         max_history_messages: Some(7),
         ..AgentManifest::default()
     };
@@ -1053,6 +1059,7 @@ fn resolve_max_history_uses_manifest_when_set() {
 fn resolve_max_history_falls_back_to_opts_when_manifest_unset() {
     let manifest = AgentManifest {
         name: "agent-b".into(),
+        source_template: None,
         ..AgentManifest::default()
     };
     let opts = LoopOptions {
@@ -1066,6 +1073,7 @@ fn resolve_max_history_falls_back_to_opts_when_manifest_unset() {
 fn resolve_max_history_falls_back_to_default_when_both_unset() {
     let manifest = AgentManifest {
         name: "agent-c".into(),
+        source_template: None,
         ..AgentManifest::default()
     };
     let opts = LoopOptions::default();
@@ -1079,6 +1087,7 @@ fn resolve_max_history_falls_back_to_default_when_both_unset() {
 fn resolve_max_history_clamps_below_floor() {
     let manifest = AgentManifest {
         name: "agent-d".into(),
+        source_template: None,
         max_history_messages: Some(2),
         ..AgentManifest::default()
     };
@@ -1090,6 +1099,7 @@ fn resolve_max_history_clamps_below_floor() {
 fn resolve_max_history_clamps_zero() {
     let manifest = AgentManifest {
         name: "agent-e".into(),
+        source_template: None,
         max_history_messages: Some(0),
         ..AgentManifest::default()
     };
@@ -1103,6 +1113,7 @@ fn resolve_max_history_passes_through_at_floor_and_above() {
 
     let manifest_at_floor = AgentManifest {
         name: "agent-f".into(),
+        source_template: None,
         max_history_messages: Some(MIN_HISTORY_MESSAGES),
         ..AgentManifest::default()
     };
@@ -1113,6 +1124,7 @@ fn resolve_max_history_passes_through_at_floor_and_above() {
 
     let manifest_above_floor = AgentManifest {
         name: "agent-f".into(),
+        source_template: None,
         max_history_messages: Some(200),
         ..AgentManifest::default()
     };
@@ -1125,6 +1137,7 @@ fn resolve_max_history_clamps_manifest_at_upper_limit() {
 
     let manifest_at_limit = AgentManifest {
         name: "agent-g".into(),
+        source_template: None,
         max_history_messages: Some(500),
         ..AgentManifest::default()
     };
@@ -1132,6 +1145,7 @@ fn resolve_max_history_clamps_manifest_at_upper_limit() {
 
     let manifest_above_limit = AgentManifest {
         name: "agent-g".into(),
+        source_template: None,
         max_history_messages: Some(501),
         ..AgentManifest::default()
     };
@@ -1142,6 +1156,7 @@ fn resolve_max_history_clamps_manifest_at_upper_limit() {
 fn resolve_max_history_clamps_opts_at_upper_limit() {
     let manifest = AgentManifest {
         name: "agent-h".into(),
+        source_template: None,
         ..AgentManifest::default()
     };
 

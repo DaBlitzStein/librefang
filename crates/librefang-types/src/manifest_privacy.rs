@@ -280,6 +280,8 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         // Instance-specific: the principal an agent acts for names a `[[users]]` /
         // `[[groups]]` entry in *this* deployment, which means nothing in another one.
         owner: _,
+        // Instance-specific: names a template in *this* deployment's workspace.
+        source_template: _,
         module,
         schedule,
         session_mode,
@@ -344,6 +346,7 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         description,
         author: String::new(),
         owner: None,
+        source_template: None,
         module,
         schedule,
         session_mode,
@@ -1119,6 +1122,7 @@ mod tests {
     fn leaky_manifest() -> AgentManifest {
         let mut manifest = AgentManifest {
             name: "researcher".to_string(),
+            source_template: None,
             description: "Reads sources and writes briefs.".to_string(),
             module: "builtin:chat".to_string(),
             author: "jane.doe@acme-internal.example".to_string(),
@@ -1584,6 +1588,7 @@ mod tests {
     fn detector_stays_quiet_on_an_already_portable_manifest() {
         let manifest = AgentManifest {
             name: "summariser".to_string(),
+            source_template: None,
             description: "Turns long documents into short ones.".to_string(),
             module: "builtin:chat".to_string(),
             tags: vec!["writing".to_string()],
@@ -1597,6 +1602,7 @@ mod tests {
     fn detector_flags_a_credential_pasted_into_a_retained_system_prompt() {
         let mut manifest = AgentManifest {
             name: "leaker".to_string(),
+            source_template: None,
             description: "d".to_string(),
             ..AgentManifest::default()
         };
@@ -1623,6 +1629,7 @@ mod tests {
     fn detector_flags_a_host_path_in_a_retained_description() {
         let manifest = AgentManifest {
             name: "pathy".to_string(),
+            source_template: None,
             description: "Indexes the notes under /Users/janedoe/vault every morning.".to_string(),
             ..AgentManifest::default()
         };
@@ -1637,6 +1644,7 @@ mod tests {
     fn detector_flags_a_private_endpoint_in_a_retained_tag() {
         let manifest = AgentManifest {
             name: "endpointy".to_string(),
+            source_template: None,
             description: "d".to_string(),
             tags: vec!["https://wiki.acme.internal/agents".to_string()],
             ..AgentManifest::default()
@@ -1652,6 +1660,7 @@ mod tests {
     fn detector_flags_personal_data_in_a_retained_prompt() {
         let mut manifest = AgentManifest {
             name: "pii".to_string(),
+            source_template: None,
             description: "d".to_string(),
             ..AgentManifest::default()
         };
@@ -1668,6 +1677,7 @@ mod tests {
     fn detector_does_not_mistake_a_model_id_for_a_credential() {
         let mut manifest = AgentManifest {
             name: "modelly".to_string(),
+            source_template: None,
             description: "d".to_string(),
             ..AgentManifest::default()
         };
@@ -1716,6 +1726,7 @@ mod tests {
         }
         let manifest = AgentManifest {
             name: "deep".to_string(),
+            source_template: None,
             description: "d".to_string(),
             response_format: Some(crate::config::ResponseFormat::JsonSchema {
                 name: "deep".to_string(),
