@@ -100,6 +100,8 @@ impl LibreFangKernel {
                     warn!(agent = %entry.name, "Failed to persist manifest to disk: {error}");
                 } else {
                     debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
+                    // Record version snapshot for history.
+                    self.record_manifest_version(entry, &toml_str, "api");
                 }
             }
             // Not a cosmetic warning: boot reconciliation re-syncs each agent from its on-disk
@@ -981,6 +983,37 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
         Ok(())
+    }
+
+    /// Best-effort record of a manifest snapshot for version history.
+    fn record_manifest_version(
+        &self,
+        entry: &librefang_types::agent::AgentEntry,
+        toml_str: &str,
+        change_source: &str,
+    ) {
+        let store = librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+        if let Err(e) =
+            store.record_version(&entry.id.to_string(), &entry.name, toml_str, change_source)
+        {
+            warn!(
+                agent = %entry.name,
+                error = %e,
+                "Failed to record manifest version snapshot"
+            );
+        }
+    }
+
+    /// List manifest version history for an agent, newest first.
+    pub fn manifest_versions_for_agent(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> KernelResult<Vec<librefang_memory::ManifestVersionRow>> {
+        let store = librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+        store
+            .list_for_agent(&agent_id.to_string(), limit)
+            .map_err(KernelError::LibreFang)
     }
 }
 

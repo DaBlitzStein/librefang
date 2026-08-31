@@ -22,7 +22,6 @@ import {
   isToolAllowed,
   isToolBlocked,
   resolveMcpGrantMode,
-  toggleMcpServerGrant,
 } from "../lib/toolGrants";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
@@ -37,7 +36,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, ChevronRight, Check, Save, Library, Radio } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, History } from "lucide-react";
 import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -74,13 +73,12 @@ import {
   useAgentTools,
   useAgentSkills,
   useAgentMcpServers,
-  useAgentManifest,
-  useAgentChannels,
+  useAgentManifestHistory,
   usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
 import {
-  useAgentTypeToml,
+  useAgentTemplateToml,
   useCloneAgent,
   useDeleteAgent,
   usePatchAgent,
@@ -91,8 +89,6 @@ import {
   useSuspendAgent,
   useUpdateAgentTools,
   useSetAgentSkills,
-  useSetAgentMcpServers,
-  useSetAgentChannels,
 } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 
@@ -314,186 +310,6 @@ export function SystemPromptSection({
   );
 }
 
-/**
- * Editable Description quick-widget for the Configure drawer (#7742).
- * Mirrors `SystemPromptSection`'s draft/dirty/save shape: `description` is
- * backend-supported (`lifecycle.rs: patch_agent` → `update_description`)
- * but had no dashboard call site before this — the field only ever showed
- * up read-only, and only when non-empty.
- */
-export function DescriptionSection({
-  agentId,
-  description,
-}: {
-  agentId: string;
-  description: string;
-}) {
-  const { t } = useTranslation();
-  const addToast = useUIStore((s) => s.addToast);
-
-  const current = description ?? "";
-  const [draft, setDraft] = useState(current);
-  useEffect(() => {
-    setDraft(current);
-  }, [current]);
-
-  const patchAgent = usePatchAgent();
-  const dirty = draft !== current;
-
-  const save = () => {
-    if (!dirty || patchAgent.isPending) return;
-    patchAgent.mutate(
-      { agentId, body: { description: draft } },
-      {
-        onSuccess: () =>
-          addToast(
-            t("agents.detail.description_saved", { defaultValue: "Description saved" }),
-            "success",
-          ),
-        onError: (e: Error) =>
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
-      },
-    );
-  };
-
-  return (
-    <section>
-      <h4 className="text-sm font-semibold mb-2">
-        {t("agents.detail.description", { defaultValue: "Description" })}
-      </h4>
-      <textarea
-        value={draft}
-        disabled={patchAgent.isPending}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder={t("agents.detail.description_placeholder", {
-          defaultValue: "No description set.",
-        })}
-        rows={2}
-        className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm resize-y disabled:opacity-50 focus:outline-none focus:border-brand"
-      />
-      <div className="flex justify-end mt-2">
-        <button
-          type="button"
-          disabled={!dirty || patchAgent.isPending}
-          onClick={save}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors"
-        >
-          {patchAgent.isPending ? (
-            <Loader2 className="w-3 h-3 animate-spin" />
-          ) : (
-            <Save className="w-3 h-3" />
-          )}
-          {t("common.save")}
-        </button>
-      </div>
-    </section>
-  );
-}
-
-/**
- * Channels quick-widget for the Configure drawer (#7742). `PUT
- * /api/agents/{id}/channels` has existed since `config.rs` shipped
- * `get_agent_channels` / `set_agent_channels` (promised when #4912 / #4963
- * closed) but never got a dashboard client — this is that client. Reuses
- * `MultiSelectCmdk`, the same picker skills/tools already use, seeded from
- * the instance's configured channel types.
- */
-export function ChannelsSection({ agentId }: { agentId: string }) {
-  const { t } = useTranslation();
-  const addToast = useUIStore((s) => s.addToast);
-
-  const channelsQuery = useAgentChannels(agentId);
-  const setChannels = useSetAgentChannels();
-
-  const assigned = useMemo(() => channelsQuery.data?.assigned ?? [], [channelsQuery.data]);
-  const available = channelsQuery.data?.available ?? [];
-  const [draft, setDraft] = useState<string[] | null>(null);
-  // Reset the draft whenever the agent changes (drawer reused across
-  // selections) or the persisted value moves out from under a pristine draft.
-  useEffect(() => {
-    setDraft(null);
-  }, [agentId]);
-
-  const current = draft ?? assigned;
-  const dirty =
-    draft !== null &&
-    (draft.length !== assigned.length || draft.some((c) => !assigned.includes(c)));
-
-  const save = () => {
-    if (draft === null || setChannels.isPending) return;
-    setChannels.mutate(
-      { agentId, channels: draft },
-      {
-        onSuccess: () => {
-          addToast(
-            t("agents.detail.channels_saved", { defaultValue: "Channels updated" }),
-            "success",
-          );
-          setDraft(null);
-        },
-        onError: (e: Error) =>
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
-      },
-    );
-  };
-
-  return (
-    <section>
-      <h4 className="text-sm font-semibold mb-2 flex items-center gap-2">
-        <Radio className="w-3.5 h-3.5 text-brand" />
-        {t("agents.detail.channels", { defaultValue: "Channels" })}
-      </h4>
-      <p className="text-[11px] text-text-dim mb-2 leading-relaxed">
-        {t("agents.detail.channels_hint", {
-          defaultValue: "Empty means reachable from every configured channel.",
-        })}
-      </p>
-      {channelsQuery.isLoading ? (
-        <p className="text-xs text-text-dim">{t("common.loading", { defaultValue: "Loading..." })}</p>
-      ) : available.length > 0 ? (
-        <MultiSelectCmdk
-          options={available}
-          value={current}
-          onChange={(next) => setDraft(typeof next === "function" ? next(current) : next)}
-          placeholder={t("agents.detail.channels_search_placeholder", {
-            defaultValue: "Search channels…",
-          })}
-        />
-      ) : (
-        <p className="text-xs text-text-dim">
-          {t("agents.detail.no_channels_configured", {
-            defaultValue: "No channels configured on this instance.",
-          })}
-        </p>
-      )}
-      {dirty && (
-        <div className="flex justify-end gap-2 mt-2">
-          <button
-            type="button"
-            onClick={() => setDraft(null)}
-            className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle"
-          >
-            {t("common.cancel")}
-          </button>
-          <button
-            type="button"
-            disabled={setChannels.isPending}
-            onClick={save}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors"
-          >
-            {setChannels.isPending ? (
-              <Loader2 className="w-3 h-3 animate-spin" />
-            ) : (
-              <Save className="w-3 h-3" />
-            )}
-            {t("common.save")}
-          </button>
-        </div>
-      )}
-    </section>
-  );
-}
-
 export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -548,11 +364,6 @@ export function AgentsPage() {
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
   const [toolsDraft, setToolsDraft] = useState<string[] | null>(null);
-  // Staged `mcp_servers` grant list for the Tools tab's MCP groups (#6565
-  // follow-up). Independent from `toolsDraft` because it saves through a
-  // different endpoint (`PUT /agents/{id}/mcp_servers`, not
-  // `/agents/{id}/tools`) — see `handleSave` in `renderToolsTab`.
-  const [mcpServersDraft, setMcpServersDraft] = useState<string[] | null>(null);
   const [expandedToolGroup, setExpandedToolGroup] = useState<string | null>(null);
   // Skills tab draft — mirrors `toolsDraft`. Holds the staged per-agent skill
   // allowlist; `null` = pristine (no edits). Add/remove/customize/reset only
@@ -560,28 +371,13 @@ export function AgentsPage() {
   // the PUT — leaving the tab discards the draft (the "change your mind" path).
   const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "tools" | "schedule" | "logs"
+    "conversation" | "memory" | "skills" | "tools" | "schedule" | "logs" | "history"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
   // popping a drawer; the drawer is only opened when the user explicitly
   // clicks "Configure" / "Edit" from the detail header's overflow menu.
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
-  // Full manifest editor (#7742) — the "long path" reachable from the
-  // Configure drawer for every field `AgentManifestForm` covers, not just
-  // the dozen quick-edit widgets already in the drawer. Seeded from
-  // `GET /agents/{id}/manifest` (raw TOML) the first time it opens for a
-  // given agent; `manifestEditorSeeded` gates the seed effect so a
-  // background refetch of that query (e.g. from an unrelated invalidation)
-  // never clobbers in-progress edits.
-  const [manifestEditorOpen, setManifestEditorOpen] = useState(false);
-  const [manifestEditorSeeded, setManifestEditorSeeded] = useState(false);
-  const [manifestEditorFormState, setManifestEditorFormState] =
-    useState<ManifestFormState>(emptyManifestForm);
-  const [manifestEditorExtras, setManifestEditorExtras] =
-    useState<ManifestExtras>(emptyManifestExtras);
-  const [manifestEditorErrors, setManifestEditorErrors] = useState<Set<string>>(new Set());
-  const [manifestEditorParseError, setManifestEditorParseError] = useState<string | null>(null);
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
   const templatesQuery = useAgentTemplates({
@@ -610,8 +406,7 @@ export function AgentsPage() {
   const cloneMutation = useCloneAgent();
   const resetSessionMutation = useResetAgentSession();
   const updateToolsMutation = useUpdateAgentTools();
-  const setAgentMcpServersMutation = useSetAgentMcpServers();
-  const templateTomlMutation = useAgentTypeToml();
+  const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
 
   const rawDeleteMutation = useDeleteAgent();
@@ -750,8 +545,7 @@ export function AgentsPage() {
     enabled:
       (showToolsEditor && !!toolsEditorAgentId) ||
       (showCreate && createMode === "form") ||
-      (!!detailAgent && agentTab === "tools") ||
-      manifestEditorOpen,
+      (!!detailAgent && agentTab === "tools"),
   });
   const agentToolsQuery = useAgentTools(toolsEditorAgentId ?? "", { enabled: showToolsEditor && !!toolsEditorAgentId });
   const toolsEditorLoading = showToolsEditor && !!toolsEditorAgentId && (toolsListQuery.isLoading || agentToolsQuery.isLoading);
@@ -864,10 +658,14 @@ export function AgentsPage() {
   });
   const setAgentSkillsMutation = useSetAgentSkills();
 
+  // Manifest version history — fetched only when the History tab is active.
+  const manifestHistoryQuery = useAgentManifestHistory(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "history",
+  });
+
   useEffect(() => {
     if (agentTab !== "tools") {
       setToolsDraft(null);
-      setMcpServersDraft(null);
       setExpandedToolGroup(null);
       return;
     }
@@ -917,21 +715,9 @@ export function AgentsPage() {
   // Separate models query for the create-form's chosen provider. We don't
   // reuse modelsQuery because that one is gated on the inline-edit widget's
   // selection, which is unrelated to the create modal.
-  //
-  // Shared with the full manifest editor (#7742): the create dialog and
-  // the editor drawer are never open at the same time in normal use, so one
-  // query serves both — it just needs to read whichever surface is active
-  // for its provider filter.
-  const formModelsQueryProvider = showCreate
-    ? formState.model.provider
-    : manifestEditorFormState.model.provider;
   const formModelsQuery = useModels(
-    { provider: formModelsQueryProvider },
-    {
-      enabled:
-        ((showCreate && createMode === "form") || manifestEditorOpen) &&
-        !!formModelsQueryProvider.trim(),
-    },
+    { provider: formState.model.provider },
+    { enabled: showCreate && createMode === "form" && !!formState.model.provider.trim() },
   );
 
   const providersQuery = useProviders();
@@ -946,11 +732,6 @@ export function AgentsPage() {
   // the cache.
   const skillsQuery = useSkills({
     enabled: !!detailAgent || (showCreate && createMode === "form"),
-  });
-  // Raw manifest TOML for the full manifest editor (#7742) — only fetched
-  // while that drawer is open for the currently selected agent.
-  const agentManifestQuery = useAgentManifest(detailAgent?.id ?? "", {
-    enabled: manifestEditorOpen && !!detailAgent,
   });
   const skillDescriptionByName = useMemo(() => {
     const map = new Map<string, string>();
@@ -1006,19 +787,6 @@ export function AgentsPage() {
         : undefined,
     [toolsListQuery.data],
   );
-  // Descriptions for the Tools Editor drawer's three `MultiSelectCmdk`
-  // fields (Declared Tools / Allowlist / Blocklist), keyed by tool name.
-  // Was the one `MultiSelectCmdk` call-site in the dashboard missing
-  // `optionMeta` — every other one (AgentTypesPage, AgentManifestForm)
-  // passes it so search matches on description too. Reuses
-  // `toolCatalogForForm` rather than mapping `toolsListQuery.data` again.
-  const toolsEditorOptionMeta = useMemo(() => {
-    const meta: Record<string, { description?: string }> = {};
-    for (const entry of toolCatalogForForm ?? []) {
-      if (entry.description) meta[entry.name] = { description: entry.description };
-    }
-    return meta;
-  }, [toolCatalogForForm]);
   // Configured MCP servers catalog for the create-dialog finder (#5246).
   // The MCP servers field previously rendered as a free-text TagInput,
   // forcing users to remember server names exactly. Gate-fetch the
@@ -1029,7 +797,7 @@ export function AgentsPage() {
   // and reopening the dialog triggers a fresh fetch via the `enabled`
   // toggle anyway.
   const mcpServersQuery = useMcpServers({
-    enabled: (showCreate && createMode === "form") || manifestEditorOpen,
+    enabled: showCreate && createMode === "form",
     refetchInterval: false,
   });
   const mcpCatalogForForm = useMemo<
@@ -1102,60 +870,6 @@ export function AgentsPage() {
       setTomlParseError(null);
     }
     setCreateMode(next);
-  };
-
-  // Full manifest editor (#7742) — open/close/seed/save. Distinct from the
-  // create dialog's Form⇄TOML sync above: this is a single seed-once
-  // parse (the drawer's own TOML source is the server, not a sibling tab),
-  // not a bidirectional textarea round-trip.
-  const openManifestEditor = () => {
-    setManifestEditorSeeded(false);
-    setManifestEditorErrors(new Set());
-    setManifestEditorParseError(null);
-    setManifestEditorOpen(true);
-  };
-  const closeManifestEditor = () => {
-    setManifestEditorOpen(false);
-  };
-  useEffect(() => {
-    if (!manifestEditorOpen || manifestEditorSeeded) return;
-    if (!agentManifestQuery.data) return;
-    const parsed = parseManifestToml(agentManifestQuery.data);
-    if (parsed.ok) {
-      setManifestEditorFormState(parsed.form);
-      setManifestEditorExtras(parsed.extras);
-      setManifestEditorParseError(null);
-    } else {
-      setManifestEditorParseError(
-        parsed.message === "json_schema_unsafe_integer"
-          ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message,
-      );
-    }
-    setManifestEditorSeeded(true);
-  }, [manifestEditorOpen, manifestEditorSeeded, agentManifestQuery.data, t]);
-
-  const saveManifestEditor = () => {
-    if (!detailAgent) return;
-    const errors = validateManifestForm(manifestEditorFormState);
-    setManifestEditorErrors(new Set(errors));
-    if (errors.length > 0) return;
-    const toml = serializeManifestForm(manifestEditorFormState, manifestEditorExtras);
-    patchAgentMutation.mutate(
-      { agentId: detailAgent.id, body: { manifest_toml: toml } },
-      {
-        onSuccess: async () => {
-          addToast(
-            t("agents.detail.manifest_saved", { defaultValue: "Configuration saved" }),
-            "success",
-          );
-          await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-          closeManifestEditor();
-        },
-        onError: (e: Error) =>
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
-      },
-    );
   };
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
@@ -1310,14 +1024,6 @@ export function AgentsPage() {
           <span className="truncate min-w-0">
             {agent.schedule || t("agents.schedule_manual", { defaultValue: "manual" })}
           </span>
-          {agent.source_template && (
-            <>
-              <span className="text-text-dim/60">·</span>
-              <span className="truncate min-w-0">
-                {t("agents.origin_template", { name: agent.source_template })}
-              </span>
-            </>
-          )}
           <span className="ml-auto shrink-0 tabular-nums">
             {stats.sessions24h} · ${stats.cost24h.toFixed(2)}
           </span>
@@ -1343,6 +1049,7 @@ export function AgentsPage() {
       { id: "tools",        label: t("agents.tab.tools",        { defaultValue: "Tools" }),        Icon: Wrench },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
+      { id: "history",      label: t("agents.tab.history",      { defaultValue: "History" }),      Icon: History },
     ];
 
     const live = agentStatsQuery.data;
@@ -1591,6 +1298,7 @@ export function AgentsPage() {
       case "tools":             return renderToolsTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
+      case "history":           return renderHistoryTab(agent);
     }
   };
 
@@ -2085,12 +1793,7 @@ export function AgentsPage() {
     const usesAll = declared.length === 0;
     const draft = toolsDraft ?? [];
     const draftSet = new Set(draft);
-    // Builtin (`capabilities_tools`) dirty flag — drives the "all" vs
-    // allowlist view switch and the declared-tool count in the header.
-    // Kept separate from the MCP draft below because the two save through
-    // different endpoints and toggling one must not force a re-render of
-    // the other's view.
-    const isBuiltinDirty = toolsDraft !== null &&
+    const isDirty = toolsDraft !== null &&
       (draft.length !== declared.length || draft.some((n) => !declared.includes(n)));
 
     // #6565: MCP tools are granted by the agent's `mcp_servers` allowlist, not by `capabilities_tools` — the kernel explicitly skips the declared-tools filter for them (`tools_and_skills.rs`, Step 3).
@@ -2098,30 +1801,17 @@ export function AgentsPage() {
     const blocklist = agentToolCfg?.tool_blocklist ?? [];
     // `tool_allowlist` is the other half of the kernel's Step 4 filter and applies to MCP tools too since #6495, so a non-empty allowlist that names no `mcp__*` glob strips the entire server even while `mcp_servers` still grants it.
     const allowlist = agentToolCfg?.tool_allowlist ?? [];
-    // Staged MCP grant list (#6565 follow-up). `mcpServersDraft` mirrors
-    // `toolsDraft`'s "null = pristine" convention: nothing is written to
-    // `agent.toml: mcp_servers` until Save. `mcpDraftArr` is what the group
-    // cards read for live grant state; `persistedMcpServers` is the
-    // server-as-of-last-fetch baseline `isMcpDirty` compares against.
-    const persistedMcpServers = agent.mcp_servers ?? [];
-    const mcpDraftArr = mcpServersDraft ?? persistedMcpServers;
-    const isMcpDirty = mcpServersDraft !== null &&
-      (mcpServersDraft.length !== persistedMcpServers.length ||
-        mcpServersDraft.some((n) => !persistedMcpServers.includes(n)));
     // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, and `tools_disabled` short-circuits every tool before that.
     // Both hard switches have to fold into "none", or an `mcp_disabled` agent with `mcp_servers = ["*"]` renders as a live grant.
-    // Once the operator stages an edit, the mode is re-derived from the draft array alone (mirrors `usesAll`/`isBuiltinDirty` for capabilities_tools) rather than the server's last-known mode string, so a fresh single-server grant reads as "allowlist" immediately instead of staying pinned at the persisted "none".
-    const mcpModeEffective =
+    const mcpMode =
       agent.tools_disabled || agent.mcp_disabled
         ? "none"
-        : mcpServersDraft !== null
-          ? resolveMcpGrantMode(mcpServersDraft, undefined)
-          : resolveMcpGrantMode(agent.mcp_servers, agent.mcp_servers_mode);
+        : resolveMcpGrantMode(agent.mcp_servers, agent.mcp_servers_mode);
     const isMcpGroup = (groupName: string) => mcpServerByGroup.has(groupName);
     const isMcpGroupGranted = (groupName: string) => {
       const server = mcpServerByGroup.get(groupName);
       if (server === undefined) return false;
-      return isMcpServerGranted(server, mcpDraftArr, mcpModeEffective);
+      return isMcpServerGranted(server, agent.mcp_servers, mcpMode);
     };
     // Whether one tool inside a group counts as active for display purposes.
     const isToolActive = (groupName: string, tool: ToolDefinition): boolean => {
@@ -2159,18 +1849,9 @@ export function AgentsPage() {
     };
 
     const handleToggleGroup = (groupName: string) => {
-      if (isMcpGroup(groupName)) {
-        // MCP grants live in `agent.toml: mcp_servers`, a separate
-        // draft/endpoint from `capabilities_tools` (#6565 follow-up) — see
-        // `handleSave`. Nothing to toggle once the server is already
-        // granted through the `["*"]`/"all" wildcard; that requires
-        // editing the wildcard itself, not a per-server pin.
-        const server = mcpServerByGroup.get(groupName);
-        if (!server || mcpModeEffective === "all") return;
-        setMcpServersDraft((prev) => toggleMcpServerGrant(prev ?? persistedMcpServers, server));
-        if (expandedToolGroup === groupName) setExpandedToolGroup(null);
-        return;
-      }
+      // MCP grants live in `agent.toml: mcp_servers`, which this tab's save endpoint (`PUT /api/agents/{id}/tools`) cannot write — it only carries capabilities_tools / tool_allowlist / tool_blocklist.
+      // Writing MCP tool names into capabilities_tools would look like it worked and change nothing, so the MCP groups are read-only here and point at the MCP servers tab instead (#6565).
+      if (isMcpGroup(groupName)) return;
       const groupTools = grouped.get(groupName) ?? [];
       const names = groupTools.map((t) => t.name);
       const status = getGroupStatus(groupName, groupTools);
@@ -2187,9 +1868,7 @@ export function AgentsPage() {
     };
 
     const handleToggleTool = (groupName: string, toolName: string) => {
-      // MCP tools aren't filtered by `capabilities_tools` (#6565), so
-      // per-tool assignment inside an MCP group has nowhere to write — the
-      // group itself is the unit of grant, handled by `handleToggleGroup`.
+      // Same reasoning as `handleToggleGroup`: a per-tool toggle inside an MCP group has nowhere valid to write (#6565).
       if (isMcpGroup(groupName)) return;
       setToolsDraft((prev) => {
         const s = new Set(prev ?? []);
@@ -2201,57 +1880,29 @@ export function AgentsPage() {
 
     const handleSave = () => {
       if (!agent.id) return;
-      const agentId = agent.id;
-      if (isBuiltinDirty) {
-        updateToolsMutation.mutate(
-          {
-            agentId,
-            payload: {
-              capabilities_tools: draft,
-              tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
-              tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
-            },
+      updateToolsMutation.mutate(
+        {
+          agentId: agent.id,
+          payload: {
+            capabilities_tools: draft,
+            tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
+            tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
           },
-          {
-            onSuccess: () => {
-              addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
-              setToolsDraft(null);
-              setExpandedToolGroup(null);
-            },
-            onError: (e) => {
-              addToast(
-                toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
-                "error",
-              );
-            },
+        },
+        {
+          onSuccess: () => {
+            addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
+            setToolsDraft(null);
+            setExpandedToolGroup(null);
           },
-        );
-      }
-      if (isMcpDirty) {
-        setAgentMcpServersMutation.mutate(
-          { agentId, mcpServers: mcpDraftArr },
-          {
-            onSuccess: async () => {
-              await refreshDetailAgent(agentId, agent.is_hand);
-              addToast(
-                t("agents.detail.tools_mcp_saved", { defaultValue: "MCP servers updated" }),
-                "success",
-              );
-              setMcpServersDraft(null);
-              setExpandedToolGroup(null);
-            },
-            onError: (e) => {
-              addToast(
-                toastErr(
-                  e,
-                  t("agents.detail.tools_mcp_save_failed", { defaultValue: "Failed to update MCP servers" }),
-                ),
-                "error",
-              );
-            },
+          onError: (e) => {
+            addToast(
+              toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
+              "error",
+            );
           },
-        );
-      }
+        },
+      );
     };
 
     // Declared MCP servers with no live connection (#7713). The kernel derives
@@ -2270,67 +1921,6 @@ export function AgentsPage() {
       ([name, tools]) => getGroupStatus(name, tools) === "none",
     );
 
-    // Shared per-tool checklist rendered under an expanded group, for both
-    // the assigned and available sections (#6565 follow-up — previously
-    // only the assigned section could expand). MCP rows stay non-clickable
-    // (`handleToggleTool` no-ops for them) — the server as a whole is
-    // granted/revoked from the group header, individual MCP tools are only
-    // ever filtered further by `tool_allowlist` / `tool_blocklist`.
-    const renderGroupToolList = (
-      groupName: string,
-      groupTools: ToolDefinition[],
-      mcpGroup: boolean,
-    ) => (
-      <div className="ml-4 mt-1.5 flex flex-col gap-1">
-        {mcpGroup && (
-          <p className="px-2.5 py-1.5 text-[10.5px] text-text-dim/70">
-            {t("agents.detail.tools_mcp_readonly", {
-              defaultValue:
-                "MCP tools are granted per server via mcp_servers in agent.toml. Toggle the group above to grant or revoke this server — individual tools are further filtered by tool_allowlist and tool_blocklist.",
-            })}
-          </p>
-        )}
-        {groupTools.map((tool) => {
-          const isActive = isToolActive(groupName, tool);
-          const blocked = mcpGroup && isToolBlocked(tool.name, blocklist);
-          return (
-            <div
-              key={tool.name}
-              onClick={() => handleToggleTool(groupName, tool.name)}
-              className={`flex items-center gap-2 px-2.5 py-1.5 rounded border transition-colors ${
-                mcpGroup ? "cursor-default" : "cursor-pointer"
-              } ${
-                isActive
-                  ? `border-brand/20 bg-main/40${mcpGroup ? "" : " hover:border-red-400/30"}`
-                  : `border-border-subtle bg-main/20 opacity-60${mcpGroup ? "" : " hover:border-brand/30 hover:opacity-100"}`
-              }`}
-            >
-              <div
-                className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${
-                  isActive ? "border-brand bg-brand/20" : "border-text-dim/30"
-                }`}
-              >
-                {isActive && <Check className="w-2 h-2 text-brand" />}
-              </div>
-              <span className="font-mono text-[11px] text-text-main truncate flex-1 min-w-0">
-                {tool.name}
-              </span>
-              {blocked && (
-                <span className="font-mono text-[9.5px] text-amber-500/80 shrink-0">
-                  {t("agents.detail.tools_blocked", { defaultValue: "blocklisted" })}
-                </span>
-              )}
-              {tool.description && (
-                <span className="font-mono text-[9.5px] text-text-dim/60 truncate max-w-[50%] hidden sm:inline">
-                  {tool.description}
-                </span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    );
-
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
@@ -2339,7 +1929,7 @@ export function AgentsPage() {
             {" · "}
             {isLoading
               ? "…"
-              : usesAll && !isBuiltinDirty
+              : usesAll && !isDirty
                 ? t("agents.detail.tools_all", { defaultValue: "all" })
                 : draft.length}
           </div>
@@ -2382,7 +1972,7 @@ export function AgentsPage() {
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
             <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
           </div>
-        ) : usesAll && !isBuiltinDirty ? (
+        ) : usesAll && !isDirty ? (
           sortedGroups.length > 0 ? (
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -2416,7 +2006,7 @@ export function AgentsPage() {
                                   defaultValue: "granted via mcp_servers",
                                 })
                               : t("agents.detail.tools_mcp_not_granted", {
-                                  defaultValue: "not granted — customize to grant individual servers",
+                                  defaultValue: "grant on the MCP servers tab",
                                 })}
                         </div>
                       </div>
@@ -2424,15 +2014,12 @@ export function AgentsPage() {
                   );
                 })}
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
+              <button
                 onClick={handleCustomize}
-                data-testid="tools-customize-btn"
-                className="self-start"
+                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
               >
                 {t("agents.detail.tools_customize", { defaultValue: "Customize — switch to allowlist" })}
-              </Button>
+              </button>
             </>
           ) : (
             <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
@@ -2456,7 +2043,6 @@ export function AgentsPage() {
                   const activeCount = activeCountIn(groupName, groupTools);
                   const isExpanded = expandedToolGroup === groupName;
                   const mcpGroup = isMcpGroup(groupName);
-                  const mcpRemovable = mcpGroup && mcpModeEffective !== "all";
                   return (
                     <div key={groupName} className="flex flex-col">
                       <div
@@ -2499,7 +2085,7 @@ export function AgentsPage() {
                               className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "" : "-rotate-90"}`}
                             />
                           </button>
-                          {(!mcpGroup || mcpRemovable) && (
+                          {!mcpGroup && (
                             <button
                               onClick={() => handleToggleGroup(groupName)}
                               className="text-text-dim hover:text-red-400 transition-colors p-0.5"
@@ -2510,7 +2096,56 @@ export function AgentsPage() {
                           )}
                         </div>
                       </div>
-                      {isExpanded && renderGroupToolList(groupName, groupTools, mcpGroup)}
+                      {isExpanded && (
+                        <div className="ml-4 mt-1.5 flex flex-col gap-1">
+                          {mcpGroup && (
+                            <p className="px-2.5 py-1.5 text-[10.5px] text-text-dim/70">
+                              {t("agents.detail.tools_mcp_readonly", {
+                                defaultValue:
+                                  "This server is granted through mcp_servers in agent.toml. Change the grant on the MCP servers tab; individual tools are filtered by tool_allowlist and tool_blocklist.",
+                              })}
+                            </p>
+                          )}
+                          {groupTools.map((tool) => {
+                            const isActive = isToolActive(groupName, tool);
+                            const blocked = mcpGroup && isToolBlocked(tool.name, blocklist);
+                            return (
+                              <div
+                                key={tool.name}
+                                onClick={() => handleToggleTool(groupName, tool.name)}
+                                className={`flex items-center gap-2 px-2.5 py-1.5 rounded border transition-colors ${
+                                  mcpGroup ? "cursor-default" : "cursor-pointer"
+                                } ${
+                                  isActive
+                                    ? `border-brand/20 bg-main/40${mcpGroup ? "" : " hover:border-red-400/30"}`
+                                    : `border-border-subtle bg-main/20 opacity-60${mcpGroup ? "" : " hover:border-brand/30 hover:opacity-100"}`
+                                }`}
+                              >
+                                <div
+                                  className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${
+                                    isActive ? "border-brand bg-brand/20" : "border-text-dim/30"
+                                  }`}
+                                >
+                                  {isActive && <Check className="w-2 h-2 text-brand" />}
+                                </div>
+                                <span className="font-mono text-[11px] text-text-main truncate flex-1 min-w-0">
+                                  {tool.name}
+                                </span>
+                                {blocked && (
+                                  <span className="font-mono text-[9.5px] text-amber-500/80 shrink-0">
+                                    {t("agents.detail.tools_blocked", { defaultValue: "blocklisted" })}
+                                  </span>
+                                )}
+                                {tool.description && (
+                                  <span className="font-mono text-[9.5px] text-text-dim/60 truncate max-w-[50%] hidden sm:inline">
+                                    {tool.description}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -2524,46 +2159,36 @@ export function AgentsPage() {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {availableGroups.map(([groupName, groupTools]) => {
+                    // An ungranted MCP server cannot be assigned from this tab — `PUT /api/agents/{id}/tools` has no `mcp_servers` field (#6565), so it renders as a non-interactive hint.
                     const mcpGroup = isMcpGroup(groupName);
-                    const isExpanded = expandedToolGroup === groupName;
                     return (
-                      <div key={groupName} className="flex flex-col">
-                        <div
-                          onClick={() => handleToggleGroup(groupName)}
-                          className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 cursor-pointer hover:border-brand/40"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
-                              {mcpGroup ? (
-                                <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
-                              ) : (
-                                <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
-                              )}
-                              {groupName}
-                            </div>
-                            <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                              {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
-                              {" · "}
-                              {t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
-                            </div>
+                      <div
+                        key={groupName}
+                        onClick={mcpGroup ? undefined : () => handleToggleGroup(groupName)}
+                        className={`px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 ${
+                          mcpGroup ? "cursor-default" : "cursor-pointer hover:border-brand/40"
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                            {mcpGroup ? (
+                              <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                            ) : (
+                              <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                            )}
+                            {groupName}
                           </div>
-                          <div className="flex items-center gap-1 shrink-0 mt-0.5">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setExpandedToolGroup(isExpanded ? null : groupName);
-                              }}
-                              className="text-text-dim hover:text-brand transition-colors p-0.5"
-                              title={t("agents.detail.tools_fine_grain", { defaultValue: "Configure individual tools" })}
-                            >
-                              <ChevronDown
-                                className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "" : "-rotate-90"}`}
-                              />
-                            </button>
-                            <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                            {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
+                            {" · "}
+                            {mcpGroup
+                              ? t("agents.detail.tools_mcp_not_granted", {
+                                  defaultValue: "grant on the MCP servers tab",
+                                })
+                              : t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
                           </div>
                         </div>
-                        {isExpanded && renderGroupToolList(groupName, groupTools, mcpGroup)}
+                        {!mcpGroup && <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />}
                       </div>
                     );
                   })}
@@ -2585,13 +2210,9 @@ export function AgentsPage() {
             variant="primary"
             size="sm"
             onClick={handleSave}
-            disabled={
-              !(isBuiltinDirty || isMcpDirty) ||
-              updateToolsMutation.isPending ||
-              setAgentMcpServersMutation.isPending
-            }
+            disabled={!isDirty || updateToolsMutation.isPending}
           >
-            {updateToolsMutation.isPending || setAgentMcpServersMutation.isPending
+            {updateToolsMutation.isPending
               ? t("common.saving", { defaultValue: "Saving..." })
               : t("common.save", { defaultValue: "Save" })}
           </Button>
@@ -2681,6 +2302,51 @@ export function AgentsPage() {
                   {formatLine(e)}
                 </span>
               </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------- History tab — manifest version timeline
+  const renderHistoryTab = (_agent: AgentDetail) => {
+    const versions = manifestHistoryQuery.data ?? [];
+    const fmtTs = (s?: string): string => {
+      if (!s) return "—";
+      try {
+        return new Date(s + "Z").toLocaleString();
+      } catch {
+        return s;
+      }
+    };
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+          {t("agents.detail.manifest_history", { defaultValue: "Manifest history" })} · {versions.length}
+        </div>
+        {manifestHistoryQuery.isLoading ? (
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
+        ) : versions.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_history", { defaultValue: "No config changes recorded yet." })}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {versions.map((v) => (
+              <details
+                key={v.id}
+                className="rounded-md border border-border-subtle bg-main/40 group"
+              >
+                <summary className="px-3 py-2 cursor-pointer text-[12px] flex items-center gap-2 select-none">
+                  <History className="w-3.5 h-3.5 text-text-dim shrink-0" />
+                  <span className="font-medium">{fmtTs(v.timestamp)}</span>
+                  <span className="text-text-dim">· {v.change_source}</span>
+                </summary>
+                <pre className="px-3 pb-3 text-[11px] font-mono leading-[1.6] max-h-60 overflow-auto whitespace-pre-wrap break-all text-text-dim">
+                  {v.manifest_toml}
+                </pre>
+              </details>
             ))}
           </div>
         )}
@@ -2962,38 +2628,6 @@ export function AgentsPage() {
             </div>
             {/* Body — scrollable inspectable sections. */}
             <div className="px-6 py-5 space-y-5">
-
-              {/* Full manifest editor entry point (#7742). The widgets below
-                  only cover a fraction of AgentManifest's fields — this is
-                  the discoverable "long path" to everything else
-                  (resources, autonomy, response format, routing, …)
-                  without dropping to SSH + agent.toml. */}
-              <button
-                type="button"
-                onClick={openManifestEditor}
-                className="w-full flex items-center justify-between gap-3 rounded-lg border border-dashed border-brand/40 bg-brand/5 px-4 py-3 text-left hover:bg-brand/10 transition-colors"
-              >
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-brand">
-                    {t("agents.detail.edit_full_manifest", { defaultValue: "Edit full configuration" })}
-                  </p>
-                  <p className="text-[11px] text-text-dim mt-0.5 leading-relaxed">
-                    {t("agents.detail.edit_full_manifest_hint", {
-                      defaultValue: "Every manifest field — resources, capabilities, autonomy, response format, and more.",
-                    })}
-                  </p>
-                </div>
-                <ChevronRight className="w-4 h-4 text-brand shrink-0" />
-              </button>
-
-              {/* Description */}
-              <DescriptionSection
-                agentId={detailAgent.id}
-                description={(detailAgent as AgentView).description ?? ""}
-              />
-
-              {/* Channels */}
-              <ChannelsSection agentId={detailAgent.id} />
 
               {/* Model */}
               {detailAgent.model && (
@@ -3382,37 +3016,6 @@ export function AgentsPage() {
                 )}
               </div>
 
-              {detailAgent.injected_footprint_tokens != null && detailAgent.injected_footprint_tokens > 0 && (
-                <div className="rounded-lg bg-main/30 p-3 space-y-1.5">
-                  <p className="text-[11px] font-bold text-text-dim">
-                    {t("agents.token_usage_title", { defaultValue: "Token footprint" })}
-                  </p>
-                  <div className="flex justify-between text-[11px] border-t border-border/40 pt-1.5">
-                    <span className="font-bold">
-                      {t("agents.token_injected_total", { defaultValue: "Injected per request" })}
-                    </span>
-                    <span className="font-mono font-bold">
-                      {detailAgent.injected_footprint_tokens.toLocaleString()}
-                    </span>
-                  </div>
-                  {(agentEventsQuery.data ?? []).length > 0 && (
-                    <div className="border-t border-border/40 pt-1.5 space-y-1">
-                      <p className="text-[10px] text-text-dim">
-                        {t("agents.token_recent", { defaultValue: "Recent calls" })}
-                      </p>
-                      {(agentEventsQuery.data ?? []).slice(0, 5).map((call, i) => (
-                        <div key={`${call.timestamp}-${i}`} className="flex justify-between text-[10px]">
-                          <span className="text-text-dim truncate">{call.model}</span>
-                          <span className="font-mono">
-                            {call.input_tokens}/{call.output_tokens} · ${call.cost_usd.toFixed(4)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
               <Button
                 variant="secondary"
                 size="sm"
@@ -3423,82 +3026,6 @@ export function AgentsPage() {
                 {t("agents.prompts")}
               </Button>
             </div>
-        </DrawerPanel>
-      )}
-
-      {/* Full Manifest Editor (#7742) — the "long path" reachable from the
-          "Edit full configuration" button at the top of the Configure
-          drawer. Reuses AgentManifestForm (previously create-agent-only),
-          seeded from GET /agents/{id}/manifest and saved through
-          PATCH /agents/{id} (manifest_toml). */}
-      {detailAgent && manifestEditorOpen && (
-        <DrawerPanel
-          isOpen={manifestEditorOpen}
-          onClose={closeManifestEditor}
-          title={t("agents.detail.edit_full_manifest", { defaultValue: "Edit full configuration" })}
-          size="2xl"
-        >
-          <div className="p-5 space-y-4">
-            {agentManifestQuery.isLoading ? (
-              <p className="text-xs text-text-dim flex items-center gap-2">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                {t("common.loading", { defaultValue: "Loading..." })}
-              </p>
-            ) : manifestEditorParseError ? (
-              <p className="text-xs text-error">
-                {t("agents.form.toml_parse_error", { msg: manifestEditorParseError })}
-              </p>
-            ) : agentManifestQuery.isError ? (
-              <p className="text-xs text-error">
-                {t("agents.detail.manifest_load_failed", {
-                  defaultValue: "Failed to load the current configuration.",
-                })}
-              </p>
-            ) : (
-              <div className="max-h-[65vh] overflow-y-auto pr-1">
-                <AgentManifestForm
-                  value={manifestEditorFormState}
-                  onChange={setManifestEditorFormState}
-                  providers={formProviderOptions}
-                  models={formModelOptions}
-                  invalidFields={manifestEditorErrors}
-                  extras={manifestEditorExtras}
-                  skillCatalog={skillCatalogForForm}
-                  toolCatalog={toolCatalogForForm}
-                  mcpCatalog={mcpCatalogForForm}
-                  nameLocked
-                />
-              </div>
-            )}
-            {patchAgentMutation.error && (
-              <p className="text-xs text-error">
-                {toastErr(patchAgentMutation.error, String(patchAgentMutation.error))}
-              </p>
-            )}
-            <div className="flex gap-2 pt-2">
-              <Button
-                variant="primary"
-                className="flex-1"
-                onClick={saveManifestEditor}
-                disabled={
-                  patchAgentMutation.isPending ||
-                  agentManifestQuery.isLoading ||
-                  !!manifestEditorParseError ||
-                  agentManifestQuery.isError
-                }
-              >
-                {patchAgentMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin mr-1" />
-                ) : (
-                  <Save className="w-4 h-4 mr-1" />
-                )}
-                {t("common.save")}
-              </Button>
-              <Button variant="secondary" onClick={closeManifestEditor}>
-                {t("common.cancel")}
-              </Button>
-            </div>
-          </div>
         </DrawerPanel>
       )}
 
@@ -3551,12 +3078,10 @@ export function AgentsPage() {
                   </div>
                   <MultiSelectCmdk
                     options={availableToolNames}
-                    optionMeta={toolsEditorOptionMeta}
                     value={capabilitiesToolsDraft}
                     onChange={setCapabilitiesToolsDraft}
                     placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
                     disabled={toolsDisabledState}
-                    allowFreeText
                   />
                 </div>
 
@@ -3571,12 +3096,10 @@ export function AgentsPage() {
                   </div>
                   <MultiSelectCmdk
                     options={availableToolNames}
-                    optionMeta={toolsEditorOptionMeta}
                     value={toolAllowlistDraft}
                     onChange={setToolAllowlistDraft}
                     placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
                     disabled={toolsDisabledState}
-                    allowFreeText
                   />
                 </div>
 
@@ -3591,12 +3114,10 @@ export function AgentsPage() {
                   </div>
                   <MultiSelectCmdk
                     options={availableToolNames}
-                    optionMeta={toolsEditorOptionMeta}
                     value={toolBlocklistDraft}
                     onChange={setToolBlocklistDraft}
                     placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
                     disabled={toolsDisabledState}
-                    allowFreeText
                   />
                 </div>
 

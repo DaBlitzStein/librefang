@@ -71,24 +71,13 @@ export const agentKeys = {
   // PUT only invalidates the skill read, not the tool read.
   skills: (agentId: string) =>
     [...agentKeys.all, "skills", agentId] as const,
-  // Per-agent MCP server grant — no dedicated GET hook reads this yet (the
-  // grant is read off `agentKeys.detail()`'s `mcp_servers` /
-  // `mcp_servers_mode` fields), but the mutation still invalidates this
-  // subtree for forward compatibility with a future
-  // `GET /agents/{id}/mcp_servers` hook.
+  // Per-agent MCP server assignment (#7713) — backs the pending-server surface
+  // on the agent detail Tools tab. Its own subtree for the same reason `skills`
+  // is separate from `tools`: an MCP read must not be invalidated by a tool write.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
-  // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest
-  // editor, distinct from `detail(id)`'s curated JSON projection.
-  manifest: (agentId: string) =>
-    [...agentKeys.all, "manifest", agentId] as const,
-  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
-  // Channels section. Named distinctly from `channelKeys` (the
-  // instance-wide `/api/channels` integration domain) to avoid confusion
-  // between "channels this agent is reachable from" and "channels
-  // configured on this instance".
-  channels: (agentId: string) =>
-    [...agentKeys.all, "channels", agentId] as const,
+  manifestHistory: (agentId: string) =>
+    [...agentKeys.all, "manifestHistory", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
@@ -128,18 +117,6 @@ export const modelKeys = {
   detail: (id: string) => [...modelKeys.details(), id] as const,
   overrides: (modelKey: string) =>
     [...modelKeys.all, "overrides", modelKey] as const,
-};
-
-// Profile-based model routing. `profiles()` is the kernel-wide catalog
-// (builtin asset + `~/.librefang/model_profiles.toml`); `agent(id)` is one
-// agent's mode + router override. Both hang off `all` so a mutation can
-// invalidate the whole domain in a single call.
-export const modelRouterKeys = {
-  all: ["modelRouter"] as const,
-  lists: () => [...modelRouterKeys.all, "list"] as const,
-  profiles: () => [...modelRouterKeys.lists(), "profiles"] as const,
-  details: () => [...modelRouterKeys.all, "detail"] as const,
-  agent: (agentId: string) => [...modelRouterKeys.details(), agentId] as const,
 };
 
 export const providerKeys = {
