@@ -309,6 +309,10 @@ impl App {
                 self.workflows.status_msg = crate::i18n::t("tui-mod-workflow-created");
                 self.refresh_workflows();
             }
+            AppEvent::WorkflowParamsLoaded(params) => {
+                self.workflows.run_params = params;
+                self.workflows.param_cursor = 0;
+            }
             AppEvent::TriggerListLoaded(list) => {
                 self.triggers.triggers = list;
                 if !self.triggers.triggers.is_empty() {
@@ -1729,6 +1733,11 @@ impl App {
                         steps_json,
                         self.event_tx.clone(),
                     );
+                }
+            }
+            workflows::WorkflowAction::FetchWorkflowParams(wf_id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_workflow_params(backend, wf_id, self.event_tx.clone());
                 }
             }
             workflows::WorkflowAction::RunWorkflow { id, input } => {
