@@ -29,7 +29,8 @@ export const agentTypeKeys = {
   list: () => [...agentTypeKeys.lists()] as const,
   details: () => [...agentTypeKeys.all, "detail"] as const,
   detail: (name: string) => [...agentTypeKeys.details(), name] as const,
-  history: (name: string) => [...agentTypeKeys.detail(name), "history"] as const,
+  histories: () => [...agentTypeKeys.all, "history"] as const,
+  history: (name: string) => [...agentTypeKeys.histories(), name] as const,
 };
 
 export const agentKeys = {
@@ -77,8 +78,6 @@ export const agentKeys = {
   // is separate from `tools`: an MCP read must not be invalidated by a tool write.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
-  manifestHistory: (agentId: string) =>
-    [...agentKeys.all, "manifestHistory", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview

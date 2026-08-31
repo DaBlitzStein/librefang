@@ -1062,18 +1062,7 @@
     "qr_expired_restart": "QR 코드가 만료되었습니다. 다시 시도하려면 사이드카를 다시 시작하세요.",
     "qr_login": "QR 로그인",
     "qr_scan_with_app": "{{channel}} 앱으로 스캔하세요",
-    "sidecar_details": "Out-of-Process 사이드카 어댑터로 실행됩니다. config.toml에서 관리하세요([[sidecar_channels]]) — 구성 → 사이드카 채널 또는 채널 카드의 기어를 사용하여 구성 서랍을 엽니다.",
-    "instance_count_one": "{{count}}개 인스턴스",
-    "instance_count_other": "{{count}}개 인스턴스",
-    "instance_name_label": "인스턴스 이름",
-    "instance_name_placeholder": "예: telegram-support",
-    "instance_name_hint_first": "이 인스턴스의 고유한 이름입니다. 아직 구성된 인스턴스가 없으므로 채널 유형으로 기본 설정됩니다.",
-    "instance_name_hint_next": "이 채널 유형에는 이미 {{count}}개의 구성된 인스턴스가 있습니다. 기존 봇을 덮어쓰지 않도록 고유한 이름을 선택하세요.",
-    "instance_name_hint_edit": "여기서는 인스턴스 이름을 변경할 수 없습니다 — 이름을 바꾸려면 제거 후 다시 추가하세요.",
-    "default_agent_label": "기본 에이전트",
-    "default_agent_none": "기본값 없음(사용 가능한 첫 번째 에이전트)",
-    "default_agent_none_short": "없음",
-    "default_agent_hint": "더 구체적인 바인딩이 없는 이 인스턴스의 수신 메시지는 이 에이전트로 라우팅됩니다."
+    "sidecar_details": "Out-of-Process 사이드카 어댑터로 실행됩니다. config.toml에서 관리하세요([[sidecar_channels]]) — 구성 → 사이드카 채널 또는 채널 카드의 기어를 사용하여 구성 서랍을 엽니다."
   },
   "skills": {
     "title": "기술",
@@ -4136,10 +4125,6 @@
     "edit_title": "{{name}} 편집",
     "empty_description": "시스템 프롬프트와 도구·스킬 구성을 여러 에이전트에서 재사용하려면 하나 만들어 보세요.",
     "empty_title": "아직 에이전트 타입이 없습니다",
-    "history": "History",
-    "history_empty": "No version history yet",
-    "history_empty_desc": "Version snapshots are recorded when a template is created or edited.",
-    "history_title": "History: {{name}}",
     "inherit_placeholder": "default",
     "managed_elsewhere": "에이전트에서 관리",
     "managed_elsewhere_hint": "이 항목은 실행 중인 에이전트의 매니페스트입니다. 에이전트 페이지에서 편집하세요.",
@@ -4165,10 +4150,6 @@
     "quick_run_task": "작업",
     "quick_run_task_placeholder": "이번 주 릴리스 노트를 요약해 주세요…",
     "quick_run_title": "빠른 실행 — {{name}}",
-    "restore": "Restore this version",
-    "restore_btn": "Restore",
-    "restore_failed": "Restore failed",
-    "restored": "Version restored",
     "save_failed": "에이전트 타입을 저장하지 못했습니다",
     "saved": "에이전트 타입을 저장했습니다",
     "skills": "스킬",
@@ -4180,12 +4161,14 @@
     "title": "에이전트 타입",
     "tools": "도구",
     "tools_hint": "이 데몬이 제공하는 도구 목록에서 선택하며, 목록에 없는 식별자도 입력할 수 있습니다.",
-    "tools_search": "도구 검색…",
-    "promote": "레지스트리에 등록",
-    "confirm_promote": "에이전트 유형 '{{name}}'을(를) 공개 레지스트리에 등록하시겠습니까? 매니페스트가 정리된 후 GitHub pull request로 제출됩니다.",
-    "promoted": "레지스트리 PR 생성됨",
-    "promote_failed": "에이전트 유형을 등록할 수 없습니다",
-    "promote_success": "레지스트리에 pull request가 생성되었습니다. 검토 후 병합하세요.",
-    "view_pr": "Pull request 보기"
+    "tools_search": "도구 검색…"
+  },
+  "templateHistory": {
+    "button": "기록",
+    "title": "버전 기록 — {{name}}",
+    "source": "출처",
+    "restore": "복원",
+    "restoreConfirm": "이 버전을 복원할까요? 현재 에이전트 타입이 이 버전으로 바뀌며, 다른 항목은 삭제되지 않습니다.",
+    "empty": "저장된 버전이 아직 없습니다."
   }
 }

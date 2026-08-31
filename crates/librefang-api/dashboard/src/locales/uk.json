@@ -1062,20 +1062,7 @@
     "qr_expired_restart": "QR-код застарів — перезапустіть sidecar, щоб спробувати ще раз",
     "qr_login": "QR-вхід",
     "qr_scan_with_app": "Відскануйте у застосунку {{channel}}",
-    "sidecar_details": "Запускається як зовнішній sidecar-адаптер. Керуйте ним у config.toml ([[sidecar_channels]]) — Config → Sidecar Channels, або відкрийте drawer налаштування через шестерню на картці каналу.",
-    "instance_count_one": "{{count}} екземпляр",
-    "instance_count_few": "{{count}} екземпляри",
-    "instance_count_many": "{{count}} екземплярів",
-    "instance_count_other": "{{count}} екземпляра",
-    "instance_name_label": "Ім'я екземпляра",
-    "instance_name_placeholder": "напр. telegram-support",
-    "instance_name_hint_first": "Унікальне ім'я для цього екземпляра. За замовчуванням — тип каналу, оскільки жодного ще не налаштовано.",
-    "instance_name_hint_next": "Цей тип каналу вже має {{count}} налаштованих екземплярів. Виберіть унікальне ім'я, щоб створити новий, а не перезаписати наявного бота.",
-    "instance_name_hint_edit": "Ім'я екземпляра тут змінити не можна — видаліть і додайте знову, щоб перейменувати.",
-    "default_agent_label": "Агент за замовчуванням",
-    "default_agent_none": "Без значення за замовчуванням (перший доступний агент)",
-    "default_agent_none_short": "Немає",
-    "default_agent_hint": "Вхідні повідомлення цього екземпляра без більш конкретної прив'язки маршрутизуються до цього агента."
+    "sidecar_details": "Запускається як зовнішній sidecar-адаптер. Керуйте ним у config.toml ([[sidecar_channels]]) — Config → Sidecar Channels, або відкрийте drawer налаштування через шестерню на картці каналу."
   },
   "skills": {
     "title": "Скіли",
@@ -4146,10 +4133,6 @@
     "edit_title": "Редагувати {{name}}",
     "empty_description": "Створіть тип, щоб повторно використовувати системний промпт, набір інструментів і скілів.",
     "empty_title": "Типів агентів ще немає",
-    "history": "History",
-    "history_empty": "No version history yet",
-    "history_empty_desc": "Version snapshots are recorded when a template is created or edited.",
-    "history_title": "History: {{name}}",
     "inherit_placeholder": "default",
     "managed_elsewhere": "Керується в Агентах",
     "managed_elsewhere_hint": "Цей запис — маніфест активного агента. Редагуйте його на сторінці Агенти.",
@@ -4175,10 +4158,6 @@
     "quick_run_task": "Завдання",
     "quick_run_task_placeholder": "Стисло опиши нотатки до випуску за цей тиждень…",
     "quick_run_title": "Швидкий запуск — {{name}}",
-    "restore": "Restore this version",
-    "restore_btn": "Restore",
-    "restore_failed": "Restore failed",
-    "restored": "Version restored",
     "save_failed": "Не вдалося зберегти тип агента",
     "saved": "Тип агента збережено",
     "skills": "Скіли",
@@ -4190,12 +4169,14 @@
     "title": "Типи агентів",
     "tools": "Інструменти",
     "tools_hint": "Обираються зі списку інструментів цього демона; невідомі ідентифікатори можна ввести вручну.",
-    "tools_search": "Пошук інструментів…",
-    "promote": "Опублікувати в реєстрі",
-    "confirm_promote": "Опублікувати тип агента '{{name}}' в публічному реєстрі? Маніфест буде очищений для публікації і надісланий як pull request на GitHub.",
-    "promoted": "PR в реєстр створено",
-    "promote_failed": "Не вдалося опублікувати тип агента",
-    "promote_success": "Pull request створено в реєстрі. Перегляньте і злийте, коли буде готово.",
-    "view_pr": "Переглянути pull request"
+    "tools_search": "Пошук інструментів…"
+  },
+  "templateHistory": {
+    "button": "Історія",
+    "title": "Історія версій — {{name}}",
+    "source": "Джерело",
+    "restore": "Відновити",
+    "restoreConfirm": "Відновити цю версію? Вона стане поточним типом агента; нічого іншого не буде видалено.",
+    "empty": "Збережених версій ще немає."
   }
 }

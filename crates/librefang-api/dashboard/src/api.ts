@@ -1735,31 +1735,30 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
-// ---------------------------------------------------------------------------
-// Template version history
-// ---------------------------------------------------------------------------
-
-export interface TemplateVersionEntry {
-  id: number;
+export interface TemplateVersion {
+  id: string;
   template_name: string;
-  timestamp: string;
-  manifest_toml: string;
-  change_source: string;
+  toml_snapshot: string;
+  source: string;
+  created_at: string;
 }
 
-export async function getTemplateHistory(
+export async function listTemplateHistory(
   name: string,
   limit = 30,
-): Promise<{ versions: TemplateVersionEntry[] }> {
-  return get(`/api/templates/${encodeURIComponent(name)}/history?limit=${limit}`);
+): Promise<TemplateVersion[]> {
+  const data = await get<{ versions: TemplateVersion[] }>(
+    `/api/templates/${encodeURIComponent(name)}/history?limit=${limit}`,
+  );
+  return data.versions ?? [];
 }
 
 export async function restoreTemplateVersion(
   name: string,
-  versionId: number,
+  versionId: string,
 ): Promise<AgentTypeDetail> {
   return post<AgentTypeDetail>(
-    `/api/templates/${encodeURIComponent(name)}/history/${versionId}/restore`,
+    `/api/templates/${encodeURIComponent(name)}/history/${encodeURIComponent(versionId)}/restore`,
     {},
   );
 }

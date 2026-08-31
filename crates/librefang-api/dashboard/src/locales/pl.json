@@ -1062,20 +1062,7 @@
     "qr_expired_restart": "Kod QR wygasł — uruchom ponownie sidecar, aby spróbować ponownie",
     "qr_login": "Logowanie QR",
     "qr_scan_with_app": "Zeskanuj za pomocą swojej aplikacji {{channel}}",
-    "sidecar_details": "Działa jako zewnętrzny proces sidecar. Zarządzaj nim w config.toml ([[sidecar_channels]]) — Konfiguracja → Kanały Sidecar, lub użyj ikony koła zębatego na karcie kanału, aby otworzyć panel konfiguracji.",
-    "instance_count_one": "{{count}} instancja",
-    "instance_count_few": "{{count}} instancje",
-    "instance_count_many": "{{count}} instancji",
-    "instance_count_other": "{{count}} instancji",
-    "instance_name_label": "Nazwa instancji",
-    "instance_name_placeholder": "np. telegram-support",
-    "instance_name_hint_first": "Unikalna nazwa dla tej instancji. Domyślnie ustawiana na typ kanału, ponieważ żadna nie jest jeszcze skonfigurowana.",
-    "instance_name_hint_next": "Ten typ kanału ma już skonfigurowane {{count}} instancje. Wybierz unikalną nazwę, aby utworzyć nową zamiast nadpisywać istniejącego bota.",
-    "instance_name_hint_edit": "Nazwy instancji nie można tutaj zmienić — usuń i dodaj ponownie, aby ją zmienić.",
-    "default_agent_label": "Domyślny agent",
-    "default_agent_none": "Brak domyślnego (pierwszy dostępny agent)",
-    "default_agent_none_short": "Brak",
-    "default_agent_hint": "Wiadomości przychodzące na tej instancji bez bardziej szczegółowego powiązania trafiają do tego agenta."
+    "sidecar_details": "Działa jako zewnętrzny proces sidecar. Zarządzaj nim w config.toml ([[sidecar_channels]]) — Konfiguracja → Kanały Sidecar, lub użyj ikony koła zębatego na karcie kanału, aby otworzyć panel konfiguracji."
   },
   "skills": {
     "title": "Umiejętności",
@@ -4146,10 +4133,6 @@
     "edit_title": "Edytuj {{name}}",
     "empty_description": "Utwórz typ, aby ponownie wykorzystać prompt systemowy oraz zestaw narzędzi i umiejętności.",
     "empty_title": "Brak typów agentów",
-    "history": "History",
-    "history_empty": "No version history yet",
-    "history_empty_desc": "Version snapshots are recorded when a template is created or edited.",
-    "history_title": "History: {{name}}",
     "inherit_placeholder": "default",
     "managed_elsewhere": "Zarządzane w Agentach",
     "managed_elsewhere_hint": "Ten wpis to manifest działającego agenta. Edytuj go na stronie Agenci.",
@@ -4175,10 +4158,6 @@
     "quick_run_task": "Zadanie",
     "quick_run_task_placeholder": "Streść informacje o wydaniu z tego tygodnia…",
     "quick_run_title": "Szybkie uruchomienie — {{name}}",
-    "restore": "Restore this version",
-    "restore_btn": "Restore",
-    "restore_failed": "Restore failed",
-    "restored": "Version restored",
     "save_failed": "Nie udało się zapisać typu agenta",
     "saved": "Zapisano typ agenta",
     "skills": "Umiejętności",
@@ -4190,12 +4169,14 @@
     "title": "Typy agentów",
     "tools": "Narzędzia",
     "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
-    "tools_search": "Szukaj narzędzi…",
-    "promote": "Opublikuj w rejestrze",
-    "confirm_promote": "Opublikować typ agenta '{{name}}' w publicznym rejestrze? Manifest zostanie oczyszczony i przesłany jako pull request na GitHubie.",
-    "promoted": "PR w rejestrze utworzony",
-    "promote_failed": "Nie udało się opublikować typu agenta",
-    "promote_success": "Pull request został utworzony w rejestrze. Sprawdź i scal, gdy będzie gotowy.",
-    "view_pr": "Zobacz pull request"
+    "tools_search": "Szukaj narzędzi…"
+  },
+  "templateHistory": {
+    "button": "Historia",
+    "title": "Historia wersji — {{name}}",
+    "source": "Źródło",
+    "restore": "Przywróć",
+    "restoreConfirm": "Przywrócić tę wersję? Stanie się bieżącym typem agenta; nic innego nie zostanie usunięte.",
+    "empty": "Brak zapisanych wersji."
   }
 }
