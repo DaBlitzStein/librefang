@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 54;
+const SCHEMA_VERSION: u32 = 55;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -4209,6 +4209,15 @@ mod tests {
                 chat_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
                 PRIMARY KEY (chat_id, user_id)
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                messages BLOB NOT NULL,
+                context_window_tokens INTEGER DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             CREATE TABLE migrations (
                 version INTEGER PRIMARY KEY,
