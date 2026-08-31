@@ -466,6 +466,7 @@ fn reduce_capabilities(capabilities: ManifestCapabilities) -> ManifestCapabiliti
         shell: _,
         ofp_discover,
         ofp_connect: _,
+        routing,
     } = capabilities;
 
     ManifestCapabilities {
@@ -478,6 +479,11 @@ fn reduce_capabilities(capabilities: ManifestCapabilities) -> ManifestCapabiliti
         shell: Vec::new(),
         ofp_discover,
         ofp_connect: Vec::new(),
+        // Media capability routing names a provider and a model, exactly like
+        // `[model] provider` / `[model] model` — which [`reduce_model`] keeps.
+        // It describes what the type needs, carries no host target and no
+        // credential, so it survives publication for the same reason.
+        routing,
     }
 }
 
