@@ -514,7 +514,11 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
     if let Some(ref phase) = g.run_phase {
         let phase_style = match phase.as_str() {
             "running" => Style::default().fg(theme::GREEN),
+            "paused" => Style::default().fg(theme::YELLOW),
             "finished" => Style::default().fg(theme::ACCENT),
+            "max_iterations_reached" => Style::default().fg(theme::YELLOW),
+            "rate_limited" => Style::default().fg(theme::RED),
+            "stopped" => Style::default().fg(theme::TEXT_TERTIARY),
             _ => theme::dim_style(),
         };
         lines.push(Line::from(""));
@@ -693,6 +697,21 @@ pub fn goal_status_badge(status: &str) -> (String, Style) {
             crate::i18n::t("tui-goals-phase-canc"),
             Style::default().fg(theme::TEXT_TERTIARY),
         )
+    } else if lower.contains("paused") || lower.contains("stopped") {
+        (
+            crate::i18n::t("tui-goals-phase-paus"),
+            Style::default().fg(theme::YELLOW),
+        )
+    } else if lower.contains("rate_limited") {
+        (
+            crate::i18n::t("tui-goals-phase-rlim"),
+            Style::default().fg(theme::RED),
+        )
+    } else if lower.contains("max_iterations") {
+        (
+            crate::i18n::t("tui-goals-phase-mxit"),
+            Style::default().fg(theme::YELLOW),
+        )
     } else if lower.contains("failed") || lower.contains("error") {
         (
             crate::i18n::t("tui-goals-phase-fail"),
@@ -710,6 +729,7 @@ pub fn goal_status_badge(status: &str) -> (String, Style) {
 fn phase_message_key(phase: &str) -> Option<&'static str> {
     match phase {
         "running" => Some("tui-goals-run-running"),
+        "paused" => Some("tui-goals-run-paused"),
         "finished" => Some("tui-goals-run-finished"),
         "max_iterations_reached" => Some("tui-goals-run-max-iterations"),
         "rate_limited" => Some("tui-goals-run-rate-limited"),
