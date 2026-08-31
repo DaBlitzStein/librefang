@@ -1020,6 +1020,7 @@ impl TaskQueue for DispatchCapture {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("task".into())
     }
@@ -1712,6 +1713,7 @@ impl TaskQueue for MirrorKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
@@ -2069,6 +2071,7 @@ impl TaskQueue for ApprovalKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
@@ -2315,6 +2318,7 @@ impl TaskQueue for ForceHumanCapturingKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
