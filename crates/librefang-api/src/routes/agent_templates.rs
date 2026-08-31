@@ -1,6 +1,6 @@
 //! Tool profile + agent template endpoints — extracted from `system.rs` per #3749.
 //!
-//! Mounts `/profiles`, `/profiles/{name}`, `/templates`, `/templates/{name}`, and `/templates/{name}/toml`.
+//! Mounts `/profiles`, `/profiles/{name}`, `/templates`, `/templates/{name}`, `/templates/{name}/toml`, `/templates/{name}/registry-diff`, and `/templates/{name}/restore`.
 //! This module is a sibling under `routes::` and is mounted via `.merge(crate::routes::agent_templates::router())` from `system::router()`.
 //!
 //! `/templates` and `/templates/{name}` also carry the agent-type write verbs (#7740, #7731): `POST` creates an operator-authored agent type, `PUT` patches one, `DELETE` removes one.
@@ -35,6 +35,14 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route(
             "/templates/{name}/toml",
             axum::routing::get(get_agent_template_toml).put(put_agent_template_toml),
+        )
+        .route(
+            "/templates/{name}/registry-diff",
+            axum::routing::get(get_registry_diff),
+        )
+        .route(
+            "/templates/{name}/restore",
+            axum::routing::post(restore_from_registry),
         )
 }
 
@@ -759,6 +767,284 @@ pub async fn delete_agent_type(
         }
         Err(e) => {
             tracing::error!("Failed to delete agent type '{name}': {e}");
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registry diff + restore (#Task4)
+// ---------------------------------------------------------------------------
+
+/// Read the registry's copy of an agent type.
+///
+/// The registry checkout lives at `~/.librefang/registry/` and stores each
+/// agent type in a directory-per-type layout: `agent-types/{name}/agent.toml`
+/// (or legacy `agents/{name}/agent.toml`).
+/// Returns `Ok(None)` when the type is not in the registry.
+async fn read_registry_agent_type(name: &str) -> std::io::Result<Option<String>> {
+    let home = agent_types_dir()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let registry_cache = home.join("registry");
+    let Some(agent_types_src) =
+        librefang_types::registry_paths::resolve_agent_types_dir(&registry_cache)
+    else {
+        return Ok(None);
+    };
+    let manifest_path = agent_types_src.join(name).join("agent.toml");
+    match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// A single field-level difference between the local and registry manifests.
+#[derive(Debug, serde::Serialize)]
+struct FieldDiff {
+    field: String,
+    local: serde_json::Value,
+    registry: serde_json::Value,
+}
+
+/// Compare two manifests and return per-field diffs for the operator-visible projection.
+///
+/// Only compares the fields that matter for the operator: the same seven the
+/// editor can write plus a handful of structural ones. A full TOML string diff
+/// is also included so the operator sees the complete picture.
+fn diff_manifests(local: &AgentManifest, registry: &AgentManifest) -> Vec<FieldDiff> {
+    let mut diffs = Vec::new();
+
+    macro_rules! cmp {
+        ($field:ident) => {
+            if local.$field != registry.$field {
+                diffs.push(FieldDiff {
+                    field: stringify!($field).to_string(),
+                    local: serde_json::to_value(&local.$field).unwrap_or_default(),
+                    registry: serde_json::to_value(&registry.$field).unwrap_or_default(),
+                });
+            }
+        };
+    }
+    macro_rules! cmp_nested {
+        ($label:expr, $a:expr, $b:expr) => {
+            if $a != $b {
+                diffs.push(FieldDiff {
+                    field: $label.to_string(),
+                    local: serde_json::to_value(&$a).unwrap_or_default(),
+                    registry: serde_json::to_value(&$b).unwrap_or_default(),
+                });
+            }
+        };
+    }
+
+    cmp!(name);
+    cmp!(description);
+    cmp_nested!(
+        "model.provider",
+        local.model.provider,
+        registry.model.provider
+    );
+    cmp_nested!("model.model", local.model.model, registry.model.model);
+    cmp_nested!(
+        "model.system_prompt",
+        local.model.system_prompt,
+        registry.model.system_prompt
+    );
+    cmp!(module);
+    cmp!(tags);
+    cmp!(skills);
+    cmp_nested!(
+        "capabilities.tools",
+        local.capabilities.tools,
+        registry.capabilities.tools
+    );
+    cmp!(mcp_servers);
+    cmp!(tool_allowlist);
+    cmp!(tool_blocklist);
+
+    diffs
+}
+
+/// GET /api/templates/:name/registry-diff — Compare local agent type with its registry original.
+#[utoipa::path(
+    get,
+    path = "/api/templates/{name}/registry-diff",
+    tag = "system",
+    operation_id = "get_agent_type_registry_diff",
+    params(("name" = String, Path, description = "Agent type name")),
+    responses(
+        (status = 200, description = "Diff between local and registry versions"),
+        (status = 404, description = "Agent type or registry version not found"),
+    )
+)]
+pub async fn get_registry_diff(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
+    let (not_found, invalid_manifest, read_failed) = template_error_messages(lang, &name);
+    let registry_not_found = {
+        let t = ErrorTranslator::new(lang);
+        t.t_args("api-error-registry-type-not-found", &[("name", &name)])
+    };
+
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::not_found(not_found).into_json_tuple();
+    }
+
+    // Read local version.
+    let local_content = match read_agent_type(&name).await {
+        Ok(Some((_source, content))) => content,
+        Ok(None) => return ApiErrorResponse::not_found(not_found).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("Failed to read template '{name}': {e}");
+            return ApiErrorResponse::internal(read_failed).into_json_tuple();
+        }
+    };
+
+    let local_manifest: AgentManifest = match toml::from_str(&local_content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("Invalid local manifest for '{name}': {e}");
+            return ApiErrorResponse::internal(invalid_manifest).into_json_tuple();
+        }
+    };
+
+    // Read registry version.
+    let registry_content = match read_registry_agent_type(&name).await {
+        Ok(Some(content)) => content,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": registry_not_found,
+                    "code": "registry_type_not_found",
+                })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read registry type '{name}': {e}");
+            return ApiErrorResponse::internal(read_failed).into_json_tuple();
+        }
+    };
+
+    let registry_manifest: AgentManifest = match toml::from_str(&registry_content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("Invalid registry manifest for '{name}': {e}");
+            return ApiErrorResponse::internal(invalid_manifest).into_json_tuple();
+        }
+    };
+
+    let diffs = diff_manifests(&local_manifest, &registry_manifest);
+    let identical = diffs.is_empty();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": name,
+            "identical": identical,
+            "diffs": diffs,
+            "local_toml": local_content,
+            "registry_toml": registry_content,
+        })),
+    )
+}
+
+/// POST /api/templates/:name/restore — Overwrite local agent type with the registry version.
+#[utoipa::path(
+    post,
+    path = "/api/templates/{name}/restore",
+    tag = "system",
+    operation_id = "restore_agent_type_from_registry",
+    params(("name" = String, Path, description = "Agent type name")),
+    responses(
+        (status = 200, description = "Agent type restored from registry"),
+        (status = 404, description = "Agent type or registry version not found"),
+        (status = 409, description = "The name belongs to a live agent"),
+    )
+)]
+pub async fn restore_from_registry(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
+    let (not_found, invalid_manifest, read_failed) = template_error_messages(lang, &name);
+    let (registry_not_found, managed_elsewhere) = {
+        let t = ErrorTranslator::new(lang);
+        (
+            t.t_args("api-error-registry-type-not-found", &[("name", &name)]),
+            t.t_args("api-error-agent-type-not-editable", &[("name", &name)]),
+        )
+    };
+
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::not_found(not_found).into_json_tuple();
+    }
+
+    // Only agent-type files can be restored — a live agent is managed elsewhere.
+    match tokio::fs::metadata(agent_type_path(&name)).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return if workspace_agent_manifest_path(&name).exists() {
+                ApiErrorResponse::conflict(managed_elsewhere)
+                    .with_code("template_not_editable")
+                    .into_json_tuple()
+            } else {
+                ApiErrorResponse::not_found(not_found)
+                    .with_code("template_not_found")
+                    .into_json_tuple()
+            };
+        }
+        Err(e) => {
+            tracing::warn!("Failed to check agent type '{name}': {e}");
+            return ApiErrorResponse::internal(read_failed).into_json_tuple();
+        }
+    }
+
+    // Read the registry version.
+    let registry_content = match read_registry_agent_type(&name).await {
+        Ok(Some(content)) => content,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": registry_not_found,
+                    "code": "registry_type_not_found",
+                })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read registry type '{name}': {e}");
+            return ApiErrorResponse::internal(read_failed).into_json_tuple();
+        }
+    };
+
+    // Validate before writing.
+    let manifest: AgentManifest = match toml::from_str(&registry_content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("Invalid registry manifest for '{name}': {e}");
+            return ApiErrorResponse::internal(invalid_manifest).into_json_tuple();
+        }
+    };
+
+    // Write via the shared persist path (atomic rename).
+    match persist_agent_type(&name, &manifest) {
+        Ok(rendered) => (
+            StatusCode::OK,
+            Json(agent_type_detail(
+                &name,
+                TemplateSource::AgentType,
+                &manifest,
+                &rendered,
+            )),
+        ),
+        Err(e) => {
+            tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
     }
