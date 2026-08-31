@@ -7,7 +7,8 @@
 //! chosen provider surfaces as an `Err` to the caller.
 
 use librefang_types::media::{
-    MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding, MAX_AUDIO_BYTES,
+    CapabilityRouting, MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding,
+    MAX_AUDIO_BYTES,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -63,6 +64,31 @@ impl MediaEngine {
             config,
             semaphore: Arc::new(Semaphore::new(max)),
         }
+    }
+
+    pub fn image_description_enabled(&self) -> bool {
+        self.config.image_description
+    }
+
+    pub fn with_capability_routing(&self, routing: &CapabilityRouting) -> Self {
+        let mut config = self.config.clone();
+        if let Some(ref t) = routing.image_understanding {
+            if let Some(ref p) = t.provider {
+                config.image_provider = Some(p.clone());
+            }
+            if let Some(ref m) = t.model {
+                config.image_model = Some(m.clone());
+            }
+        }
+        if let Some(ref t) = routing.speech_to_text {
+            if let Some(ref p) = t.provider {
+                config.audio_provider = Some(p.clone());
+            }
+            if let Some(ref m) = t.model {
+                config.audio_model = Some(m.clone());
+            }
+        }
+        Self::new(config)
     }
 
     /// Describe an image using a vision-capable LLM.

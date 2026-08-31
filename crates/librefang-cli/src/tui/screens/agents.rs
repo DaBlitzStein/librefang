@@ -251,6 +251,10 @@ impl AgentSelectState {
         }
     }
 
+    pub fn on_token_usage_loaded(&mut self, usage: AgentTokenUsage) {
+        self.token_usage = Some(usage);
+    }
+
     pub fn reset(&mut self) {
         self.sub = AgentSubScreen::AgentList;
         self.list.select(Some(0));

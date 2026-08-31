@@ -28,7 +28,7 @@ export function TemplateHistoryModal({
   const history = useTemplateHistory(name, { enabled: open });
   const restoreMutation = useRestoreTemplateVersion();
 
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
   const [pendingRestore, setPendingRestore] = useState<TemplateVersion | null>(null);
 
   const versions = history.data ?? [];
@@ -36,7 +36,7 @@ export function TemplateHistoryModal({
   async function confirmRestore() {
     if (!pendingRestore) return;
     try {
-      await restoreMutation.mutateAsync({ name, versionId: pendingRestore.id });
+      await restoreMutation.mutateAsync({ name, version: pendingRestore.id });
       addToast(t("agentTypes.saved"), "success");
       setPendingRestore(null);
       onClose();
@@ -70,7 +70,7 @@ export function TemplateHistoryModal({
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="truncate text-[13px] font-semibold text-text-main">
-                      {new Date(v.created_at).toLocaleString()}
+                      {new Date(v.saved_at ?? v.created_at ?? "").toLocaleString()}
                     </span>
                     <Badge variant="default">{`${t("templateHistory.source")}: ${v.source}`}</Badge>
                   </div>

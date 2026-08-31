@@ -78,6 +78,20 @@ export const agentKeys = {
   // is separate from `tools`: an MCP read must not be invalidated by a tool write.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
+  manifest: (agentId: string) =>
+    [...agentKeys.all, "manifest", agentId] as const,
+  manifestHistory: (agentId: string) =>
+    [...agentKeys.all, "manifestHistory", agentId] as const,
+  channels: (agentId: string) =>
+    [...agentKeys.all, "channels", agentId] as const,
+};
+
+// Model routing (#7781)
+export const modelRouterKeys = {
+  all: ["modelRouter"] as const,
+  profiles: () => [...modelRouterKeys.all, "profiles"] as const,
+  agent: (agentId: string) =>
+    [...modelRouterKeys.all, "agent", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview

@@ -470,7 +470,6 @@
       "name_placeholder": "例如 my-agent",
       "module_placeholder": "例如 default",
       "model_id_placeholder": "例如 gpt-4o",
-      "temperature_placeholder": "0.7",
       "max_tokens_placeholder": "4096",
       "api_key_env_placeholder": "OPENAI_API_KEY",
       "base_url_placeholder": "https://api.example.com/v1",
@@ -501,7 +500,28 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "移除 fallback",
-      "remove_context_injection": "移除上下文注入"
+      "remove_context_injection": "移除上下文注入",
+      "add_folder": "Add folder",
+      "capability_inherit_placeholder": "Inherit from default",
+      "capability_routing": "Capability routing",
+      "capability_routing_hint": "Route media capabilities to specific providers",
+      "context_window": "Context window",
+      "context_window_placeholder": "Default",
+      "custom": "Custom",
+      "folder_name": "Folder name",
+      "folder_path": "Folder path",
+      "frequency_penalty": "Frequency penalty",
+      "limits_hint": "Override model limits for this agent",
+      "max_output_tokens": "Max output tokens",
+      "max_output_tokens_placeholder": "Default",
+      "name_locked_hint": "Agent name cannot be changed after creation",
+      "over_limit_warning": "Value exceeds recommended limit",
+      "preferences_hint": "Fine-tune model behavior for this agent",
+      "presence_penalty": "Presence penalty",
+      "remove_folder": "Remove folder",
+      "shared_folders": "Shared folders",
+      "shared_folders_hint": "Named directories shared between agents",
+      "top_p": "Top P"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",
@@ -868,7 +888,28 @@
     "tools_declared_desc": "此智能体可使用的工具。留空则可不受限制地访问所有工具。",
     "providers_error_loading": "加载错误",
     "no_providers": "没有供应商",
-    "select_provider_first": "请先选择供应商"
+    "select_provider_first": "请先选择供应商",
+    "routing": {
+      "saved": "Model routing saved",
+      "saveFailed": "Could not save model routing",
+      "loadFailed": "Could not load model routing",
+      "title": "Model routing",
+      "description": "Choose whether this agent always uses its own model, or lets the router pick one per task based on the work",
+      "disabledKernelWide": "Router off in config.toml",
+      "mode": "Mode",
+      "modeFixed": "Fixed model",
+      "modeFlexible": "Router chooses",
+      "modeFixedHint": "This agent always uses the provider and model in its own manifest.",
+      "modeFlexibleHint": "The router scores each turn and picks a matching profile. Constrain the choice below.",
+      "allowedProfiles": "Allowed profiles",
+      "noProfiles": "No model profiles configured",
+      "noProfilesHint": "Add profiles to ~/.librefang/model_profiles.toml to make them selectable here.",
+      "anyProfile": "None selected — the router may pick any profile.",
+      "someProfiles": "The router may only pick from the selected profiles.",
+      "costBudget": "Cost budget",
+      "noCap": "No cap",
+      "costBudgetHint": "The router will never pick a profile above this tier, even if the task matches one."
+    }
   },
   "providers": {
     "title": "供应商",
@@ -1069,7 +1110,17 @@
     "qr_expired_restart": "二维码已过期 — 请重启 sidecar 后重试",
     "qr_login": "二维码登录",
     "qr_scan_with_app": "请使用 {{channel}} 应用扫码",
-    "sidecar_details": "作为进程外 sidecar 适配器运行。请在 config.toml ([[sidecar_channels]]) 中管理，路径为 Config → Sidecar Channels，或使用通道卡片上的齿轮打开配置抽屉。"
+    "sidecar_details": "作为进程外 sidecar 适配器运行。请在 config.toml ([[sidecar_channels]]) 中管理，路径为 Config → Sidecar Channels，或使用通道卡片上的齿轮打开配置抽屉。",
+    "default_agent_label": "Default agent",
+    "default_agent_none_short": "None",
+    "instance_name_label": "Instance name",
+    "instance_name_placeholder": "e.g. telegram-support",
+    "instance_name_hint_first": "Unique name for this instance. Defaults to the channel type since none is configured yet.",
+    "instance_name_hint_next": "This channel type already has {{count}} configured instance(s). Pick a unique name so this becomes a new one instead of overwriting an existing bot.",
+    "instance_name_hint_edit": "The instance name cannot be changed here — remove and re-add to rename.",
+    "default_agent_none": "No default (first available agent)",
+    "default_agent_hint": "Inbound messages on this instance with no more specific binding route to this agent.",
+    "instance_count": "{{count}} instances"
   },
   "skills": {
     "title": "技能",
@@ -1707,9 +1758,6 @@
     "delete_failed": "删除失败",
     "run_failed": "运行失败",
     "run_started": "运行已启动",
-    "rerun": "用相同参数重跑",
-    "rerun_started": "已用相同参数重新运行",
-    "rerun_failed": "重跑失败",
     "schedule_failed": "创建计划失败",
     "skip": "跳过",
     "agent_not_found": "未找到 Agent",
@@ -1751,8 +1799,20 @@
       "empty_artifact": "（空产物）",
       "load_failed": "无法加载待处理的操作员审查。",
       "review_run": "审查 {{workflow}} — {{step}}",
-      "more_pending": "另有 {{count}} 项待处理"
-    }
+      "more_pending": "另有 {{count}} 项待处理",
+      "pending_review": "{{count}} workflow runs awaiting operator review"
+    },
+    "rerun_hint": "Re-run with these parameters",
+    "rerun_same": "Re-run with same parameters",
+    "step_executing": "Step {{current}}/{{total}} executing…",
+    "starting": "Starting…",
+    "console": "Console",
+    "step_pending": "Pending…",
+    "variables": "Variables",
+    "step_output": "Output",
+    "console_completed": "Completed",
+    "console_executing": "Executing…",
+    "console_failed": "Failed"
   },
   "scheduler": {
     "title": "调度器",
@@ -1999,7 +2059,10 @@
     "trigger_lane_help": "事件触发分发（TaskPosted、MessageReceived、…）",
     "default_per_agent_help": "当清单省略 max_concurrent_invocations 时的每智能体 fallback",
     "audit_anchor": "锚点",
-    "restore_keep_config": "保留我的配置（克隆模式）"
+    "restore_keep_config": "保留我的配置（克隆模式）",
+    "create_backup_confirm": "Create backup",
+    "create_backup_confirm_desc": "This will create a full backup of the current state.",
+    "create_backup_confirm_title": "Create backup?"
   },
   "logs": {
     "title": "日志",
@@ -2825,7 +2888,17 @@
     "run_active": "执行中 · 第 {{iteration}}/{{max}} 轮",
     "help": "Goals 是战略规划面——一棵 agent（或你）正在追的目标树，含进度、状态和父子关系。模板播种常见目标形状；树视图展示层级和向上汇总的进度。\n\n使用步骤：\n\n1. 创建。\"Create goal\" 打开表单填标题、描述、父目标、状态。或 \"Pick template\" 一次性铺开预置目标树（如 \"ship a feature\"、\"research a topic\"）。\n\n2. 跟踪。每个节点显示 pending / in-progress / completed。父节点进度由子节点汇总。点节点可内联编辑状态或描述。\n\n3. 清理。\"Clear all\" 整棵清空（带二次确认）——开新阶段时常用。\n\n跟 Scheduler / Workflows 的区别：\n\n  · Goals —— 想做什么。长期意图，可被 agent 读取。\n  · Scheduler / Workflows —— 怎么做。具体的触发与步骤。\n\n典型场景：\n\n  · 给 agent 一个长期方向，规划时可以参考。\n  · 跟踪一个跨周项目，人和 agent 都看同一棵树。\n\n注意事项：\n\n  · 模板是起点，应用后随便改。\n  · 删父节点会带走子节点，\"Clear all\" 前请确认。",
     "progress": "进度",
-    "status": "状态"
+    "status": "状态",
+    "run_pause": "Pause",
+    "run_resume": "Resume",
+    "assigned_agent": "Assigned agent",
+    "evaluator_model": "Evaluator model",
+    "evaluator_model_placeholder": "Default model",
+    "loop_engineering": "Loop engineering",
+    "loop_engineering_hint": "Enable iterative goal refinement",
+    "no_agent_selected": "No agent selected",
+    "no_verifier_selected": "No verifier selected",
+    "verifier_agent": "Verifier agent"
   },
   "sessions": {
     "title": "会话",
@@ -3542,7 +3615,8 @@
     "logs_empty_desc": "尚未公开单服务器 MCP 日志 — 请检查守护进程 stdout 中的连接跟踪。",
     "config_env_notice": "env 变量只按名称引用；连接时从主机环境解析密钥。",
     "tabs_label": "服务器视图",
-    "get_key": "获取密钥"
+    "get_key": "获取密钥",
+    "requires_env_count": "{{count}} key"
   },
   "toml_viewer": {
     "tab_toml": "TOML",
@@ -4068,7 +4142,21 @@
     "status_pending": "待处理",
     "status_in_progress": "进行中",
     "status_completed": "已完成",
-    "status_failed": "失败"
+    "status_failed": "失败",
+    "assignee_none": "Unassigned",
+    "field_description_hint": "Describe the task in detail",
+    "field_priority": "Priority",
+    "field_priority_hint": "Higher priority tasks are processed first",
+    "field_timeout": "Timeout",
+    "field_timeout_hint": "Maximum time in seconds before the task is cancelled",
+    "field_timeout_placeholder": "No timeout",
+    "no_agents_hint": "Create an agent first to assign tasks",
+    "priority_high": "High",
+    "priority_low": "Low",
+    "priority_normal": "Normal",
+    "priority_tooltip": "Task priority",
+    "priority_urgent": "Urgent",
+    "timeout_tooltip": "Task timeout"
   },
   "prompts": {
     "title": "提示词",
@@ -4180,7 +4268,6 @@
     "tools_search": "搜索工具…"
   },
   "templateHistory": {
-    "button": "历史",
     "title": "版本历史 — {{name}}",
     "source": "来源",
     "restore": "恢复",

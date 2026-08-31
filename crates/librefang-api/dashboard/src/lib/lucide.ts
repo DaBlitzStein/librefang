@@ -3,6 +3,7 @@
 // pins lucide-react exactly and lucide.test.ts imports every mapping.
 export { default as Activity } from "lucide-react/dist/esm/icons/activity.mjs";
 export { default as AlertCircle } from "lucide-react/dist/esm/icons/circle-alert.mjs";
+export { default as ArrowUpNarrowWide } from "lucide-react/dist/esm/icons/arrow-up-narrow-wide.mjs";
 export { default as AlertTriangle } from "lucide-react/dist/esm/icons/triangle-alert.mjs";
 export { default as Archive } from "lucide-react/dist/esm/icons/archive.mjs";
 export { default as ArrowLeft } from "lucide-react/dist/esm/icons/arrow-left.mjs";

@@ -144,6 +144,10 @@ export {
   // per-agent MCP server assignment — read (#7713)
   getAgentMcpServers,
   getAgentTemplateToml,
+  getAgentManifestHistory,
+  listTemplateHistory,
+  listModelRouterProfiles,
+  getAgentModelRouting,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -217,6 +221,17 @@ export {
   updateAgentTools,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
+  // per-agent MCP server assignment — write (#7713)
+  setAgentMcpServers,
+  // per-agent channel assignment — write
+  setAgentChannels,
+  // model routing — per-agent (#7781)
+  updateAgentModelRouting,
+  // goal pause/resume (#7973)
+  pauseGoalRun,
+  resumeGoalRun,
+  // template version history (#8052)
+  restoreTemplateVersion,
   createAgentSession,
   switchAgentSession,
   deleteSession,
@@ -447,4 +462,10 @@ export type {
   EffectiveMemoryAccess,
   EffectiveBudget,
   EffectiveChannelToolPolicy,
+  // model routing (#7781)
+  CostTier,
+  AgentModelRouting,
+  // template version history (#8052)
+  TemplateVersion,
+  ManifestHistoryEntry,
 } from "../../api";

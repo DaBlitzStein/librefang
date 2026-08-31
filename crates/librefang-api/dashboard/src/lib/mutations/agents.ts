@@ -57,10 +57,10 @@ import {
  * ignores them on the standalone `/config` route.
  */
 export type AgentConfigPatch = {
-  max_tokens?: number;
+  max_tokens?: number | null;
   model?: string;
   provider?: string;
-  temperature?: number;
+  temperature?: number | null;
   api_key_env?: string;
   base_url?: string;
   web_search_augmentation?: "off" | "auto" | "always";

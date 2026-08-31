@@ -213,6 +213,7 @@ export interface ChannelItem {
    *  **Sticky**: never cleared, not even by the successful respawn that follows.
    *  A connected channel carrying one is degraded, not dead. */
   last_error?: string | null;
+  agent?: string;
 }
 
 export interface SkillItem {
@@ -624,6 +625,7 @@ export interface WorkflowItem {
   steps?: number | WorkflowStep[];
   created_at?: string;
   layout?: unknown;
+  input_schema?: Record<string, unknown>;
   /** Most recent run summary, null when the workflow has never been run. */
   last_run?: WorkflowLastRunSummary | null;
   /** Completed / (completed + failed) over terminal runs only.
@@ -1091,6 +1093,9 @@ export interface GoalItem {
   progress?: number;
   created_at?: string;
   updated_at?: string;
+  loop_engineering?: boolean;
+  verify_agent_id?: string | null;
+  evaluator_model?: string | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -1444,10 +1449,15 @@ export async function listAgentEvents(
 export async function patchAgentConfig(
   agentId: string,
   config: {
-    max_tokens?: number;
+    max_tokens?: number | null;
     model?: string;
     provider?: string;
-    temperature?: number;
+    temperature?: number | null;
+    top_p?: number | null;
+    frequency_penalty?: number | null;
+    presence_penalty?: number | null;
+    context_window?: number | null;
+    model_max_output_tokens?: number | null;
     web_search_augmentation?: "off" | "auto" | "always";
   },
 ): Promise<ApiActionResponse> {
@@ -1471,18 +1481,28 @@ function trimOptionalHandRuntimeString(value: string | undefined): string | unde
  * do not silently inherit those semantics.
  */
 function serializeHandAgentRuntimeConfigPatch(config: {
-  max_tokens?: number;
+  max_tokens?: number | null;
   model?: string;
   provider?: string;
-  temperature?: number;
+  temperature?: number | null;
+  top_p?: number | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  context_window?: number | null;
+  model_max_output_tokens?: number | null;
   api_key_env?: string;
   base_url?: string;
   web_search_augmentation?: "off" | "auto" | "always";
 }): {
-  max_tokens?: number;
+  max_tokens?: number | null;
   model?: string;
   provider?: string;
-  temperature?: number;
+  temperature?: number | null;
+  top_p?: number | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  context_window?: number | null;
+  model_max_output_tokens?: number | null;
   api_key_env?: string;
   base_url?: string;
   web_search_augmentation?: "off" | "auto" | "always";
@@ -1502,10 +1522,15 @@ function serializeHandAgentRuntimeConfigPatch(config: {
 export async function patchHandAgentRuntimeConfig(
   agentId: string,
   config: {
-    max_tokens?: number;
+    max_tokens?: number | null;
     model?: string;
     provider?: string;
-    temperature?: number;
+    temperature?: number | null;
+    top_p?: number | null;
+    frequency_penalty?: number | null;
+    presence_penalty?: number | null;
+    context_window?: number | null;
+    model_max_output_tokens?: number | null;
     api_key_env?: string;
     base_url?: string;
     web_search_augmentation?: "off" | "auto" | "always";
@@ -2186,10 +2211,11 @@ export interface SidecarSaveResult {
 export async function saveSidecarConfig(
   name: string,
   values: Record<string, string>,
+  opts?: { instanceName?: string; agent?: string | null },
 ): Promise<SidecarSaveResult> {
   return post<SidecarSaveResult>(
     `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
-    { values },
+    { values, ...opts },
   );
 }
 
@@ -2751,6 +2777,7 @@ export interface WorkflowStepResult {
   duration_ms: number;
   /** Step-level failure message; present on the step that failed. */
   error?: string;
+  variables?: Record<string, unknown>;
 }
 
 /** Full detail for a single workflow run. */
@@ -2765,6 +2792,8 @@ export interface WorkflowRunDetail {
   started_at: string;
   completed_at?: string | null;
   step_results: WorkflowStepResult[];
+  total_steps?: number;
+  current_step_index?: number;
 }
 
 /** Per-step preview returned by dry-run. */
@@ -3147,6 +3176,7 @@ export interface TaskQueueItem {
   result?: string;
   claimed_at?: string;
   priority?: number;
+  timeout_secs?: number;
   [key: string]: unknown;
 }
 
@@ -4268,6 +4298,9 @@ export async function createGoal(payload: {
   agent_id?: string;
   status?: string;
   progress?: number;
+  loop_engineering?: boolean;
+  verify_agent_id?: string;
+  evaluator_model?: string;
 }): Promise<GoalItem> {
   return post<GoalItem>("/api/goals", payload);
 }
@@ -4281,6 +4314,9 @@ export async function updateGoal(
     progress?: number;
     parent_id?: string | null;
     agent_id?: string | null;
+    verify_agent_id?: string | null;
+    verify_max_retries?: number;
+    evaluator_model?: string | null;
   }
 ): Promise<GoalItem> {
   // Issue #3832: handler now returns the mutated GoalItem instead of an ack
@@ -4297,7 +4333,7 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 export interface GoalRunState {
   goal_id: string;
   agent_id: string;
-  phase: "running" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
+  phase: "running" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped" | "paused";
   iteration: number;
   max_iterations: number;
   last_progress: number;
@@ -4309,7 +4345,7 @@ export interface GoalRunState {
 /** Begin an autonomous run that drives the goal's assigned agent. */
 export async function startGoalRun(
   goalId: string,
-  payload?: { max_iterations?: number }
+  payload?: { max_iterations?: number; verify_max_retries?: number }
 ): Promise<{ ok: boolean; run: GoalRunState | null }> {
   return post<{ ok: boolean; run: GoalRunState | null }>(
     `/api/goals/${encodeURIComponent(goalId)}/start`,
@@ -5707,3 +5743,129 @@ export async function listPairedDevices(): Promise<PairedDevice[]> {
 export async function removePairedDevice(deviceId: string): Promise<void> {
   return del<void>(`/api/pairing/devices/${encodeURIComponent(deviceId)}`);
 }
+
+// ── Goal pause / resume (#7973) ──────────────────────────────────────
+export async function pauseGoalRun(goalId: string): Promise<{ ok: boolean }> {
+  return post<{ ok: boolean }>(`/api/goals/${encodeURIComponent(goalId)}/pause`, {});
+}
+
+export async function resumeGoalRun(goalId: string): Promise<{ ok: boolean }> {
+  return post<{ ok: boolean }>(`/api/goals/${encodeURIComponent(goalId)}/resume`, {});
+}
+
+// ── Per-agent MCP server assignment — write (#7713) ──────────────────
+export async function setAgentMcpServers(
+  agentId: string,
+  mcpServers: string[],
+): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/mcp_servers`,
+    { mcp_servers: mcpServers },
+  );
+}
+
+// ── Per-agent channel assignment — write ─────────────────────────────
+export async function setAgentChannels(
+  agentId: string,
+  channels: string[],
+): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/channels`,
+    { channels },
+  );
+}
+
+// ── Model routing — per-agent (#7781) ────────────────────────────────
+export type CostTier = "cheap" | "medium" | "expensive";
+
+export interface AgentModelRouting {
+  mode?: string;
+  router_override?: string | null;
+  allowed_profiles?: string[];
+  cost_budget?: CostTier | null;
+}
+
+export interface ModelRouterProfileEntry {
+  name: string;
+  cost_tier?: string;
+  provider?: string;
+  model?: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export interface ModelRouterProfilesResponse {
+  profiles: ModelRouterProfileEntry[];
+  enabled: boolean;
+  [key: string]: unknown;
+}
+
+export async function listModelRouterProfiles(): Promise<ModelRouterProfilesResponse> {
+  return get<ModelRouterProfilesResponse>("/api/providers/model-router-profiles");
+}
+
+export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {
+  return get<AgentModelRouting>(
+    `/api/agents/${encodeURIComponent(agentId)}/model_routing`,
+  );
+}
+
+export async function updateAgentModelRouting(
+  agentId: string,
+  routing: AgentModelRouting,
+): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/model_routing`,
+    routing,
+  );
+}
+
+// ── Agent manifest history (#8053) ───────────────────────────────────
+export interface ManifestHistoryEntry {
+  version: number;
+  changed_at: string;
+  diff_summary?: string;
+}
+
+export async function getAgentManifestHistory(
+  agentId: string,
+): Promise<ManifestHistoryEntry[]> {
+  const data = await get<{ versions?: ManifestHistoryEntry[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/manifest-history`,
+  );
+  return data.versions ?? [];
+}
+
+// ── Template version history (#8052) ─────────────────────────────────
+export interface TemplateVersion {
+  id: number;
+  version: number;
+  saved_at: string;
+  created_at?: string;
+  diff_summary?: string;
+  manifest_toml?: string;
+  toml_snapshot?: string;
+  source?: string;
+}
+
+export async function listTemplateHistory(
+  name: string,
+): Promise<TemplateVersion[]> {
+  const data = await get<{ versions?: TemplateVersion[] }>(
+    `/api/templates/${encodeURIComponent(name)}/history`,
+  );
+  return data.versions ?? [];
+}
+
+export async function restoreTemplateVersion(
+  name: string,
+  version: number,
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(
+    `/api/templates/${encodeURIComponent(name)}/history/${version}/restore`,
+    {},
+  );
+}
+
+// ── Channel item agent field ─────────────────────────────────────────
+// (already used in ChannelsPage but missing from the ChannelItem type)

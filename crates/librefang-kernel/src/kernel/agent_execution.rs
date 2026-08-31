@@ -409,7 +409,7 @@ impl LibreFangKernel {
     /// The last guard mirrors the tier router a few lines below: routing an
     /// agent onto a provider the operator never configured would turn a
     /// cost optimisation into a hard failure on every turn.
-    fn route_to_profile(
+    pub fn route_to_profile(
         &self,
         manifest: &librefang_types::agent::AgentManifest,
         message: &str,
@@ -1115,8 +1115,8 @@ impl LibreFangKernel {
                     message,
                 )]),
                 tools: std::sync::Arc::new(tools.clone()),
-                max_tokens: manifest.model.max_tokens,
-                temperature: manifest.model.temperature,
+                max_tokens: manifest.model.max_tokens.unwrap_or(4096),
+                temperature: manifest.model.temperature.unwrap_or(0.7),
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
                 prompt_caching: false,
@@ -1182,10 +1182,10 @@ impl LibreFangKernel {
             let catalog = self.llm.model_catalog.load();
             if let Some(mo) = catalog.get_overrides(&override_key) {
                 if let Some(t) = mo.temperature {
-                    manifest.model.temperature = t;
+                    manifest.model.temperature = Some(t);
                 }
                 if let Some(mt) = mo.max_tokens {
-                    manifest.model.max_tokens = mt;
+                    manifest.model.max_tokens = Some(mt);
                 }
                 let ep = &mut manifest.model.extra_params;
                 if let Some(tp) = mo.top_p {

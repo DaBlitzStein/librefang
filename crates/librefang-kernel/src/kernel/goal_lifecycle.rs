@@ -24,11 +24,16 @@ impl LibreFangKernel {
     /// complete, the iteration cap (`max_iterations`, default
     /// [`DEFAULT_GOAL_MAX_ITERATIONS`]) is reached, an operator stops it, or the
     /// kernel shuts down.
+    #[allow(clippy::too_many_arguments)]
     pub fn goal_run_start(
         &self,
         goal_id: GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        _loop_engineering: bool,
+        _verify_agent_id: Option<AgentId>,
+        _verify_max_retries: Option<u32>,
+        _evaluator_model: Option<String>,
     ) -> bool {
         let max = max_iterations.unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS).max(1);
         let substrate = self.substrate_ref().clone();
@@ -97,7 +102,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         max_iterations: Option<u32>,
     ) -> bool {
-        self.goal_run_start(goal_id, agent_id, max_iterations)
+        self.goal_run_start(goal_id, agent_id, max_iterations, false, None, None, None)
     }
 
     /// Snapshot the observable state of a goal's run, if one is active.

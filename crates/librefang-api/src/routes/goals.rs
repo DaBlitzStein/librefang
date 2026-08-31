@@ -301,7 +301,7 @@ async fn start_or_resume(
     } else {
         state
             .kernel
-            .start_goal_run(goal_id, agent_id, max_iterations)
+            .start_goal_run(goal_id, agent_id, max_iterations, false, None, None, None)
     };
     if !started {
         return ApiErrorResponse::internal("Failed to start goal run").into_json_tuple();

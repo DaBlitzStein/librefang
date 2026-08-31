@@ -1583,7 +1583,7 @@ export function WorkflowsPage() {
                                                 {Object.entries(step.variables!).map(([k, v]) => (
                                                   <div key={k} className="contents">
                                                     <span className="text-brand/70 font-mono whitespace-nowrap">{`{{${k}}}`}</span>
-                                                    <span className="text-text-dim/60 truncate" title={v}>{v.length > 60 ? v.slice(0, 60) + "…" : v}</span>
+                                                    <span className="text-text-dim/60 truncate" title={String(v)}>{String(v).length > 60 ? String(v).slice(0, 60) + "…" : String(v)}</span>
                                                   </div>
                                                 ))}
                                               </div>

@@ -470,7 +470,6 @@
       "name_placeholder": "예를 들어 내 에이전트",
       "module_placeholder": "예를 들어 기본",
       "model_id_placeholder": "예를 들어 gpt-4o",
-      "temperature_placeholder": "0.7",
       "max_tokens_placeholder": "4096",
       "api_key_env_placeholder": "OPENAI_API_KEY",
       "base_url_placeholder": "https://api.example.com/v1",
@@ -501,7 +500,28 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "대체 제거",
-      "remove_context_injection": "컨텍스트 주입 제거"
+      "remove_context_injection": "컨텍스트 주입 제거",
+      "add_folder": "Add folder",
+      "capability_inherit_placeholder": "Inherit from default",
+      "capability_routing": "Capability routing",
+      "capability_routing_hint": "Route media capabilities to specific providers",
+      "context_window": "Context window",
+      "context_window_placeholder": "Default",
+      "custom": "Custom",
+      "folder_name": "Folder name",
+      "folder_path": "Folder path",
+      "frequency_penalty": "Frequency penalty",
+      "limits_hint": "Override model limits for this agent",
+      "max_output_tokens": "Max output tokens",
+      "max_output_tokens_placeholder": "Default",
+      "name_locked_hint": "Agent name cannot be changed after creation",
+      "over_limit_warning": "Value exceeds recommended limit",
+      "preferences_hint": "Fine-tune model behavior for this agent",
+      "presence_penalty": "Presence penalty",
+      "remove_folder": "Remove folder",
+      "shared_folders": "Shared folders",
+      "shared_folders_hint": "Named directories shared between agents",
+      "top_p": "Top P"
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
     "prompts": "프롬프트",
@@ -867,7 +887,28 @@
     "tools_declared_desc": "이 에이전트가 사용할 수 있는 도구입니다. 모든 도구에 제한 없이 액세스하려면 비워 두세요.",
     "providers_error_loading": "로드 중 오류 발생",
     "no_providers": "제공업체 없음",
-    "select_provider_first": "먼저 제공업체를 선택하세요."
+    "select_provider_first": "먼저 제공업체를 선택하세요.",
+    "routing": {
+      "allowedProfiles": "Allowed profiles",
+      "anyProfile": "None selected — the router may pick any profile.",
+      "costBudget": "Cost budget",
+      "costBudgetHint": "The router will never pick a profile above this tier, even if the task matches one.",
+      "description": "Choose whether this agent always uses its own model, or lets the router pick one per task based on the work",
+      "disabledKernelWide": "Router off in config.toml",
+      "loadFailed": "Could not load model routing",
+      "mode": "Mode",
+      "modeFixed": "Fixed model",
+      "modeFixedHint": "This agent always uses the provider and model in its own manifest.",
+      "modeFlexible": "Router chooses",
+      "modeFlexibleHint": "The router scores each turn and picks a matching profile. Constrain the choice below.",
+      "noCap": "No cap",
+      "noProfiles": "No model profiles configured",
+      "noProfilesHint": "Add profiles to ~/.librefang/model_profiles.toml to make them selectable here.",
+      "saveFailed": "Could not save model routing",
+      "saved": "Model routing saved",
+      "someProfiles": "The router may only pick from the selected profiles.",
+      "title": "Model routing"
+    }
   },
   "providers": {
     "title": "공급자",
@@ -1068,7 +1109,17 @@
     "qr_expired_restart": "QR 코드가 만료되었습니다. 다시 시도하려면 사이드카를 다시 시작하세요.",
     "qr_login": "QR 로그인",
     "qr_scan_with_app": "{{channel}} 앱으로 스캔하세요",
-    "sidecar_details": "Out-of-Process 사이드카 어댑터로 실행됩니다. config.toml에서 관리하세요([[sidecar_channels]]) — 구성 → 사이드카 채널 또는 채널 카드의 기어를 사용하여 구성 서랍을 엽니다."
+    "sidecar_details": "Out-of-Process 사이드카 어댑터로 실행됩니다. config.toml에서 관리하세요([[sidecar_channels]]) — 구성 → 사이드카 채널 또는 채널 카드의 기어를 사용하여 구성 서랍을 엽니다.",
+    "instance_count": "{{count}} instances",
+    "default_agent_hint": "Inbound messages on this instance with no more specific binding route to this agent.",
+    "default_agent_label": "Default agent",
+    "default_agent_none": "No default (first available agent)",
+    "default_agent_none_short": "None",
+    "instance_name_hint_edit": "The instance name cannot be changed here — remove and re-add to rename.",
+    "instance_name_hint_first": "Unique name for this instance. Defaults to the channel type since none is configured yet.",
+    "instance_name_hint_next": "This channel type already has {{count}} configured instance(s). Pick a unique name so this becomes a new one instead of overwriting an existing bot.",
+    "instance_name_label": "Instance name",
+    "instance_name_placeholder": "e.g. telegram-support"
   },
   "skills": {
     "title": "기술",
@@ -1705,9 +1756,6 @@
     "delete_failed": "삭제 실패",
     "run_failed": "실행 실패",
     "run_started": "실행이 시작되었습니다",
-    "rerun": "동일한 매개변수로 다시 실행",
-    "rerun_started": "동일한 매개변수로 다시 실행 시작됨",
-    "rerun_failed": "재실행 실패",
     "runs_label": "실행",
     "schedule_failed": "일정 생성 실패",
     "skip": "건너뛰기",
@@ -1750,8 +1798,20 @@
       "empty_artifact": "(빈 인공물)",
       "load_failed": "대기 중인 운영자 검토를 불러오지 못했습니다.",
       "review_run": "{{workflow}} — {{step}} 검토",
-      "more_pending": "대기 중 {{count}}개 더 있음"
-    }
+      "more_pending": "대기 중 {{count}}개 더 있음",
+      "pending_review": "{{count}} workflow runs awaiting operator review"
+    },
+    "console_completed": "Completed",
+    "console_executing": "Executing…",
+    "console_failed": "Failed",
+    "console": "Console",
+    "rerun_hint": "Re-run with these parameters",
+    "rerun_same": "Re-run with same parameters",
+    "starting": "Starting…",
+    "step_executing": "Step {{current}}/{{total}} executing…",
+    "step_output": "Output",
+    "step_pending": "Pending…",
+    "variables": "Variables"
   },
   "scheduler": {
     "title": "스케줄러",
@@ -1998,7 +2058,10 @@
     "trigger_lane_help": "이벤트 트리거 전달(TaskPosted, MessageReceived, …)",
     "default_per_agent_help": "매니페스트가 max_concurrent_invocations를 생략하는 경우 에이전트별 대체",
     "audit_anchor": "기준점",
-    "restore_keep_config": "내 구성 유지 (복제 모드)"
+    "restore_keep_config": "내 구성 유지 (복제 모드)",
+    "create_backup_confirm": "Create backup",
+    "create_backup_confirm_desc": "This will create a full backup of the current state.",
+    "create_backup_confirm_title": "Create backup?"
   },
   "telemetry": {
     "badge": "관찰 가능성",
@@ -2858,7 +2921,17 @@
     "run_active": "실행 · 반복 {{iteration}}/{{max}}",
     "help": "목표는 전략 계획 표면입니다. 즉, 진행 상황, 상태 및 상위/하위 관계를 포함하여 에이전트(또는 귀하)가 노력하고 있는 목표 트리입니다. 템플릿은 공통 목표 형태를 제공합니다. 트리 보기에는 계층 구조와 롤업 진행 상황이 표시됩니다.\n\n이 페이지를 사용하는 방법:\n\n1. 생성합니다. '목표 만들기'를 클릭하면 제목, 설명, 상위 목표 및 상태에 대한 양식이 열립니다. 또는 사전 구축된 목표 트리를 적용하려면 \"템플릿 선택\"(예: \"기능 제공\", \"주제 조사\").\n\n2. 추적. 각 노드에는 보류 중/진행 중/완료가 표시됩니다. 상위 진행 상황은 하위 항목에서 집계됩니다. 노드를 인라인으로 편집하여 상태를 반전하거나 설명을 구체화합니다.\n\n3. 가지치기. \"모두 지우기\"는 트리를 지웁니다(확인과 함께). 새 이니셔티브를 시작할 때 유용합니다.\n\n사용 시기(스케줄러/워크플로와 비교):\n\n  · 목표 — 우리가 원하는 것. 수명이 긴 의도로, 에이전트가 읽을 수 있는 경우가 많습니다.\n  · 스케줄러/작업 흐름 — 완료 방법. 구체적인 실행(트리거)과 단계.\n\n일반적인 시나리오:\n\n  · 에이전트에게 계획 중에 다시 참조할 수 있는 장기적인 방향을 제시합니다.\n  · 인간과 에이전트 모두가 볼 수 있는 트리로 여러 주에 걸친 프로젝트를 추적합니다.\n\n알아야 할 사항:\n\n  · 템플릿은 시작점입니다. 적용한 후에는 자유롭게 트리를 편집할 수 있습니다.\n  · 상위를 삭제하면 해당 하위도 삭제됩니다. \"모두 지우기\" 전에 확인하세요.",
     "progress": "진행률",
-    "status": "상태"
+    "status": "상태",
+    "assigned_agent": "Assigned agent",
+    "evaluator_model": "Evaluator model",
+    "evaluator_model_placeholder": "Default model",
+    "loop_engineering": "Loop engineering",
+    "loop_engineering_hint": "Enable iterative goal refinement",
+    "no_agent_selected": "No agent selected",
+    "no_verifier_selected": "No verifier selected",
+    "verifier_agent": "Verifier agent",
+    "run_pause": "Pause",
+    "run_resume": "Resume"
   },
   "sessions": {
     "title": "세션",
@@ -3541,7 +3614,8 @@
     "logs_empty_desc": "서버별 MCP 로그는 아직 노출되지 않았습니다. 데몬의 stdout에서 연결 추적을 확인하세요.",
     "config_env_notice": "env 변수는 이름으로만 참조됩니다. 연결 시 호스트 환경에서 비밀이 확인됩니다.",
     "tabs_label": "서버 보기",
-    "get_key": "키 받기"
+    "get_key": "키 받기",
+    "requires_env_count": "{{count}} key"
   },
   "toml_viewer": {
     "tab_toml": "TOML",
@@ -4067,7 +4141,21 @@
     "status_pending": "보류 중",
     "status_in_progress": "진행 중",
     "status_completed": "완료",
-    "status_failed": "실패"
+    "status_failed": "실패",
+    "assignee_none": "Unassigned",
+    "field_description_hint": "Describe the task in detail",
+    "field_priority": "Priority",
+    "field_priority_hint": "Higher priority tasks are processed first",
+    "field_timeout": "Timeout",
+    "field_timeout_hint": "Maximum time in seconds before the task is cancelled",
+    "field_timeout_placeholder": "No timeout",
+    "no_agents_hint": "Create an agent first to assign tasks",
+    "priority_high": "High",
+    "priority_low": "Low",
+    "priority_normal": "Normal",
+    "priority_tooltip": "Task priority",
+    "priority_urgent": "Urgent",
+    "timeout_tooltip": "Task timeout"
   },
   "prompts": {
     "title": "프롬프트",
@@ -4179,7 +4267,6 @@
     "tools_search": "도구 검색…"
   },
   "templateHistory": {
-    "button": "기록",
     "title": "버전 기록 — {{name}}",
     "source": "출처",
     "restore": "복원",

@@ -544,8 +544,24 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's model routing (mode + router override).
+    pub fn update_model_routing(
+        &self,
+        id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.mode = mode;
+            entry.manifest.model.router_override = router_override;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's max_tokens (response length limit).
-    pub fn update_max_tokens(&self, id: AgentId, max_tokens: u32) -> LibreFangResult<()> {
+    pub fn update_max_tokens(&self, id: AgentId, max_tokens: Option<u32>) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.model.max_tokens = max_tokens;
             entry.last_active = chrono::Utc::now();
@@ -555,9 +571,71 @@ impl AgentRegistry {
     }
 
     /// Update an agent's sampling temperature.
-    pub fn update_temperature(&self, id: AgentId, temperature: f32) -> LibreFangResult<()> {
+    pub fn update_temperature(&self, id: AgentId, temperature: Option<f32>) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.model.temperature = temperature;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's top-p sampling parameter.
+    pub fn update_top_p(&self, id: AgentId, top_p: Option<f32>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.top_p = top_p;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's frequency penalty.
+    pub fn update_frequency_penalty(
+        &self,
+        id: AgentId,
+        penalty: Option<f32>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.frequency_penalty = penalty;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's presence penalty.
+    pub fn update_presence_penalty(
+        &self,
+        id: AgentId,
+        penalty: Option<f32>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.presence_penalty = penalty;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's context window override.
+    pub fn update_context_window(&self, id: AgentId, window: Option<u64>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.context_window = window;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's max output tokens limit.
+    pub fn update_model_max_output_tokens(
+        &self,
+        id: AgentId,
+        tokens: Option<u64>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.max_output_tokens = tokens;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -1307,15 +1385,15 @@ mod tests {
         // Default temperature is 0.7
         let before = registry.get(id).unwrap();
         let old_active = before.last_active;
-        assert!((before.manifest.model.temperature - 0.7).abs() < f32::EPSILON);
+        assert!((before.manifest.model.temperature.unwrap_or(0.7) - 0.7).abs() < f32::EPSILON);
 
         // Wait a tiny bit so last_active changes
         std::thread::sleep(std::time::Duration::from_millis(1));
 
-        registry.update_temperature(id, 1.5).unwrap();
+        registry.update_temperature(id, Some(1.5)).unwrap();
 
         let after = registry.get(id).unwrap();
-        assert!((after.manifest.model.temperature - 1.5).abs() < f32::EPSILON);
+        assert!((after.manifest.model.temperature.unwrap_or(0.0) - 1.5).abs() < f32::EPSILON);
         assert!(after.last_active > old_active);
     }
 

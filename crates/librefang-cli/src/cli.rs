@@ -493,6 +493,23 @@ pub(crate) enum Commands {
         #[arg(long)]
         generate: bool,
     },
+    /// Create and run an autonomous long-horizon goal.
+    #[command(
+        long_about = "Create and run an autonomous goal.\n\nExamples:\n  librefang goal \"Ship the quarterly report\" --agent coder\n  librefang goal \"Fix all lint warnings\" --agent coder --watch"
+    )]
+    Goal {
+        /// Goal description.
+        description: String,
+        /// Agent name or ID to run the goal on.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Maximum LLM iterations before the goal auto-stops.
+        #[arg(long)]
+        max_iterations: Option<u64>,
+        /// Poll and display goal progress until completion.
+        #[arg(long)]
+        watch: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1220,6 +1237,37 @@ pub(crate) enum AgentCommands {
         field: String,
         /// New value.
         value: String,
+    },
+    /// Show the model routing configuration for an agent.
+    Routing {
+        /// Agent ID (UUID).
+        agent_id: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set model routing configuration for an agent.
+    RoutingSet {
+        /// Agent ID (UUID).
+        agent_id: String,
+        /// Routing mode (e.g. "auto", "manual", "profile").
+        #[arg(long)]
+        mode: String,
+        /// Comma-separated profile names.
+        #[arg(long)]
+        profiles: Option<String>,
+        /// Budget limit.
+        #[arg(long)]
+        budget: Option<String>,
+        /// Default profile name.
+        #[arg(long)]
+        default_profile: Option<String>,
+    },
+    /// List available routing profiles.
+    RoutingProfiles {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 

@@ -4,6 +4,7 @@ import {
   updateAgentType,
   deleteAgentType,
   restoreAgentTypeFromRegistry,
+  restoreTemplateVersion,
   spawnEphemeral,
 } from "../http/client";
 import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
@@ -67,6 +68,18 @@ export function useRestoreAgentTypeFromRegistry() {
  * left the budget widget showing the pre-run figure is the exact surprise this
  * feature must not produce.
  */
+export function useRestoreTemplateVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, version }: { name: string; version: number }) =>
+      restoreTemplateVersion(name, version),
+    onSuccess: (_data, { name }) => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
+    },
+  });
+}
+
 export function useSpawnEphemeral() {
   const qc = useQueryClient();
   return useMutation({

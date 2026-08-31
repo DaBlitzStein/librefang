@@ -41,7 +41,7 @@ export function AgentModelRoutingPanel({ agent }: { agent: AgentDetail }) {
   // showing a stale draft after the response came back.
   useEffect(() => {
     if (!saved) return;
-    setMode(saved.mode);
+    setMode(saved.mode === "fixed" ? "fixed" : "flexible");
     setAllowed(saved.allowed_profiles ?? []);
     setBudget(saved.cost_budget ?? null);
   }, [saved]);

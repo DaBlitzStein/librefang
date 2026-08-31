@@ -14,6 +14,9 @@
 // an emptied field is a deliberate "hand this back to the model's setting" that reaches the
 // backend as `null` instead of being silently indistinguishable from no edit at all.
 
+export const MODEL_MAX_TOKENS_DEFAULT = 4096;
+export const MODEL_TEMPERATURE_DEFAULT = 0.7;
+
 export interface PersistedModel {
   provider?: string;
   model?: string;

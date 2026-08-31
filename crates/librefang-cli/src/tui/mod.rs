@@ -864,6 +864,9 @@ impl App {
                 };
                 self.chat.push_message(chat::Role::System, msg);
             }
+            AppEvent::AgentTokenUsageLoaded(usage) => {
+                self.agents.on_token_usage_loaded(usage);
+            }
         }
     }
 
@@ -1694,6 +1697,20 @@ impl App {
                         self.event_tx.clone(),
                     );
                 }
+            }
+            agents::AgentAction::FetchAgentTokenUsage(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_token_usage(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::FetchAgentWorkspaces(_id) => {
+                // TODO: spawn_fetch_agent_workspaces not yet wired
+            }
+            agents::AgentAction::UpdateWorkspaces {
+                id: _id,
+                workspaces: _ws,
+            } => {
+                // TODO: spawn_update_agent_workspaces not yet wired
             }
         }
     }

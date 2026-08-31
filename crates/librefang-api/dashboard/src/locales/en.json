@@ -470,7 +470,6 @@
       "name_placeholder": "e.g. my-agent",
       "module_placeholder": "e.g. default",
       "model_id_placeholder": "e.g. gpt-4o",
-      "temperature_placeholder": "0.7",
       "max_tokens_placeholder": "4096",
       "api_key_env_placeholder": "OPENAI_API_KEY",
       "base_url_placeholder": "https://api.example.com/v1",
@@ -501,7 +500,28 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "remove fallback",
-      "remove_context_injection": "remove context injection"
+      "remove_context_injection": "remove context injection",
+      "add_folder": "Add folder",
+      "capability_inherit_placeholder": "Inherit from default",
+      "capability_routing": "Capability routing",
+      "capability_routing_hint": "Route media capabilities to specific providers",
+      "context_window": "Context window",
+      "context_window_placeholder": "Default",
+      "custom": "Custom",
+      "folder_name": "Folder name",
+      "folder_path": "Folder path",
+      "frequency_penalty": "Frequency penalty",
+      "limits_hint": "Override model limits for this agent",
+      "max_output_tokens": "Max output tokens",
+      "max_output_tokens_placeholder": "Default",
+      "name_locked_hint": "Agent name cannot be changed after creation",
+      "over_limit_warning": "Value exceeds recommended limit",
+      "preferences_hint": "Fine-tune model behavior for this agent",
+      "presence_penalty": "Presence penalty",
+      "remove_folder": "Remove folder",
+      "shared_folders": "Shared folders",
+      "shared_folders_hint": "Named directories shared between agents",
+      "top_p": "Top P"
     },
     "delete_confirm": "Are you sure you want to delete agent \"{{name}}\"?",
     "prompts": "Prompts",
@@ -868,7 +888,28 @@
     "tools_declared_desc": "Tools this agent can use. Leave empty for unrestricted access to all tools.",
     "providers_error_loading": "Error loading",
     "no_providers": "No providers",
-    "select_provider_first": "Select provider first"
+    "select_provider_first": "Select provider first",
+    "routing": {
+      "saved": "Model routing saved",
+      "saveFailed": "Could not save model routing",
+      "loadFailed": "Could not load model routing",
+      "title": "Model routing",
+      "description": "Choose whether this agent always uses its own model, or lets the router pick one per task based on the work",
+      "disabledKernelWide": "Router off in config.toml",
+      "mode": "Mode",
+      "modeFixed": "Fixed model",
+      "modeFlexible": "Router chooses",
+      "modeFixedHint": "This agent always uses the provider and model in its own manifest.",
+      "modeFlexibleHint": "The router scores each turn and picks a matching profile. Constrain the choice below.",
+      "allowedProfiles": "Allowed profiles",
+      "noProfiles": "No model profiles configured",
+      "noProfilesHint": "Add profiles to ~/.librefang/model_profiles.toml to make them selectable here.",
+      "anyProfile": "None selected — the router may pick any profile.",
+      "someProfiles": "The router may only pick from the selected profiles.",
+      "costBudget": "Cost budget",
+      "noCap": "No cap",
+      "costBudgetHint": "The router will never pick a profile above this tier, even if the task matches one."
+    }
   },
   "providers": {
     "title": "Providers",
@@ -1069,7 +1110,17 @@
     "qr_expired_restart": "QR code expired — restart the sidecar to try again",
     "qr_login": "QR Login",
     "qr_scan_with_app": "Scan with your {{channel}} app",
-    "sidecar_details": "Runs as an out-of-process sidecar adapter. Manage it in config.toml ([[sidecar_channels]]) — Config → Sidecar Channels, or use the gear on the channel card to open the configure drawer."
+    "sidecar_details": "Runs as an out-of-process sidecar adapter. Manage it in config.toml ([[sidecar_channels]]) — Config → Sidecar Channels, or use the gear on the channel card to open the configure drawer.",
+    "default_agent_label": "Default agent",
+    "default_agent_none_short": "None",
+    "instance_name_label": "Instance name",
+    "instance_name_placeholder": "e.g. telegram-support",
+    "instance_name_hint_first": "Unique name for this instance. Defaults to the channel type since none is configured yet.",
+    "instance_name_hint_next": "This channel type already has {{count}} configured instance(s). Pick a unique name so this becomes a new one instead of overwriting an existing bot.",
+    "instance_name_hint_edit": "The instance name cannot be changed here — remove and re-add to rename.",
+    "default_agent_none": "No default (first available agent)",
+    "default_agent_hint": "Inbound messages on this instance with no more specific binding route to this agent.",
+    "instance_count": "{{count}} instances"
   },
   "skills": {
     "title": "Skills",
@@ -1706,9 +1757,6 @@
     "delete_failed": "Delete failed",
     "run_failed": "Run failed",
     "run_started": "Run started",
-    "rerun": "Re-run with same parameters",
-    "rerun_started": "Re-run started with the same parameters",
-    "rerun_failed": "Re-run failed",
     "runs_label": "runs",
     "schedule_failed": "Schedule creation failed",
     "skip": "skip",
@@ -1751,8 +1799,20 @@
       "empty_artifact": "(empty artifact)",
       "load_failed": "Failed to load pending operator reviews.",
       "review_run": "Review {{workflow}} — {{step}}",
-      "more_pending": "+{{count}} more pending"
-    }
+      "more_pending": "+{{count}} more pending",
+      "pending_review": "{{count}} workflow runs awaiting operator review"
+    },
+    "rerun_hint": "Re-run with these parameters",
+    "rerun_same": "Re-run with same parameters",
+    "step_executing": "Step {{current}}/{{total}} executing…",
+    "starting": "Starting…",
+    "console": "Console",
+    "step_pending": "Pending…",
+    "variables": "Variables",
+    "step_output": "Output",
+    "console_completed": "Completed",
+    "console_executing": "Executing…",
+    "console_failed": "Failed"
   },
   "scheduler": {
     "title": "Scheduler",
@@ -1999,7 +2059,10 @@
     "trigger_lane_help": "Event-trigger dispatches (TaskPosted, MessageReceived, …)",
     "default_per_agent_help": "Per-agent fallback when manifest omits max_concurrent_invocations",
     "audit_anchor": "anchor",
-    "restore_keep_config": "Keep my config (clone mode)"
+    "restore_keep_config": "Keep my config (clone mode)",
+    "create_backup_confirm": "Create backup",
+    "create_backup_confirm_desc": "This will create a full backup of the current state.",
+    "create_backup_confirm_title": "Create backup?"
   },
   "telemetry": {
     "badge": "Observability",
@@ -2859,7 +2922,17 @@
     "run_active": "Running · iteration {{iteration}}/{{max}}",
     "help": "Goals is the strategic-planning surface — a tree of objectives the agent (or you) is working towards, with progress, status, and parent / child relationships. Templates seed common goal shapes; the tree view shows hierarchy and roll-up progress.\n\nHow to use this page:\n\n1. Create. \"Create goal\" opens a form for title, description, parent goal, and status. Or \"Pick template\" to apply a pre-built goal tree (e.g. \"ship a feature\", \"research a topic\").\n\n2. Track. Each node shows pending / in-progress / completed. Parent progress aggregates from children. Edit a node inline to flip its state or refine its description.\n\n3. Prune. \"Clear all\" wipes the tree (with a confirm) — useful when starting a new initiative.\n\nWhen to use it (vs. Scheduler / Workflows):\n\n  · Goals — what we want. Long-lived intentions, often agent-readable.\n  · Scheduler / Workflows — how it gets done. Concrete fires and steps.\n\nTypical scenarios:\n\n  · Giving an agent a long-term direction it can refer back to during planning.\n  · Tracking a multi-week project as a tree the human and the agent both see.\n\nThings to know:\n\n  · Templates are starting points — feel free to edit the tree after applying.\n  · Deleting a parent deletes its children. Confirm before \"Clear all\".",
     "progress": "Progress",
-    "status": "Status"
+    "status": "Status",
+    "run_pause": "Pause",
+    "run_resume": "Resume",
+    "assigned_agent": "Assigned agent",
+    "evaluator_model": "Evaluator model",
+    "evaluator_model_placeholder": "Default model",
+    "loop_engineering": "Loop engineering",
+    "loop_engineering_hint": "Enable iterative goal refinement",
+    "no_agent_selected": "No agent selected",
+    "no_verifier_selected": "No verifier selected",
+    "verifier_agent": "Verifier agent"
   },
   "sessions": {
     "title": "Sessions",
@@ -3542,7 +3615,8 @@
     "logs_empty_desc": "Per-server MCP logs aren't exposed yet — check the daemon's stdout for connection traces.",
     "config_env_notice": "env vars are referenced by name only; secrets resolved from the host environment at connect-time.",
     "tabs_label": "Server views",
-    "get_key": "Get key"
+    "get_key": "Get key",
+    "requires_env_count": "{{count}} key"
   },
   "toml_viewer": {
     "tab_toml": "TOML",
@@ -4068,7 +4142,21 @@
     "status_pending": "Pending",
     "status_in_progress": "In Progress",
     "status_completed": "Completed",
-    "status_failed": "Failed"
+    "status_failed": "Failed",
+    "assignee_none": "Unassigned",
+    "field_description_hint": "Describe the task in detail",
+    "field_priority": "Priority",
+    "field_priority_hint": "Higher priority tasks are processed first",
+    "field_timeout": "Timeout",
+    "field_timeout_hint": "Maximum time in seconds before the task is cancelled",
+    "field_timeout_placeholder": "No timeout",
+    "no_agents_hint": "Create an agent first to assign tasks",
+    "priority_high": "High",
+    "priority_low": "Low",
+    "priority_normal": "Normal",
+    "priority_tooltip": "Task priority",
+    "priority_urgent": "Urgent",
+    "timeout_tooltip": "Task timeout"
   },
   "prompts": {
     "title": "Prompts",
@@ -4180,7 +4268,6 @@
     "tools_search": "Search tools…"
   },
   "templateHistory": {
-    "button": "History",
     "title": "Version history — {{name}}",
     "source": "Source",
     "restore": "Restore",

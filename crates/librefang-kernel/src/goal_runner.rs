@@ -132,7 +132,7 @@ pub fn create_and_start_goal(
         })
         .map_err(|e| format!("Failed to create goal: {e}"))?;
 
-    let started = kernel.start_goal_run(goal_id, agent_id, None);
+    let started = kernel.start_goal_run(goal_id, agent_id, None, false, None, None, None);
     Ok(GoalLaunch { goal_id, started })
 }
 
