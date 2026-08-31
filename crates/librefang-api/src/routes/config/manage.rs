@@ -372,8 +372,11 @@ fn redacted_config_json(
         "audio_model": config.media.audio_model,
         "audio_language": config.media.audio_language,
         "audio_prompt": config.media.audio_prompt,
+        "video_provider": config.media.video_provider,
+        "video_model": config.media.video_model,
         "custom_stt": serde_json::to_value(&config.media.custom_stt).unwrap_or_default(),
         "custom_image": serde_json::to_value(&config.media.custom_image).unwrap_or_default(),
+        "custom_video": serde_json::to_value(&config.media.custom_video).unwrap_or_default(),
         "stt_available": stt_available,
     });
 
