@@ -101,6 +101,37 @@ pub struct CustomSttConfig {
     pub model: Option<String>,
 }
 
+/// Custom / self-hosted vision endpoint for image description.
+///
+/// Same idea as [`CustomSttConfig`] but for multimodal chat-completion
+/// endpoints (OpenAI-compatible `/v1/chat/completions` that accept image
+/// content parts).
+///
+/// ## Example (`config.toml`)
+/// ```toml
+/// [media]
+/// image_provider = "local-llava"
+///
+/// [media.custom_image]
+/// base_url = "http://localhost:8080/v1/chat/completions"
+/// model = "llava-v1.6"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CustomImageConfig {
+    /// Full URL of the OpenAI-compatible chat completions endpoint.
+    pub base_url: String,
+    /// Environment variable that holds the API key.
+    #[serde(default)]
+    pub api_key_env: String,
+    /// Reject immediately if the key env var is unset.
+    #[serde(default)]
+    pub key_required: bool,
+    /// Model identifier forwarded to the endpoint.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 /// Configuration for media understanding.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -147,6 +178,12 @@ pub struct MediaConfig {
     /// Whisper endpoint at `custom_stt.base_url`.
     #[serde(default)]
     pub custom_stt: CustomSttConfig,
+    /// Custom / self-hosted vision endpoint for image description.
+    ///
+    /// Used when `image_provider` is set to a name that is not one of the
+    /// built-in providers (`anthropic`, `openai`, `groq`, `gemini`).
+    #[serde(default)]
+    pub custom_image: CustomImageConfig,
 }
 
 impl Default for MediaConfig {
@@ -165,6 +202,7 @@ impl Default for MediaConfig {
             audio_language: None,
             audio_prompt: None,
             custom_stt: CustomSttConfig::default(),
+            custom_image: CustomImageConfig::default(),
         }
     }
 }

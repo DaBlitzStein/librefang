@@ -166,6 +166,7 @@ impl MediaEngine {
             .config
             .image_model
             .as_deref()
+            .or_else(|| custom_image_model_ref(provider, &self.config.custom_image))
             .unwrap_or_else(|| default_vision_model(provider));
 
         info!(
@@ -187,7 +188,11 @@ impl MediaEngine {
                     openai_describe_image(&api_url, &api_key, model, &image_bytes, mime_type).await
                 }
                 "gemini" => gemini_describe_image(model, &image_bytes, mime_type).await,
-                other => Err(format!("Unsupported image description provider: {}", other)),
+                _other => {
+                    let (api_url, api_key) =
+                        custom_image_config(provider, &self.config.custom_image)?;
+                    openai_describe_image(&api_url, &api_key, model, &image_bytes, mime_type).await
+                }
             }
         }
         .await;
@@ -946,6 +951,39 @@ fn custom_stt_config(
             _ if cfg.key_required => {
                 return Err(format!(
                     "Custom STT provider '{provider}' requires an API key but \
+                     env var '{}' is not set or empty.",
+                    cfg.api_key_env
+                ));
+            }
+            _ => String::new(),
+        }
+    };
+
+    Ok((cfg.base_url.clone(), api_key))
+}
+
+/// Resolve `[media.custom_image]` — base_url + optional API key from an env var.
+fn custom_image_config(
+    provider: &str,
+    cfg: &librefang_types::media::CustomImageConfig,
+) -> Result<(String, String), String> {
+    if cfg.base_url.is_empty() {
+        return Err(format!(
+            "Image provider '{provider}' is not a built-in provider and \
+             [media.custom_image] base_url is not set. \
+             Add `base_url = \"http://<host>/v1/chat/completions\"` \
+             to [media.custom_image] in config.toml."
+        ));
+    }
+
+    let api_key = if cfg.api_key_env.is_empty() {
+        String::new()
+    } else {
+        match std::env::var(&cfg.api_key_env) {
+            Ok(k) if !k.trim().is_empty() => k,
+            _ if cfg.key_required => {
+                return Err(format!(
+                    "Custom image provider '{provider}' requires an API key but \
                      env var '{}' is not set or empty.",
                     cfg.api_key_env
                 ));
@@ -1723,6 +1761,17 @@ fn default_vision_model(provider: &str) -> &str {
         "groq" => "meta-llama/llama-4-scout-17b-16e-instruct",
         "gemini" => "gemini-2.5-flash",
         _ => "unknown",
+    }
+}
+
+/// Same as [`custom_stt_model_ref`] but for image description providers.
+fn custom_image_model_ref<'a>(
+    provider: &str,
+    cfg: &'a librefang_types::media::CustomImageConfig,
+) -> Option<&'a str> {
+    match provider {
+        "anthropic" | "openai" | "groq" | "gemini" => None,
+        _ => cfg.model.as_deref(),
     }
 }
 
