@@ -180,7 +180,8 @@
     "select_options": "选择选项",
     "error_loading_data": "加载记忆失败",
     "reload": "重新加载",
-    "save_changes": "保存更改"
+    "save_changes": "保存更改",
+    "save_failed": "保存失败"
   },
   "status": {
     "active": "活跃",

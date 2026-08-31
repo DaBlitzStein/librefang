@@ -180,7 +180,8 @@
     "select_options": "Select options",
     "error_loading_data": "Failed to load memories",
     "reload": "Reload",
-    "save_changes": "Save changes"
+    "save_changes": "Save changes",
+    "save_failed": "Save failed"
   },
   "status": {
     "active": "Active",
