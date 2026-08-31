@@ -157,6 +157,7 @@ fn spawn_test_agent(h: &Harness) -> librefang_types::agent::AgentId {
         .kernel
         .spawn_agent_typed(librefang_types::agent::AgentManifest {
             name: format!("workflows-fixture-{}", uuid::Uuid::new_v4()),
+            source_template: None,
             ..librefang_types::agent::AgentManifest::default()
         })
         .expect("spawn fixture agent")
