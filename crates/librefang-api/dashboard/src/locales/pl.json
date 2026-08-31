@@ -888,6 +888,8 @@
       "schedule": "Harmonogram",
       "logs": "Logi",
       "routing": "Routing"
+      "routing": "Routing",
+      "history": "Historia"
     },
     "configure": "Konfiguruj",
     "select_an_agent": "Wybierz agenta",

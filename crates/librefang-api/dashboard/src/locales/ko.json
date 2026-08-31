@@ -885,6 +885,8 @@
       "schedule": "일정",
       "logs": "로그",
       "routing": "라우팅"
+      "routing": "라우팅",
+      "history": "기록"
     },
     "configure": "구성",
     "select_an_agent": "에이전트를 선택하세요",
