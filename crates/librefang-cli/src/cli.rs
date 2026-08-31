@@ -297,22 +297,13 @@ pub(crate) enum Commands {
         long_about = "Low-level daemon control commands.\n\nExamples:\n  librefang gateway start          # Start the daemon\n  librefang gateway stop           # Stop the daemon\n  librefang gateway restart        # Restart the daemon\n  librefang gateway status         # Show daemon status"
     )]
     Gateway(GatewayCommands),
-    /// Run an autonomous goal until an agent completes it [*].
-    #[command(
-        long_about = "Create an autonomous goal and start an agent working on it.\n\nCreates the goal via POST /api/goals, starts the run via POST /api/goals/{id}/start,\nand with --watch polls every 2 seconds until the run leaves the running phase.\nWithout --watch the goal id is printed and the command returns immediately.\n\nWith --watch the exit status reports the outcome: 0 when the run finished, 1 when\nit stopped, was rate-limited, or hit the iteration cap.\n\nExamples:\n  librefang goal \"Fix the login bug\" --agent my-agent\n  librefang goal \"Refactor auth module\" --agent 8f2b1c94-... --watch\n  librefang goal \"Write tests\" --agent my-agent --max-iterations 10 --watch"
-    )]
-    Goal {
-        /// Goal description — serves as both title and prompt.
-        description: String,
-        /// Agent name or UUID that will pursue the goal.
+    /// Purge every trace of an agent: roster entry, sessions, memories,
+    /// workspace directory and any agent-type with the same name. For agents
+    /// the operator already deleted but whose data lingers.
+    Purge {
+        /// Agent name to purge.
         #[arg(long)]
-        agent: Option<String>,
-        /// Maximum autonomous iterations before the run stops.
-        #[arg(long)]
-        max_iterations: Option<u64>,
-        /// Poll the run and print progress until it ends.
-        #[arg(long)]
-        watch: bool,
+        agent: String,
     },
     /// Manage execution approvals (list, approve, reject) [*].
     #[command(
@@ -1218,57 +1209,17 @@ pub(crate) enum AgentCommands {
         #[arg(long)]
         from: String,
     },
-    /// Set an agent property (model, or one of its inference parameters).
+    /// Set an agent property (e.g., model).
     #[command(
-        long_about = "Set a property on a running agent.\n\nFields:\n  model               Model id; provider can be set as a prefix\n  temperature         Sampling temperature (0.0-2.0)\n  max_tokens          Output tokens to request\n  top_p               Nucleus sampling (0.0-1.0)\n  frequency_penalty   -2.0 to 2.0\n  presence_penalty    -2.0 to 2.0\n  context_window      Context-window override for this endpoint\n  max_output_tokens   Output-cap override for this endpoint\n\nThe agent's own value wins over the per-model override. Pass `inherit`\nto drop the agent's value and let the per-model override (or the system\ndefault) supply it again.\n\nAsking for more than the model's known limit is reported, not clamped:\nthe value you set is the value that gets sent.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-code/claude-sonnet\n  librefang agent set <ID> temperature 0.2\n  librefang agent set <ID> temperature inherit"
+        long_about = "Set a property on a running agent.\n\nCurrently supports changing the model. Provider can be set if provided as a prefix.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-code/claude-sonnet"
     )]
     Set {
         /// Agent ID (UUID).
         agent_id: String,
-        /// Field to set — see the command's long help for the full list.
+        /// Field to set (model).
         field: String,
-        /// New value, or `inherit` to clear the agent's own value.
+        /// New value.
         value: String,
-    },
-    /// Show an agent's model routing settings.
-    #[command(
-        long_about = "Show whether an agent uses its own model or lets the router pick one\nper task, plus any profile allowlist and cost budget.\n\nExamples:\n  librefang agent routing coder\n  librefang agent routing coder --json"
-    )]
-    Routing {
-        /// Agent ID (UUID) or name.
-        agent_id: String,
-        /// Output as JSON for scripting.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Update an agent's model routing settings.
-    #[command(
-        long_about = "Switch an agent between a fixed model and router-chosen models, and\nconstrain what the router may pick.\n\n`--mode fixed` clears the allowlist and the budget: they only describe a\nrouting decision that will not happen.\n\nExamples:\n  librefang agent routing-set coder --mode flexible\n  librefang agent routing-set coder --mode flexible --profiles coder,quick\n  librefang agent routing-set coder --mode flexible --budget medium\n  librefang agent routing-set coder --mode fixed"
-    )]
-    RoutingSet {
-        /// Agent ID (UUID) or name.
-        agent_id: String,
-        /// "fixed" (use the agent's own model) or "flexible" (let the router pick).
-        #[arg(long, default_value = "flexible")]
-        mode: String,
-        /// Comma-separated profile names the router may pick. Omit for any profile.
-        #[arg(long)]
-        profiles: Option<String>,
-        /// Highest cost tier the router may pick: cheap, medium or expensive. Omit for no cap.
-        #[arg(long)]
-        budget: Option<String>,
-        /// Profile to use when nothing matches the task.
-        #[arg(long)]
-        default_profile: Option<String>,
-    },
-    /// List the resolved model-router profile catalog.
-    #[command(
-        long_about = "List the model profiles the router matches against: the builtin\ncatalog with ~/.librefang/model_profiles.toml merged over it.\n\nExamples:\n  librefang agent routing-profiles\n  librefang agent routing-profiles --json"
-    )]
-    RoutingProfiles {
-        /// Output as JSON for scripting.
-        #[arg(long)]
-        json: bool,
     },
 }
 

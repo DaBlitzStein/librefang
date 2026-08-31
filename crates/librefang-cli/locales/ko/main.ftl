@@ -2072,13 +2072,8 @@ tui-agents-title-templates = 템플릿
 tui-agents-title-custom-name = 사용자 지정 — 이름
 tui-agents-title-custom-desc = 사용자 지정 — 설명
 tui-agents-title-custom-prompt = 사용자 지정 — 시스템 프롬프트
-tui-agents-detail-tokens = 토큰 사용량  ($ 새로고침)
-tui-agents-detail-tokens-injected = 주입됨
 tui-agents-title-custom-tools = 사용자 지정 — 도구
 tui-agents-title-custom-skills = 사용자 지정 — 스킬
-tui-agents-workspaces-help = a 추가 · d 삭제 · Enter 편집 · s 저장 · Esc 뒤로
-tui-agents-workspaces-empty = 아직 공유 폴더가 없습니다. a를 눌러 추가하세요.
-tui-event-workspaces-update-failed = 공유 폴더 업데이트 실패
 tui-agents-title-custom-mcp = 사용자 지정 — MCP 서버
 tui-agents-title-edit-channels = 편집 — 채널
 tui-agents-title-spawning = 생성 중...
@@ -2111,7 +2106,7 @@ tui-agents-opt-create-new = 새 에이전트 생성
 
 tui-agents-hints-filter =   [입력] 필터  [Enter] 적용  [Esc] 검색 취소
 tui-agents-hints-list =   [↑↓] 탐색  [Enter] 상세  [/] 검색  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [w] 공유 폴더  [c] 채팅  [k] 종료  [Esc] 뒤로
+tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-hints-navigate =     [↑↓] 탐색  [Enter] 선택  [Esc] 뒤로
 tui-agents-hints-input =     [Enter] 다음  [Esc] 뒤로
 tui-agents-hints-tools =     [↑↓] 탐색  [Space] 전환  [Enter] 생성  [Esc] 뒤로
@@ -2245,9 +2240,6 @@ tui-memory-config-embedding-model = 검색 모델
 tui-memory-config-on = 켬
 tui-memory-config-off = 끔
 tui-memory-config-loading = 설정을 읽는 중...
-tui-memory-config-saving = 저장 중...
-tui-memory-config-save-failed = 저장 실패
-tui-memory-config-unsaved = 저장되지 않은 변경 사항 — s로 저장, Esc로 취소
 tui-memory-config-hint =   r 새로고침 · Esc 뒤로
 tui-memory-label-select-agent =   메모리를 탐색할 에이전트를 선택하십시오:
 tui-memory-header-agent-name = 에이전트 이름
@@ -2355,18 +2347,6 @@ tui-wizard-status-saved = 구성 저장됨 — { $provider } / { $model }
 tui-wizard-status-save-fail = 구성 저장에 실패: { $error }
 tui-wizard-status-continuing = 계속하는 중...
 
-# Model routing editor (profile-based routing)
-tui-agents-title-model-routing = 모델 라우팅
-tui-agents-label-routing-fixed = 고정 — 항상 이 에이전트의 자체 모델 사용
-tui-agents-label-routing-flexible = 유연 — 작업별로 라우터가 선택
-tui-agents-hint-routing-mode = [Tab] 모드 전환
-tui-agents-label-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다. Tab을 눌러 작업별로 라우터가 선택하도록 하세요.
-tui-agents-label-no-router-profiles = 사용 가능한 모델 프로필이 없습니다. ~/.librefang/model_profiles.toml에 추가하세요.
-tui-agents-label-routing-any-profile = 전체
-tui-agents-hints-model-routing = [Tab] 모드  [↑↓] 탐색  [Space] 프로필 전환  [+/-] 비용 예산  [Enter] 저장  [Esc] 취소
-tui-event-model-routing-fetch-failed = 모델 라우팅을 가져오지 못했습니다
-tui-event-model-routing-update-failed = 모델 라우팅을 업데이트하지 못했습니다
-tui-mod-agent-model-routing-updated = 에이전트 { $id }의 모델 라우팅이 업데이트되었습니다.
 
 
 
@@ -2404,21 +2384,12 @@ tui-groups-hints = ↑/↓ 이동 · r 새로고침
 
 tui-goals-judge-label = { "  " }목표 심사자:{ " " }
 tui-goals-phase-label = { "  " }실행 단계:{ " " }
-
-# Model routing CLI commands
-agent-routing-label-mode = 모드
-agent-routing-label-allowed = 허용된 프로필
-agent-routing-label-budget = 비용 예산
-agent-routing-label-default = 기본 프로필
-agent-routing-any-profile = 전체
-agent-routing-no-cap = 제한 없음
-agent-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다.
-agent-routing-updated = 에이전트 { $id }의 모델 라우팅이 { $mode }(으)로 설정되었습니다.
-agent-routing-failed = 모델 라우팅 업데이트 실패: { $error }
-agent-routing-profiles-header = 모델 라우터 프로필 (라우터: { $enabled }):
-tui-agents-line-routing-mode =   모드: { $mode }
-tui-agents-line-routing-summary =   비용 예산: { $budget }    허용된 프로필: { $allowed }
-tui-agents-label-routing-no-cap = 제한 없음
-tui-agents-label-routing-cheap = 저비용
-tui-agents-label-routing-medium = 중간
-tui-agents-label-routing-expensive = 고비용
+# purge command
+purge-failed-no-database = 삭제 실패: { $path }에 데이터베이스가 없습니다
+purge-failed-open-database = 삭제 실패: 데이터베이스 열기: { $error }
+purge-nothing-to-purge = 삭제할 항목이 없습니다: '{ $agent }'은(는) 이 설치에 흔적을 남기지 않았습니다.
+purge-purged-header = '{ $agent }' 삭제됨:
+purge-removed-roster-entry =   - 로스터 항목, 세션, 기억 및 KV 행
+purge-removed-workspace =   - 작업 공간 디렉터리
+purge-removed-agent-type =   - 에이전트 유형 템플릿
+purge-failed = 삭제 실패: { $error }

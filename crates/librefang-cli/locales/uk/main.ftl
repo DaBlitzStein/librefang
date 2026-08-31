@@ -2093,13 +2093,8 @@ tui-agents-title-templates = Шаблони
 tui-agents-title-custom-name = Власний — Ім'я
 tui-agents-title-custom-desc = Власний — Опис
 tui-agents-title-custom-prompt = Власний — Системний промпт
-tui-agents-detail-tokens = Обсяг токенів  ($ оновити)
-tui-agents-detail-tokens-injected = введено
 tui-agents-title-custom-tools = Власний — Інструменти
 tui-agents-title-custom-skills = Власний — Скіли
-tui-agents-workspaces-help = a додати · d видалити · Enter редагувати · s зберегти · Esc назад
-tui-agents-workspaces-empty = Спільних папок ще немає. Натисніть a, щоб додати.
-tui-event-workspaces-update-failed = Не вдалося оновити спільні папки
 tui-agents-title-custom-mcp = Власний — MCP-сервери
 tui-agents-title-edit-channels = Редагування — Канали
 tui-agents-title-spawning = Створення...
@@ -2132,7 +2127,7 @@ tui-agents-opt-create-new = Створити нового агента
 
 tui-agents-hints-filter =   [Введення] Фільтр  [Enter] Застосувати  [Esc] Скасувати пошук
 tui-agents-hints-list =   [↑↓] Навігація  [Enter] Деталі  [/] Пошук  [Esc] Назад
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [w] Спільні папки  [c] Чат  [k] Зупинити  [Esc] Назад
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-hints-navigate =     [↑↓] Навігація  [Enter] Обрати  [Esc] Назад
 tui-agents-hints-input =     [Enter] Далі  [Esc] Назад
 tui-agents-hints-tools =     [↑↓] Навігація  [Space] Перемкнути  [Enter] Створити  [Esc] Назад
@@ -2266,9 +2261,6 @@ tui-memory-config-embedding-model = Модель пошуку
 tui-memory-config-on = увімк.
 tui-memory-config-off = вимк.
 tui-memory-config-loading = Читання конфігурації...
-tui-memory-config-saving = Збереження...
-tui-memory-config-save-failed = Помилка збереження
-tui-memory-config-unsaved = Незбережені зміни — натисніть s щоб зберегти, Esc щоб скасувати
 tui-memory-config-hint =   r оновити · Esc назад
 tui-memory-label-select-agent =   Виберіть агента для перегляду його пам'яті:
 tui-memory-header-agent-name = Ім'я агента
@@ -2416,34 +2408,12 @@ tui-groups-hints = ↑/↓ навігація · r оновити
 
 tui-goals-judge-label = { "  " }Суддя цілі:{ " " }
 tui-goals-phase-label = { "  " }Фаза запуску:{ " " }
-
-# Model routing editor (profile-based routing)
-tui-agents-title-model-routing = Маршрутизація моделей
-tui-agents-label-routing-fixed = фіксований — завжди використовувати власну модель агента
-tui-agents-label-routing-flexible = гнучкий — маршрутизатор обирає модель для кожного завдання
-tui-agents-hint-routing-mode = [Tab] змінити режим
-tui-agents-label-routing-fixed-explainer = Цей агент завжди використовує модель зі свого маніфесту. Натисніть Tab, щоб маршрутизатор обирав модель для кожного завдання.
-tui-agents-label-no-router-profiles = Немає доступних профілів моделей. Додайте їх до ~/.librefang/model_profiles.toml.
-tui-agents-label-routing-any-profile = будь-який
-tui-agents-hints-model-routing = [Tab] Режим  [↑↓] Навігація  [Space] Перемкнути профіль  [+/-] Бюджет витрат  [Enter] Зберегти  [Esc] Скасувати
-tui-event-model-routing-fetch-failed = Не вдалося отримати маршрутизацію моделі
-tui-event-model-routing-update-failed = Не вдалося оновити маршрутизацію моделі
-tui-mod-agent-model-routing-updated = Маршрутизацію моделі оновлено для агента { $id }.
-
-# Model routing CLI commands
-agent-routing-label-mode = Режим
-agent-routing-label-allowed = Дозволені профілі
-agent-routing-label-budget = Бюджет витрат
-agent-routing-label-default = Профіль за замовчуванням
-agent-routing-any-profile = будь-який
-agent-routing-no-cap = без обмежень
-agent-routing-fixed-explainer = Цей агент завжди використовує модель зі свого маніфесту.
-agent-routing-updated = Маршрутизацію моделі для агента { $id } встановлено на { $mode }.
-agent-routing-failed = Не вдалося оновити маршрутизацію моделі: { $error }
-agent-routing-profiles-header = Профілі маршрутизатора моделей (маршрутизатор: { $enabled }):
-tui-agents-line-routing-mode =   Режим: { $mode }
-tui-agents-line-routing-summary =   Бюджет витрат: { $budget }    Дозволені профілі: { $allowed }
-tui-agents-label-routing-no-cap = без обмежень
-tui-agents-label-routing-cheap = дешевий
-tui-agents-label-routing-medium = середній
-tui-agents-label-routing-expensive = дорогий
+# purge command
+purge-failed-no-database = Не вдалося очистити: немає бази даних за шляхом { $path }
+purge-failed-open-database = Не вдалося очистити: відкриття бази даних: { $error }
+purge-nothing-to-purge = Нічого очищати: '{ $agent }' не залишив слідів у цій інсталяції.
+purge-purged-header = Очищено '{ $agent }':
+purge-removed-roster-entry =   - запис у реєстрі, сесії, спогади та рядки KV
+purge-removed-workspace =   - каталог робочого простору
+purge-removed-agent-type =   - шаблон типу агента
+purge-failed = Не вдалося очистити: { $error }

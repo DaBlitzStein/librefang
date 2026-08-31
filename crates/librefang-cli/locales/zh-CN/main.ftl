@@ -1130,13 +1130,8 @@ tui-agents-title-templates = 模板
 tui-agents-title-custom-name = 自定义 — 名称
 tui-agents-title-custom-desc = 自定义 — 描述
 tui-agents-title-custom-prompt = 自定义 — 系统提示词
-tui-agents-detail-tokens = 令牌占用（$ 刷新）
-tui-agents-detail-tokens-injected = 已注入
 tui-agents-title-custom-tools = 自定义 — 工具
 tui-agents-title-custom-skills = 自定义 — Skill
-tui-agents-workspaces-help = a 添加 · d 删除 · Enter 编辑 · s 保存 · Esc 返回
-tui-agents-workspaces-empty = 还没有共享文件夹。按 a 添加一个。
-tui-event-workspaces-update-failed = 更新共享文件夹失败
 tui-agents-title-custom-mcp = 自定义 — MCP 服务
 tui-agents-title-edit-channels = 编辑 — 频道
 tui-agents-title-spawning = 正在创建...
@@ -1169,7 +1164,7 @@ tui-agents-opt-create-new = 创建新 Agent
 
 tui-agents-hints-filter =   [输入] 过滤  [Enter] 应用  [Esc] 取消搜索
 tui-agents-hints-list =   [↑↓] 导航  [Enter] 详情  [/] 搜索  [Esc] 返回
-tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [w] 共享文件夹  [c] 聊天  [k] 停止  [Esc] 返回
+tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [c] 聊天  [k] 停止  [Esc] 返回
 tui-agents-hints-navigate =     [↑↓] 导航  [Enter] 选择  [Esc] 返回
 tui-agents-hints-input =     [Enter] 下一步  [Esc] 返回
 tui-agents-hints-tools =     [↑↓] 导航  [Space] 切换  [Enter] 创建  [Esc] 返回
@@ -1303,9 +1298,6 @@ tui-memory-config-embedding-model = 检索模型
 tui-memory-config-on = 开
 tui-memory-config-off = 关
 tui-memory-config-loading = 正在读取配置...
-tui-memory-config-saving = 正在保存...
-tui-memory-config-save-failed = 保存失败
-tui-memory-config-unsaved = 有未保存的更改 ── 按 s 保存，Esc 放弃
 tui-memory-config-hint =   r 刷新 · Esc 返回
 tui-memory-label-select-agent =   选择一个 Agent 以浏览其记忆:
 tui-memory-header-agent-name = Agent 名称
@@ -2347,34 +2339,12 @@ tui-groups-hints = ↑/↓ 导航 · r 刷新
 
 tui-goals-judge-label = { "  " }目标裁判:{ " " }
 tui-goals-phase-label = { "  " }运行阶段:{ " " }
-
-# Model routing editor (profile-based routing)
-tui-agents-title-model-routing = 模型路由
-tui-agents-label-routing-fixed = 固定 — 始终使用该智能体自己的模型
-tui-agents-label-routing-flexible = 灵活 — 由路由器按任务选择
-tui-agents-hint-routing-mode = [Tab] 切换模式
-tui-agents-label-routing-fixed-explainer = 该智能体始终使用其清单中的模型。按 Tab 让路由器按任务选择。
-tui-agents-label-no-router-profiles = 没有可用的模型配置。请添加到 ~/.librefang/model_profiles.toml。
-tui-agents-label-routing-any-profile = 全部
-tui-agents-hints-model-routing = [Tab] 模式  [↑↓] 导航  [Space] 切换配置  [+/-] 费用预算  [Enter] 保存  [Esc] 取消
-tui-event-model-routing-fetch-failed = 获取模型路由失败
-tui-event-model-routing-update-failed = 更新模型路由失败
-tui-mod-agent-model-routing-updated = 已更新智能体 { $id } 的模型路由。
-
-# Model routing CLI commands
-agent-routing-label-mode = 模式
-agent-routing-label-allowed = 允许的配置
-agent-routing-label-budget = 费用预算
-agent-routing-label-default = 默认配置
-agent-routing-any-profile = 全部
-agent-routing-no-cap = 无上限
-agent-routing-fixed-explainer = 该智能体始终使用其清单中的模型。
-agent-routing-updated = 智能体 { $id } 的模型路由已设置为 { $mode }。
-agent-routing-failed = 更新模型路由失败: { $error }
-agent-routing-profiles-header = 模型路由配置 (路由器: { $enabled }):
-tui-agents-line-routing-mode =   模式: { $mode }
-tui-agents-line-routing-summary =   费用预算: { $budget }    允许的配置: { $allowed }
-tui-agents-label-routing-no-cap = 无上限
-tui-agents-label-routing-cheap = 低价
-tui-agents-label-routing-medium = 中等
-tui-agents-label-routing-expensive = 高价
+# purge command
+purge-failed-no-database = 清除失败：{ $path } 处无数据库
+purge-failed-open-database = 清除失败：打开数据库：{ $error }
+purge-nothing-to-purge = 无需清除：'{ $agent }' 在此安装中未留下痕迹。
+purge-purged-header = 已清除 '{ $agent }'：
+purge-removed-roster-entry =   - 名册条目、会话、记忆和 KV 行
+purge-removed-workspace =   - 工作区目录
+purge-removed-agent-type =   - 代理类型模板
+purge-failed = 清除失败：{ $error }

@@ -2073,13 +2073,8 @@ tui-agents-title-templates = Templates
 tui-agents-title-custom-name = Custom — Name
 tui-agents-title-custom-desc = Custom — Description
 tui-agents-title-custom-prompt = Custom — System Prompt
-tui-agents-detail-tokens = Token footprint  ($ to refresh)
-tui-agents-detail-tokens-injected = injected
 tui-agents-title-custom-tools = Custom — Tools
 tui-agents-title-custom-skills = Custom — Skills
-tui-agents-workspaces-help = a add · d delete · Enter edit · s save · Esc back
-tui-agents-workspaces-empty = No shared folders yet. Press a to add one.
-tui-event-workspaces-update-failed = Failed to update shared folders
 tui-agents-title-custom-mcp = Custom — MCP Servers
 tui-agents-title-edit-channels = Edit — Channels
 tui-agents-title-spawning = Spawning...
@@ -2112,14 +2107,13 @@ tui-agents-opt-create-new = Create new agent
 
 tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
 tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-hints-navigate =     [↑↓] Navigate  [Enter] Select  [Esc] Back
 tui-agents-hints-input =     [Enter] Next  [Esc] Back
 tui-agents-hints-tools =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
 tui-agents-hints-skills =     [↑↓] Navigate  [Space] Toggle  [Enter] Next  [Esc] Back
 tui-agents-hints-mcp =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
 tui-agents-hints-save =     [↑↓] Navigate  [Space] Toggle  [Enter] Save  [Esc] Cancel
-
 
 tui-agents-placeholder-name = my-agent
 tui-agents-placeholder-desc = A custom agent
@@ -2247,9 +2241,6 @@ tui-memory-config-embedding-model = Search model
 tui-memory-config-on = on
 tui-memory-config-off = off
 tui-memory-config-loading = Reading configuration...
-tui-memory-config-saving = Saving...
-tui-memory-config-save-failed = Save failed
-tui-memory-config-unsaved = Unsaved changes — press s to save, Esc to discard
 tui-memory-config-hint =   r refresh · Esc back
 tui-memory-label-select-agent =   Select an agent to browse its memory:
 tui-memory-header-agent-name = Agent Name
@@ -2357,18 +2348,6 @@ tui-wizard-status-saved = Config saved — { $provider } / { $model }
 tui-wizard-status-save-fail = Failed to save config: { $error }
 tui-wizard-status-continuing = Continuing...
 
-# Model routing editor (profile-based routing)
-tui-agents-title-model-routing = Model Routing
-tui-agents-label-routing-fixed = fixed — always use this agent's own model
-tui-agents-label-routing-flexible = flexible — let the router pick per task
-tui-agents-hint-routing-mode = [Tab] switch mode
-tui-agents-label-routing-fixed-explainer = This agent always uses the model in its own manifest. Press Tab to let the router choose per task.
-tui-agents-label-no-router-profiles = No model profiles available. Add them to ~/.librefang/model_profiles.toml.
-tui-agents-label-routing-any-profile = any
-tui-agents-hints-model-routing = [Tab] Mode  [↑↓] Navigate  [Space] Toggle profile  [+/-] Cost budget  [Enter] Save  [Esc] Cancel
-tui-event-model-routing-fetch-failed = Failed to fetch model routing
-tui-event-model-routing-update-failed = Failed to update model routing
-tui-mod-agent-model-routing-updated = Model routing updated for agent { $id }.
 
 
 
@@ -2406,21 +2385,12 @@ tui-groups-hints = ↑/↓ navigate · r refresh
 
 tui-goals-judge-label = { "  " }Goal Judge:{ " " }
 tui-goals-phase-label = { "  " }Run Phase:{ " " }
-
-# Model routing CLI commands
-agent-routing-label-mode = Mode
-agent-routing-label-allowed = Allowed profiles
-agent-routing-label-budget = Cost budget
-agent-routing-label-default = Default profile
-agent-routing-any-profile = any
-agent-routing-no-cap = no cap
-agent-routing-fixed-explainer = This agent always uses the model in its own manifest.
-agent-routing-updated = Model routing for agent { $id } set to { $mode }.
-agent-routing-failed = Failed to update model routing: { $error }
-agent-routing-profiles-header = Model router profiles (router is { $enabled }):
-tui-agents-line-routing-mode =   Mode: { $mode }
-tui-agents-line-routing-summary =   Cost budget: { $budget }    Allowed profiles: { $allowed }
-tui-agents-label-routing-no-cap = no cap
-tui-agents-label-routing-cheap = cheap
-tui-agents-label-routing-medium = medium
-tui-agents-label-routing-expensive = expensive
+# purge command
+purge-failed-no-database = Purge failed: no database at { $path }
+purge-failed-open-database = Purge failed: open database: { $error }
+purge-nothing-to-purge = Nothing to purge: '{ $agent }' left no trace in this installation.
+purge-purged-header = Purged '{ $agent }':
+purge-removed-roster-entry =   - roster entry, sessions, memories and KV rows
+purge-removed-workspace =   - workspace directory
+purge-removed-agent-type =   - agent-type template
+purge-failed = Purge failed: { $error }
