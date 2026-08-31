@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
-import { Edit2, LayoutTemplate, Lock, Play, Plus, Trash2 } from "lucide-react";
+import { Edit2, History, LayoutTemplate, Lock, Play, Plus, Trash2 } from "lucide-react";
 import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
 import { useAgentType, useAgentTypes } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
@@ -21,6 +21,7 @@ import { Badge } from "../components/ui/Badge";
 import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
+import { TemplateHistoryModal } from "../components/TemplateHistoryModal";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 
@@ -418,11 +419,13 @@ function QuickRunModal({
 function AgentTypeRow({
   type,
   onQuickRun,
+  onHistory,
   onEdit,
   onDelete,
 }: {
   type: AgentTemplate;
   onQuickRun: () => void;
+  onHistory: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -462,6 +465,15 @@ function AgentTypeRow({
             that cannot succeed — point at the surface that can instead (#7731). */}
         {type.editable ? (
           <>
+            <button
+              type="button"
+              onClick={onHistory}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-text-main"
+              aria-label={t("templateHistory.button")}
+              title={t("templateHistory.button")}
+            >
+              <History className="h-3.5 w-3.5" />
+            </button>
             <button
               type="button"
               onClick={onEdit}
@@ -505,6 +517,7 @@ export function AgentTypesPage() {
   const [editing, setEditing] = useState<{ name: string | null } | null>(null);
   const [quickRun, setQuickRun] = useState<AgentTemplate | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [historyTarget, setHistoryTarget] = useState<string | null>(null);
 
   async function confirmDelete() {
     if (!pendingDelete) return;
@@ -554,6 +567,7 @@ export function AgentTypesPage() {
               key={`${type.source}:${type.name}`}
               type={type}
               onQuickRun={() => setQuickRun(type)}
+              onHistory={() => setHistoryTarget(type.name)}
               onEdit={() => setEditing({ name: type.name })}
               onDelete={() => setPendingDelete(type.name)}
             />
@@ -566,6 +580,12 @@ export function AgentTypesPage() {
       )}
 
       {quickRun && <QuickRunModal type={quickRun} onClose={() => setQuickRun(null)} />}
+
+      <TemplateHistoryModal
+        name={historyTarget ?? ""}
+        open={!!historyTarget}
+        onClose={() => setHistoryTarget(null)}
+      />
 
       <ConfirmDialog
         isOpen={pendingDelete !== null}

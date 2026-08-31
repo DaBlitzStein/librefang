@@ -4170,5 +4170,13 @@
     "tools": "Narzędzia",
     "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
     "tools_search": "Szukaj narzędzi…"
+  },
+  "templateHistory": {
+    "button": "Historia",
+    "title": "Historia wersji — {{name}}",
+    "source": "Źródło",
+    "restore": "Przywróć",
+    "restoreConfirm": "Przywrócić tę wersję? Stanie się bieżącym typem agenta; nic innego nie zostanie usunięte.",
+    "empty": "Brak zapisanych wersji."
   }
 }

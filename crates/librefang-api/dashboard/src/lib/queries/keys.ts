@@ -29,6 +29,8 @@ export const agentTypeKeys = {
   list: () => [...agentTypeKeys.lists()] as const,
   details: () => [...agentTypeKeys.all, "detail"] as const,
   detail: (name: string) => [...agentTypeKeys.details(), name] as const,
+  histories: () => [...agentTypeKeys.all, "history"] as const,
+  history: (name: string) => [...agentTypeKeys.histories(), name] as const,
 };
 
 export const agentKeys = {
