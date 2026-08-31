@@ -3,6 +3,7 @@ import {
   createAgentType,
   updateAgentType,
   deleteAgentType,
+  restoreAgentTypeFromRegistry,
   spawnEphemeral,
 } from "../http/client";
 import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
@@ -41,6 +42,18 @@ export function useDeleteAgentType() {
   return useMutation({
     mutationFn: (name: string) => deleteAgentType(name),
     onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
+  });
+}
+
+/** Overwrite the operator's agent type with the registry's copy of the same name. */
+export function useRestoreAgentTypeFromRegistry() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => restoreAgentTypeFromRegistry(name),
+    onSuccess: (_data, name) => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
+    },
   });
 }
 

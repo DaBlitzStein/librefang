@@ -35,6 +35,7 @@ api-error-template-read-failed = Не вдалося прочитати темп
 api-error-agent-type-exists = Тип агента '{ $name }' вже існує
 api-error-agent-type-name-taken = '{ $name }' — це назва активного агента; оберіть іншу назву для типу агента
 api-error-agent-type-not-editable = Тип агента '{ $name }' походить із робочої області активного агента й керується через /api/agents
+api-error-agent-type-no-registry-version = Немає версії реєстру типу агента '{ $name }', з якої можна відновити
 
 # Manifest errors
 api-error-manifest-too-large = Маніфест занадто великий (макс. 1MB)
