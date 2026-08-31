@@ -36,6 +36,8 @@ api-error-agent-type-exists = Typ agenta '{ $name }' już istnieje
 api-error-agent-type-name-taken = '{ $name }' to nazwa działającego agenta; wybierz inną nazwę dla typu agenta
 api-error-agent-type-not-editable = Typ agenta '{ $name }' pochodzi z obszaru roboczego działającego agenta i jest zarządzany przez /api/agents
 api-error-registry-type-not-found = Typ agenta '{ $name }' nie został znaleziony w rejestrze
+api-error-agent-type-no-registry-version = Brak wersji z rejestru typu agenta '{ $name }', z której można by przywrócić
+>>>>>>> fork/feat/dashboard-registry-restore
 
 # Manifest errors
 api-error-manifest-too-large = Manifest jest za duży (maks. 1 MB)

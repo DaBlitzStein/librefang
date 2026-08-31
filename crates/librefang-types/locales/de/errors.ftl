@@ -23,6 +23,8 @@ api-error-agent-type-exists = Ein Agententyp namens '{ $name }' existiert bereit
 api-error-agent-type-name-taken = '{ $name }' ist der Name eines laufenden Agenten; waehlen Sie einen anderen Namen fuer den Agententyp
 api-error-agent-type-not-editable = Agententyp '{ $name }' stammt aus dem Arbeitsbereich eines laufenden Agenten und wird ueber /api/agents verwaltet
 api-error-registry-type-not-found = Agententyp '{ $name }' nicht im Registry gefunden
+api-error-agent-type-no-registry-version = Fuer den Agententyp '{ $name }' ist keine Registry-Version zum Wiederherstellen verfuegbar
+>>>>>>> fork/feat/dashboard-registry-restore
 
 # Manifest errors
 api-error-manifest-too-large = Manifest zu gross (max 1MB)

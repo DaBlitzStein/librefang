@@ -5024,24 +5024,12 @@ impl SystemResource {
         .await
     }
 
-    pub async fn get_agent_type_registry_diff(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &["api", "templates", name, "registry-diff"],
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn restore_agent_type_from_registry(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &["api", "templates", name, "restore"],
+            &["api", "templates", name, "restore-from-registry"],
             None,
             &[],
         )

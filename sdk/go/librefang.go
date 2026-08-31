@@ -1738,12 +1738,8 @@ func (r *SystemResource) DeleteAgentType(name string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/templates/%s", name), nil, nil)
 }
 
-func (r *SystemResource) GetAgentTypeRegistryDiff(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/registry-diff", name), nil, nil)
-}
-
 func (r *SystemResource) RestoreAgentTypeFromRegistry(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/templates/%s/restore", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/templates/%s/restore-from-registry", name), nil, nil)
 }
 
 func (r *SystemResource) GetAgentTemplateToml(name string) (interface{}, error) {

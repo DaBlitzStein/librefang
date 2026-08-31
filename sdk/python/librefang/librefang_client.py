@@ -1325,11 +1325,8 @@ class _SystemResource(_Resource):
     def delete_agent_type(self, name: str):
         return self._c._request("DELETE", f"/api/templates/{name}")
 
-    def get_agent_type_registry_diff(self, name: str):
-        return self._c._request("GET", f"/api/templates/{name}/registry-diff")
-
     def restore_agent_type_from_registry(self, name: str):
-        return self._c._request("POST", f"/api/templates/{name}/restore")
+        return self._c._request("POST", f"/api/templates/{name}/restore-from-registry")
 
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
