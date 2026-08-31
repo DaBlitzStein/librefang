@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChannelItem, QrState } from "../api";
 import { useChannels, useChannelQr } from "../lib/queries/channels";
+import { useAgents } from "../lib/queries/agents";
 import {
   useReloadChannels,
   useSaveSidecarConfig,
@@ -403,6 +404,14 @@ function DetailsModal({ channel, onClose, t }: {
                 </span>
               </div>
               <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
+                <span className="text-xs font-bold text-text-dim">
+                  {t("channels.default_agent_label", { defaultValue: "Default agent" })}
+                </span>
+                <span className="text-xs font-mono text-text-main">
+                  {channel.agent || t("channels.default_agent_none_short", { defaultValue: "None" })}
+                </span>
+              </div>
+              <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
                 <span className="text-xs font-bold text-text-dim">{t("channels.has_token")}</span>
                 <span className={`text-xs font-bold ${channel.has_token ? "text-success" : "text-warning"}`}>
                   {channel.has_token ? t("common.yes") : t("common.no")}
@@ -547,15 +556,38 @@ function DetailsModal({ channel, onClose, t }: {
 // (everything else) — see `useSaveSidecarConfig` for the wire shape.
 function SidecarForm({
   channel,
+  existingInstanceCount,
   onClose,
   t,
 }: {
   channel: Channel;
+  /** How many configured instances of this channel's type already exist.
+   *  Drives the instance-name default below — see the field's own comment. */
+  existingInstanceCount: number;
   onClose: () => void;
-  t: (key: string, opts?: { defaultValue?: string; keys?: string }) => string;
+  t: (key: string, opts?: { defaultValue?: string; keys?: string; count?: number }) => string;
 }) {
   const addToast = useUIStore((s) => s.addToast);
   const saveMut = useSaveSidecarConfig();
+  // A discovery (catalog) row is never `configured`, so this is exactly
+  // "the user picked a channel type from the Add picker" — including
+  // picking a type that already has other instances (multi-instance
+  // support). `channelType` is the `SIDECAR_CATALOG` key either way:
+  // discovery rows use their own `name` for it (no `channel_type` field),
+  // configured rows carry it explicitly.
+  const isCreate = !channel.configured;
+  const channelType = channel.channel_type ?? channel.name;
+  const { data: agents } = useAgents();
+  // Instance-name default: safe to prefill with the catalog type only when
+  // this would be the type's first instance (matches the pre-multi-instance
+  // UX exactly, zero risk of collision). Once a first instance exists, an
+  // empty default forces the operator to type a distinct name rather than
+  // silently overwriting it — a blank field also disables Save below.
+  const [instanceName, setInstanceName] = useState(() =>
+    isCreate ? (existingInstanceCount === 0 ? channelType : "") : channel.name,
+  );
+  const [agent, setAgent] = useState(channel.agent ?? "");
+  const instanceNameTrimmed = instanceName.trim();
   const allFields = channel.fields ?? [];
   const fields = allFields.filter((f) => !f.advanced);
   const advanced = allFields.filter((f) => f.advanced);
@@ -592,7 +624,12 @@ function SidecarForm({
       if (v) payload[f.key] = v;
     }
     saveMut.mutate(
-      { name: channel.name, values: payload },
+      {
+        name: channelType,
+        values: payload,
+        instanceName: instanceNameTrimmed,
+        agent: agent.trim() || null,
+      },
       {
         onSuccess: (res) => {
           const savedMessage = res.restart_required
@@ -630,6 +667,53 @@ function SidecarForm({
         </button>
       </div>
       <div className="p-6 space-y-3">
+        <div className="space-y-1">
+          <label className="text-xs font-bold">
+            {t("channels.instance_name_label", { defaultValue: "Instance name" })}
+          </label>
+          <Input
+            aria-label={t("channels.instance_name_label", { defaultValue: "Instance name" })}
+            value={instanceName}
+            disabled={!isCreate}
+            onChange={(e) => setInstanceName(e.target.value)}
+            placeholder={t("channels.instance_name_placeholder", {
+              defaultValue: "e.g. telegram-support",
+            })}
+          />
+          <p className="text-[11px] text-text-dim leading-relaxed">
+            {isCreate
+              ? existingInstanceCount === 0
+                ? t("channels.instance_name_hint_first", {
+                    defaultValue: "Unique name for this instance. Defaults to the channel type since none is configured yet.",
+                  })
+                : t("channels.instance_name_hint_next", {
+                    defaultValue: "This channel type already has {{count}} configured instance(s). Pick a unique name so this becomes a new one instead of overwriting an existing bot.",
+                    count: existingInstanceCount,
+                  })
+              : t("channels.instance_name_hint_edit", {
+                  defaultValue: "The instance name cannot be changed here — remove and re-add to rename.",
+                })}
+          </p>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs font-bold">
+            {t("channels.default_agent_label", { defaultValue: "Default agent" })}
+          </label>
+          <Select
+            aria-label={t("channels.default_agent_label", { defaultValue: "Default agent" })}
+            options={[
+              { value: "", label: t("channels.default_agent_none", { defaultValue: "No default (first available agent)" }) },
+              ...(agents ?? []).map((a) => ({ value: a.name, label: a.name })),
+            ]}
+            value={agent}
+            onChange={(e) => setAgent(e.target.value)}
+          />
+          <p className="text-[11px] text-text-dim leading-relaxed">
+            {t("channels.default_agent_hint", {
+              defaultValue: "Inbound messages on this instance with no more specific binding route to this agent.",
+            })}
+          </p>
+        </div>
         {schemaUnavailable && (
           <div className="flex gap-2 p-3 rounded-lg border border-warning/30 bg-warning/5">
             <AlertCircle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
@@ -732,7 +816,7 @@ function SidecarForm({
         <Button
           variant="primary"
           onClick={handleSubmit}
-          disabled={saveMut.isPending || schemaUnavailable}
+          disabled={saveMut.isPending || schemaUnavailable || !instanceNameTrimmed}
         >
           {saveMut.isPending
             ? t("common.saving", { defaultValue: "Saving..." })
@@ -815,7 +899,11 @@ export function ChannelsPage() {
     [channels, search, sortField, sortOrder],
   );
 
-  // Catalog of unconfigured channel types, surfaced in the Add picker.
+  // Catalog of channel types, surfaced in the Add picker. Every catalog
+  // type is always listed (not just ones with zero configured instances —
+  // #8xxx multi-instance support) so picking an already-configured type
+  // starts a second (third, …) named instance instead of having nowhere
+  // left to click.
   const pickerChannels = useMemo(
     () => [...channels]
       .filter(c => !c.configured)
@@ -826,6 +914,37 @@ export function ChannelsPage() {
     [channels, pickerSearch],
   );
 
+  // How many configured instances each catalog type already has — feeds
+  // the picker's "N configured" hint and, more importantly, tells
+  // `SidecarForm` whether it's safe to default the instance-name field to
+  // the catalog type (only when this would be the first instance) or must
+  // force the operator to type a distinct name (a second+ instance): a
+  // blank name silently editing the *existing* default instance in place
+  // is exactly the footgun multi-instance support must not introduce.
+  const instanceCountByType = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of channels) {
+      if (!c.configured) continue;
+      const type = c.channel_type || c.name;
+      counts.set(type, (counts.get(type) ?? 0) + 1);
+    }
+    return counts;
+  }, [channels]);
+
+  // Configured channels grouped by type so multiple instances of the same
+  // adapter (several Telegram bots, several Slack workspaces, …) render
+  // together under one heading instead of scattered through a flat list.
+  const groupedChannels = useMemo(() => {
+    const groups = new Map<string, Channel[]>();
+    for (const c of filteredChannels) {
+      const key = c.channel_type || c.category || c.name;
+      const list = groups.get(key);
+      if (list) list.push(c);
+      else groups.set(key, [c]);
+    }
+    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [filteredChannels]);
+
   const openPicker = () => {
     setPickerSearch("");
     setPickerOpen(true);
@@ -834,7 +953,10 @@ export function ChannelsPage() {
     setPickerOpen(false);
     // Schema-driven save endpoint
     // (`POST /api/channels/sidecar/{name}/configure`) is the only
-    // configure path now — every channel runs as a sidecar.
+    // configure path now — every channel runs as a sidecar. `ch` here is
+    // always a discovery (catalog) row, so `SidecarForm` opens in "create a
+    // new instance" mode regardless of how many instances of this type
+    // already exist.
     setSidecarFormChannel(ch);
   };
 
@@ -1029,19 +1151,39 @@ export function ChannelsPage() {
             )}
           </div>
 
-          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
-            {filteredChannels.map((c) => (
-              <ChannelCard
-                key={c.name}
-                channel={c}
-                isSelected={selectedIds.has(c.name)}
-                viewMode={viewMode}
-                onSelect={handleSelect}
-                onConfigure={handleCardConfigure}
-                onRemove={handleCardRemove}
-                onViewDetails={setDetailsChannel}
-                t={t}
-              />
+          {/* One section per channel TYPE so several instances of the same
+              adapter (multiple Telegram bots, multiple Slack workspaces, …)
+              render together instead of scattered through a flat list. */}
+          <div className="flex flex-col gap-6">
+            {groupedChannels.map(([type, instances]) => (
+              <div key={type} className="flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-md bg-accent/10 border border-accent/30 text-accent grid place-items-center shrink-0">
+                    {getChannelIcon(type)}
+                  </div>
+                  <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">
+                    {type}
+                  </h3>
+                  <span className="text-[10px] font-bold text-text-dim/70">
+                    {t("channels.instance_count", { count: instances.length })}
+                  </span>
+                </div>
+                <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
+                  {instances.map((c) => (
+                    <ChannelCard
+                      key={c.name}
+                      channel={c}
+                      isSelected={selectedIds.has(c.name)}
+                      viewMode={viewMode}
+                      onSelect={handleSelect}
+                      onConfigure={handleCardConfigure}
+                      onRemove={handleCardRemove}
+                      onViewDetails={setDetailsChannel}
+                      t={t}
+                    />
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
         </>
@@ -1074,6 +1216,11 @@ export function ChannelsPage() {
       {sidecarFormChannel && (
         <SidecarForm
           channel={sidecarFormChannel}
+          existingInstanceCount={
+            instanceCountByType.get(
+              sidecarFormChannel.channel_type ?? sidecarFormChannel.name,
+            ) ?? 0
+          }
           onClose={() => setSidecarFormChannel(null)}
           t={t}
         />

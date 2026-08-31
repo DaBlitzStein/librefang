@@ -382,6 +382,7 @@ async fn creating_a_cron_job_records_the_authenticated_caller_as_its_owner() {
         .kernel
         .spawn_agent_typed(librefang_types::agent::AgentManifest {
             name: format!("ownership-cron-{}", uuid::Uuid::new_v4()),
+            source_template: None,
             author: "Alice".to_string(),
             ..Default::default()
         })
@@ -441,6 +442,7 @@ async fn creating_a_schedule_records_the_authenticated_caller_as_its_owner() {
         .kernel
         .spawn_agent_typed(librefang_types::agent::AgentManifest {
             name: format!("ownership-sched-{}", uuid::Uuid::new_v4()),
+            source_template: None,
             author: "Alice".to_string(),
             ..Default::default()
         })
