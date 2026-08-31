@@ -101,6 +101,77 @@ pub struct CustomSttConfig {
     pub model: Option<String>,
 }
 
+/// Configuration for a custom / self-hosted vision endpoint used by image
+/// description (the understanding path, not generation).
+///
+/// Points `describe_image` at any OpenAI-compatible `/v1/chat/completions`
+/// endpoint that accepts a vision message — e.g. a local `llama.cpp` server,
+/// `ollama` with a multimodal model, or any other OpenAI-compatible service.
+///
+/// ## Example (`config.toml`)
+/// ```toml
+/// [media]
+/// image_provider = "local-llava"
+///
+/// [media.custom_image]
+/// base_url = "http://localhost:11434/v1/chat/completions"
+/// # api_key_env = "MY_LOCAL_VISION_KEY"  # omit for keyless servers  # pragma: allowlist secret
+/// key_required = false
+/// model = "llava"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CustomImageConfig {
+    /// Full URL of the OpenAI-compatible chat/completions endpoint.
+    /// E.g. `"http://localhost:11434/v1/chat/completions"`.
+    pub base_url: String,
+    /// Environment variable that holds the API key for this endpoint.
+    /// When empty (default), no `Authorization` header is sent.
+    #[serde(default)]
+    pub api_key_env: String,
+    /// When `true`, the request is rejected immediately if the env var named
+    /// by `api_key_env` is not set. When `false` (default), a missing key
+    /// simply means no auth header is added — suitable for keyless local
+    /// servers.
+    #[serde(default)]
+    pub key_required: bool,
+    /// Model identifier forwarded to the endpoint. When unset the endpoint
+    /// default is used.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Configuration for a custom / self-hosted video description endpoint.
+///
+/// Points `describe_video` at any OpenAI-compatible multimodal endpoint
+/// that accepts video input — mirrors `CustomImageConfig` for video.
+///
+/// ## Example (`config.toml`)
+/// ```toml
+/// [media]
+/// video_provider = "local-video"
+///
+/// [media.custom_video]
+/// base_url = "http://localhost:8080/v1/chat/completions"
+/// key_required = false
+/// model = "video-llava"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CustomVideoConfig {
+    /// Full URL of the multimodal endpoint.
+    pub base_url: String,
+    /// Environment variable that holds the API key for this endpoint.
+    #[serde(default)]
+    pub api_key_env: String,
+    /// When `true`, the request is rejected if the env var is not set.
+    #[serde(default)]
+    pub key_required: bool,
+    /// Model identifier forwarded to the endpoint.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 /// Configuration for media understanding.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -118,6 +189,9 @@ pub struct MediaConfig {
     /// Timeout for one ffmpeg subprocess in seconds. Default: 30.
     pub ffmpeg_timeout_secs: u64,
     /// Preferred image description provider (auto-detect if None).
+    ///
+    /// Set to any string (e.g. `"local-llava"`) to use the custom vision
+    /// endpoint defined in `[media.custom_image]`.
     pub image_provider: Option<String>,
     /// Preferred image description model (provider default if None).
     pub image_model: Option<String>,
@@ -138,6 +212,13 @@ pub struct MediaConfig {
     /// `prompt` (#6678). Per-call value always wins; this only applies when
     /// the tool call left the field unset.
     pub audio_prompt: Option<String>,
+    /// Preferred video description provider (auto-detect if None).
+    ///
+    /// Set to any string (e.g. `"local-video"`) to use the custom video
+    /// endpoint defined in `[media.custom_video]`.
+    pub video_provider: Option<String>,
+    /// Preferred video description model (provider default if None).
+    pub video_model: Option<String>,
     /// Custom / self-hosted STT endpoint configuration.
     ///
     /// When `audio_provider` is set to a name that is not one of the
@@ -147,6 +228,20 @@ pub struct MediaConfig {
     /// Whisper endpoint at `custom_stt.base_url`.
     #[serde(default)]
     pub custom_stt: CustomSttConfig,
+    /// Custom / self-hosted vision endpoint for image description.
+    ///
+    /// When `image_provider` is set to a name that is not one of the
+    /// built-in providers (`anthropic`, `openai`, `groq`, `gemini`), this
+    /// block is consulted and the request is forwarded to an
+    /// OpenAI-compatible chat/completions endpoint at `custom_image.base_url`.
+    #[serde(default)]
+    pub custom_image: CustomImageConfig,
+    /// Custom / self-hosted endpoint for video description.
+    ///
+    /// When `video_provider` is set to a name that is not one of the
+    /// built-in providers (`gemini`), this block is consulted.
+    #[serde(default)]
+    pub custom_video: CustomVideoConfig,
 }
 
 impl Default for MediaConfig {
@@ -164,7 +259,11 @@ impl Default for MediaConfig {
             audio_model: None,
             audio_language: None,
             audio_prompt: None,
+            video_provider: None,
+            video_model: None,
             custom_stt: CustomSttConfig::default(),
+            custom_image: CustomImageConfig::default(),
+            custom_video: CustomVideoConfig::default(),
         }
     }
 }
@@ -564,6 +663,16 @@ pub enum MediaCapability {
     TextToSpeech,
     VideoGeneration,
     MusicGeneration,
+    /// Turning speech into text. Understanding, not generation — but it is a
+    /// media capability a provider either has or lacks, and leaving it out
+    /// meant transcription providers could not be discovered from the
+    /// registry like every other one and were picked from a hardcoded env-var
+    /// cascade instead.
+    SpeechToText,
+    /// Describing an image. Same reasoning as `SpeechToText`: this is the
+    /// capability that decides whether an attached image reaches the model
+    /// or gets replaced by a note about a file path.
+    ImageUnderstanding,
 }
 
 impl std::fmt::Display for MediaCapability {
@@ -573,6 +682,8 @@ impl std::fmt::Display for MediaCapability {
             MediaCapability::TextToSpeech => write!(f, "text_to_speech"),
             MediaCapability::VideoGeneration => write!(f, "video_generation"),
             MediaCapability::MusicGeneration => write!(f, "music_generation"),
+            MediaCapability::SpeechToText => write!(f, "speech_to_text"),
+            MediaCapability::ImageUnderstanding => write!(f, "image_understanding"),
         }
     }
 }

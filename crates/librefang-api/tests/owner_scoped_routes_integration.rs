@@ -95,6 +95,7 @@ fn spawn_authored(state: &AppState, author: &str) -> AgentId {
         .kernel
         .spawn_agent_typed(AgentManifest {
             name: format!("owner-scope-{}", uuid::Uuid::new_v4()),
+            source_template: None,
             author: author.to_string(),
             ..AgentManifest::default()
         })
@@ -451,6 +452,7 @@ fn spawn_cron_job(
         created_at: chrono::Utc::now(),
         last_run: None,
         next_run: None,
+        owner: None,
     };
     state
         .kernel

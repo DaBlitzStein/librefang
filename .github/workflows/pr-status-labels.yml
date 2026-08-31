@@ -28,11 +28,23 @@ permissions:
   issues: write
   pull-requests: write
 
+# Every job here recomputes the full desired label set from the PR's current state, so a newer run's answer entirely supersedes an older one and cancelling the older run loses nothing.
+# `pull_request_target`, `check_suite` and `push` all report `github.ref` as a branch of this repository rather than as a PR ref, so keying the group on the ref alone would put every open PR in one bucket and let one PR's run cancel another's.
+# Key on the PR number, falling back to the check-suite head SHA and then the ref, and keep the event name in the group so a `check_suite` run can never cancel the main-push conflict sweep.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.check_suite.head_sha || github.ref }}
+  # Only the per-PR paths cancel. The `push` and `workflow_dispatch` sweeps walk up to 100 open PRs
+  # with a retry delay per PR whose mergeability is still null, and a push to main is exactly what
+  # makes mergeability null repository-wide — so during a merge batch each further merge would abort
+  # the sweep that detects newly conflicting PRs. Same reasoning as stale-pr.yml's sweep.
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' || github.event_name == 'check_suite' }}
+
 jobs:
   # ── Conflict detection ────────────────────────────────────────────
   conflicts:
     name: Conflict Check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event_name == 'pull_request_target' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Label conflicting PRs
@@ -42,13 +54,12 @@ jobs:
             const LABEL = 'has-conflicts';
             let prs;
             if (context.eventName === 'push' || context.eventName === 'workflow_dispatch') {
-              const resp = await github.rest.pulls.list({
+              prs = await github.paginate(github.rest.pulls.list, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 state: 'open',
                 per_page: 100,
               });
-              prs = resp.data;
             } else {
               prs = [{ number: context.payload.pull_request.number }];
             }
@@ -66,7 +77,9 @@ jobs:
               // Retry in both cases so a conflict-fixing push removes the label.
               const isSynchronize = context.eventName === 'pull_request_target' &&
                 context.payload.action === 'synchronize';
-              if (mergeable === null || (isSynchronize && mergeable === false)) {
+              for (let attempt = 0;
+                attempt < 3 && (mergeable === null || (isSynchronize && mergeable === false));
+                attempt += 1) {
                 await new Promise(r => setTimeout(r, 5000));
                 const { data: retry } = await github.rest.pulls.get({
                   owner: context.repo.owner,
@@ -74,6 +87,10 @@ jobs:
                   pull_number: pr.number,
                 });
                 mergeable = retry.mergeable;
+              }
+              if (mergeable === null) {
+                core.info(`#${pr.number}: mergeability is still unknown, preserving labels`);
+                continue;
               }
 
               const labels = full.labels.map(l => l.name);
@@ -84,7 +101,7 @@ jobs:
                   await github.rest.issues.removeLabel({
                     owner: context.repo.owner, repo: context.repo.repo,
                     issue_number: pr.number, name,
-                  }).catch(() => {});
+                  }).catch((error) => { if (error.status !== 404) throw error; });
                 }
               };
 
@@ -100,7 +117,7 @@ jobs:
                 }
                 // Always enforce: conflicts → no ready-for-review
                 await rmLabel('ready-for-review');
-              } else if (mergeable !== false && hasLabel) {
+              } else if (mergeable === true && hasLabel) {
                 await rmLabel(LABEL);
                 // Restore ready-for-review if no other blockers remain
                 const hasCiFailed = labels.includes('ci-failed');
@@ -123,6 +140,7 @@ jobs:
   ci-status:
     name: CI Status Check
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: github.event_name == 'check_suite' || (github.event_name == 'pull_request_target' && github.event.action == 'synchronize')
     steps:
       - name: Label PRs with failed CI
@@ -141,7 +159,7 @@ jobs:
                 await github.rest.issues.removeLabel({
                   owner: context.repo.owner, repo: context.repo.repo,
                   issue_number: pr.number, name: LABEL,
-                }).catch(() => {});
+                }).catch((error) => { if (error.status !== 404) throw error; });
                 core.info(`#${pr.number}: -${LABEL} (new push invalidates old CI result)`);
               }
               return;
@@ -190,6 +208,10 @@ jobs:
             const externalRuns = allCheckRuns.filter(
               cr => cr && cr.name && !SELF_JOBS.has(cr.name),
             );
+            if (externalRuns.length === 0) {
+              core.info(`no external checks found for ${suite.head_sha}, preserving labels`);
+              return;
+            }
 
             const hasFailure = externalRuns.some(
               cr => cr.conclusion === 'failure' || cr.conclusion === 'timed_out'
@@ -217,7 +239,7 @@ jobs:
                   await github.rest.issues.removeLabel({
                     owner: context.repo.owner, repo: context.repo.repo,
                     issue_number: prNumber, name,
-                  }).catch(() => {});
+                  }).catch((error) => { if (error.status !== 404) throw error; });
                 }
               };
 
@@ -256,6 +278,7 @@ jobs:
   size:
     name: PR Size
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: github.event_name == 'pull_request_target'
     steps:
       - name: Classify PR size
@@ -295,7 +318,7 @@ jobs:
                   repo: context.repo.repo,
                   issue_number: pr.number,
                   name: old,
-                }).catch(() => {});
+                }).catch((error) => { if (error.status !== 404) throw error; });
               }
             }
             if (!current.includes(sizeLabel)) {
@@ -312,6 +335,7 @@ jobs:
   docs-only:
     name: Docs/CI Check
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: github.event_name == 'pull_request_target'
     steps:
       - name: Label docs/CI-only PRs
@@ -350,7 +374,7 @@ jobs:
                 repo: context.repo.repo,
                 issue_number: pr.number,
                 name: LABEL,
-              }).catch(() => {});
+              }).catch((error) => { if (error.status !== 404) throw error; });
               core.info(`#${pr.number}: removed "${LABEL}" (has .rs files)`);
             }
 
@@ -365,6 +389,7 @@ jobs:
   review-state:
     name: Review State
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: github.event_name == 'pull_request_target' && github.event.action == 'synchronize'
     steps:
       - name: Clear needs-changes after push if all reviews resolved
@@ -400,7 +425,7 @@ jobs:
                   repo: context.repo.repo,
                   issue_number: prNumber,
                   name: label,
-                }).catch(() => {});
+                }).catch((error) => { if (error.status !== 404) throw error; });
               }
             }
 

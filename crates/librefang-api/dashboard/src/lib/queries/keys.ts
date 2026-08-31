@@ -9,9 +9,26 @@
 //
 // All arrays use `as const` for structural stability.
 
+import type { AuditQueryFilters } from "../http/client";
+
 export const autoDreamKeys = {
   all: ["autoDream"] as const,
   status: () => [...autoDreamKeys.all, "status"] as const,
+};
+
+/**
+ * Operator-authored agent types (`/api/templates`).
+ *
+ * Kept separate from `agentKeys.templates()` deliberately: that key backs the
+ * read-only picker on the spawn form, while these back the editor, whose
+ * mutations must invalidate the detail as well as the list.
+ */
+export const agentTypeKeys = {
+  all: ["agentTypes"] as const,
+  lists: () => [...agentTypeKeys.all, "list"] as const,
+  list: () => [...agentTypeKeys.lists()] as const,
+  details: () => [...agentTypeKeys.all, "detail"] as const,
+  detail: (name: string) => [...agentTypeKeys.details(), name] as const,
 };
 
 export const agentKeys = {
@@ -54,6 +71,11 @@ export const agentKeys = {
   // PUT only invalidates the skill read, not the tool read.
   skills: (agentId: string) =>
     [...agentKeys.all, "skills", agentId] as const,
+  // Per-agent MCP server assignment (#7713) — backs the pending-server surface
+  // on the agent detail Tools tab. Its own subtree for the same reason `skills`
+  // is separate from `tools`: an MCP read must not be invalidated by a tool write.
+  mcpServers: (agentId: string) =>
+    [...agentKeys.all, "mcpServers", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
@@ -396,15 +418,8 @@ export const auditKeys = {
   // dashboard data layer is ready; the daemon endpoint becomes real once
   // M5 lands.
   queries: () => [...auditKeys.all, "query"] as const,
-  query: (filters: {
-    limit?: number;
-    offset?: number;
-    user?: string;
-    action?: string;
-    status?: string;
-    since?: string;
-    until?: string;
-  } = {}) => [...auditKeys.queries(), filters] as const,
+  query: (filters: AuditQueryFilters = {}) =>
+    [...auditKeys.queries(), filters] as const,
 };
 
 export const userKeys = {
@@ -414,6 +429,22 @@ export const userKeys = {
     [...userKeys.lists(), filters] as const,
   details: () => [...userKeys.all, "detail"] as const,
   detail: (name: string) => [...userKeys.details(), name] as const,
+};
+
+// #7745 — user groups. `memberships(user)` hangs off the same root so a
+// membership change can invalidate `groupKeys.all` and sweep both the group
+// list and every per-user reverse lookup in one call, which is what every
+// membership mutation actually needs: adding alice to `oncall` changes the
+// group row AND alice's resolved role set.
+export const groupKeys = {
+  all: ["groups"] as const,
+  lists: () => [...groupKeys.all, "list"] as const,
+  list: (filters: { search?: string } = {}) =>
+    [...groupKeys.lists(), filters] as const,
+  details: () => [...groupKeys.all, "detail"] as const,
+  detail: (name: string) => [...groupKeys.details(), name] as const,
+  memberships: () => [...groupKeys.all, "membership"] as const,
+  membership: (user: string) => [...groupKeys.memberships(), user] as const,
 };
 
 // M5 / #3203 — per-user spend ranking + per-user detail. Endpoint stubbed
@@ -449,12 +480,6 @@ export const mediaKeys = {
   videoTasks: () => [...mediaKeys.all, "videoTasks"] as const,
   videoTask: (taskId: string, provider: string) =>
     [...mediaKeys.videoTasks(), taskId, provider] as const,
-  // Stable key for the disabled state of useVideoTask — paired with skipToken
-  // so every not-yet-submitted render shares the same (unused) cache slot.
-  // Shape mirrors `videoTask(taskId, provider)` (4 segments) so both branches
-  // of the query are type-compatible under useQuery's generic inference.
-  videoTaskDisabled: () =>
-    [...mediaKeys.videoTasks(), "__disabled__", "__disabled__"] as const,
 };
 
 export const mcpKeys = {
@@ -480,6 +505,7 @@ export const configKeys = {
   all: ["config"] as const,
   full: () => [...configKeys.all, "full"] as const,
   schema: () => [...configKeys.all, "schema"] as const,
+  status: () => [...configKeys.all, "status"] as const,
   rawToml: () => [...configKeys.all, "rawToml"] as const,
 };
 
@@ -504,4 +530,11 @@ export const pairingKeys = {
   all: ["pairing"] as const,
   request: () => [...pairingKeys.all, "request"] as const,
   devices: () => [...pairingKeys.all, "devices"] as const,
+};
+
+// Server-owned chat slash-command catalog (`GET /api/commands`).
+export const chatCommandKeys = {
+  all: ["chat-commands"] as const,
+  lists: () => [...chatCommandKeys.all, "list"] as const,
+  list: () => [...chatCommandKeys.lists()] as const,
 };

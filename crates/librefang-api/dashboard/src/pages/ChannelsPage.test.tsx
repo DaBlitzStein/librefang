@@ -199,6 +199,27 @@ describe("ChannelsPage", () => {
     expect(screen.getByText("channels.connect_first")).toBeInTheDocument();
   });
 
+  // The gear was gated on `category !== "sidecar"` while every channel reports
+  // `category: "sidecar"`, so the test was never true and the button never
+  // rendered — leaving `POST /api/channels/sidecar/{name}/configure` (#5252)
+  // unreachable from the UI for an already-configured sidecar (#7892).
+  // Assert on the rendered button rather than on the gate, so the same class of
+  // dead condition cannot come back unnoticed.
+  it("renders the configure gear for a sidecar channel", () => {
+    useChannelsMock.mockReturnValue(makeQuery([makeChannel()]));
+    renderPage();
+    expect(screen.getByLabelText("channels.config")).toBeTruthy();
+  });
+
+  it("opens the sidecar configure drawer when the gear is clicked", async () => {
+    useChannelsMock.mockReturnValue(makeQuery([makeChannel()]));
+    renderPage();
+    fireEvent.click(screen.getByLabelText("channels.config"));
+    await waitFor(() => {
+      expect(useDrawerStore.getState().isOpen).toBe(true);
+    });
+  });
+
   it("lists configured channels and hides unconfigured ones by default", () => {
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([
@@ -368,6 +389,65 @@ describe("ChannelsPage", () => {
     ).toBeDisabled();
   });
 
+  it("shows the SDK version the sidecar adapter reported, and nothing when it reported none", () => {
+    // #7140: a Telegram sidecar ran a four-month-old librefang-sdk against a
+    // current daemon and the only way to find that out was shelling into the
+    // host. The configure drawer is where an operator is already looking at
+    // that adapter.
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "slack" }),
+        makeChannel({
+          name: "telegram",
+          display_name: "Telegram",
+          configured: false,
+          sdk_version: "2026.3.2201",
+          fields: [
+            {
+              key: "TELEGRAM_BOT_TOKEN",
+              label: "Bot token",
+              type: "secret",
+              required: true,
+            },
+          ],
+        }),
+        makeChannel({
+          name: "wechat",
+          display_name: "WeChat",
+          configured: false,
+          // An SDK too old to report a version is exactly the deployment this
+          // line exists to expose, so it must read as "unknown" — an absent
+          // line — rather than borrowing another adapter's number.
+          fields: [
+            {
+              key: "WECHAT_BOT_TOKEN",
+              label: "Bot token",
+              type: "secret",
+              required: true,
+            },
+          ],
+        }),
+      ]),
+    );
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    let drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("Telegram"));
+    drawer = screen.getByTestId("drawer-slot");
+    expect(within(drawer).getByTestId("sidecar-sdk-version")).toHaveTextContent(
+      "2026.3.2201",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /common\.cancel/ }));
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("WeChat"));
+    drawer = screen.getByTestId("drawer-slot");
+    expect(
+      within(drawer).queryByTestId("sidecar-sdk-version"),
+    ).not.toBeInTheDocument();
+  });
+
   it("forwards the schema-driven values to useSaveSidecarConfig on Save", () => {
     const { save } = setMutationDefaults();
     useChannelsMock.mockReturnValue(
@@ -377,6 +457,11 @@ describe("ChannelsPage", () => {
           name: "telegram",
           display_name: "Telegram",
           configured: false,
+          // Discovery rows never carry `channel_type` on the wire (only
+          // configured rows do) — `makeChannel`'s default is a leftover
+          // from its "slack" base, so it's overridden here to match a real
+          // discovery row shape and get the right instance-name default.
+          channel_type: undefined,
           fields: [
             {
               key: "TELEGRAM_BOT_TOKEN",
@@ -401,6 +486,7 @@ describe("ChannelsPage", () => {
     expect(arg).toMatchObject({
       name: "telegram",
       values: { TELEGRAM_BOT_TOKEN: "abc-123" },
+      instanceName: "telegram",
     });
   });
 
@@ -413,6 +499,7 @@ describe("ChannelsPage", () => {
           name: "telegram",
           display_name: "Telegram",
           configured: false,
+          channel_type: undefined,
           fields: [{ key: "TOKEN", label: "Token", type: "secret" }],
         }),
       ]),

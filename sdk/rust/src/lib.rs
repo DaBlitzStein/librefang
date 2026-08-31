@@ -273,6 +273,7 @@ pub struct LibreFang {
     pub channels: Arc<ChannelsResource>,
     pub extensions: Arc<ExtensionsResource>,
     pub goals: Arc<GoalsResource>,
+    pub groups: Arc<GroupsResource>,
     pub hands: Arc<HandsResource>,
     pub inbox: Arc<InboxResource>,
     pub mcp: Arc<McpResource>,
@@ -318,6 +319,7 @@ impl LibreFang {
             channels: Arc::new(ChannelsResource::new(base_url.clone(), client.clone())),
             extensions: Arc::new(ExtensionsResource::new(base_url.clone(), client.clone())),
             goals: Arc::new(GoalsResource::new(base_url.clone(), client.clone())),
+            groups: Arc::new(GroupsResource::new(base_url.clone(), client.clone())),
             hands: Arc::new(HandsResource::new(base_url.clone(), client.clone())),
             inbox: Arc::new(InboxResource::new(base_url.clone(), client.clone())),
             mcp: Arc::new(McpResource::new(base_url.clone(), client.clone())),
@@ -553,6 +555,18 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn spawn_ephemeral_agent(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", "spawn-ephemeral"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -645,6 +659,18 @@ impl AgentsResource {
             &["api", "agents", id, "deliveries"],
             None,
             &[],
+        )
+        .await
+    }
+
+    pub async fn list_agent_ephemeral_runs(&self, id: &str, limit: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "ephemeral-runs"],
+            None,
+            &[("limit", limit)],
         )
         .await
     }
@@ -1826,62 +1852,108 @@ impl BudgetResource {
         .await
     }
 
-    pub async fn usage_stats(&self) -> Result<Value> {
+    pub async fn usage_stats(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage"],
             None,
-            &[],
+            &[("start_date", start_date), ("end_date", end_date)],
         )
         .await
     }
 
-    pub async fn usage_by_model(&self) -> Result<Value> {
+    pub async fn usage_by_model(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage", "by-model"],
             None,
-            &[],
+            &[("start_date", start_date), ("end_date", end_date)],
         )
         .await
     }
 
-    pub async fn usage_by_model_performance(&self) -> Result<Value> {
+    pub async fn usage_by_model_performance(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage", "by-model", "performance"],
             None,
-            &[],
+            &[("start_date", start_date), ("end_date", end_date)],
         )
         .await
     }
 
-    pub async fn usage_daily(&self) -> Result<Value> {
+    pub async fn usage_daily(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        days: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage", "daily"],
             None,
-            &[],
+            &[
+                ("start_date", start_date),
+                ("end_date", end_date),
+                ("days", days),
+            ],
         )
         .await
     }
 
-    pub async fn usage_summary(&self) -> Result<Value> {
+    pub async fn usage_export(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        format: Option<&str>,
+    ) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "usage", "export"],
+            None,
+            &[
+                ("start_date", start_date),
+                ("end_date", end_date),
+                ("format", format),
+            ],
+        )
+        .await
+    }
+
+    pub async fn usage_summary(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage", "summary"],
             None,
-            &[],
+            &[("start_date", start_date), ("end_date", end_date)],
         )
         .await
     }
@@ -2054,6 +2126,116 @@ impl GoalsResource {
             &self.base_url,
             reqwest::Method::GET,
             &["api", "goals", "templates"],
+            None,
+            &[],
+        )
+        .await
+    }
+}
+
+// ── Groups ──
+
+#[derive(Debug, Clone)]
+pub struct GroupsResource {
+    base_url: String,
+    client: Client,
+}
+
+impl GroupsResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn list_groups(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "groups"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn create_group(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "groups"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn get_group(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "groups", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_group(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "groups", name],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_group(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "groups", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn add_group_member(&self, name: &str, user: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "groups", name, "members", user],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn remove_group_member(&self, name: &str, user: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "groups", name, "members", user],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn user_groups(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "users", name, "groups"],
             None,
             &[],
         )
@@ -2760,6 +2942,42 @@ impl ModelsResource {
             &self.base_url,
             reqwest::Method::DELETE,
             &["api", "models", "custom", id],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn get_model_overrides(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "models", "overrides", id],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_model_overrides(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "models", "overrides", id],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_model_overrides(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "models", "overrides", id],
             None,
             &[],
         )
@@ -4363,6 +4581,18 @@ impl SystemResource {
         .await
     }
 
+    pub async fn whoami(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "authz", "whoami"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn create_backup(&self) -> Result<Value> {
         do_req(
             &self.client,
@@ -4650,6 +4880,18 @@ impl SystemResource {
         .await
     }
 
+    pub async fn provisioning_status(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "provisioning", "status"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn queue_status(&self) -> Result<Value> {
         do_req(
             &self.client,
@@ -4734,11 +4976,47 @@ impl SystemResource {
         .await
     }
 
+    pub async fn create_agent_type(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_template(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
+            &["api", "templates", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_agent_type(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "templates", name],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_agent_type(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
             &["api", "templates", name],
             None,
             &[],

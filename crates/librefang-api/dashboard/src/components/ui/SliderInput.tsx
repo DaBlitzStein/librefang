@@ -28,27 +28,39 @@ export function SliderInput({
   ticks,
 }: SliderInputProps) {
   const id = useId();
-  const pct = max === min ? 0 : ((value - min) / (max - min)) * 100;
+  const lowerBound = Math.min(min, max);
+  const upperBound = Math.max(min, max);
+  const clamp = (nextValue: number) =>
+    Math.min(upperBound, Math.max(lowerBound, nextValue));
+  const boundedValue = Number.isFinite(value) ? clamp(value) : lowerBound;
+  const pct =
+    upperBound === lowerBound
+      ? 0
+      : ((boundedValue - lowerBound) / (upperBound - lowerBound)) * 100;
+  const emitValue = (rawValue: string) => {
+    const nextValue = Number.parseFloat(rawValue);
+    if (Number.isFinite(nextValue)) onChange(clamp(nextValue));
+  };
+  // A row that is inheriting the catalog default is dimmed, but the dimming belongs on the values, never on the switch that overrides them (refs #7782).
+  // While it sat on the row container it faded the toggle too, leaving the default state of every parameter with no visible way out of it.
+  const dimmed = enabled ? "" : " opacity-40";
 
   return (
-    <div className={`space-y-1.5 ${!enabled ? "opacity-40" : ""}`}>
+    <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
-        <label htmlFor={id} className="text-xs font-bold text-text-dim">
+        <label htmlFor={id} className={`text-xs font-bold text-text-dim${dimmed}`}>
           {label}
         </label>
         <div className="flex items-center gap-2">
           <input
             type="number"
-            value={value}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (!isNaN(v)) onChange(Math.min(max, Math.max(min, v)));
-            }}
-            min={min}
-            max={max}
+            value={boundedValue}
+            onChange={(e) => emitValue(e.target.value)}
+            min={lowerBound}
+            max={upperBound}
             step={step}
             disabled={!enabled}
-            className="w-20 rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs text-right font-mono outline-none focus:border-brand disabled:cursor-not-allowed"
+            className={`w-20 rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs text-right font-mono outline-none focus:border-brand disabled:cursor-not-allowed${dimmed}`}
           />
           {onToggle ? (
             <button
@@ -57,8 +69,8 @@ export function SliderInput({
               aria-checked={enabled}
               aria-label={label}
               onClick={() => onToggle(!enabled)}
-              className={`relative w-8 h-[18px] rounded-full transition-colors ${
-                enabled ? "bg-brand" : "bg-border-subtle"
+              className={`relative w-8 h-[18px] rounded-full transition-colors outline-none focus-visible:ring-2 focus-visible:ring-brand ${
+                enabled ? "bg-brand" : "bg-text-dim"
               }`}
             >
               <span
@@ -73,13 +85,13 @@ export function SliderInput({
       <input
         id={id}
         type="range"
-        min={min}
-        max={max}
+        min={lowerBound}
+        max={upperBound}
         step={step}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
+        value={boundedValue}
+        onChange={(e) => emitValue(e.target.value)}
         disabled={!enabled}
-        className="w-full h-1.5 rounded-full appearance-none cursor-pointer disabled:cursor-not-allowed accent-brand"
+        className={`w-full h-1.5 rounded-full appearance-none cursor-pointer disabled:cursor-not-allowed accent-brand${dimmed}`}
         style={{
           background: enabled
             ? `linear-gradient(to right, var(--color-brand) ${pct}%, var(--color-border-subtle) ${pct}%)`
@@ -87,10 +99,42 @@ export function SliderInput({
         }}
       />
       {ticks ? (
-        <div className="flex justify-between text-[9px] text-text-dim/50 font-mono px-0.5">
-          {ticks.map((t) => (
-            <span key={t}>{formatTick ? formatTick(t) : t}</span>
-          ))}
+        // Each label sits at the position its own value maps to, from the same
+        // expression the filled track above uses, so the legend and the thumb
+        // agree about where a value lives.
+        //
+        // This was `flex justify-between`, which spaces labels evenly whatever
+        // they say. On a range whose ticks are not evenly spaced that is
+        // actively misleading: the context-window row runs 1024..2097152 with
+        // ticks at 32K/128K/512K/1M, so "1M" was drawn hard right when 1M is
+        // the midpoint, and "128K" a third of the way across when its true
+        // position is 6%. Reading a value off the legend was wrong by an order
+        // of magnitude.
+        <div className={`relative h-3 text-[9px] text-text-dim/50 font-mono${dimmed}`}>
+          {ticks.map((t, index) => {
+            const position =
+              upperBound === lowerBound
+                ? 0
+                : ((t - lowerBound) / (upperBound - lowerBound)) * 100;
+            const clamped = Math.min(100, Math.max(0, position));
+            // Centre each label on its mark, except at the ends, where centring
+            // would push half the text outside the track.
+            const align =
+              clamped <= 0
+                ? "translate-x-0"
+                : clamped >= 100
+                  ? "-translate-x-full"
+                  : "-translate-x-1/2";
+            return (
+              <span
+                key={`${t}-${index}`}
+                className={`absolute whitespace-nowrap ${align}`}
+                style={{ left: `${clamped}%` }}
+              >
+                {formatTick ? formatTick(t) : t}
+              </span>
+            );
+          })}
         </div>
       ) : null}
     </div>

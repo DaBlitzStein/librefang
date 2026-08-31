@@ -5,6 +5,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   type AgentDetail,
   type AgentItem,
+  type CloneAgentResult,
   type PromptVersion,
   type ToolDefinition,
 } from "../api";
@@ -35,7 +36,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch } from "lucide-react";
 import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -63,6 +64,7 @@ import {
   type ManifestFormState,
 } from "../lib/agentManifest";
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
+import { agentKeys } from "../lib/queries/keys";
 import {
   agentQueries,
   useAgentEvents,
@@ -71,6 +73,7 @@ import {
   useAgentTemplates,
   useAgentTools,
   useAgentSkills,
+  useAgentMcpServers,
   usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
@@ -79,8 +82,7 @@ import {
   useCloneAgent,
   useDeleteAgent,
   usePatchAgent,
-  usePatchAgentConfig,
-  usePatchHandAgentRuntimeConfig,
+  usePatchAgentRuntimeConfig,
   useResetAgentSession,
   useResumeAgent,
   useSpawnAgent,
@@ -120,6 +122,12 @@ type AgentView = AgentDetail & {
   last_active?: string;
   triggers?: AgentTriggerSummary[];
   cron_jobs?: AgentCronSummary[];
+  /** Lineage fields the backend only emits on `GET /api/agents` (the list
+   *  endpoint's `enrich_agent_json`), not on the per-agent detail fetch.
+   *  Carried over from the `AgentItem` row when opening the detail panel. */
+  parent_agent_id?: string | null;
+  parent_unknown?: boolean;
+  children?: string[];
   capabilities?: Omit<NonNullable<AgentDetail["capabilities"]>, "tools" | "skills"> & {
     skills?: string[];
     tools?: string[];
@@ -132,6 +140,17 @@ function safeStringify(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+export function cloneResultNotice(result: CloneAgentResult): {
+  partial: boolean;
+  warnings: string;
+} {
+  const warnings = result.warnings.filter(Boolean);
+  return {
+    partial: result.partial || warnings.length > 0,
+    warnings: warnings.join(", ") || "unknown",
+  };
 }
 
 /** Two-column row used inside the detail modal's value cards. */
@@ -188,7 +207,7 @@ export function SystemPromptSection({
   const bind = (version: PromptVersion) => {
     if (bindVersion.isPending) return;
     bindVersion.mutate(
-      { agentId, version },
+      { agentId, version, previousSystemPrompt: current },
       {
         onSuccess: () => {
           addToast(
@@ -393,8 +412,7 @@ export function AgentsPage() {
   const spawnMutation = useSpawnAgent();
   const suspendMutation = useSuspendAgent();
   const resumeMutation = useResumeAgent();
-  const patchAgentConfigMutation = usePatchAgentConfig();
-  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
+  const patchAgentRuntimeConfigMutation = usePatchAgentRuntimeConfig();
   const patchAgentMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
   const resetSessionMutation = useResetAgentSession();
@@ -418,20 +436,40 @@ export function AgentsPage() {
       "error",
     );
   const deleteMutation = {
-    mutate: (agentId: string) =>
+    mutate: (agentId: string) => {
+      qc.cancelQueries({ queryKey: agentKeys.detail(agentId) });
       rawDeleteMutation.mutate(agentId, {
         onSuccess: () => handleDeleteSuccess(agentId),
         onError: handleDeleteError,
-      }),
-    mutateAsync: (agentId: string) =>
-      rawDeleteMutation.mutateAsync(agentId, {
+      });
+    },
+    mutateAsync: (agentId: string) => {
+      qc.cancelQueries({ queryKey: agentKeys.detail(agentId) });
+      return rawDeleteMutation.mutateAsync(agentId, {
         onSuccess: () => handleDeleteSuccess(agentId),
         onError: handleDeleteError,
-      }),
+      });
+    },
   };
 
   function mergeHandFlag(agent: AgentDetail, fallback?: boolean) {
     return { ...agent, is_hand: agent.is_hand ?? fallback };
+  }
+
+  // The single-agent detail response omits lineage — only the list
+  // endpoint includes it — so origin fields are carried over from the
+  // list row or the previous detail state on refresh.
+  function mergeOriginFields<T extends AgentDetail>(
+    agent: T,
+    origin?: Pick<AgentView, "parent_agent_id" | "parent_unknown" | "children">,
+  ): T {
+    if (!origin) return agent;
+    return {
+      ...agent,
+      parent_agent_id: origin.parent_agent_id,
+      parent_unknown: origin.parent_unknown,
+      children: origin.children,
+    };
   }
 
   function startModelEdit() {
@@ -514,7 +552,7 @@ export function AgentsPage() {
     try {
       await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
       const d = await qc.fetchQuery(agentQueries.detail(agentId));
-      setDetailAgent(mergeHandFlag(d, fallback));
+      setDetailAgent(mergeOriginFields(mergeHandFlag(d, fallback), (detailAgent as AgentView) ?? undefined));
     } catch {
       // keep current state when refresh fails
     }
@@ -586,14 +624,8 @@ export function AgentsPage() {
       return;
     }
 
-    // Caller picks the mutation based on cached agent-detail knowledge: hand
-    // agents go through the hand-runtime-config endpoint (also invalidates
-    // handKeys.details()), everyone else hits the standalone /config route.
-    const mutation = detailAgent.is_hand
-      ? patchHandAgentRuntimeConfigMutation
-      : patchAgentConfigMutation;
-    mutation.mutate(
-      { agentId: detailAgent.id, config: patch },
+    patchAgentRuntimeConfigMutation.mutate(
+      { agentId: detailAgent.id, isHand: detailAgent.is_hand === true, config: patch },
       {
         onSuccess: async () => {
           setEditingModel(false);
@@ -639,6 +671,13 @@ export function AgentsPage() {
   // blank for almost every agent.
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
   const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "tools",
+  });
+  // Per-agent MCP server assignment (#7713). The Tools tab is where MCP grants
+  // are explained, and it is the only place a declared-but-unconnected server
+  // can be shown at all: a server with no connection contributes no tools, so
+  // it forms no tool group and would otherwise be invisible on this page.
+  const tabAgentMcpQuery = useAgentMcpServers(detailAgent?.id ?? "", {
     enabled: !!detailAgent && agentTab === "tools",
   });
   // Per-agent skill assignment (#4917) — backs the inline assign/unassign
@@ -935,31 +974,15 @@ export function AgentsPage() {
   const isDetailDrawerCrashed = drawerDetailState === "crashed";
   const drawerStatusColor = isDetailDrawerSuspended ? "bg-warning" : isDetailDrawerCrashed ? "bg-error" : "bg-success";
   const lockRename = !!detailAgent?.is_hand;
-  const activeConfigMutation = detailAgent?.is_hand
-    ? patchHandAgentRuntimeConfigMutation
-    : patchAgentConfigMutation;
-  // Save enables when the draft is both valid AND differs from the persisted
-  // model in any field — Provider, Model, Max tokens, or Temperature. Earlier
-  // this gate checked validity only; combined with the provider-switch model
-  // reset that produced the #5917 symptom where Max-token / Temperature edits
-  // never lit Save. draftMaxTokens / draftTemperature mirror saveModelEdit's
-  // coercion so the dirty comparison matches what would actually be PATCHed.
-  const draftMaxTokens = parseInt(modelDraft.max_tokens, 10);
-  const draftTemperature = parseFloat(modelDraft.temperature);
-  const modelValid =
-    !!modelDraft.provider.trim()
-    && !!modelDraft.model.trim()
-    && !isNaN(draftMaxTokens)
-    && draftMaxTokens > 0
-    && !isNaN(draftTemperature)
-    && draftTemperature >= 0
-    && draftTemperature <= 2;
+  const activeConfigMutation = patchAgentRuntimeConfigMutation;
+  // Save enables when the draft is both valid AND differs from the persisted model in any field — Provider, Model, Max tokens, or Temperature.
+  // Both facts are read off `buildModelConfigPatch`, the same strict builder Save itself calls: a null patch means the draft is invalid, an empty patch means nothing changed.
+  // Deriving the two separately is what produced #5917 — the gate checked validity only, and combined with the provider-switch model reset, Max-token / Temperature edits never lit Save.
+  // Sharing the builder also keeps trailing garbage ("4096abc") from enabling a button that then no-ops, because the parse that rejects it is the parse that would have built the request.
   const currentModel = detailAgent?.model;
-  const modelDirty =
-    modelDraft.provider.trim() !== (currentModel?.provider ?? "")
-    || modelDraft.model.trim() !== (currentModel?.model ?? "")
-    || draftMaxTokens !== (currentModel?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT)
-    || draftTemperature !== (currentModel?.temperature ?? MODEL_TEMPERATURE_DEFAULT);
+  const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
+  const modelValid = modelPatchPreview !== null;
+  const modelDirty = modelPatchPreview !== null && Object.keys(modelPatchPreview).length > 0;
   const saveModelDisabled =
     activeConfigMutation.isPending || !modelValid || !modelDirty;
 
@@ -967,10 +990,18 @@ export function AgentsPage() {
     setAgentTab("conversation");
     try {
       const d = await qc.fetchQuery(agentQueries.detail(agent.id));
-      setDetailAgent(mergeHandFlag(d, agent.is_hand));
+      setDetailAgent(mergeOriginFields(mergeHandFlag(d, agent.is_hand), agent));
     } catch {
-      setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail);
+      setDetailAgent(mergeOriginFields({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail, agent));
     }
+  };
+
+  /** Navigate the detail panel to a parent/child agent referenced by id.
+   *  Falls back to a bare stub when the id isn't in the current (paginated)
+   *  list — `selectAgent` still fetches the real detail from its own id. */
+  const goToAgent = (id: string) => {
+    const found = agents.find(a => a.id === id);
+    void selectAgent(found ?? ({ id, name: id, is_hand: false } as AgentItem));
   };
 
   // Auto-select the first agent on desktop so the detail panel isn't blank
@@ -1017,6 +1048,11 @@ export function AgentsPage() {
               {t("agents.hand_badge", { defaultValue: "HAND" })}
             </span>
           )}
+          {!!agent.children?.length && (
+            <span className="shrink-0 text-[10.5px] text-text-dim/80">
+              ({t("agents.children_count", { count: agent.children.length })})
+            </span>
+          )}
           <span className="font-mono text-[10.5px] text-text-dim/80 shrink-0 tabular-nums">
             {agent.last_active ? formatRelativeTime(agent.last_active) : "—"}
           </span>
@@ -1027,6 +1063,14 @@ export function AgentsPage() {
           <span className="truncate min-w-0">
             {agent.schedule || t("agents.schedule_manual", { defaultValue: "manual" })}
           </span>
+          {agent.source_template && (
+            <>
+              <span className="text-text-dim/60">·</span>
+              <span className="truncate min-w-0">
+                {t("agents.origin_template", { name: agent.source_template })}
+              </span>
+            </>
+          )}
           <span className="ml-auto shrink-0 tabular-nums">
             {stats.sessions24h} · ${stats.cost24h.toFixed(2)}
           </span>
@@ -1478,6 +1522,10 @@ export function AgentsPage() {
       .slice()
       .sort();
     const available: string[] = (skillsData?.available ?? []).slice().sort();
+    // Assigned names the registry does not have (#7713). Marked in place rather
+    // than listed separately: they are genuinely assigned, they just contribute
+    // nothing until the skill is installed and the registry reloaded.
+    const pendingSkills = new Set(skillsData?.pending ?? []);
     // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — every
     // registry skill usable, the default), or 'allowlist' (manifest pins a
     // set). Prefer the live query's mode; fall back to the detail payload.
@@ -1707,6 +1755,7 @@ export function AgentsPage() {
                       action="remove"
                       onRemove={() => removeSkill(s)}
                       busy={mutating}
+                      pending={pendingSkills.has(s)}
                     />
                   ))}
                 </div>
@@ -1901,6 +1950,15 @@ export function AgentsPage() {
       );
     };
 
+    // Declared MCP servers with no live connection (#7713). The kernel derives
+    // this from the connection pool rather than the configured server list, so a
+    // server that is configured here and simply unreachable is included — which
+    // is the case worth surfacing, since it looks identical to a healthy one
+    // everywhere else on this page.
+    const pendingMcpServers: string[] = (tabAgentMcpQuery.data?.pending ?? [])
+      .slice()
+      .sort();
+
     const assignedGroups = sortedGroups.filter(
       ([name, tools]) => getGroupStatus(name, tools) !== "none",
     );
@@ -1921,6 +1979,39 @@ export function AgentsPage() {
                 : draft.length}
           </div>
         </div>
+
+        {pendingMcpServers.length > 0 && (
+          <div
+            className="rounded-md border border-amber-400/30 bg-amber-400/5 p-3 flex items-start gap-3"
+            data-testid="agent-pending-mcp"
+          >
+            <Clock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[12.5px] font-medium text-text-main">
+                {t("agents.detail.mcp_pending_title", {
+                  defaultValue: "MCP servers not connected",
+                })}
+              </div>
+              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                {t("agents.detail.mcp_pending_desc", {
+                  defaultValue:
+                    "Granted in agent.toml but no live connection, so they contribute no tools. Check the server on the MCP page; the grant activates as soon as it connects.",
+                })}
+              </div>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {pendingMcpServers.map((name) => (
+                  <span
+                    key={name}
+                    className="font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main"
+                    data-testid="agent-pending-mcp-item"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {isLoading ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
@@ -2679,6 +2770,72 @@ export function AgentsPage() {
                 </section>
               )}
 
+              {/* Origin */}
+              <section>
+                <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                  <GitBranch className="w-3.5 h-3.5 text-brand" />
+                  {t("agents.origin", { defaultValue: "Origin" })}
+                </h4>
+                <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
+                  <DetailRow label={t("agents.parent", { defaultValue: "Parent Agent" })}>
+                    {(() => {
+                      const parentId = (detailAgent as AgentView).parent_agent_id;
+                      if (parentId) {
+                        const parent = agents.find(a => a.id === parentId);
+                        const label = parent
+                          ? t(`agents.builtin.${parent.name}.name`, { defaultValue: parent.name })
+                          : truncateId(parentId, 16);
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => goToAgent(parentId)}
+                            className="font-mono text-brand hover:underline"
+                          >
+                            {label}
+                          </button>
+                        );
+                      }
+                      if ((detailAgent as AgentView).parent_unknown) {
+                        return (
+                          <span className="text-text-dim">
+                            {t("agents.origin_unknown", { defaultValue: "Unknown (pre-migration)" })}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span className="text-text-dim">
+                          {t("agents.origin_root", { defaultValue: "Root agent" })}
+                        </span>
+                      );
+                    })()}
+                  </DetailRow>
+                  <DetailRow label={t("agents.children", { defaultValue: "Children" })}>
+                    {(detailAgent as AgentView).children?.length ? (
+                      <div className="flex flex-wrap justify-end gap-1.5">
+                        {(detailAgent as AgentView).children!.map(childId => {
+                          const child = agents.find(a => a.id === childId);
+                          const label = child
+                            ? t(`agents.builtin.${child.name}.name`, { defaultValue: child.name })
+                            : truncateId(childId, 16);
+                          return (
+                            <button
+                              key={childId}
+                              type="button"
+                              onClick={() => goToAgent(childId)}
+                              className="font-mono text-xs px-1.5 py-0.5 rounded bg-brand/10 text-brand hover:bg-brand/20"
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <span className="text-text-dim">{t("common.none")}</span>
+                    )}
+                  </DetailRow>
+                </div>
+              </section>
+
               {/* Web Search Augmentation */}
               <section>
                 <h4 className="text-sm font-semibold mb-2">
@@ -2696,14 +2853,12 @@ export function AgentsPage() {
                       value={detailAgent.web_search_augmentation || "off"}
                       onChange={e => {
                         const mode = e.target.value as "off" | "auto" | "always";
-                        // Branch in the caller, not the hook — only the
-                        // caller knows from the cached detail whether this
-                        // agent is a hand role.
-                        const mutation = detailAgent.is_hand
-                          ? patchHandAgentRuntimeConfigMutation
-                          : patchAgentConfigMutation;
-                        mutation.mutate(
-                          { agentId: detailAgent.id, config: { web_search_augmentation: mode } },
+                        patchAgentRuntimeConfigMutation.mutate(
+                          {
+                            agentId: detailAgent.id,
+                            isHand: detailAgent.is_hand === true,
+                            config: { web_search_augmentation: mode },
+                          },
                           {
                             onSuccess: async () => {
                               await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
@@ -3397,7 +3552,7 @@ export function AgentsPage() {
             const newName = cloneNameDraft.trim();
             if (!newName) return;
             try {
-              await cloneMutation.mutateAsync({
+              const result = await cloneMutation.mutateAsync({
                 agentId: cloneDialog.agentId,
                 payload: {
                   new_name: newName,
@@ -3405,7 +3560,15 @@ export function AgentsPage() {
                   include_tools: cloneIncludeTools,
                 },
               });
-              addToast(t("agents.clone_succeeded", { defaultValue: "Agent cloned" }), "success");
+              const notice = cloneResultNotice(result);
+              if (notice.partial) {
+                addToast(t("agents.clone_partial", {
+                  defaultValue: "Agent cloned with incomplete initialization: {{warnings}}",
+                  warnings: notice.warnings,
+                }), "info");
+              } else {
+                addToast(t("agents.clone_succeeded", { defaultValue: "Agent cloned" }), "success");
+              }
               setCloneDialog(null);
             } catch (err) {
               addToast(toastErr(err, t("agents.clone_failed", { defaultValue: "Failed to clone agent" })), "error");

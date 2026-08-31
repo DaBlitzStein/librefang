@@ -26,6 +26,7 @@ pub mod channels;
 pub mod commands;
 pub mod config;
 pub mod goals;
+pub mod groups;
 pub mod inbox;
 pub mod logs;
 pub mod mcp_auth;
@@ -37,6 +38,7 @@ pub mod passkey;
 pub mod plugins;
 pub mod prompts;
 pub mod providers;
+pub mod provisioning;
 pub mod registry;
 pub mod secrets_env;
 pub mod sidecar_describe;
@@ -358,7 +360,12 @@ pub struct AppState {
 ///
 /// The mode is read from the process environment on every call rather than cached at boot.
 /// It costs one `std::env::var`, and it means a mode set by an orchestrator that rewrites the environment mid-life cannot be stale.
-pub fn guard_config_write() -> Option<(
+///
+/// `source` must be the kernel's own [`config_path`](librefang_kernel::LibreFangKernel::config_path) — `state.kernel.config_path()` at every call site.
+/// Re-deriving it here would let the refusal name a different file from the one the handler would have written, which is precisely the confusion the `423` body exists to remove (#6695).
+pub fn guard_config_write(
+    source: &std::path::Path,
+) -> Option<(
     axum::http::StatusCode,
     axum::response::Json<serde_json::Value>,
 )> {
@@ -367,7 +374,6 @@ pub fn guard_config_write() -> Option<(
         return None;
     }
 
-    let source = librefang_kernel::config::default_config_path();
     Some((
         axum::http::StatusCode::LOCKED,
         axum::response::Json(serde_json::json!({
@@ -379,12 +385,40 @@ pub fn guard_config_write() -> Option<(
     ))
 }
 
+/// Refuse a write to a resource the deployment's provisioning tree owns (#6695).
+///
+/// The resource-level counterpart of [`guard_config_write`], and deliberately the same status code and envelope shape so a client can handle both with one branch: `423 Locked` carrying `{ok:false, error, code, kind, name, source}`.
+/// The `code` differs — `resource_provisioned` rather than `config_managed` — because the remedy differs: one is fixed by editing `config.toml`, the other by editing a file in the provisioning tree and rolling the daemon.
+///
+/// Returns `None` for every runtime-created resource, which is the whole point of provisioning being per-resource rather than a global switch: an operator keeps full control of everything the deployment did not declare.
+///
+/// This is a lock on the resource's *definition*, not on operating it. Suspending, resuming, messaging, resetting a session, or reading anything about a provisioned agent all stay available — the RFC's "operational actions and mutable runtime state remain usable" criterion.
+pub fn guard_provisioned_write(
+    resource: Option<&librefang_kernel::provisioning::ResourceProvenance>,
+) -> Option<(
+    axum::http::StatusCode,
+    axum::response::Json<serde_json::Value>,
+)> {
+    let provenance = resource?;
+    Some((
+        axum::http::StatusCode::LOCKED,
+        axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": "this resource is provisioned by the deployment",
+            "code": "resource_provisioned",
+            "kind": provenance.kind.as_str(),
+            "name": provenance.name,
+            "source": provenance.source,
+        })),
+    ))
+}
+
 /// The `423 Locked` body `guard_config_write` produces, as a ready `Response`.
 ///
 /// Handlers whose error type cannot carry a `Response` (the `PersistError` / `PersistBudgetError` enums are `Clone`-free but also `Debug`-matched in several places) store a unit `Managed` variant and call this at the point of conversion, so there is still exactly one place that decides the status code and the body shape.
-pub fn managed_config_response() -> axum::response::Response {
+pub fn managed_config_response(source: &std::path::Path) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match guard_config_write() {
+    match guard_config_write(source) {
         Some(parts) => parts.into_response(),
         // Unreachable in practice: only called from a `Managed` error arm, which is only constructed when the guard fired.
         // Falling back to the same body keeps the wire contract stable if that ever stops holding.
@@ -394,7 +428,7 @@ pub fn managed_config_response() -> axum::response::Response {
                 "ok": false,
                 "error": "configuration is managed by the deployment",
                 "code": "config_managed",
-                "source": librefang_kernel::config::default_config_path().display().to_string(),
+                "source": source.display().to_string(),
             })),
         )
             .into_response(),

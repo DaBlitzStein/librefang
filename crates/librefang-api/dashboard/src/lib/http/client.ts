@@ -24,6 +24,7 @@ export {
   listAgentEvents,
   listAgentSessions,
   listAgentTemplates,
+  getAgentType,
   listPromptVersions,
   listPromptsOverview,
   listExperiments,
@@ -44,11 +45,15 @@ export {
   // config & registry
   getFullConfig,
   getConfigSchema,
+  getConfigStatus,
   fetchRegistrySchema,
   getRawConfigToml,
+  // chat command catalog
+  listChatCommands,
   // goals
   listGoals,
   listGoalTemplates,
+  getGoalRun,
   // hands
   listHands,
   listActiveHands,
@@ -136,6 +141,8 @@ export {
   getAgentTools,
   // per-agent skill assignment — read (#4917)
   getAgentSkills,
+  // per-agent MCP server assignment — read (#7713)
+  getAgentMcpServers,
   getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
@@ -157,6 +164,10 @@ export {
   // users (RBAC M6)
   listUsers,
   getUser,
+  // groups (#7745)
+  listGroups,
+  getGroup,
+  getUserGroups,
   // per-user budget (M5) / policy (M3 #3205 — wired)
   getUserBudget,
   getUserPolicy,
@@ -186,6 +197,10 @@ export type {
 // ---------------------------------------------------------------------------
 export {
   // agents
+  createAgentType,
+  updateAgentType,
+  deleteAgentType,
+  spawnEphemeral,
   spawnAgent,
   cloneAgent,
   stopAgent,
@@ -244,7 +259,6 @@ export {
   deleteGoal,
   startGoalRun,
   stopGoalRun,
-  getGoalRun,
   // hands
   activateHand,
   deactivateHand,
@@ -347,6 +361,12 @@ export {
   createUser,
   updateUser,
   deleteUser,
+  // groups (#7745)
+  createGroup,
+  updateGroup,
+  deleteGroup,
+  addGroupMember,
+  removeGroupMember,
   importUsers,
   rotateUserKey,
   // per-user policy (M3 #3205)
@@ -369,6 +389,7 @@ export type {
   AutoDreamStatusName,
   AutoDreamTriggerOutcome,
   AutoDreamTurn,
+  ChatCommand,
   CronActionSpec,
   CronDeliverySpec,
   CronDeliveryTarget,
@@ -400,6 +421,10 @@ export type {
   // users / RBAC
   UserItem,
   UserUpsertPayload,
+  // groups (#7745)
+  GroupItem,
+  GroupUpsertPayload,
+  UserGroupsResult,
   UserRoleName,
   BulkImportRow,
   BulkImportResult,

@@ -127,6 +127,11 @@ Claude must not execute it — prepare the commands from `docs/development/build
   See `docs/architecture/trigger-dispatch-concurrency.md`.
 - **Config hot-reload classification** — which `KernelConfig` fields hot-reload, which need a restart, which are read-live/noop — is decided by `build_reload_plan` in `crates/librefang-kernel/src/config_reload.rs`.
   Consult the drift-guarded table at `docs/operations/config-reload.md` before assuming a config edit takes effect on `POST /api/config/reload`.
+- **Automatic memory is scoped three ways** (#7605): `capabilities.memory_read` / `memory_write` in `agent.toml` gate the auto paths, the #5227 `chat_scope` stamp separates chats, and the `session_scope` stamp separates sessions.
+  The two capability lists are **tri-state** — an absent key means "unrestricted" as everywhere else in a manifest, but `memory_read = []` is a declared-empty list that denies, which is why they are `Option<Vec<String>>` and must be read through `ManifestCapabilities::allows_own_memory_read` / `allows_own_memory_write`.
+  Session scoping is on by default (`config.toml: [proactive_memory] session_scoped_recall`, per-agent override in `agent.toml`); it uses the session the turn already belongs to, never a second notion of one.
+  The one behaviour it changes for an agent that configures nothing is `session_mode = "new"`, whose fresh-per-invocation sessions no longer recall each other's memories.
+  See `docs/architecture/proactive-memory-scoping.md`.
 - **Skill workshop** (#3328) passively captures teaching signals from successful turns into draft skills under `~/.librefang/skills/pending/<agent>/<uuid>.toml`.
   **Default-OFF — opt in per agent** with `[skill_workshop] enabled = true` in `agent.toml` (or the matching `[agents.<name>]` section of a `HAND.toml`); source of truth is `SkillWorkshopConfig::default()` in `crates/librefang-types/src/agent.rs`.
   Approval routes through `evolution::create_skill`, so the prompt-injection scan runs at both `save_candidate` and `approve_candidate` — every artefact the agent can see has crossed the same security boundary as a marketplace skill.
@@ -193,6 +198,25 @@ The rules you must not break without asking:
 - **At most two follow-up comments** on a thread without human input, then stop. No "looks good" drive-bys. Every reply links evidence: commit SHAs, file paths, test names.
 - **Latest maintainer intent wins** in conflict resolution, and preserve both sides' intent — dropping a hunk because "it'll be reapplied later" is how regressions land.
 - **Batch merging is runner-pool bound, not merge bound.** Merging >10 PRs back-to-back saturates the free-plan `ubuntu-latest` pool; merge in batches, cancel *superseded* runs (never a run whose `head_sha` **is** its branch tip — `CI Gate` fails on `cancelled` and does not re-evaluate), and remember a stalled queue is not a CI failure.
+  What saturates the pool is not the merges, it is the **housekeeping fan-out per merge**.
+  Every push to `main` fires `TODO to Issue`; every PR close fires `Contributor Role` and `Issue-PR Link Labels`; every completed `Release` run fires `Release / Notify`.
+  At a normal merge rate that is invisible.
+  At 250 merges it produced ~750 queued runs sitting ahead of the 196 queued `CI` runs, and nothing executed for over three hours.
+  The recovery is to cancel the housekeeping runs, which is safe: the `main` ruleset requires only `CI Gate`, GitHub auto-merge waits only on required checks, and `CI Gate`'s `cancelled` test covers only the 22 jobs in its own `needs` list — all inside `ci.yml`.
+  Never cancel `secrets` to buy queue capacity; a security scan is not the thing to trade away for speed.
+- **`gh run list --limit N` silently truncates, and the queue is usually deeper than it shows.**
+  Three separate diagnoses in one incident were wrong because `--limit 100` returned exactly 100 and that was read as the total.
+  `gh api "repos/OWNER/REPO/actions/runs?status=queued&per_page=1" -q '.total_count'` gives the real number; the paginated listing itself stops at 1000 results, so a queue deeper than that has to be cleared and re-enumerated in rounds.
+- **Deciding whether CI is alive has exactly one honest test, and every shortcut lies.**
+  A workflow file GitHub cannot parse produces a run that completes as `failure` within seconds *without ever taking a runner*, so a queue full of those looks identical to throughput.
+  `gh run list --status in_progress` counts **runs**, not jobs, and those startup failures flicker through `in_progress` on their way to `completed` — so a poll on "in_progress != 0" reports a live pool against a dead one.
+  The only condition that means anything: **a run whose workflow is not one of the known startup-failing ones reached `success` or `failure`, with a timestamp later than a baseline you recorded before you started watching.**
+  Three separate monitors in one session got this wrong three different ways — polling `in_progress`, comparing a timestamp against a `jq` expression that yields `null` on an empty array (`null != baseline`, so it fires forever), and counting matches with a `select(...)` whose `test(...)|not` did not bind to the field intended.
+  Write the check to produce the *timestamped run itself*, print it, and read it — never a derived boolean.
+- **A suspiciously fast `cargo check` is not evidence of anything until you prove the compiler saw your tree.**
+  In a shared `CARGO_TARGET_DIR` a check can print `Finished in 0.35s` with no `Checking` lines because the artifacts are already there.
+  `touch`ing sources often does not force a rebuild.
+  Appending `compile_error!("SENTINEL");` to the crate's `lib.rs` and confirming cargo reports it takes one command and is conclusive; do that before trusting a green that arrived too quickly, and before reporting one.
 - **Two green PRs can still break `main` together.** The `main` ruleset has no `strict_required_status_checks_policy`, so each PR merges on CI run against its own base. Group a merge sweep by changed file, re-run CI on later PRs in a group, and verify `main` itself after the batch.
 
 ## Common Gotchas

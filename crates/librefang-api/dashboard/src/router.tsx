@@ -161,6 +161,7 @@ const SchedulerPage = lazyWithReload(() => import("./pages/SchedulerPage").then(
 const SessionsPage = lazyWithReload(() => import("./pages/SessionsPage").then(m => ({ default: m.SessionsPage })));
 const SettingsPage = lazyWithReload(() => import("./pages/SettingsPage").then(m => ({ default: m.SettingsPage })));
 const SkillsPage = lazyWithReload(() => import("./pages/SkillsPage").then(m => ({ default: m.SkillsPage })));
+const AgentTypesPage = lazyWithReload(() => import("./pages/AgentTypesPage").then(m => ({ default: m.AgentTypesPage })));
 const PromptsPage = lazyWithReload(() => import("./pages/PromptsPage").then(m => ({ default: m.PromptsPage })));
 const WizardPage = lazyWithReload(() => import("./pages/WizardPage").then(m => ({ default: m.WizardPage })));
 const WorkflowsPage = lazyWithReload(() => import("./pages/WorkflowsPage").then(m => ({ default: m.WorkflowsPage })));
@@ -174,6 +175,7 @@ const TerminalPage = lazyWithReload(() => import("./pages/TerminalPage").then(m 
 const McpServersPage = lazyWithReload(() => import("./pages/McpServersPage").then(m => ({ default: m.McpServersPage })));
 const ConfigPage = lazyWithReload(() => import("./pages/ConfigPage").then(m => ({ default: m.ConfigPage })));
 const UsersPage = lazyWithReload(() => import("./pages/UsersPage").then(m => ({ default: m.UsersPage })));
+const GroupsPage = lazyWithReload(() => import("./pages/GroupsPage").then(m => ({ default: m.GroupsPage })));
 const PermissionSimulatorPage = lazyWithReload(() => import("./pages/PermissionSimulatorPage").then(m => ({ default: m.PermissionSimulatorPage })));
 const AuditPage = lazyWithReload(() => import("./pages/AuditPage").then(m => ({ default: m.AuditPage })));
 const UserBudgetPage = lazyWithReload(() => import("./pages/UserBudgetPage").then(m => ({ default: m.UserBudgetPage })));
@@ -273,6 +275,12 @@ const skillsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/skills",
   component: () => <LazyRouteBoundary><SkillsPage /></LazyRouteBoundary>
+});
+
+const agentTypesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/agent-types",
+  component: () => <LazyRouteBoundary><AgentTypesPage /></LazyRouteBoundary>
 });
 
 const promptsRoute = createRoute({
@@ -410,6 +418,12 @@ const usersRoute = createRoute({
   path: "/users",
   component: () => <LazyRouteBoundary><UsersPage /></LazyRouteBoundary>
 });
+// #7745 — user groups. Membership is flat; see `GroupConfig` for why.
+const groupsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/groups",
+  component: () => <LazyRouteBoundary><GroupsPage /></LazyRouteBoundary>
+});
 const usersSimulatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/simulator",
@@ -501,6 +515,7 @@ const routeTree = rootRoute.addChildren([
   chatRoute,
   settingsRoute,
   skillsRoute,
+  agentTypesRoute,
   promptsRoute,
   wizardRoute,
   workflowsRoute,
@@ -530,6 +545,7 @@ const routeTree = rootRoute.addChildren([
   configNetworkRoute,
   configInfraRoute,
   usersRoute,
+  groupsRoute,
   usersSimulatorRoute,
   userBudgetRoute,
   userPolicyRoute,

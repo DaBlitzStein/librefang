@@ -19,7 +19,10 @@ WORKDIR /build/dashboard
 # Node ≥20.19 is also required by vite 8 / rolldown's optional native
 # bindings (engines: ^20.19.0), without which `pnpm install` silently skips
 # the linux-x64-musl binding and `vite build` fails at require-time.
-RUN npm install --global corepack@latest \
+# Dependency lifecycle scripts are intentionally disabled in this build
+# stage. Vite/rolldown and esbuild ship their musl binaries through pinned
+# optional dependencies, so the dashboard build needs no postinstall code.
+RUN npm install --global corepack@0.34.6 \
     && corepack enable \
     && corepack prepare pnpm@10.33.0 --activate \
     && pnpm install --frozen-lockfile --ignore-scripts \
@@ -54,6 +57,9 @@ COPY packages ./packages
 # panics with "sdk/python/librefang is not a directory". Only this one
 # subtree is needed — .dockerignore keeps the rest of sdk/ out.
 COPY sdk/python/librefang ./sdk/python/librefang
+# The same module reads the SDK version out of `sdk/python/pyproject.toml` with include_str!, because the extracted tree has neither a sibling pyproject.toml nor installed package metadata and would answer `0+unknown`.
+# Without this COPY the build fails with "couldn't read crates/librefang-channels/src/../../../sdk/python/pyproject.toml".
+COPY sdk/python/pyproject.toml ./sdk/python/pyproject.toml
 # librefang-api uses include_str!("../../../deploy/...") to embed the
 # observability stack (prometheus / tempo / otel-collector / grafana
 # configs) at compile time — added in #3062. Without this COPY the
@@ -73,6 +79,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bin librefang --features telemetry && \
     cp target/release/librefang /usr/local/bin/librefang
 
+# Node remains in the runtime image for JavaScript sidecars such as the
+# WhatsApp gateway copied under /opt/librefang/packages.
 # Pinned to a specific Node 22 LTS minor (not floating `node:lts-bookworm-slim`)
 # so a rebuild months later doesn't quietly land on a new major when the
 # `lts` alias rolls forward. `curl` is added for the HEALTHCHECK below.

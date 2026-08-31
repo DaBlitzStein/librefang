@@ -370,6 +370,14 @@ struct BrowserSession {
     target_created_over_cdp: bool,
 }
 
+fn navigation_error_text(result: &serde_json::Value) -> Option<&str> {
+    result
+        .get("errorText")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
 impl BrowserSession {
     /// Launch Chromium and establish a CDP connection.
     async fn launch(config: &BrowserConfig) -> Result<Self, String> {
@@ -775,9 +783,12 @@ impl BrowserSession {
             .cdp
             .send("Page.navigate", serde_json::json!({ "url": url }))
             .await;
-
-        if let Err(e) = result {
-            return BrowserResponse::err(format!("Navigate failed: {e}"));
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => return BrowserResponse::err(format!("Navigate failed: {error}")),
+        };
+        if let Some(error) = navigation_error_text(&result) {
+            return BrowserResponse::err(format!("Navigate failed: {error}"));
         }
 
         // Wait for page load
@@ -1488,6 +1499,12 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
         return text.replace(/⟨(\d+)⟩/g, '($1)');
     }
 
+    // Read a language hint out of a `language-rust` / `lang-rust` class, so the reader knows what it is looking at.
+    function codeLanguage(cls) {
+        const m = /(?:language|lang)-([A-Za-z0-9+#-]+)/.exec(cls || '');
+        return m ? m[1] : '';
+    }
+
     const lines = [];
     // Parallel to `lines`: whether that line is a bullet a nested `li` already emitted.
     // A list item folds its children onto one line, and it has to fold only its *own* text — re-folding a sub-list's bullets would put their `- ` markers mid-sentence.
@@ -1511,6 +1528,15 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
             const heading = lines.splice(start).join(' ').replace(/\s+/g, ' ').trim();
             isBullet.splice(start);
             if (heading) emit('\n' + level + ' ' + heading);
+            return;
+        }
+        if (tag === 'pre') {
+            // A listing is the one place where the whitespace *is* the content, so it is taken as text rather than walked.
+            // Descending would trim every line in the text-node branch above and fold the block into the prose around it, which is what a compiler diagnostic or a Python session loses first.
+            // The fence is emitted for any `pre`, not only `pre > code`: Python's documentation, the RFC series and diagnostics all mark listings up with no `code` element anywhere.
+            const lang = codeLanguage(node.className) || codeLanguage((node.querySelector('code') || {}).className);
+            const body = plain(node.textContent.replace(/^\n+/, '').replace(/\n+$/, ''));
+            if (body) emit('\n```' + lang + '\n' + body + '\n```\n');
             return;
         }
         if (tag === 'a' && node.href && node.textContent.trim()) {
@@ -1951,11 +1977,17 @@ mod tests {
             }
         };
         config.chromium_path = Some(chromium.to_string_lossy().into_owned());
-        Some(
-            BrowserSession::launch(&config)
-                .await
-                .expect("discovered Chromium must launch for extraction fixtures"),
-        )
+        // A launch failure is the same class of environmental unavailability as a missing binary, so it skips rather than panics.
+        // A CI runner routinely has Chromium installed but cannot start it — no sandbox, a missing shared library, or too little memory — and panicking there turns an environment limitation into a red `main` that every open PR then inherits (#7861).
+        match BrowserSession::launch(&config).await {
+            Ok(session) => Some(session),
+            Err(error) => {
+                eprintln!(
+                    "skipping live extraction fixture because Chromium failed to launch: {error}"
+                );
+                None
+            }
+        }
     }
 
     async fn load_html_fixture(session: &BrowserSession, html: &str) {
@@ -1981,6 +2013,52 @@ mod tests {
                 .expect("extraction script must return encoded JSON"),
         )
         .expect("extraction result must remain valid JSON")
+    }
+
+    /// A listing reaches the model fenced, with its whitespace and its language.
+    ///
+    /// The walk had no `pre` branch at all, so a listing fell through to the text-node branch, which trims every line: 15 of 15 blocks on a Rust book chapter and 35 of 35 on a Python tutorial arrived as prose with their indentation gone.
+    /// The fence is emitted for any `pre`, so the two shapes that carry no `code` element — Python's highlighted spans and a plain RFC listing — are covered as well as a highlighted one.
+    #[tokio::test]
+    async fn live_extraction_fences_preformatted_blocks() {
+        let Some(session) = live_browser_session().await else {
+            return;
+        };
+
+        load_html_fixture(
+            &session,
+            r##"<!doctype html><html><head><title>listings</title></head><body><main><p>Before.</p><pre class="playground"><code class="language-rust">fn main() {
+    let x = 1;
+}</code></pre><p>Between.</p><pre><span class="gp">&gt;&gt;&gt; </span>len(x)
+3</pre><p>After.</p></main></body></html>"##,
+        )
+        .await;
+        let extracted = extract_fixture(&session, 10_000).await;
+        let content = extracted["content"].as_str().unwrap();
+
+        assert!(
+            content.contains("```rust"),
+            "a language hint on the inner code element must reach the fence: {content}"
+        );
+        assert!(
+            content.contains("    let x = 1;"),
+            "indentation is the content of a listing and must survive: {content}"
+        );
+        assert!(
+            content.contains(">>> len(x)"),
+            "a listing with no code element must be fenced too: {content}"
+        );
+        assert_eq!(
+            content.matches("```").count(),
+            4,
+            "each listing must open and close exactly once: {content}"
+        );
+        for prose in ["Before.", "Between.", "After."] {
+            assert!(
+                content.contains(prose),
+                "prose around a listing must survive: {prose} missing from {content}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2946,6 +3024,27 @@ mod tests {
         let err = BrowserResponse::err("bad");
         assert!(!err.success);
         assert_eq!(err.error.unwrap(), "bad");
+    }
+
+    #[test]
+    fn test_navigation_error_text_classifies_cdp_failures() {
+        let failed = serde_json::json!({
+            "frameId": "frame-1",
+            "errorText": "net::ERR_NAME_NOT_RESOLVED"
+        });
+        assert_eq!(
+            navigation_error_text(&failed),
+            Some("net::ERR_NAME_NOT_RESOLVED")
+        );
+
+        assert_eq!(
+            navigation_error_text(&serde_json::json!({"frameId": "frame-1"})),
+            None
+        );
+        assert_eq!(
+            navigation_error_text(&serde_json::json!({"errorText": "  "})),
+            None
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ async fn resolve_manifest(
     lang: &'static str,
 ) -> Result<ResolvedManifest, ManifestError> {
     // Resolve template name → manifest_toml
+    let mut used_template: Option<String> = None;
     let manifest_toml = if req.manifest_toml.trim().is_empty() {
         if let Some(ref tmpl_name) = req.template {
             let safe_name: String = tmpl_name
@@ -49,7 +50,10 @@ async fn resolve_manifest(
                 .join("agent.toml");
             // Use tokio::fs to avoid blocking in an async context
             match tokio::fs::read_to_string(&tmpl_path).await {
-                Ok(content) => content,
+                Ok(content) => {
+                    used_template = Some(safe_name.clone());
+                    content
+                }
                 Err(_) => {
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
@@ -121,6 +125,9 @@ async fn resolve_manifest(
         if !custom_name.trim().is_empty() {
             manifest.name = custom_name.trim().to_string();
         }
+    }
+    if used_template.is_some() {
+        manifest.source_template = used_template;
     }
 
     let name = manifest.name.clone();
@@ -350,6 +357,21 @@ pub async fn bulk_delete_agents(
                 continue;
             }
         };
+        // #6695: a provisioned agent is refused per item rather than failing the batch —
+        // one deployment-owned agent in a list must not take the operator's other deletes
+        // down with it.
+        if super::guard_provisioned_agent(&state, agent_id).is_some() {
+            results.push(BulkActionResult {
+                agent_id: id_str.clone(),
+                success: false,
+                message: None,
+                error: Some(
+                    "This agent is provisioned by the deployment; remove its declaration from the provisioning tree instead."
+                        .to_string(),
+                ),
+            });
+            continue;
+        }
         // Same guard as the single-agent kill path: hand-spawned agents
         // must be removed by deactivating their owning hand, not directly.
         if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
@@ -787,6 +809,12 @@ pub async fn kill_agent(
         }
     };
 
+    // #6695: a provisioned agent's lifecycle belongs to the deployment. Placed before the
+    // idempotent-absent short-circuit below so the refusal is about ownership, not existence.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal.into_response();
+    }
+
     // Idempotent-no-op short-circuit: a DELETE for an already-absent agent is
     // a no-op per RFC 9110 §9.2.2, so we don't gate it on `?confirm=true` —
     // there's nothing to confirm destroying. Hand-owned and confirmation
@@ -1010,6 +1038,13 @@ pub async fn get_agent(
             .into_response();
     }
 
+    // `ErrorTranslator` holds a `!Send` FluentBundle, so it must not be alive across the await below (#7713 added the first await to this handler).
+    drop(t);
+    let pending = state
+        .kernel
+        .pending_skill_and_mcp_declarations(agent_id)
+        .await;
+
     let dm = {
         let dm_override = state
             .kernel
@@ -1033,6 +1068,18 @@ pub async fn get_agent(
         } else {
             entry.manifest.model.model.as_str()
         };
+
+    // Static footprint every request to this agent carries before the first
+    // user message: system prompt plus the assembled tool definitions
+    // (skills, MCP servers, built-ins — `available_tools` is the exact list
+    // that travels in the prompt). Same heuristic the compactor uses to
+    // decide when to fold history, so this number cannot drift from that one.
+    let tools = state.kernel.available_tools(agent_id);
+    let injected_footprint_tokens = librefang_kernel::compactor::estimate_token_count(
+        &[],
+        Some(&entry.manifest.model.system_prompt),
+        Some(tools.as_slice()),
+    );
 
     (
         StatusCode::OK,
@@ -1058,6 +1105,7 @@ pub async fn get_agent(
             },
             "system_prompt": entry.manifest.model.system_prompt,
             "description": entry.manifest.description,
+            "source_template": entry.manifest.source_template,
             "tags": entry.manifest.tags,
             "identity": {
                 "emoji": entry.identity.emoji,
@@ -1066,6 +1114,10 @@ pub async fn get_agent(
             },
             "skills": entry.manifest.skills,
             "skills_mode": skill_assignment_mode(&entry.manifest),
+            // Declared-but-unusable halves of the two allowlists (#7713). Always present, `[]` when everything resolves.
+            // A skill is pending until it is installed and the registry reloaded; an MCP server until a connection is live, so a configured-and-unreachable server stays listed here.
+            "pending_skills": pending.skills,
+            "pending_mcp_servers": pending.mcp_servers,
             "schedule": format_schedule_mode(&entry.manifest.schedule),
             "skills_disabled": entry.manifest.skills_disabled,
             "tools_disabled": entry.manifest.tools_disabled,
@@ -1077,6 +1129,7 @@ pub async fn get_agent(
             "fallback_models": entry.manifest.fallback_models,
             "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
+            "injected_footprint_tokens": injected_footprint_tokens,
         })),
     )
         .into_response()
@@ -1195,6 +1248,11 @@ pub async fn patch_agent(
             );
         }
     };
+
+    // #6695: refuse to change the manifest of an agent the deployment provisioned.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
 
     if state.kernel.agent_registry().get(agent_id).is_none() {
         return (

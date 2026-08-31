@@ -12,6 +12,7 @@
 //! literal directly.
 
 use super::*;
+use crate::kernel::subsystems::memory::{MemoryExtractionResolution, MemoryExtractionTarget};
 use crate::MeteringSubsystemApi;
 use librefang_types::error::LibreFangError;
 
@@ -71,9 +72,14 @@ impl LibreFangKernel {
     /// #6651; the call is idempotent, so make it unconditionally right after
     /// the `Arc` wrap.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
-        let config = load_config(config_path)
+        // Resolve the path *before* loading, and hand the same value to the kernel.
+        // `load_config(None)` would resolve it internally and throw it away, leaving every later reader to guess at it from `home_dir` — which is wrong under `LIBREFANG_CONFIG_PATH`, wrong under `--config`, and wrong for a file whose own `home_dir` key points elsewhere (#6695).
+        let config_path = config_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crate::config::default_config_path);
+        let config = load_config(Some(&config_path))
             .map_err(|e| crate::error::KernelError::LibreFang(LibreFangError::Config(e)))?;
-        Self::boot_with_config(config)
+        Self::boot_with_config_at(Some(config_path), config)
     }
 
     /// Boot the kernel with an explicit configuration.
@@ -88,8 +94,25 @@ impl LibreFangKernel {
     /// Carries the same post-boot obligation as [`Self::boot`]: wrap the
     /// returned kernel in an `Arc` and call [`Self::set_self_handle`] on it
     /// before anything can dispatch an agent turn.
-    pub fn boot_with_config(mut config: KernelConfig) -> KernelResult<Self> {
+    pub fn boot_with_config(config: KernelConfig) -> KernelResult<Self> {
+        Self::boot_with_config_at(None, config)
+    }
+
+    /// Boot the kernel with an explicit configuration *and* the file it came from.
+    ///
+    /// `config_path` is the path the kernel will re-read on hot-reload, watch for changes, and persist API config writes into.
+    /// `None` means "the caller built this config in memory": the path is then derived with [`crate::config::config_path_for`], which honours `LIBREFANG_CONFIG_PATH` and otherwise falls back to the config's own `home_dir`.
+    ///
+    /// Same post-boot obligation as [`Self::boot`].
+    pub fn boot_with_config_at(
+        config_path: Option<PathBuf>,
+        mut config: KernelConfig,
+    ) -> KernelResult<Self> {
         use librefang_types::config::KernelMode;
+
+        // One resolution, recorded on the kernel, used by every later reader and writer.
+        let config_path_boot =
+            config_path.unwrap_or_else(|| crate::config::config_path_for(&config));
 
         // Env var overrides — useful for Docker where config.toml is baked in.
         if let Ok(listen) = std::env::var("LIBREFANG_LISTEN") {
@@ -349,6 +372,8 @@ impl LibreFangKernel {
         migrate_root_backups(&config.home_dir);
         migrate_root_state_files(&config.home_dir);
         cleanup_legacy_root_logs(&config.home_dir);
+        // #7723: a transient mission workspace is removed by its in-process guard when the run ends, so anything still sitting under `<home>/transient` is the residue of a run the daemon did not survive. Boot is the one moment at which no mission of ours can be live, which makes it the only safe place to collect it.
+        mission_workspace::sweep_orphan_missions(&config.home_dir);
 
         // Initialize memory substrate
         let db_path = config
@@ -378,6 +403,11 @@ impl LibreFangKernel {
         // hardcoded default while operators tune the on-demand path.
         substrate
             .set_consolidation_duplicate_threshold(config.proactive_memory.duplicate_threshold);
+
+        // #7911: bound the per-turn episodic memory row.
+        // The runtime's per-turn writer reads this off the substrate it already holds, so the value does not have to be threaded through `LoopOptions` at every construction site.
+        // `[memory]` is restart-required in `build_reload_plan`, so a value read once here cannot go stale relative to the config on disk.
+        substrate.set_max_episodic_chars(config.memory.max_episodic_chars);
 
         // Optionally attach an external vector store backend.
         if let Some(ref backend) = config.memory.vector_backend {
@@ -1080,6 +1110,23 @@ impl LibreFangKernel {
                  LibreFang role and will default-deny — see WARN lines above"
             );
         }
+        // Same visibility fix for `[external_auth.role_map]` (#7744): a typo'd target role grants nothing, and without a boot WARN the only symptom is SSO callers getting 401 with no explanation.
+        let oidc_typo_count = crate::auth::validate_oidc_role_map(&config.external_auth.role_map);
+        if oidc_typo_count > 0 {
+            warn!(
+                "external_auth.role_map: {oidc_typo_count} entr(ies) reference an unrecognized \
+                 LibreFang role and grant nothing — see WARN lines above"
+            );
+        }
+        // And for `[external_auth.group_map]` (#7746): a target that names no `[[groups]]` entry — a rename that missed the map, or a typo — confers no membership, with the same silent symptom.
+        let oidc_group_dangling =
+            crate::auth::validate_oidc_group_map(&config.external_auth.group_map, &config.groups);
+        if oidc_group_dangling > 0 {
+            warn!(
+                "external_auth.group_map: {oidc_group_dangling} entr(ies) point at a group that \
+                 does not exist in [[groups]] and confer no membership — see WARN lines above"
+            );
+        }
 
         // Initialize git repo for config version control (first boot)
         init_git_if_missing(&config.home_dir);
@@ -1299,7 +1346,10 @@ impl LibreFangKernel {
         // silently replace the caller's in-memory config with whatever is on
         // disk, which is wrong when the caller started the kernel with a
         // non-default config path or a programmatically-built config.
-        let migrated = match librefang_runtime::mcp_migrate::migrate_if_needed(&config.home_dir) {
+        let migrated = match librefang_runtime::mcp_migrate::migrate_if_needed(
+            &config.home_dir,
+            &config_path_boot,
+        ) {
             Ok(Some(summary)) => {
                 info!("MCP migration: {summary}");
                 true
@@ -1317,7 +1367,7 @@ impl LibreFangKernel {
         info!("MCP catalog: {catalog_count} template(s) available");
 
         let config = if migrated {
-            let cfg_path = config.home_dir.join("config.toml");
+            let cfg_path = config_path_boot.clone();
             if cfg_path.is_file() {
                 match load_config(Some(&cfg_path)) {
                     Ok(reloaded) => {
@@ -1408,6 +1458,16 @@ impl LibreFangKernel {
             ),
         };
 
+        // #7912: the identity of the embedding model actually in use, in
+        // `provider/model` form. This is deliberately not
+        // `config.memory.embedding_model` — the resolution below substitutes a
+        // provider default when the configured string is one of the two
+        // built-in placeholders, and auto-detection picks the provider from the
+        // environment, so the configured string and the model that produced a
+        // vector routinely differ. Only the resolved pair identifies the vector
+        // space a stored embedding belongs to.
+        let mut effective_embedding_identity: Option<String> = None;
+
         // Auto-detect embedding driver for vector similarity search
         let embedding_driver: Option<
             Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
@@ -1455,6 +1515,7 @@ impl LibreFangKernel {
                 ) {
                     Ok(d) => {
                         info!(provider = %provider, model = %model, "Embedding driver configured from memory config");
+                        effective_embedding_identity = Some(format!("{provider}/{model}"));
                         Some(Arc::from(d))
                     }
                     Err(e) => {
@@ -1505,6 +1566,7 @@ impl LibreFangKernel {
                     ) {
                         Ok(d) => {
                             info!(provider = %detected, model = %model, "Embedding driver auto-detected");
+                            effective_embedding_identity = Some(format!("{detected}/{model}"));
                             Some(Arc::from(d))
                         }
                         Err(e) => {
@@ -1523,6 +1585,41 @@ impl LibreFangKernel {
                 }
             }
         };
+
+        // #7912: stamp new vectors with the model that produced them, and tell
+        // the operator when the store already holds vectors from a different
+        // one. Both models in the report on that issue are 1024-dimensional, so
+        // the length check inside `cosine_similarity` never fires and the only
+        // symptom of a model swap is that retrieval quietly goes random.
+        if let Some(ref identity) = effective_embedding_identity {
+            memory.set_embedding_model(identity);
+            match memory.embedding_model_census() {
+                Ok(census) => {
+                    // BTreeMap, so the rendered summary is byte-identical across
+                    // boots for the same store rather than reshuffling per run.
+                    let stale: Vec<String> = census
+                        .iter()
+                        .filter(|(model, _)| model.as_str() != identity.as_str())
+                        .map(|(model, count)| format!("{model}={count}"))
+                        .collect();
+                    if !stale.is_empty() {
+                        warn!(
+                            active_model = %identity,
+                            stale = %stale.join(", "),
+                            "Stored embeddings were produced by a different model than the one now configured. \
+                             Cosine similarity across two embedding spaces is meaningless, so those vectors are \
+                             skipped during vector recall. Restore the previous embedding_model, or re-embed \
+                             the affected rows."
+                        );
+                    } else {
+                        debug!(active_model = %identity, "Embedding model census clean");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Embedding model census failed; skipping the model-drift check");
+                }
+            }
+        }
 
         let browser_ctx = librefang_runtime::browser::BrowserManager::new(config.browser.clone());
 
@@ -1782,7 +1879,7 @@ impl LibreFangKernel {
         // skill config injection layer treats a missing/invalid file as an
         // empty table, which is the same semantics as the previous on-miss
         // path.
-        let initial_raw_config_toml = load_raw_config_toml(&config.home_dir.join("config.toml"));
+        let initial_raw_config_toml = load_raw_config_toml(&config_path_boot);
 
         // Canonical agent UUID registry (refs #4614). Loaded from
         // `<home_dir>/agent_identities.toml`; missing or malformed files
@@ -1872,7 +1969,11 @@ impl LibreFangKernel {
 
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
+            config_path_boot,
             data_dir_boot: config.data_dir.clone(),
+            provisioning: ArcSwap::new(std::sync::Arc::new(
+                crate::provisioning::ProvisioningRuntime::default(),
+            )),
             config: ArcSwap::new(std::sync::Arc::new(config)),
             raw_config_toml: ArcSwap::new(std::sync::Arc::new(initial_raw_config_toml)),
             agents: crate::kernel::subsystems::AgentSubsystem::new(agent_identities, supervisor),
@@ -1992,10 +2093,10 @@ impl LibreFangKernel {
         let cfg = kernel.config.load();
         if cfg.proactive_memory.enabled {
             let pm_config = cfg.proactive_memory.clone();
-            let extraction_spec = pm_config
-                .extraction_model
+            let configured_extraction_model =
+                pm_config.extraction_model.clone().filter(|s| !s.is_empty());
+            let extraction_spec = configured_extraction_model
                 .clone()
-                .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| cfg.default_model.model.clone());
 
             let catalog = kernel.llm.model_catalog.load();
@@ -2012,6 +2113,56 @@ impl LibreFangKernel {
                 &extraction_provider,
             );
 
+            // Say out loud which model ended up doing the extraction, and
+            // whether anyone chose it — *after* resolution, so the line names
+            // the provider and the model that will actually be called rather
+            // than the spec string that was fed in. An inherited
+            // `provider/model` spec logged before resolution answers neither
+            // "which provider" nor "what will the upstream API see", which is
+            // the whole question.
+            //
+            // The fallback to `default_model` used to be silent, and silence
+            // is what made it expensive: on a live deployment an agent was
+            // answering in 2 s on its own fast model while its memory
+            // extraction ran on the global default — a reasoning model that
+            // needs 30.5 s for the *smallest possible* extraction, against a
+            // 30 s ceiling it could therefore never meet. It failed on every
+            // single turn, retried four times, and held each finished reply
+            // for over two minutes. Nothing in the operator's config file
+            // mentioned that model in connection with memory at all, so there
+            // was nothing to read and no reason to suspect it.
+            //
+            // Inheriting the default is the documented behaviour of an unset
+            // field, so it is reported at INFO, not WARN: a warning that fires
+            // on every default install is a warning operators learn to skip,
+            // and the one path here that is genuinely surprising — the driver
+            // failing to build and extraction silently losing its LLM — needs
+            // that level to still mean something.
+            let extraction_target = MemoryExtractionTarget {
+                configured_spec: configured_extraction_model.clone(),
+                provider: extraction_provider.clone(),
+                model: extraction_model_name.clone(),
+            };
+            if configured_extraction_model.is_some() {
+                debug!(
+                    extraction_spec = %extraction_spec,
+                    extraction_provider = %extraction_provider,
+                    extraction_model = %extraction_model_name,
+                    "proactive memory: using the configured extraction model"
+                );
+            } else {
+                info!(
+                    extraction_spec = %extraction_spec,
+                    extraction_provider = %extraction_provider,
+                    extraction_model = %extraction_model_name,
+                    "proactive memory: no [proactive_memory] extraction_model is set, so \
+                     extraction inherits the global default model. This runs on every turn \
+                     after the reply is ready, so a slow model here delays every answer. \
+                     Set [proactive_memory] extraction_model to a small, fast model to \
+                     decouple it from the model your agents converse with."
+                );
+            }
+
             // Build the extraction driver: reuse the kernel's default driver
             // when extraction provider == default provider (no extra
             // driver_cache entry); otherwise build a fresh driver for the
@@ -2020,6 +2171,7 @@ impl LibreFangKernel {
             // — explicit visible degradation beats silently 404'ing the
             // operator's named provider on every turn (the original #4871
             // bug).
+            let mut extraction_driver_error: Option<String> = None;
             let llm: Option<(Arc<dyn librefang_runtime::llm_driver::LlmDriver>, String)> =
                 if extraction_provider == cfg.default_model.provider {
                     Some((
@@ -2031,14 +2183,16 @@ impl LibreFangKernel {
                         Ok(driver) => Some((driver, extraction_model_name)),
                         Err(e) => {
                             warn!(
-                                extraction_model = %extraction_spec,
+                                extraction_spec = %extraction_spec,
                                 extraction_provider = %extraction_provider,
+                                extraction_model = %extraction_model_name,
                                 error = %e,
                                 "Failed to build extraction LLM driver for the configured \
                                  [proactive_memory] extraction_model; falling back to substring \
                                  extraction. Check that the named provider has its API key + \
                                  base URL configured."
                             );
+                            extraction_driver_error = Some(e.to_string());
                             None
                         }
                     }
@@ -2057,6 +2211,16 @@ impl LibreFangKernel {
             // inherits caching from the agent's manifest metadata which
             // the kernel derives from this same flag.
             let prompt_caching = cfg.prompt_caching;
+            // A sidecar extractor takes precedence inside
+            // `init_proactive_memory_full_with_extractor` and bypasses the LLM
+            // path wholesale, so it is one of the ways a resolved model ends up
+            // not being the thing that writes memories. Read it before
+            // `pm_config` is moved.
+            let sidecar_command = pm_config
+                .extractor_sidecar
+                .as_ref()
+                .map(|s| s.command.trim().to_string())
+                .filter(|c| !c.is_empty());
             let result =
                 librefang_runtime::proactive_memory::init_proactive_memory_full_with_extractor(
                     Arc::clone(&kernel.memory.substrate),
@@ -2065,12 +2229,52 @@ impl LibreFangKernel {
                     embedding,
                     prompt_caching,
                 );
+
+            // Record the *outcome*, not the intent. Every reporting surface
+            // reads this snapshot instead of re-deriving "which model extracts
+            // memories" from `KernelConfig`, because a re-derivation cannot see
+            // any of the three ways the configured model stops being the answer
+            // — the store never being built, a sidecar taking over, or the
+            // driver failing to build and extraction quietly dropping to
+            // substring matching with no LLM at all.
+            let resolution = match &result {
+                // Both `auto_memorize` and `auto_retrieve` are off, so no store
+                // was built and nothing extracts.
+                None => MemoryExtractionResolution::Inactive,
+                Some((_, Some(_))) => MemoryExtractionResolution::Llm {
+                    target: extraction_target,
+                },
+                Some((_, None)) => match sidecar_command {
+                    Some(command) => MemoryExtractionResolution::Sidecar { command },
+                    None => MemoryExtractionResolution::DegradedToSubstring {
+                        reason: format!(
+                            "failed to build the {} driver for extraction model {}: {}",
+                            extraction_target.provider,
+                            extraction_target.model,
+                            extraction_driver_error
+                                .as_deref()
+                                .unwrap_or("no extraction LLM driver was built"),
+                        ),
+                        target: extraction_target,
+                    },
+                },
+            };
+            let _ = kernel.memory.extraction_resolution.set(resolution);
+
             if let Some((store, extractor)) = result {
                 let _ = kernel.memory.proactive_memory.set(store);
                 if let Some(ex) = extractor {
                     let _ = kernel.memory.proactive_memory_extractor.set(ex);
                 }
             }
+        } else {
+            // Record the inactive outcome too, so a reporting surface can tell
+            // "extraction is switched off" apart from "boot never got here" and
+            // never has to fall back to guessing from config.
+            let _ = kernel
+                .memory
+                .extraction_resolution
+                .set(MemoryExtractionResolution::Inactive);
         }
 
         // Initialize prompt store
@@ -2800,6 +3004,14 @@ impl LibreFangKernel {
                 );
             }
         }
+
+        // Reconcile the deployment-owned provisioning tree (#6695).
+        //
+        // Ordered after the registry restore so the plan can tell "this agent exists" from
+        // "this agent must be created", and before the default-assistant fallback below so a
+        // deployment that declares its own agents does not also get an `assistant` it never
+        // asked for.
+        kernel.apply_provisioning();
 
         // If no agents exist (fresh install), spawn a default assistant.
         if kernel.agents.registry.list().is_empty() {
