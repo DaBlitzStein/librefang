@@ -81,6 +81,7 @@ async fn boot() -> Harness {
 fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
     let manifest = AgentManifest {
         name: name.to_string(),
+        source_template: None,
         ..AgentManifest::default()
     };
     state

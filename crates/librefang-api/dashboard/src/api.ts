@@ -213,6 +213,11 @@ export interface ChannelItem {
    *  **Sticky**: never cleared, not even by the successful respawn that follows.
    *  A connected channel carrying one is degraded, not dead. */
   last_error?: string | null;
+  /** Per-instance default agent (`[[sidecar_channels]].agent`) — inbound
+   *  messages on this instance with no more specific binding route here.
+   *  `null` / absent when this instance has no default agent configured.
+   *  Only present on configured rows; a discovery (catalog) row never has one. */
+  agent?: string | null;
 }
 
 export interface SkillItem {
@@ -355,6 +360,8 @@ export interface AgentItem {
   supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
   /** Human-readable schedule summary: "manual" for reactive agents,
    *  the cron expression for periodic agents, "proactive", or
    *  "continuous · Ns" for continuous agents. */
@@ -1389,6 +1396,8 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
@@ -1699,11 +1708,34 @@ export interface AgentTypeSpec {
   skills?: string[];
 }
 
+/**
+ * One privacy risk the promotion preview found in a manifest (mirrors
+ * `librefang_types::manifest_privacy::Finding`).
+ *
+ * `removed_by_sanitizer: true` means the published copy already drops the
+ * value; `false` means it sits inside a field worth keeping and the operator
+ * has to edit it by hand before publishing.
+ */
+export interface PromotionFinding {
+  field: string;
+  category: string;
+  preview: string;
+  removed_by_sanitizer: boolean;
+}
+
+/** Read-only privacy pass over a manifest, ahead of promoting it to a shared registry (#7771). */
+export interface PromotionPreview {
+  requires_review: boolean;
+  findings: PromotionFinding[];
+  manifest_toml: string | null;
+}
+
 export interface AgentTypeDetail {
   name: string;
   source: AgentTypeSource;
   editable: boolean;
   spec: AgentTypeSpec;
+  promotion_preview?: PromotionPreview;
   manifest_toml: string;
 }
 
@@ -2155,13 +2187,26 @@ export interface SidecarSaveResult {
 // else + the `[[sidecar_channels]]` boilerplate) on the server. Triggers
 // hot-reload of the channels registry; whether the sidecar child needs an
 // out-of-band restart is reported via `restart_required`.
+//
+// `channelType` is always the `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …)
+// — it picks the adapter's schema/command/args and never changes across a
+// rename. `instanceName` is the `[[sidecar_channels]].name` actually
+// written; omit it (or pass the same value as `channelType`) to save the
+// type's default single instance, exactly as before multi-instance support.
+// Pass a distinct `instanceName` to configure a second (third, …) instance
+// of the same catalog type — e.g. two Telegram bots.
 export async function saveSidecarConfig(
-  name: string,
+  channelType: string,
   values: Record<string, string>,
+  options: { instanceName?: string; agent?: string | null } = {},
 ): Promise<SidecarSaveResult> {
   return post<SidecarSaveResult>(
-    `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
-    { values },
+    `/api/channels/sidecar/${encodeURIComponent(channelType)}/configure`,
+    {
+      values,
+      instance_name: options.instanceName,
+      agent: options.agent,
+    },
   );
 }
 
