@@ -57,25 +57,10 @@ import {
  * ignores them on the standalone `/config` route.
  */
 export type AgentConfigPatch = {
-  // Tri-state: omit to leave unchanged, `null` to hand the field back to
-  // inherit, a number to pin it for this agent. A pinned value wins over the
-  // per-model override.
-  //
-  // `null` is only honoured on the standalone `/config` route. The
-  // hand-runtime override has no per-field clear of its own — `DELETE
-  // /hand-runtime-config` drops the whole override — so it reads `null` as
-  // "leave unchanged" rather than inventing a third meaning for it.
-  max_tokens?: number | null;
+  max_tokens?: number;
   model?: string;
   provider?: string;
-  temperature?: number | null;
-  top_p?: number | null;
-  frequency_penalty?: number | null;
-  presence_penalty?: number | null;
-  // Endpoint limits, not sampling preferences: an over-limit request is
-  // reported in the response's `warnings` and stored as sent, never clamped.
-  context_window?: number | null;
-  max_output_tokens?: number | null;
+  temperature?: number;
   api_key_env?: string;
   base_url?: string;
   web_search_augmentation?: "off" | "auto" | "always";
@@ -152,8 +137,8 @@ export function useResumeAgent() {
  * Manifest-level partial update: name, description, system_prompt,
  * mcp_servers, model, schedule — or, via `manifest_toml`, a full-manifest
  * replacement (#7742: the dashboard's full manifest editor). Distinct from
- * `usePatchAgentRuntimeConfig`, which targets the role-appropriate
- * model-tuning endpoint.
+ * `usePatchAgentConfig` which targets `/agents/{id}/config` (model-tuning
+ * only).
  *
  * `manifest_toml` can touch nearly every manifest field in one request, so
  * its invalidation fan-out is broader than the other partial fields:

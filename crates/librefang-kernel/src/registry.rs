@@ -479,6 +479,7 @@ impl AgentRegistry {
                 bucket.push(id);
             }
         }
+
         self.notify_changed();
         Ok(())
     }
@@ -543,12 +544,8 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Update an agent's max_tokens (requested response length).
-    ///
-    /// `None` clears the agent's own value, putting the field back to
-    /// "inherit" so the per-model override — or, failing that, the system
-    /// default — supplies it.
-    pub fn update_max_tokens(&self, id: AgentId, max_tokens: Option<u32>) -> LibreFangResult<()> {
+    /// Update an agent's max_tokens (response length limit).
+    pub fn update_max_tokens(&self, id: AgentId, max_tokens: u32) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.model.max_tokens = max_tokens;
             entry.last_active = chrono::Utc::now();
@@ -557,67 +554,10 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Update an agent's sampling temperature. `None` = inherit.
-    pub fn update_temperature(&self, id: AgentId, temperature: Option<f32>) -> LibreFangResult<()> {
+    /// Update an agent's sampling temperature.
+    pub fn update_temperature(&self, id: AgentId, temperature: f32) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.model.temperature = temperature;
-            entry.last_active = chrono::Utc::now();
-        })?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    /// Update an agent's top-p / nucleus sampling. `None` = inherit.
-    pub fn update_top_p(&self, id: AgentId, top_p: Option<f32>) -> LibreFangResult<()> {
-        self.with_entry_mut(id, |entry| {
-            entry.manifest.model.top_p = top_p;
-            entry.last_active = chrono::Utc::now();
-        })?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    /// Update an agent's frequency penalty. `None` = inherit.
-    pub fn update_frequency_penalty(&self, id: AgentId, value: Option<f32>) -> LibreFangResult<()> {
-        self.with_entry_mut(id, |entry| {
-            entry.manifest.model.frequency_penalty = value;
-            entry.last_active = chrono::Utc::now();
-        })?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    /// Update an agent's presence penalty. `None` = inherit.
-    pub fn update_presence_penalty(&self, id: AgentId, value: Option<f32>) -> LibreFangResult<()> {
-        self.with_entry_mut(id, |entry| {
-            entry.manifest.model.presence_penalty = value;
-            entry.last_active = chrono::Utc::now();
-        })?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    /// Update an agent's context-window override (`agent.toml: [model] context_window`).
-    ///
-    /// A limit, not a preference: it tells the runtime what the endpoint can
-    /// accept. `None` hands resolution back to the registry / probe chain.
-    pub fn update_context_window(&self, id: AgentId, value: Option<u64>) -> LibreFangResult<()> {
-        self.with_entry_mut(id, |entry| {
-            entry.manifest.model.context_window = value;
-            entry.last_active = chrono::Utc::now();
-        })?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    /// Update an agent's max-output-tokens override. See [`Self::update_context_window`].
-    pub fn update_model_max_output_tokens(
-        &self,
-        id: AgentId,
-        value: Option<u64>,
-    ) -> LibreFangResult<()> {
-        self.with_entry_mut(id, |entry| {
-            entry.manifest.model.max_output_tokens = value;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -632,25 +572,6 @@ impl AgentRegistry {
     ) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.web_search_augmentation = mode;
-            entry.last_active = chrono::Utc::now();
-        })?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    /// Update an agent's model selection mode and per-agent router override
-    /// (profile allowlist + cost budget). Mutates the manifest only; use
-    /// [`crate::LibreFangKernel::set_agent_model_routing`] to also persist to
-    /// SQLite and `agent.toml`. Mirrors `update_web_search_augmentation`.
-    pub fn update_model_routing(
-        &self,
-        id: AgentId,
-        mode: librefang_types::agent::ModelMode,
-        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
-    ) -> LibreFangResult<()> {
-        self.with_entry_mut(id, |entry| {
-            entry.manifest.model.mode = mode;
-            entry.manifest.model.router_override = router_override;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -1382,23 +1303,19 @@ mod tests {
         let id = entry.id;
         registry.register(entry).unwrap();
 
-        // A fresh agent inherits rather than pinning a number.
+        // Default temperature is 0.7
         let before = registry.get(id).unwrap();
         let old_active = before.last_active;
-        assert_eq!(before.manifest.model.temperature, None);
+        assert!((before.manifest.model.temperature - 0.7).abs() < f32::EPSILON);
 
         // Wait a tiny bit so last_active changes
         std::thread::sleep(std::time::Duration::from_millis(1));
 
-        registry.update_temperature(id, Some(1.5)).unwrap();
+        registry.update_temperature(id, 1.5).unwrap();
 
         let after = registry.get(id).unwrap();
-        assert_eq!(after.manifest.model.temperature, Some(1.5));
+        assert!((after.manifest.model.temperature - 1.5).abs() < f32::EPSILON);
         assert!(after.last_active > old_active);
-
-        // …and can be handed back to inherit.
-        registry.update_temperature(id, None).unwrap();
-        assert_eq!(registry.get(id).unwrap().manifest.model.temperature, None);
     }
 
     #[test]

@@ -129,6 +129,10 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
+    /// The agent's `[workspaces]` table, as `(name, path, mode)` rows.
+    AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
+    /// The shared-folders write came back 2xx.
+    AgentWorkspacesUpdated(String),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -1414,6 +1418,105 @@ pub fn spawn_fetch_agent_mcp_servers(
 }
 
 /// Update an agent's skills.
+/// Read the agent's `[workspaces]` table out of its manifest TOML.
+///
+/// Goes through `GET /api/agents/{id}/manifest` rather than the JSON agent
+/// detail, because the detail response does not carry the workspace
+/// declarations at all.
+pub fn spawn_fetch_agent_workspaces(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
+                .send()
+            {
+                if let Ok(toml_text) = resp.text() {
+                    let entries: Vec<(String, String, String)> =
+                        toml::from_str::<toml::Value>(&toml_text)
+                            .ok()
+                            .and_then(|v| v.get("workspaces").cloned())
+                            .and_then(|w| w.as_table().cloned())
+                            .map(|t| {
+                                t.iter()
+                                    .map(|(name, decl)| {
+                                        let path = decl
+                                            .get("path")
+                                            .and_then(|p| p.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let mode = decl
+                                            .get("mode")
+                                            .and_then(|m| m.as_str())
+                                            .unwrap_or("rw")
+                                            .to_string();
+                                        (name.clone(), path, mode)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                    let _ = tx.send(AppEvent::AgentWorkspacesLoaded(agent_id, entries));
+                }
+            }
+        }
+    });
+}
+
+/// Write the edited shared folders back.
+///
+/// `PATCH /api/agents/{id}` with `manifest_toml` replaces the whole manifest,
+/// so the current one is fetched first and only its `[workspaces]` table is
+/// replaced. Sending a manifest built from the editor alone would silently
+/// drop every field the editor does not render.
+pub fn spawn_update_agent_workspaces(
+    backend: BackendRef,
+    agent_id: String,
+    workspaces: Vec<(String, String, String)>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let patched = client
+                .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
+                .send()
+                .ok()
+                .and_then(|r| r.text().ok())
+                .and_then(|text| {
+                    let mut value: toml::Value = toml::from_str(&text).ok()?;
+                    let table = value.as_table_mut()?;
+                    let mut ws = toml::map::Map::new();
+                    for (name, path, mode) in &workspaces {
+                        let mut entry = toml::map::Map::new();
+                        entry.insert("path".to_string(), toml::Value::String(path.clone()));
+                        entry.insert("mode".to_string(), toml::Value::String(mode.clone()));
+                        ws.insert(name.clone(), toml::Value::Table(entry));
+                    }
+                    table.insert("workspaces".to_string(), toml::Value::Table(ws));
+                    toml::to_string(&value).ok()
+                });
+            let ok = match patched {
+                Some(toml_content) => client
+                    .patch(format!("{base_url}/api/agents/{agent_id}"))
+                    .json(&serde_json::json!({"manifest_toml": toml_content}))
+                    .send()
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false),
+                None => false,
+            };
+            let _ = tx.send(if ok {
+                AppEvent::AgentWorkspacesUpdated(agent_id)
+            } else {
+                AppEvent::FetchError(crate::i18n::t("tui-event-workspaces-update-failed"))
+            });
+        }
+    });
+}
+
 pub fn spawn_update_agent_skills(
     backend: BackendRef,
     agent_id: String,
