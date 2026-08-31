@@ -3992,7 +3992,7 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 export interface GoalRunState {
   goal_id: string;
   agent_id: string;
-  phase: "running" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
+  phase: "running" | "paused" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
   iteration: number;
   max_iterations: number;
   last_progress: number;
