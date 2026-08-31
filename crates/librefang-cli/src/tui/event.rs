@@ -163,6 +163,11 @@ pub enum AppEvent {
         ok: bool,
         message: String,
     },
+    /// Template version history loaded.
+    TemplateHistoryLoaded {
+        name: String,
+        versions: Vec<serde_json::Value>,
+    },
     /// Security features loaded.
     SecurityLoaded(Vec<SecurityFeature>),
     /// Security chain verification result.
@@ -2321,6 +2326,35 @@ pub fn spawn_restore_from_registry(backend: BackendRef, name: String, tx: mpsc::
             }
         };
         let _ = tx.send(AppEvent::RegistryRestoreResult { name, ok, message });
+    });
+}
+
+pub fn spawn_fetch_template_history(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .get(format!("{base_url}/api/templates/{name}/history"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let versions: Vec<serde_json::Value> = resp.json().unwrap_or_default();
+                    let _ = tx.send(AppEvent::TemplateHistoryLoaded { name, versions });
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::TemplateHistoryLoaded {
+                        name,
+                        versions: vec![],
+                    });
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::TemplateHistoryLoaded {
+                name,
+                versions: vec![],
+            });
+        }
     });
 }
 

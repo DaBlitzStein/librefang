@@ -559,6 +559,24 @@ impl App {
                     self.refresh_templates();
                 }
             }
+            AppEvent::TemplateHistoryLoaded { name, versions } => {
+                self.templates.history_name = name;
+                self.templates.version_history = versions
+                    .iter()
+                    .filter_map(|v| {
+                        let id = v.get("id")?.to_string();
+                        let ts = v.get("created_at")?.as_str()?.to_string();
+                        let source = v.get("source")?.as_str().unwrap_or("unknown").to_string();
+                        Some((id, ts, source))
+                    })
+                    .collect();
+                self.templates.showing_history = true;
+                self.templates.history_list = ratatui::widgets::ListState::default();
+                if !self.templates.version_history.is_empty() {
+                    self.templates.history_list.select(Some(0));
+                }
+                self.templates.loading = false;
+            }
             AppEvent::TemplateProvidersLoaded(providers) => {
                 self.templates.providers = providers;
             }
@@ -1945,6 +1963,13 @@ impl App {
                 if let Some(backend) = self.backend.to_ref() {
                     self.templates.status_msg = format!("Restoring {name} from registry…");
                     event::spawn_restore_from_registry(backend, name, self.event_tx.clone());
+                }
+            }
+            templates::TemplatesAction::ShowVersionHistory { name } => {
+                self.templates.status_msg = format!("Loading history for {name}…");
+                self.templates.loading = true;
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_template_history(backend, name, self.event_tx.clone());
                 }
             }
         }
