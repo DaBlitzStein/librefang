@@ -160,6 +160,11 @@ pub enum AppEvent {
         name: String,
         toml: Option<String>,
     },
+    /// Result of promoting an agent type to the registry.
+    AgentTypePromoted {
+        name: String,
+        result: Result<String, String>,
+    },
     /// Security features loaded.
     SecurityLoaded(Vec<SecurityFeature>),
     /// Security chain verification result.
@@ -2410,6 +2415,45 @@ pub fn spawn_fetch_template_toml(backend: BackendRef, name: String, tx: mpsc::Se
             }
         };
         let _ = tx.send(AppEvent::TemplateTomlLoaded { name, toml });
+    });
+}
+
+/// Promote an agent type to the registry via `POST /api/templates/{name}/promote`.
+pub fn spawn_promote_agent_type(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let result = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                // Template names are validated to [A-Za-z0-9_-] so no URL encoding needed.
+                match client
+                    .post(format!("{base_url}/api/templates/{name}/promote"))
+                    .json(&serde_json::json!({}))
+                    .send()
+                {
+                    Ok(resp) if resp.status().is_success() => resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|v| v["pr_url"].as_str().map(|s| s.to_string()))
+                        .ok_or_else(|| crate::i18n::t("tui-event-promote-missing-pr-url")),
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let detail = resp.text().unwrap_or_default();
+                        Err(crate::i18n::t_args(
+                            "tui-event-promote-http-error",
+                            &[
+                                ("status", &status.to_string()),
+                                ("detail", &detail.chars().take(200).collect::<String>()),
+                            ],
+                        ))
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            BackendRef::InProcess(_) => {
+                Err(crate::i18n::t("tui-event-promote-not-available-in-process"))
+            }
+        };
+        let _ = tx.send(AppEvent::AgentTypePromoted { name, result });
     });
 }
 

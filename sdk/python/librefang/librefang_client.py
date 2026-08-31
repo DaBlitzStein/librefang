@@ -58,7 +58,6 @@ class LibreFang:
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
         self.mcp = _McpResource(self)
-        self.media = _MediaResource(self)
         self.memory = _MemoryResource(self)
         self.models = _ModelsResource(self)
         self.network = _NetworkResource(self)
@@ -68,7 +67,6 @@ class LibreFang:
         self.sessions = _SessionsResource(self)
         self.skills = _SkillsResource(self)
         self.system = _SystemResource(self)
-        self.tasks = _TasksResource(self)
         self.tools = _ToolsResource(self)
         self.users = _UsersResource(self)
         self.webhooks = _WebhooksResource(self)
@@ -288,9 +286,6 @@ class _AgentsResource(_Resource):
     def agent_logs(self, id: str, n: Any = None, level: Any = None, offset: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/logs", None, query={"n": n, "level": level, "offset": offset})
 
-    def get_agent_manifest_toml(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/manifest")
-
     def get_agent_mcp_servers(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
 
@@ -311,12 +306,6 @@ class _AgentsResource(_Resource):
 
     def set_model(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/model", data)
-
-    def get_agent_model_routing(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/model_routing")
-
-    def set_agent_model_routing(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/model_routing", data)
 
     def push_message(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{id}/push", data)
@@ -773,32 +762,6 @@ class _McpResource(_Resource):
         return self._c._request("GET", "/api/mcp/taint-rules")
 
 
-# ── Media Resource ─────────────────────────────────────────────
-
-class _MediaResource(_Resource):
-
-    def generate_image(self, **data):
-        return self._c._request("POST", "/api/media/image", data)
-
-    def generate_music(self, **data):
-        return self._c._request("POST", "/api/media/music", data)
-
-    def list_media_providers(self):
-        return self._c._request("GET", "/api/media/providers")
-
-    def synthesize_speech(self, **data):
-        return self._c._request("POST", "/api/media/speech", data)
-
-    def transcribe_audio(self, **data):
-        return self._c._request("POST", "/api/media/transcribe", data)
-
-    def submit_video(self, **data):
-        return self._c._request("POST", "/api/media/video", data)
-
-    def poll_video_task(self, task_id: str, provider: Any = None):
-        return self._c._request("GET", f"/api/media/video/{task_id}", None, query={"provider": provider})
-
-
 # ── Memory Resource ────────────────────────────────────────────
 
 class _MemoryResource(_Resource):
@@ -840,9 +803,6 @@ class _ModelsResource(_Resource):
 
     def list_credential_pools(self):
         return self._c._request("GET", "/api/credential-pools")
-
-    def list_model_router_profiles(self):
-        return self._c._request("GET", "/api/model-router/profiles")
 
     def list_all_models(self):
         return self._c._request("GET", "/api/models")
@@ -1365,31 +1325,17 @@ class _SystemResource(_Resource):
     def delete_agent_type(self, name: str):
         return self._c._request("DELETE", f"/api/templates/{name}")
 
-    def get_agent_type_registry_diff(self, name: str):
-        return self._c._request("GET", f"/api/templates/{name}/registry-diff")
-
-    def restore_agent_type_from_registry(self, name: str):
-        return self._c._request("POST", f"/api/templates/{name}/restore")
+    def promote_agent_type(self, name: str):
+        return self._c._request("POST", f"/api/templates/{name}/promote")
 
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
-
-    def put_agent_template_toml(self, name: str, **data):
-        return self._c._request("PUT", f"/api/templates/{name}/toml", data)
 
     def version(self):
         return self._c._request("GET", "/api/version")
 
     def api_versions(self):
         return self._c._request("GET", "/api/versions")
-
-
-# ── Tasks Resource ─────────────────────────────────────────────
-
-class _TasksResource(_Resource):
-
-    def task_queue_post_root(self, **data):
-        return self._c._request("POST", "/api/tasks", data)
 
 
 # ── Tools Resource ─────────────────────────────────────────────

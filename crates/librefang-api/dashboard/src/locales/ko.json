@@ -4162,15 +4162,11 @@
     "tools": "도구",
     "tools_hint": "이 데몬이 제공하는 도구 목록에서 선택하며, 목록에 없는 식별자도 입력할 수 있습니다.",
     "tools_search": "도구 검색…",
-    "restore": "Restore",
-    "restore_title": "Restore from registry — {{name}}",
-    "restore_confirm": "Overwrite the local agent type with the registry version? This cannot be undone.",
-    "restore_identical": "This agent type is identical to the registry version.",
-    "restore_no_registry": "This agent type does not exist in the registry.",
-    "restore_success": "Agent type restored from registry",
-    "restore_failed": "Could not restore from registry",
-    "restore_diff_field": "Field",
-    "restore_diff_local": "Local",
-    "restore_diff_registry": "Registry"
+    "promote": "레지스트리에 등록",
+    "confirm_promote": "에이전트 유형 '{{name}}'을(를) 공개 레지스트리에 등록하시겠습니까? 매니페스트가 정리된 후 GitHub pull request로 제출됩니다.",
+    "promoted": "레지스트리 PR 생성됨",
+    "promote_failed": "에이전트 유형을 등록할 수 없습니다",
+    "promote_success": "레지스트리에 pull request가 생성되었습니다. 검토 후 병합하세요.",
+    "view_pr": "Pull request 보기"
   }
 }

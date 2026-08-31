@@ -20,14 +20,11 @@ export {
   // agents
   listAgents,
   getAgentDetail,
-  getAgentManifest,
-  getAgentChannels,
   getAgentStats,
   listAgentEvents,
   listAgentSessions,
   listAgentTemplates,
   getAgentType,
-  getAgentTypeRegistryDiff,
   listPromptVersions,
   listPromptsOverview,
   listExperiments,
@@ -84,9 +81,6 @@ export {
   // models
   listModels,
   getModelOverrides,
-  // model router (profile-based routing)
-  listModelRouterProfiles,
-  getAgentModelRouting,
   // providers
   listProviders,
   // credential pools (#4965)
@@ -149,7 +143,6 @@ export {
   getAgentSkills,
   // per-agent MCP server assignment — read (#7713)
   getAgentMcpServers,
-  getAgentManifestHistory,
   getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
@@ -206,9 +199,8 @@ export {
   // agents
   createAgentType,
   updateAgentType,
-  putAgentTemplateToml,
   deleteAgentType,
-  restoreAgentTypeFromRegistry,
+  promoteAgentType,
   spawnEphemeral,
   spawnAgent,
   cloneAgent,
@@ -225,10 +217,6 @@ export {
   updateAgentTools,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
-  // per-agent MCP server grant — write (#6565 follow-up)
-  setAgentMcpServers,
-  // per-agent channel allowlist — write (#7742)
-  setAgentChannels,
   createAgentSession,
   switchAgentSession,
   deleteSession,
@@ -272,8 +260,6 @@ export {
   deleteGoal,
   startGoalRun,
   stopGoalRun,
-  pauseGoalRun,
-  resumeGoalRun,
   // hands
   activateHand,
   deactivateHand,
@@ -305,8 +291,6 @@ export {
   removeCustomModel,
   updateModelOverrides,
   deleteModelOverrides,
-  // model router (profile-based routing)
-  updateAgentModelRouting,
   // providers
   testProvider,
   setProviderKey,
@@ -397,10 +381,6 @@ export {
 // Type re-exports used by hooks and pages
 // ---------------------------------------------------------------------------
 export type {
-  AgentModelRouting,
-  ModelProfile,
-  ModelRouterProfiles,
-  CostTier,
   A2AAgentItem,
   A2ATaskStatus,
   AutoDreamAbortOutcome,

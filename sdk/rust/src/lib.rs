@@ -277,7 +277,6 @@ pub struct LibreFang {
     pub hands: Arc<HandsResource>,
     pub inbox: Arc<InboxResource>,
     pub mcp: Arc<McpResource>,
-    pub media: Arc<MediaResource>,
     pub memory: Arc<MemoryResource>,
     pub models: Arc<ModelsResource>,
     pub network: Arc<NetworkResource>,
@@ -287,7 +286,6 @@ pub struct LibreFang {
     pub sessions: Arc<SessionsResource>,
     pub skills: Arc<SkillsResource>,
     pub system: Arc<SystemResource>,
-    pub tasks: Arc<TasksResource>,
     pub tools: Arc<ToolsResource>,
     pub users: Arc<UsersResource>,
     pub webhooks: Arc<WebhooksResource>,
@@ -325,7 +323,6 @@ impl LibreFang {
             hands: Arc::new(HandsResource::new(base_url.clone(), client.clone())),
             inbox: Arc::new(InboxResource::new(base_url.clone(), client.clone())),
             mcp: Arc::new(McpResource::new(base_url.clone(), client.clone())),
-            media: Arc::new(MediaResource::new(base_url.clone(), client.clone())),
             memory: Arc::new(MemoryResource::new(base_url.clone(), client.clone())),
             models: Arc::new(ModelsResource::new(base_url.clone(), client.clone())),
             network: Arc::new(NetworkResource::new(base_url.clone(), client.clone())),
@@ -338,7 +335,6 @@ impl LibreFang {
             sessions: Arc::new(SessionsResource::new(base_url.clone(), client.clone())),
             skills: Arc::new(SkillsResource::new(base_url.clone(), client.clone())),
             system: Arc::new(SystemResource::new(base_url.clone(), client.clone())),
-            tasks: Arc::new(TasksResource::new(base_url.clone(), client.clone())),
             tools: Arc::new(ToolsResource::new(base_url.clone(), client.clone())),
             users: Arc::new(UsersResource::new(base_url.clone(), client.clone())),
             webhooks: Arc::new(WebhooksResource::new(base_url.clone(), client.clone())),
@@ -817,18 +813,6 @@ impl AgentsResource {
         .await
     }
 
-    pub async fn get_agent_manifest_toml(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &["api", "agents", id, "manifest"],
-            None,
-            &[],
-        )
-        .await
-    }
-
     pub async fn get_agent_mcp_servers(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -912,30 +896,6 @@ impl AgentsResource {
             &self.base_url,
             reqwest::Method::PUT,
             &["api", "agents", id, "model"],
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn get_agent_model_routing(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &["api", "agents", id, "model_routing"],
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn set_agent_model_routing(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::PUT,
-            &["api", "agents", id, "model_routing"],
             Some(data),
             &[],
         )
@@ -2757,104 +2717,6 @@ impl McpResource {
     }
 }
 
-// ── Media ──
-
-#[derive(Debug, Clone)]
-pub struct MediaResource {
-    base_url: String,
-    client: Client,
-}
-
-impl MediaResource {
-    fn new(base_url: String, client: Client) -> Self {
-        Self { base_url, client }
-    }
-
-    pub async fn generate_image(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &["api", "media", "image"],
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn generate_music(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &["api", "media", "music"],
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn list_media_providers(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &["api", "media", "providers"],
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn synthesize_speech(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &["api", "media", "speech"],
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn transcribe_audio(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &["api", "media", "transcribe"],
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn submit_video(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &["api", "media", "video"],
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn poll_video_task(&self, task_id: &str, provider: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &["api", "media", "video", task_id],
-            None,
-            &[("provider", provider)],
-        )
-        .await
-    }
-}
-
 // ── Memory ──
 
 #[derive(Debug, Clone)]
@@ -3008,18 +2870,6 @@ impl ModelsResource {
             &self.base_url,
             reqwest::Method::GET,
             &["api", "credential-pools"],
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn list_model_router_profiles(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &["api", "model-router", "profiles"],
             None,
             &[],
         )
@@ -5174,24 +5024,12 @@ impl SystemResource {
         .await
     }
 
-    pub async fn get_agent_type_registry_diff(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &["api", "templates", name, "registry-diff"],
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn restore_agent_type_from_registry(&self, name: &str) -> Result<Value> {
+    pub async fn promote_agent_type(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &["api", "templates", name, "restore"],
+            &["api", "templates", name, "promote"],
             None,
             &[],
         )
@@ -5205,18 +5043,6 @@ impl SystemResource {
             reqwest::Method::GET,
             &["api", "templates", name, "toml"],
             None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn put_agent_template_toml(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::PUT,
-            &["api", "templates", name, "toml"],
-            Some(data),
             &[],
         )
         .await
@@ -5241,32 +5067,6 @@ impl SystemResource {
             reqwest::Method::GET,
             &["api", "versions"],
             None,
-            &[],
-        )
-        .await
-    }
-}
-
-// ── Tasks ──
-
-#[derive(Debug, Clone)]
-pub struct TasksResource {
-    base_url: String,
-    client: Client,
-}
-
-impl TasksResource {
-    fn new(base_url: String, client: Client) -> Self {
-        Self { base_url, client }
-    }
-
-    pub async fn task_queue_post_root(&self, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &["api", "tasks"],
-            Some(data),
             &[],
         )
         .await

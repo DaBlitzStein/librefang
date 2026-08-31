@@ -4170,15 +4170,11 @@
     "tools": "Narzędzia",
     "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
     "tools_search": "Szukaj narzędzi…",
-    "restore": "Restore",
-    "restore_title": "Restore from registry — {{name}}",
-    "restore_confirm": "Overwrite the local agent type with the registry version? This cannot be undone.",
-    "restore_identical": "This agent type is identical to the registry version.",
-    "restore_no_registry": "This agent type does not exist in the registry.",
-    "restore_success": "Agent type restored from registry",
-    "restore_failed": "Could not restore from registry",
-    "restore_diff_field": "Field",
-    "restore_diff_local": "Local",
-    "restore_diff_registry": "Registry"
+    "promote": "Opublikuj w rejestrze",
+    "confirm_promote": "Opublikować typ agenta '{{name}}' w publicznym rejestrze? Manifest zostanie oczyszczony i przesłany jako pull request na GitHubie.",
+    "promoted": "PR w rejestrze utworzony",
+    "promote_failed": "Nie udało się opublikować typu agenta",
+    "promote_success": "Pull request został utworzony w rejestrze. Sprawdź i scal, gdy będzie gotowy.",
+    "view_pr": "Zobacz pull request"
   }
 }

@@ -355,8 +355,6 @@ export interface AgentItem {
   supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
-  /** Template this agent was spawned from, if any (#8018). */
-  source_template?: string;
   /** Human-readable schedule summary: "manual" for reactive agents,
    *  the cron expression for periodic agents, "proactive", or
    *  "continuous · Ns" for continuous agents. */
@@ -1391,8 +1389,6 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
-  /** Template this agent was spawned from, if any (#8018). */
-  source_template?: string;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
@@ -1443,26 +1439,6 @@ export async function listAgentEvents(
     `/api/agents/${encodeURIComponent(agentId)}/events?limit=${limit}`,
   );
   return data.events ?? [];
-}
-
-/** One snapshot in the agent manifest version history. */
-export interface ManifestVersionEntry {
-  id: number;
-  agent_id: string;
-  agent_name: string;
-  timestamp: string;
-  manifest_toml: string;
-  change_source: string;
-}
-
-export async function getAgentManifestHistory(
-  agentId: string,
-  limit = 30,
-): Promise<ManifestVersionEntry[]> {
-  const data = await get<{ versions?: ManifestVersionEntry[] }>(
-    `/api/agents/${encodeURIComponent(agentId)}/manifest-history?limit=${limit}`,
-  );
-  return data.versions ?? [];
 }
 
 export async function patchAgentConfig(
@@ -1759,37 +1735,20 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
-/** A single field-level difference between local and registry manifests. */
-export interface FieldDiff {
-  field: string;
-  local: unknown;
-  registry: unknown;
+/** Result of promoting an agent type to the public registry as a PR. */
+export interface PromoteAgentTypeResult {
+  pr_url: string;
+  repo: string;
+  branch: string;
 }
 
-/** Result of comparing a local agent type with its registry original. */
-export interface RegistryDiffResult {
-  name: string;
-  identical: boolean;
-  diffs: FieldDiff[];
-  local_toml: string;
-  registry_toml: string;
-}
-
-export async function getAgentTypeRegistryDiff(
-  name: string,
-): Promise<RegistryDiffResult> {
-  return get<RegistryDiffResult>(
-    `/api/templates/${encodeURIComponent(name)}/registry-diff`,
-  );
-}
-
-export async function restoreAgentTypeFromRegistry(
-  name: string,
-): Promise<AgentTypeDetail> {
-  return post<AgentTypeDetail>(
-    `/api/templates/${encodeURIComponent(name)}/restore`,
-    {},
-  );
+/**
+ * Promote an agent type to the configured registry repo as a GitHub PR.
+ * Sanitizes the manifest for publication, pushes it to `agent-types/<name>/agent.toml`,
+ * and opens a pull request. Requires `GITHUB_TOKEN` on the daemon side.
+ */
+export async function promoteAgentType(name: string): Promise<PromoteAgentTypeResult> {
+  return post<PromoteAgentTypeResult>(`/api/templates/${encodeURIComponent(name)}/promote`, {});
 }
 
 /**

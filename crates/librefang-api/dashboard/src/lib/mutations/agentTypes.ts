@@ -3,9 +3,8 @@ import {
   createAgentType,
   updateAgentType,
   deleteAgentType,
-  restoreAgentTypeFromRegistry,
+  promoteAgentType,
   spawnEphemeral,
-  putAgentTemplateToml,
 } from "../http/client";
 import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
 import { agentTypeKeys, budgetKeys, usageKeys } from "../queries/keys";
@@ -38,18 +37,6 @@ export function useUpdateAgentType() {
   });
 }
 
-export function useUpdateAgentTypeToml() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ name, toml }: { name: string; toml: string }) =>
-      putAgentTemplateToml(name, toml),
-    onSuccess: (_data, { name }) => {
-      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
-      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
-    },
-  });
-}
-
 export function useDeleteAgentType() {
   const qc = useQueryClient();
   return useMutation({
@@ -58,15 +45,16 @@ export function useDeleteAgentType() {
   });
 }
 
-/** Overwrite a local agent type with its registry original. */
-export function useRestoreAgentType() {
-  const qc = useQueryClient();
+/**
+ * Promote an agent type to the public registry as a GitHub PR.
+ *
+ * Read-only with respect to local state — it forks the registry repo,
+ * pushes the sanitized manifest, and opens a PR. No local invalidation
+ * needed since the agent type itself is unchanged.
+ */
+export function usePromoteAgentType() {
   return useMutation({
-    mutationFn: (name: string) => restoreAgentTypeFromRegistry(name),
-    onSuccess: (_data, name) => {
-      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
-      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
-    },
+    mutationFn: (name: string) => promoteAgentType(name),
   });
 }
 

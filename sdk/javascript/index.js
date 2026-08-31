@@ -42,7 +42,6 @@ class LibreFang {
     this.hands = new HandsResource(this);
     this.inbox = new InboxResource(this);
     this.mcp = new McpResource(this);
-    this.media = new MediaResource(this);
     this.memory = new MemoryResource(this);
     this.models = new ModelsResource(this);
     this.network = new NetworkResource(this);
@@ -52,7 +51,6 @@ class LibreFang {
     this.sessions = new SessionsResource(this);
     this.skills = new SkillsResource(this);
     this.system = new SystemResource(this);
-    this.tasks = new TasksResource(this);
     this.tools = new ToolsResource(this);
     this.users = new UsersResource(this);
     this.webhooks = new WebhooksResource(this);
@@ -272,10 +270,6 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
   }
 
-  async getAgentManifestToml(id) {
-    return this._c._request("GET", `/api/agents/${id}/manifest`);
-  }
-
   async getAgentMcpServers(id) {
     return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
   }
@@ -302,14 +296,6 @@ class AgentsResource {
 
   async setModel(id, data) {
     return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
-  }
-
-  async getAgentModelRouting(id) {
-    return this._c._request("GET", `/api/agents/${id}/model_routing`);
-  }
-
-  async setAgentModelRouting(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/model_routing`, data, undefined);
   }
 
   async pushMessage(id, data) {
@@ -911,40 +897,6 @@ class McpResource {
   }
 }
 
-// ── Media Resource
-
-class MediaResource {
-  constructor(client) { this._c = client; }
-
-  async generateImage(data) {
-    return this._c._request("POST", "/api/media/image", data, undefined);
-  }
-
-  async generateMusic(data) {
-    return this._c._request("POST", "/api/media/music", data, undefined);
-  }
-
-  async listMediaProviders() {
-    return this._c._request("GET", "/api/media/providers");
-  }
-
-  async synthesizeSpeech(data) {
-    return this._c._request("POST", "/api/media/speech", data, undefined);
-  }
-
-  async transcribeAudio(data) {
-    return this._c._request("POST", "/api/media/transcribe", data, undefined);
-  }
-
-  async submitVideo(data) {
-    return this._c._request("POST", "/api/media/video", data, undefined);
-  }
-
-  async pollVideoTask(task_id, query) {
-    return this._c._request("GET", `/api/media/video/${task_id}`, undefined, query);
-  }
-}
-
 // ── Memory Resource
 
 class MemoryResource {
@@ -998,10 +950,6 @@ class ModelsResource {
 
   async listCredentialPools() {
     return this._c._request("GET", "/api/credential-pools");
-  }
-
-  async listModelRouterProfiles() {
-    return this._c._request("GET", "/api/model-router/profiles");
   }
 
   async listAllModels() {
@@ -1694,20 +1642,12 @@ class SystemResource {
     return this._c._request("DELETE", `/api/templates/${name}`);
   }
 
-  async getAgentTypeRegistryDiff(name) {
-    return this._c._request("GET", `/api/templates/${name}/registry-diff`);
-  }
-
-  async restoreAgentTypeFromRegistry(name) {
-    return this._c._request("POST", `/api/templates/${name}/restore`);
+  async promoteAgentType(name) {
+    return this._c._request("POST", `/api/templates/${name}/promote`);
   }
 
   async getAgentTemplateToml(name) {
     return this._c._request("GET", `/api/templates/${name}/toml`);
-  }
-
-  async putAgentTemplateToml(name, data) {
-    return this._c._request("PUT", `/api/templates/${name}/toml`, data, undefined);
   }
 
   async version() {
@@ -1716,16 +1656,6 @@ class SystemResource {
 
   async apiVersions() {
     return this._c._request("GET", "/api/versions");
-  }
-}
-
-// ── Tasks Resource
-
-class TasksResource {
-  constructor(client) { this._c = client; }
-
-  async taskQueuePostRoot(data) {
-    return this._c._request("POST", "/api/tasks", data, undefined);
   }
 }
 
