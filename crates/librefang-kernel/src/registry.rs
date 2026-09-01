@@ -452,19 +452,30 @@ impl AgentRegistry {
     ///
     /// `replace_manifest`'s doc comment explains why a blind manifest swap
     /// leaves tags alone: `entry.tags` and `tag_index` are a snapshot taken
-    /// at spawn time, and there was no runtime API to update either one.
-    /// This is that API — retract the agent from tag buckets it no longer
-    /// belongs to (mirroring `remove()`'s bucket cleanup) and add it to any
-    /// newly-added tag buckets, then update both tag-carrying fields on the
-    /// entry itself.
+    /// at spawn time, and nothing upstream serializes tag writes for a
+    /// single agent. The read of the previous tags and both index passes
+    /// therefore run under one guard: the `agents` shard guard is held
+    /// across the whole `tag_index` maintenance (retract dropped buckets
+    /// with empty-bucket pruning, mirroring `remove()`; add new buckets),
+    /// so two concurrent `update_tags` on one agent cannot interleave their
+    /// index passes and a concurrent reader of either map observes only the
+    /// before or after state (#7749 review).
+    ///
+    /// Lock ordering: `agents` shard guard → `tag_index` shard guards. Safe
+    /// because no code path holds a `tag_index` guard while acquiring an
+    /// `agents` guard (`register` orders `name_index` → `{agents,
+    /// tag_index}`; `remove` and `replace_manifest_and_retag` run their
+    /// phases sequentially). A future reader that walks `tag_index` must
+    /// clone the bucket and release the guard before touching `agents`.
     pub fn update_tags(&self, id: AgentId, tags: Vec<String>) -> LibreFangResult<()> {
-        let old_tags = self.with_entry_mut(id, |entry| {
-            let old = entry.tags.clone();
-            entry.tags = tags.clone();
-            entry.manifest.tags = tags.clone();
-            entry.last_active = chrono::Utc::now();
-            old
-        })?;
+        let mut slot = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        let inner = Arc::make_mut(slot.value_mut());
+        let old_tags = std::mem::replace(&mut inner.tags, tags.clone());
+        inner.manifest.tags = tags.clone();
+        inner.last_active = chrono::Utc::now();
         for tag in old_tags.iter().filter(|t| !tags.contains(t)) {
             if let Entry::Occupied(mut bucket) = self.tag_index.entry(tag.clone()) {
                 bucket.get_mut().retain(|&agent_id| agent_id != id);
@@ -479,6 +490,7 @@ impl AgentRegistry {
                 bucket.push(id);
             }
         }
+        drop(slot);
         self.notify_changed();
         Ok(())
     }
@@ -1066,6 +1078,32 @@ mod tests {
         );
         assert_eq!(registry.tag_index.get("beta").unwrap().as_slice(), &[id]);
         assert_eq!(registry.tag_index.get("gamma").unwrap().as_slice(), &[id]);
+    }
+
+    #[test]
+    fn update_tags_removing_last_tag_leaves_no_empty_bucket_7742() {
+        let registry = AgentRegistry::new();
+        let mut entry = test_entry("tag-cleanup-agent");
+        entry.tags = vec!["solo".to_string()];
+        entry.manifest.tags = vec!["solo".to_string()];
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        // Remove the agent's only tag: the "solo" bucket becomes empty and
+        // must be pruned rather than left behind as an empty vector, mirroring
+        // `remove()`'s cleanup.
+        registry.update_tags(id, vec![]).unwrap();
+
+        let refreshed = registry.get(id).unwrap();
+        assert!(refreshed.tags.is_empty(), "entry.tags must end up empty");
+        assert_eq!(
+            refreshed.manifest.tags, refreshed.tags,
+            "manifest.tags must mirror entry.tags"
+        );
+        assert!(
+            !registry.tag_index.contains_key("solo"),
+            "removing the last tag must prune the bucket it occupied"
+        );
     }
 
     #[test]
