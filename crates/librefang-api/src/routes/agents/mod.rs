@@ -85,6 +85,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
                 .patch(patch_agent),
         )
         .route(
+            "/agents/{id}/manifest",
+            axum::routing::get(get_agent_manifest_toml),
+        )
+        .route(
             "/agents/{id}/stats",
             axum::routing::get(get_agent_stats),
         )

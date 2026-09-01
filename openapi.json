@@ -1651,6 +1651,45 @@
         }
       }
     },
+    "/api/agents/{id}/manifest": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest — Return the agent's live manifest as TOML text.",
+        "description": "Serializes the in-memory `AgentManifest` (not the on-disk `agent.toml`,\nwhich can lag when a partial-update PATCH hasn't triggered a persist) so\nthe dashboard's full-manifest editor always starts from what the kernel\ncurrently runs. Read-only counterpart to `PATCH /api/agents/{id}` with a\n`manifest_toml` body.",
+        "operationId": "get_agent_manifest_toml",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest TOML content as plain text",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "500": {
+            "description": "Manifest failed to serialize"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [

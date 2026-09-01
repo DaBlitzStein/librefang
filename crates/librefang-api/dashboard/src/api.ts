@@ -1404,6 +1404,12 @@ export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
+/** GET /api/agents/{id}/manifest — the agent's live manifest as TOML text,
+ * for the full-editor drawer (`AgentManifestForm`). */
+export async function getAgentManifestToml(agentId: string): Promise<string> {
+  return getText(`/api/agents/${encodeURIComponent(agentId)}/manifest`);
+}
+
 /** 24-hour KPI rollup for one agent — backs the AgentsPage detail-panel
  *  KPI tiles. See `GET /api/agents/{id}/stats`. */
 export interface AgentStats24h {
@@ -1561,7 +1567,7 @@ export type AgentSchedulePatch =
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
  * system_prompt, mcp_servers, model, schedule). Distinct from `/agents/{id}/config`
  * which only accepts the model-tuning subset. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch }): Promise<ApiActionResponse> {
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
 }
 
