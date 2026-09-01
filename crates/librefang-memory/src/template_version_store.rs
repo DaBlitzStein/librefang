@@ -52,10 +52,21 @@ impl TemplateVersionStore {
         manifest_toml: &str,
         change_source: &str,
     ) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // Deduplicate: skip if latest snapshot is identical.
-        let latest: Option<String> = conn
+        // `Immediate` takes the write lock up front, so two concurrent
+        // `record_version` calls for the same template cannot both observe
+        // the same latest row and double-insert — the dedupe below holds
+        // under concurrency rather than only in the happy path.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(LibreFangError::memory)?;
+
+        // Deduplicate: skip if the latest snapshot is byte-identical.
+        // `.optional()` distinguishes "no rows" from a real read failure;
+        // `.ok()` would read a missing table or I/O error as "no previous
+        // version" and fall through to a much less useful insert error.
+        let latest: Option<String> = tx
             .query_row(
                 "SELECT manifest_toml FROM template_versions
                  WHERE template_name = ?1
@@ -64,14 +75,11 @@ impl TemplateVersionStore {
                 [template_name],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()
+            .map_err(LibreFangError::memory)?;
         if latest.as_deref() == Some(manifest_toml) {
             return Ok(());
         }
-
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(LibreFangError::memory)?;
 
         tx.execute(
             "INSERT INTO template_versions

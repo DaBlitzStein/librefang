@@ -1222,10 +1222,9 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
         "CREATE TABLE IF NOT EXISTS template_versions (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             template_name   TEXT NOT NULL,
-            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            timestamp       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             manifest_toml   TEXT NOT NULL,
-            change_source   TEXT NOT NULL DEFAULT 'unknown',
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            change_source   TEXT NOT NULL DEFAULT 'unknown'
         );
         CREATE INDEX IF NOT EXISTS idx_template_versions_name
             ON template_versions(template_name, timestamp DESC);",
