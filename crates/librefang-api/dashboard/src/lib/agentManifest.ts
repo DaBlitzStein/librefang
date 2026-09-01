@@ -36,6 +36,11 @@ export interface ManifestFormState {
     system_prompt: string;
     temperature: string;
     max_tokens: string;
+    context_window: string;
+    top_p: string;
+    frequency_penalty: string;
+    presence_penalty: string;
+    reasoning_effort: string;
     api_key_env: string;
     base_url: string;
   };
@@ -165,6 +170,11 @@ export const emptyManifestForm = (): ManifestFormState => ({
     system_prompt: "",
     temperature: "",
     max_tokens: "",
+    context_window: "",
+    top_p: "",
+    frequency_penalty: "",
+    presence_penalty: "",
+    reasoning_effort: "",
     api_key_env: "",
     base_url: "",
   },
@@ -267,6 +277,11 @@ const FORM_MODEL_KEYS = new Set([
   "system_prompt",
   "temperature",
   "max_tokens",
+  "context_window",
+  "top_p",
+  "frequency_penalty",
+  "presence_penalty",
+  "reasoning_effort",
   "api_key_env",
   "base_url",
 ]);
@@ -496,6 +511,11 @@ export const serializeManifestForm = (
   writeStringScalar(modelBody, "system_prompt", form.model.system_prompt);
   writeNumberScalar(modelBody, "temperature", parseFloatish(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
+  writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
+  writeNumberScalar(modelBody, "top_p", parseFloatish(form.model.top_p));
+  writeNumberScalar(modelBody, "frequency_penalty", parseFloatish(form.model.frequency_penalty));
+  writeNumberScalar(modelBody, "presence_penalty", parseFloatish(form.model.presence_penalty));
+  writeStringScalar(modelBody, "reasoning_effort", form.model.reasoning_effort?.trim() ?? "");
   writeStringScalar(modelBody, "api_key_env", form.model.api_key_env.trim());
   writeStringScalar(modelBody, "base_url", form.model.base_url.trim());
   const modelExtras = renderExtraScalars(safeModelExtras);
@@ -954,6 +974,11 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.model.system_prompt = asString(modelTable.system_prompt);
   form.model.temperature = asNumberString(modelTable.temperature);
   form.model.max_tokens = asNumberString(modelTable.max_tokens);
+  form.model.context_window = asNumberString(modelTable.context_window);
+  form.model.top_p = asNumberString(modelTable.top_p);
+  form.model.frequency_penalty = asNumberString(modelTable.frequency_penalty);
+  form.model.presence_penalty = asNumberString(modelTable.presence_penalty);
+  form.model.reasoning_effort = asString(modelTable.reasoning_effort);
   form.model.api_key_env = asString(modelTable.api_key_env);
   form.model.base_url = asString(modelTable.base_url);
   extras.model = stripKnown(modelTable, FORM_MODEL_KEYS);
