@@ -37,7 +37,6 @@ api-error-agent-type-name-taken = '{ $name }'은(는) 실행 중인 에이전트
 api-error-agent-type-not-editable = 에이전트 타입 '{ $name }'은(는) 실행 중인 에이전트 워크스페이스에서 왔으며 /api/agents 에서 관리됩니다
 api-error-registry-type-not-found = 에이전트 타입 '{ $name }'을(를) 레지스트리에서 찾을 수 없습니다
 api-error-agent-type-no-registry-version = 에이전트 타입 '{ $name }'을(를) 복원할 레지스트리 버전이 없습니다
->>>>>>> fork/feat/dashboard-registry-restore
 
 # Manifest errors
 api-error-manifest-too-large = 매니페스트가 너무 큽니다 (최대 1MB)

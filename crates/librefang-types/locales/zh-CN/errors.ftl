@@ -24,7 +24,6 @@ api-error-agent-type-name-taken = '{ $name }' 是某个运行中智能体的名�
 api-error-agent-type-not-editable = 智能体类型 '{ $name }' 来自运行中智能体的工作区，请通过 /api/agents 管理
 api-error-registry-type-not-found = 在注册表中未找到智能体类型 '{ $name }'
 api-error-agent-type-no-registry-version = 没有可用于恢复的智能体类型 '{ $name }' 的注册表版本
->>>>>>> fork/feat/dashboard-registry-restore
 
 # Manifest errors
 api-error-manifest-too-large = 清单文件过大（最大 1MB）

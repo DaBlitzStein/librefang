@@ -24,7 +24,6 @@ api-error-agent-type-name-taken = '{ $name }' est le nom d'un agent actif ; choi
 api-error-agent-type-not-editable = Le type d'agent '{ $name }' provient de l'espace de travail d'un agent actif et se gère via /api/agents
 api-error-registry-type-not-found = Type d'agent '{ $name }' introuvable dans le registre
 api-error-agent-type-no-registry-version = Aucune version du registre du type d'agent '{ $name }' n'est disponible pour la restauration
->>>>>>> fork/feat/dashboard-registry-restore
 
 # Manifest errors
 api-error-manifest-too-large = Manifeste trop volumineux (max. 1 Mo)
