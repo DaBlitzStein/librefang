@@ -403,19 +403,13 @@ pub fn match_profile<'a>(
 }
 
 /// Whether an agent's override permits this profile at all.
+///
+/// Single source of truth for "may this agent use this profile": delegates to
+/// [`AgentRouterOverride::permits`] on the type, because the `agent_spawn`
+/// path in the runtime — which cannot depend on the kernel — must apply the
+/// identical predicate when a spawn names a profile (#7789 review).
 fn is_permitted(profile: &ModelProfile, agent_override: Option<&AgentRouterOverride>) -> bool {
-    let Some(ov) = agent_override else {
-        return true;
-    };
-    if !ov.allowed_profiles.is_empty() && !ov.allowed_profiles.contains(&profile.name) {
-        return false;
-    }
-    if let Some(budget) = ov.cost_budget {
-        if profile.cost_tier > budget {
-            return false;
-        }
-    }
-    true
+    agent_override.is_none_or(|ov| ov.permits(profile))
 }
 
 #[cfg(test)]

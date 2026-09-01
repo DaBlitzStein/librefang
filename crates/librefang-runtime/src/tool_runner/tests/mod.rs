@@ -2,7 +2,8 @@
 //! parent module stays focused on dispatch + child-module wiring.
 
 use super::agent::{
-    build_agent_manifest_toml, tools_to_parent_capabilities, unknown_profile_error,
+    build_agent_manifest_toml, check_profile_against_parent, tools_to_parent_capabilities,
+    unknown_profile_error,
 };
 use super::channel::parse_poll_options;
 use super::image::{detect_image_format, extract_image_dimensions, format_file_size};

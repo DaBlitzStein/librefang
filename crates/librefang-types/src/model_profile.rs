@@ -183,6 +183,33 @@ pub struct AgentRouterOverride {
     pub default_profile: Option<String>,
 }
 
+impl AgentRouterOverride {
+    /// Whether this override permits `profile` — present in
+    /// `allowed_profiles` (when that list is non-empty) and at or below
+    /// `cost_budget`.
+    ///
+    /// Deliberately does **not** consult `fixed`: there, the agent opts out
+    /// of routing altogether rather than being refused specific profiles, so
+    /// the router path checks `fixed` for its Bypassed decision and callers
+    /// that must refuse a named profile check `fixed` separately.
+    ///
+    /// Lives on the type rather than in
+    /// `librefang_kernel::model_router::is_permitted` so the `agent_spawn`
+    /// path in the runtime — which cannot depend on the kernel — applies the
+    /// identical predicate when a spawn names a profile (#7789 review).
+    pub fn permits(&self, profile: &ModelProfile) -> bool {
+        if !self.allowed_profiles.is_empty() && !self.allowed_profiles.contains(&profile.name) {
+            return false;
+        }
+        if let Some(budget) = self.cost_budget {
+            if profile.cost_tier > budget {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +314,69 @@ cost_budget = "medium"
         let ordered: Vec<&str> = ov.allowed_profiles.iter().map(|s| s.as_str()).collect();
         assert_eq!(ordered, ["coder", "quick"]);
         assert_eq!(ov.cost_budget, Some(CostTier::Medium));
+    }
+
+    /// `permits` is the spawn-time enforcement point (#7789 review): the
+    /// allowlist and the cost budget must bind a named profile exactly as
+    /// they bind the per-turn router's choice.
+    #[test]
+    fn permits_applies_allowed_profiles_and_cost_budget() {
+        fn profile(name: &str, tier: CostTier) -> ModelProfile {
+            ModelProfile {
+                name: name.to_string(),
+                tags: Default::default(),
+                provider: "provider".into(),
+                model: "model".into(),
+                context_window: None,
+                cost_tier: tier,
+                priority: 0,
+                max_complexity: 1.0,
+                description: None,
+            }
+        }
+
+        // An empty allowlist means "all profiles allowed".
+        let budget_only = AgentRouterOverride {
+            fixed: false,
+            allowed_profiles: Default::default(),
+            cost_budget: Some(CostTier::Medium),
+            default_profile: None,
+        };
+        assert!(budget_only.permits(&profile("quick", CostTier::Cheap)));
+        assert!(!budget_only.permits(&profile("architect", CostTier::Expensive)));
+
+        // A non-empty allowlist binds by name, and the budget binds at the
+        // same time: a listed profile still has to fit under the budget.
+        let both = AgentRouterOverride {
+            fixed: false,
+            allowed_profiles: ["quick".to_string()].into_iter().collect(),
+            cost_budget: Some(CostTier::Medium),
+            default_profile: None,
+        };
+        assert!(both.permits(&profile("quick", CostTier::Cheap)));
+        assert!(!both.permits(&profile("architect", CostTier::Cheap)));
+        assert!(!both.permits(&profile("quick", CostTier::Expensive)));
+    }
+
+    /// `permits` deliberately ignores `fixed` — a pinned agent has opted out
+    /// of profiles entirely, which the spawn path refuses separately.
+    #[test]
+    fn permits_ignores_the_fixed_flag() {
+        let ov = AgentRouterOverride {
+            fixed: true,
+            ..Default::default()
+        };
+        let p = ModelProfile {
+            name: "quick".to_string(),
+            tags: Default::default(),
+            provider: "provider".into(),
+            model: "model".into(),
+            context_window: None,
+            cost_tier: CostTier::Cheap,
+            priority: 0,
+            max_complexity: 1.0,
+            description: None,
+        };
+        assert!(ov.permits(&p));
     }
 }
