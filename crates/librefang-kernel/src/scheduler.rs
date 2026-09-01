@@ -128,6 +128,10 @@ pub struct AgentScheduler {
     usage: Arc<DashMap<AgentId, UsageTracker>>,
     /// Active task handles per agent.
     tasks: DashMap<AgentId, JoinHandle<()>>,
+    /// Global default burst ratio from `[budget] default_burst_ratio` in
+    /// config.toml, stored as f32 bits in an AtomicU32 so it can be updated
+    /// on config hot-reload without &mut self.
+    default_burst_ratio_bits: std::sync::atomic::AtomicU32,
 }
 
 /// Roll back a pre-charged token reservation (undo the `total_tokens` increment) without recording an LLM call.
@@ -246,7 +250,21 @@ impl AgentScheduler {
             quotas: DashMap::new(),
             usage: Arc::new(DashMap::new()),
             tasks: DashMap::new(),
+            default_burst_ratio_bits: std::sync::atomic::AtomicU32::new(0f32.to_bits()),
         }
+    }
+
+    /// Update the global default burst ratio (called on config load/reload).
+    pub fn set_default_burst_ratio(&self, ratio: f32) {
+        self.default_burst_ratio_bits
+            .store(ratio.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn default_burst_ratio(&self) -> f32 {
+        f32::from_bits(
+            self.default_burst_ratio_bits
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Register an agent with its resource quota.
@@ -356,7 +374,7 @@ impl AgentScheduler {
 
         // --- Burst limit: configurable fraction of the hourly budget in any single minute ---
         if token_limit > 0 {
-            let ratio = quota.effective_burst_ratio(0.0);
+            let ratio = quota.effective_burst_ratio(self.default_burst_ratio());
             let burst_cap = (token_limit as f32 * ratio) as u64;
             let tokens_last_min = tracker.tokens_in_last_minute();
             if burst_cap > 0 && tokens_last_min > burst_cap {
@@ -448,7 +466,7 @@ impl AgentScheduler {
             )));
         }
         // Burst check against the projected spend
-        let ratio = quota.effective_burst_ratio(0.0);
+        let ratio = quota.effective_burst_ratio(self.default_burst_ratio());
         let burst_cap = (token_limit as f32 * ratio) as u64;
         let tokens_last_min = tracker.tokens_in_last_minute();
         if burst_cap > 0 && tokens_last_min.saturating_add(estimated_tokens) > burst_cap {
