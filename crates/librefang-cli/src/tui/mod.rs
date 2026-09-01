@@ -315,9 +315,20 @@ impl App {
                 self.workflows.status_msg = crate::i18n::t("tui-mod-workflow-created");
                 self.refresh_workflows();
             }
-            AppEvent::WorkflowParamsLoaded(params) => {
-                self.workflows.run_params = params;
+            AppEvent::WorkflowParamsLoaded(fetch) => {
+                self.workflows.run_params = Vec::new();
                 self.workflows.param_cursor = 0;
+                match fetch {
+                    workflows::WorkflowParamsFetch::Loaded(params) => {
+                        self.workflows.run_params = params;
+                    }
+                    workflows::WorkflowParamsFetch::None => {
+                        self.workflows.status_msg = crate::i18n::t("tui-workflows-params-none");
+                    }
+                    workflows::WorkflowParamsFetch::Failed => {
+                        self.workflows.status_msg = crate::i18n::t("tui-workflows-params-failed");
+                    }
+                }
             }
             AppEvent::ChannelListLoaded {
                 instances,

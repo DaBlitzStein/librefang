@@ -39,13 +39,31 @@ pub enum WorkflowSubScreen {
 }
 
 /// One declared parameter, with whatever the operator has typed so far.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowParamField {
     pub name: String,
     pub param_type: String,
     pub required: bool,
     pub description: String,
     pub value: String,
+}
+
+/// What the run-input form knows about the workflow's declared parameters.
+///
+/// Every fetch outcome is one of these — success, "declares none" and
+/// "could not load" are three different states, because each one needs a
+/// different next step from the operator and a silent fallback to the
+/// bare-string box hides all three behind the same screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkflowParamsFetch {
+    /// The workflow declared these parameters — one editable row per param.
+    Loaded(Vec<WorkflowParamField>),
+    /// The workflow answered and declares no parameters — bare-string input.
+    None,
+    /// The schema could not be consulted (in-process mode, the daemon was
+    /// unreachable, or the answer was not a success). Bare-string input,
+    /// with the status line saying so.
+    Failed,
 }
 
 pub struct WorkflowState {
@@ -336,13 +354,16 @@ impl WorkflowState {
                     .unwrap_or_else(|_| serde_json::json!(p.value)),
                 "boolean" => serde_json::json!(matches!(
                     p.value.trim().to_ascii_lowercase().as_str(),
-                    "true" | "1" | "yes" | "si" | "sí"
+                    "true" | "1" | "yes"
                 )),
                 _ => serde_json::json!(p.value),
             };
             obj.insert(p.name.clone(), value);
         }
-        if !self.run_input.trim().is_empty() {
+        // A declared parameter named `input` wins over the free-text box: the
+        // loop above bound it by name, and the free-text line has no declared
+        // parameter to be.
+        if !self.run_input.trim().is_empty() && !obj.contains_key("input") {
             obj.insert("input".to_string(), serde_json::json!(self.run_input));
         }
         serde_json::to_string(&serde_json::Value::Object(obj))
@@ -712,7 +733,10 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        // One row per declared parameter, not one shared row — the old
+        // `Length(1)` clipped everything past the first parameter while
+        // Tab still moved the cursor onto the invisible rows.
+        Constraint::Length(state.run_params.len() as u16),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
@@ -968,6 +992,55 @@ mod run_param_tests {
         let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
         assert_eq!(payload["ciudad"], serde_json::json!("Vigo"));
         assert_eq!(payload["dias"], serde_json::json!(7.0));
+    }
+
+    #[test]
+    fn a_non_numeric_number_parameter_falls_back_to_a_string() {
+        let mut s = state_with(vec![field("dias", "number", true)]);
+        s.run_params[0].value = "seven".to_string();
+
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["dias"], serde_json::json!("seven"));
+    }
+
+    #[test]
+    fn boolean_parameters_coerce_the_canonical_set_only() {
+        let mut s = state_with(vec![field("reintentar", "boolean", false)]);
+        s.run_params[0].value = "yes".to_string();
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["reintentar"], serde_json::json!(true));
+
+        s.run_params[0].value = "si".to_string();
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["reintentar"], serde_json::json!(false));
+        assert!(payload.get("input").is_none());
+    }
+
+    #[test]
+    fn an_unknown_param_type_stays_a_string() {
+        let mut s = state_with(vec![field("objetivo", "agent_id", true)]);
+        s.run_params[0].value = "writer".to_string();
+
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["objetivo"], serde_json::json!("writer"));
+    }
+
+    #[test]
+    fn a_blank_optional_parameter_does_not_block_the_run() {
+        let mut s = state_with(vec![field("nota", "string", false)]);
+        let action = s.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(action, WorkflowAction::RunWorkflow { .. }));
+    }
+
+    #[test]
+    fn a_declared_input_parameter_is_not_clobbered_by_the_free_text_box() {
+        let mut s = state_with(vec![field("input", "string", false)]);
+        s.run_params[0].value = "declared wins".to_string();
+        s.run_input = "free text".to_string();
+
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["input"], serde_json::json!("declared wins"));
     }
 
     #[test]
