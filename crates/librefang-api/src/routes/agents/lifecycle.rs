@@ -40,16 +40,18 @@ async fn resolve_manifest(
                     message: t.t("api-error-template-invalid-name"),
                 });
             }
-            let tmpl_path = state
-                .kernel
-                .config_ref()
-                .home_dir
+            let home = &state.kernel.config_ref().home_dir;
+            let workspace_path = home
                 .join("workspaces")
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
-            // Use tokio::fs to avoid blocking in an async context
-            match tokio::fs::read_to_string(&tmpl_path).await {
+            let agent_type_path = home.join("agent-types").join(format!("{safe_name}.toml"));
+            let content = match tokio::fs::read_to_string(&workspace_path).await {
+                Ok(c) => Ok(c),
+                Err(_) => tokio::fs::read_to_string(&agent_type_path).await,
+            };
+            match content {
                 Ok(content) => {
                     used_template = Some(safe_name.clone());
                     content
