@@ -4481,64 +4481,6 @@ async fn dispatch_message(
             }
             return;
         }
-        // ButtonCallback actions that look like slash commands (e.g. "/agent X"
-        // from /agents inline keyboard) must be re-injected as command text so
-        // the slash-command dispatcher at L4608+ picks them up. Without this,
-        // content_to_text wraps them in "[Button: /agent X]" which never matches
-        // the starts_with('/') check.
-        if action.starts_with('/') {
-            let parts: Vec<&str> = action.splitn(2, ' ').collect();
-            let cmd = &parts[0][1..];
-            let args: Vec<String> = if parts.len() > 1 {
-                parts[1].split_whitespace().map(String::from).collect()
-            } else {
-                vec![]
-            };
-            if crate::commands::is_channel_command(cmd) {
-                if is_command_allowed(cmd, overrides.as_ref()) {
-                    if let Err(denied) = handle
-                        .authorize_channel_user(ct_str, sender_user_id(message), "chat")
-                        .await
-                    {
-                        send_response(
-                            adapter,
-                            &message.sender,
-                            format!("Access denied: {denied}"),
-                            thread_id,
-                            output_format,
-                        )
-                        .await;
-                        return;
-                    }
-                    let result = handle_command(
-                        cmd,
-                        &args,
-                        handle,
-                        router,
-                        &message.sender,
-                        &message.channel,
-                        message.metadata.get("account_id").and_then(|v| v.as_str()),
-                        overrides.as_ref(),
-                        sender_user_id(message),
-                    )
-                    .await;
-                    if !suppress_button_command_ack(&message.content, cmd) {
-                        send_response(adapter, &message.sender, result, thread_id, output_format)
-                            .await;
-                    }
-                } else {
-                    send_response(
-                        adapter,
-                        &message.sender,
-                        format!("Command /{cmd} is not allowed in this channel."),
-                        thread_id,
-                        output_format,
-                    )
-                    .await;
-                }
-                return;
-            }
-        }
     }
 
     let text = match &message.content {
