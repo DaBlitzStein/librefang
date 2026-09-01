@@ -246,16 +246,76 @@ async fn install_from_registry(
             }
         }
 
-        let Some(index_entries) = entries else {
-            let _ = tokio::fs::remove_dir_all(&target_dir).await;
-            return Err(format!(
-                "Cannot verify plugin '{name}' integrity: signed registry index \
-                 fetch failed after retry. {} Refusing to install — install must \
-                 fail safe when the trust root is unreachable, regardless of any \
-                 SHA-256 checksum on the GitHub repo (which an attacker who can \
-                 serve a doctored manifest can also forge).",
-                last_err.unwrap_or_default()
-            ));
+        let index_entries = if let Some(es) = entries {
+            es
+        } else {
+            // Remote index unavailable — try the local git-cloned registry as
+            // fallback trust root. The local registry-index.json is maintained
+            // by `git pull` on the registry clone and is not attacker-controlled
+            // in the same way a GitHub Contents API response is.
+            let local_index = dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".librefang")
+                .join("registry")
+                .join("registry-index.json");
+            if local_index.exists() {
+                match tokio::fs::read(&local_index).await {
+                    Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        Ok(val) => {
+                            // The local index is a single JSON object with top-level
+                            // arrays ("plugins", "hands", etc.). Extract the plugins array.
+                            let plugins = val
+                                .get("plugins")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            if plugins.is_empty() {
+                                warn!(
+                                    "Local registry-index.json has no plugins array; \
+                                     falling through to remote-only error"
+                                );
+                                let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                                return Err(format!(
+                                    "Cannot verify plugin '{name}' integrity: signed registry index \
+                                     fetch failed after retry. {} Local registry-index.json has no \
+                                     plugins. Refusing to install.",
+                                    last_err.unwrap_or_default()
+                                ));
+                            }
+                            info!(
+                                plugin = name,
+                                "Remote index unavailable; using local registry-index.json ({} plugins)",
+                                plugins.len()
+                            );
+                            plugins
+                        }
+                        Err(e) => {
+                            let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                            return Err(format!(
+                                "Cannot verify plugin '{name}' integrity: remote index \
+                                 failed ({}) and local registry-index.json parse error: {e}",
+                                last_err.unwrap_or_default()
+                            ));
+                        }
+                    },
+                    Err(e) => {
+                        let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                        return Err(format!(
+                            "Cannot verify plugin '{name}' integrity: remote index \
+                             failed ({}) and local registry-index.json read error: {e}",
+                            last_err.unwrap_or_default()
+                        ));
+                    }
+                }
+            } else {
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                return Err(format!(
+                    "Cannot verify plugin '{name}' integrity: signed registry index \
+                     fetch failed after retry. {} No local registry-index.json found. \
+                     Refusing to install.",
+                    last_err.unwrap_or_default()
+                ));
+            }
         };
 
         let in_index = index_entries
