@@ -801,7 +801,7 @@ impl LibreFangKernel {
                 // a task explicitly carries. `task_reset_stuck` reads the gate
                 // per row — a row with no `timeout_secs` inherits the disabled
                 // global and is never reclaimed (the historical behaviour, and
-                // what every pre-v55 row means), while a row that declared its
+                // what every pre-v57 row means), while a row that declared its
                 // own non-zero timeout is still swept. Same "two rules, two
                 // switches" reasoning as the reconcile above; the sweep is a
                 // single indexed query, so running it unconditionally costs
