@@ -100,4 +100,22 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
         crate::model_router::ProfileCatalog::load_cached(cfg.home_dir.as_path(), &cfg.model_router)
             .names()
     }
+
+    /// The parent's `[model.router_override]`, read from its manifest in the
+    /// registry (#7789 review).
+    ///
+    /// Same lookup shape as `proactive_memory_extraction_model_for` above: a
+    /// malformed UUID or an agent not in the registry returns `None`, which
+    /// callers treat as "no constraints". An agent that *has* an override
+    /// always resolves here — the registry is the same source the per-turn
+    /// router reads `manifest.model.router_override` from.
+    fn model_router_override_for(
+        &self,
+        agent_id: &str,
+    ) -> Option<librefang_types::model_profile::AgentRouterOverride> {
+        use std::str::FromStr;
+        let aid = librefang_types::agent::AgentId::from_str(agent_id).ok()?;
+        let entry = self.agents.registry.get_arc(aid)?;
+        entry.manifest.model.router_override.clone()
+    }
 }

@@ -257,6 +257,56 @@ pub(super) fn unknown_profile_error(name: &str, available: &[String]) -> ToolErr
     ))
 }
 
+/// Refusal for an `agent_spawn { profile }` the spawning agent's own
+/// `[model.router_override]` does not permit (#7789 review).
+///
+/// Same shape as [`unknown_profile_error`]: name what was asked for, then
+/// list what *is* permitted, so the caller — usually an LLM — can retry
+/// correctly instead of guessing. `permitted` is ordered by the catalog
+/// (#3298), so the message is stable across retries.
+pub(super) fn check_profile_against_parent(
+    profile: &librefang_types::model_profile::ModelProfile,
+    override_: &librefang_types::model_profile::AgentRouterOverride,
+    permitted: &[String],
+) -> Result<(), ToolError> {
+    if override_.fixed {
+        return Err(ToolError::upstream_msg(format!(
+            "Model profile '{name}' cannot be used here: the spawning agent is pinned with \
+             `[model.router_override] fixed = true`, which opts out of every profile — for its \
+             own turns and for the agents it spawns. Spawn without a profile, or ask the \
+             operator to relax the pin.",
+            name = profile.name,
+        )));
+    }
+    if !override_.permits(profile) {
+        return Err(ToolError::upstream_msg(format!(
+            "Model profile '{name}' is not permitted for this agent by its \
+             `[model.router_override]`. Permitted profiles: {permitted}.",
+            name = profile.name,
+            permitted = permitted.join(", "),
+        )));
+    }
+    Ok(())
+}
+
+/// The parent's permitted profile names, ordered by the catalog (#3298).
+///
+/// Filters the full catalog through the parent's override with the same
+/// `AgentRouterOverride::permits` predicate the per-turn router uses, so a
+/// refusal enumerates exactly what a correct retry can name.
+fn permitted_profile_names(
+    kh: &Arc<dyn KernelHandle>,
+    override_: &librefang_types::model_profile::AgentRouterOverride,
+) -> Vec<String> {
+    kh.model_profile_names()
+        .into_iter()
+        .filter(|name| {
+            kh.resolve_model_profile(name)
+                .is_some_and(|p| override_.permits(&p))
+        })
+        .collect()
+}
+
 /// Expand a list of tool names into full `Capability` grants for the parent.
 ///
 /// Tool names at the `execute_tool` level (e.g. `"file_read"`, `"shell_exec"`)
@@ -384,16 +434,28 @@ pub(super) async fn tool_agent_spawn(
 
     // Resolve the profile name before spawning so an unknown name fails loudly
     // here instead of silently producing an agent on the wrong model.
+    //
+    // The request is then checked against the *spawning agent's* own
+    // `[model.router_override]` (#7789 review): the same `allowed_profiles`
+    // and `cost_budget` the per-turn router applies, plus a hard refusal when
+    // the parent is `fixed`. Without this, delegation is a way around every
+    // per-agent constraint the profile layer introduces — an agent budgeted at
+    // `cheap` could spawn a helper on the most expensive profile in the
+    // catalog, billed to the same operator, with the parent's cap never
+    // applied.
     let profile = match input["profile"].as_str() {
-        Some(profile_name) => match kh.resolve_model_profile(profile_name) {
-            Some(profile) => Some(profile),
-            None => {
-                return Err(unknown_profile_error(
-                    profile_name,
-                    &kh.model_profile_names(),
-                ))
+        Some(profile_name) => {
+            let profile = kh
+                .resolve_model_profile(profile_name)
+                .ok_or_else(|| unknown_profile_error(profile_name, &kh.model_profile_names()))?;
+            if let Some(parent) = parent_id {
+                if let Some(override_) = kh.model_router_override_for(parent) {
+                    let permitted = permitted_profile_names(kh, &override_);
+                    check_profile_against_parent(&profile, &override_, &permitted)?;
+                }
             }
-        },
+            Some(profile)
+        }
         None => None,
     };
 

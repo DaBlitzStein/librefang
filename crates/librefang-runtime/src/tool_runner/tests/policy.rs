@@ -1031,6 +1031,80 @@ fn unknown_profile_error_with_empty_catalog_points_at_the_config() {
 }
 
 // -----------------------------------------------------------------------
+// agent_spawn `profile` vs the spawning agent's own `[model.router_override]`
+// (#7789 review) — delegation must not be a way around per-agent constraints.
+// -----------------------------------------------------------------------
+
+/// Parent pinned with `fixed = true`: the pin opts out of every profile, for
+/// the parent's own turns and for everything it spawns.
+#[test]
+fn agent_spawn_profile_refused_when_parent_is_fixed() {
+    let mut profile = spawn_test_profile("architect", "anthropic", "claude-sonnet-4-5", None);
+    profile.cost_tier = librefang_types::model_profile::CostTier::Expensive;
+    let override_ = librefang_types::model_profile::AgentRouterOverride {
+        fixed: true,
+        ..Default::default()
+    };
+
+    let err = check_profile_against_parent(&profile, &override_, &[])
+        .expect_err("a fixed parent must not select profiles at all")
+        .to_string();
+    assert!(
+        err.contains("architect"),
+        "must name the refused profile: {err}"
+    );
+    assert!(err.contains("fixed = true"), "must explain the pin: {err}");
+}
+
+/// The headline case from the review: a parent budgeted at `cheap` cannot
+/// spawn a helper on the most expensive profile in the catalog.
+#[test]
+fn agent_spawn_profile_refused_over_parent_cost_budget() {
+    let mut profile = spawn_test_profile("architect", "cheapo", "cheap-model", None);
+    profile.cost_tier = librefang_types::model_profile::CostTier::Expensive;
+    let override_ = librefang_types::model_profile::AgentRouterOverride {
+        fixed: false,
+        allowed_profiles: Default::default(),
+        cost_budget: Some(librefang_types::model_profile::CostTier::Cheap),
+        default_profile: None,
+    };
+    let permitted = vec!["quick".to_string()];
+    let err = check_profile_against_parent(&profile, &override_, &permitted)
+        .expect_err("an over-budget profile must be refused")
+        .to_string();
+    assert!(
+        err.contains("architect"),
+        "must name the refused profile: {err}"
+    );
+    assert!(err.contains("quick"), "must list permitted profiles: {err}");
+}
+
+/// The other half of the contract: a profile the override *does* permit goes
+/// through unchanged, and a parent without any override is unconstrained.
+#[test]
+fn agent_spawn_profile_allowed_when_parent_override_permits() {
+    let profile = spawn_test_profile("quick", "cheapo", "cheap-model", None);
+    let unconstrained = librefang_types::model_profile::AgentRouterOverride {
+        fixed: false,
+        allowed_profiles: Default::default(),
+        cost_budget: None,
+        default_profile: None,
+    };
+    assert!(
+        check_profile_against_parent(&profile, &unconstrained, &[]).is_ok(),
+        "a permitted profile must pass the check"
+    );
+
+    let allowlisted = librefang_types::model_profile::AgentRouterOverride {
+        fixed: false,
+        allowed_profiles: Default::default(),
+        cost_budget: Some(librefang_types::model_profile::CostTier::Expensive),
+        default_profile: None,
+    };
+    assert!(check_profile_against_parent(&profile, &allowlisted, &[]).is_ok());
+}
+
+// -----------------------------------------------------------------------
 // Security fix tests (#1652)
 // -----------------------------------------------------------------------
 
