@@ -1056,6 +1056,13 @@ pub fn image_description_block_text(description: &str) -> String {
 
 /// Whether `text` is a description block — either a real description or the
 /// unavailable marker. Both mean "an attempt was already made here".
+///
+/// This reads exactly what [`image_description_block_text`] writes (plus the
+/// `IMAGE_DESCRIPTION_UNAVAILABLE` marker that `agent_loop::media_routing`
+/// emits when a description attempt fails), so the two ends must not drift:
+/// loosening the sniff widens the dedupe rule and can suppress a needed
+/// description, tightening it makes the writer's blocks unrecognisable and
+/// re-describes (and re-bills) what is already on the wire.
 pub fn is_image_description_text(text: &str) -> bool {
     let text = text.trim_start();
     text.starts_with(IMAGE_DESCRIPTION_PREFIX) || text.starts_with(IMAGE_DESCRIPTION_UNAVAILABLE)
