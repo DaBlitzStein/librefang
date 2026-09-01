@@ -40,7 +40,16 @@ impl LibreFangKernel {
             };
             drop(cfg);
             for (channel, platform_id) in &bindings {
-                if kernel.mesh.channel_adapters.contains_key(channel.as_str()) {
+                // Gate on the same resolution the send itself performs (#8055), not on a bare registry key.
+                // `channel_bindings` is written with a channel *type* (`{"telegram": "123456"}`, per `UserConfig::channel_bindings`), while the channel bridge keys the adapter registry by instance `name`.
+                // A `contains_key("telegram")` gate therefore skipped every owner notification on a daemon whose instance is named `telegram-hr` — silently, and even though `send_channel_message` now resolves that pair fine.
+                if super::handles::channel_sender::resolve_channel_adapter(
+                    &kernel.mesh.channel_adapters,
+                    channel,
+                    None,
+                )
+                .is_ok()
+                {
                     if let Err(e) = kernel
                         .send_channel_message(channel, platform_id, &message, None, None)
                         .await
@@ -146,9 +155,13 @@ impl LibreFangKernel {
         if let Some(entry) = self.agents.registry.find_by_name(name) {
             return Ok(entry.id);
         }
-        let (manifest, _source_path) =
+        let (mut manifest, _source_path) =
             crate::agent_template::load_agent_template(self.home_dir(), name)
                 .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        // Same provenance stamp `POST /api/agents` and the step-agent resolver
+        // apply (#8018): a specialist spawned by LLM routing did come from a
+        // template, and a blank field would read as "not from a template".
+        manifest.source_template = Some(name.to_string());
         let id = self.spawn_agent(manifest)?;
         info!(agent = %name, id = %id, "Spawned specialist agent for LLM routing");
         Ok(id)
@@ -160,7 +173,7 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Arc<dyn KernelHandle>,
         sender_context: Option<&SenderContext>,
-        thinking_override: Option<bool>,
+        thinking_override: librefang_types::config::ThinkingOverride,
         session_id_override: Option<SessionId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
