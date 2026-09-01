@@ -521,6 +521,7 @@ async fn comms_send_refuses_impersonation_of_owned_from_agent() {
         name: "alice".into(),
         state: librefang_types::agent::AgentState::Running,
         manifest: librefang_types::agent::AgentManifest {
+            source_template: None,
             author: "alice-the-human".into(),
             ..Default::default()
         },
@@ -606,6 +607,7 @@ async fn comms_send_records_audit_entry_on_success() {
         .kernel
         .spawn_agent_typed(AgentManifest {
             name: "bob".into(),
+            source_template: None,
             ..Default::default()
         })
         .expect("spawn bob");

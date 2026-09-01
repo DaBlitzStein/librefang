@@ -213,6 +213,11 @@ export interface ChannelItem {
    *  **Sticky**: never cleared, not even by the successful respawn that follows.
    *  A connected channel carrying one is degraded, not dead. */
   last_error?: string | null;
+  /** Per-instance default agent (`[[sidecar_channels]].agent`) — inbound
+   *  messages on this instance with no more specific binding route here.
+   *  `null` / absent when this instance has no default agent configured.
+   *  Only present on configured rows; a discovery (catalog) row never has one. */
+  agent?: string | null;
 }
 
 export interface SkillItem {
@@ -355,6 +360,8 @@ export interface AgentItem {
   supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
   /** Human-readable schedule summary: "manual" for reactive agents,
    *  the cron expression for periodic agents, "proactive", or
    *  "continuous · Ns" for continuous agents. */
@@ -1389,6 +1396,8 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
@@ -1699,11 +1708,34 @@ export interface AgentTypeSpec {
   skills?: string[];
 }
 
+/**
+ * One privacy risk the promotion preview found in a manifest (mirrors
+ * `librefang_types::manifest_privacy::Finding`).
+ *
+ * `removed_by_sanitizer: true` means the published copy already drops the
+ * value; `false` means it sits inside a field worth keeping and the operator
+ * has to edit it by hand before publishing.
+ */
+export interface PromotionFinding {
+  field: string;
+  category: string;
+  preview: string;
+  removed_by_sanitizer: boolean;
+}
+
+/** Read-only privacy pass over a manifest, ahead of promoting it to a shared registry (#7771). */
+export interface PromotionPreview {
+  requires_review: boolean;
+  findings: PromotionFinding[];
+  manifest_toml: string | null;
+}
+
 export interface AgentTypeDetail {
   name: string;
   source: AgentTypeSource;
   editable: boolean;
   spec: AgentTypeSpec;
+  promotion_preview?: PromotionPreview;
   manifest_toml: string;
 }
 
@@ -2155,13 +2187,26 @@ export interface SidecarSaveResult {
 // else + the `[[sidecar_channels]]` boilerplate) on the server. Triggers
 // hot-reload of the channels registry; whether the sidecar child needs an
 // out-of-band restart is reported via `restart_required`.
+//
+// `channelType` is always the `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …)
+// — it picks the adapter's schema/command/args and never changes across a
+// rename. `instanceName` is the `[[sidecar_channels]].name` actually
+// written; omit it (or pass the same value as `channelType`) to save the
+// type's default single instance, exactly as before multi-instance support.
+// Pass a distinct `instanceName` to configure a second (third, …) instance
+// of the same catalog type — e.g. two Telegram bots.
 export async function saveSidecarConfig(
-  name: string,
+  channelType: string,
   values: Record<string, string>,
+  options: { instanceName?: string; agent?: string | null } = {},
 ): Promise<SidecarSaveResult> {
   return post<SidecarSaveResult>(
-    `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
-    { values },
+    `/api/channels/sidecar/${encodeURIComponent(channelType)}/configure`,
+    {
+      values,
+      instance_name: options.instanceName,
+      agent: options.agent,
+    },
   );
 }
 
@@ -3263,6 +3308,83 @@ export interface ConfigStatus {
 
 export async function getConfigStatus(): Promise<ConfigStatus> {
   return get<ConfigStatus>("/api/config/status");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Media model endpoints (refs #8038, #8011)                          */
+/* ------------------------------------------------------------------ */
+/* Custom / self-hosted media endpoints are plain `GET /api/config`    */
+/* sub-tables, not entries in the model catalogue:                    */
+/* `[media.custom_stt]`, `[media.custom_image]`, `[media.custom_video]`*/
+/* and `[tts.custom]`. The types below describe that existing shape so */
+/* the Models tab can render them next to LLM models — the config file */
+/* layout is deliberately unchanged.                                   */
+
+/** Modality of one row in the unified Models tab. `llm` covers the model catalogue. */
+export type ModelEntryKind = "llm" | "tts" | "stt" | "image" | "video";
+
+/** Modality of a custom media endpoint — `ModelEntryKind` minus the catalogue. */
+export type MediaModelKind = Exclude<ModelEntryKind, "llm">;
+
+/**
+ * One custom media endpoint table as `GET /api/config` returns it.
+ *
+ * `api_key_env` is the *name* of an environment variable, never a key — the
+ * secret itself never enters config.toml and never reaches the dashboard.
+ * `model` is `Option<String>` on the Rust side for STT / image / video and a
+ * plain `String` for TTS, so it is optional here; `voice` and `format` exist
+ * on `CustomTtsConfig` only.
+ */
+export interface MediaModelEndpointConfig {
+  base_url?: string;
+  api_key_env?: string;
+  key_required?: boolean;
+  model?: string | null;
+  /** TTS only. */
+  voice?: string;
+  /** TTS only. */
+  format?: string;
+}
+
+/** The subset of a media endpoint the dashboard lets an operator edit. */
+export interface MediaModelEndpointDraft {
+  base_url: string;
+  key_required: boolean;
+  model: string;
+  /** TTS only — ignored for the other kinds. */
+  voice?: string;
+  /** TTS only — ignored for the other kinds. */
+  format?: string;
+}
+
+/** A custom media endpoint projected into a Models-tab row. */
+export interface MediaModelEndpoint {
+  kind: MediaModelKind;
+  /** Dotted `POST /api/config/set` path of the endpoint table, e.g. `media.custom_stt`. */
+  config_path: string;
+  /** Dotted path of the scalar that selects this endpoint, e.g. `media.audio_provider`. */
+  provider_path: string;
+  /** Provider name currently selected for this modality, or `""` when unset. */
+  provider: string;
+  config: MediaModelEndpointConfig;
+  /** Whether a base URL is set — an endpoint without one is never consulted. */
+  configured: boolean;
+  /**
+   * Whether the modality's master switch is on (`[media] audio_transcription`,
+   * `[tts] enabled`, …). A fully filled-in endpoint whose modality is off is
+   * never reached at runtime, so the tab has to say so.
+   */
+  modality_enabled: boolean;
+  /** Dotted path of that master switch, for the warning text. */
+  modality_enabled_path: string;
+  /**
+   * Value of the `[media]` scalar that takes precedence over this table's
+   * `model` (`audio_model` / `image_model` / `video_model`), or `null` when it
+   * is unset or the modality has no such scalar. TTS has none.
+   */
+  model_override: string | null;
+  /** Dotted path of that scalar, or `null` when the modality has none. */
+  model_override_path: string | null;
 }
 
 /* ------------------------------------------------------------------ */

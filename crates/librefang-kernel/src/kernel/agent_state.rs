@@ -922,6 +922,7 @@ mod mcp_manifest_patch_tests {
     fn manifest_source() -> String {
         toml::to_string_pretty(&AgentManifest {
             name: "format-test".to_string(),
+            source_template: None,
             ..Default::default()
         })
         .unwrap()

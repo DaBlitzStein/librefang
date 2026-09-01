@@ -1703,6 +1703,7 @@ mod task_board_reconcile_tests {
     fn worker(name: &str) -> AgentManifest {
         AgentManifest {
             name: name.to_string(),
+            source_template: None,
             description: "task board worker".to_string(),
             author: "test".to_string(),
             module: "builtin:chat".to_string(),

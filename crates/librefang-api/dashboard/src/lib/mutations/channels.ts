@@ -26,16 +26,22 @@ export function useReloadChannels() {
 // Save a sidecar channel's schema-driven config (Phase 5,
 // sidecar-channel-configure). Invalidates the whole `channelKeys.all`
 // subtree because a successful save flips the channel from "discovery"
-// to "configured". This refreshes the channel list and any open QR poll.
+// to "configured" (or, for a brand-new named instance, adds a row).
+// `instanceName` / `agent` support multi-instance channels — see
+// `saveSidecarConfig` in `src/api.ts`.
 export function useSaveSidecarConfig() {
   return useInvalidatingMutation(
     ({
       name,
       values,
+      instanceName,
+      agent,
     }: {
       name: string;
       values: Record<string, string>;
-    }) => saveSidecarConfig(name, values),
+      instanceName?: string;
+      agent?: string | null;
+    }) => saveSidecarConfig(name, values, { instanceName, agent }),
     channelKeys.all,
   );
 }

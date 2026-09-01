@@ -39,6 +39,7 @@ fn config_toml_kind_docker_loads() {
 #[test]
 fn agent_manifest_override_wins_over_global() {
     let manifest = AgentManifest {
+        source_template: None,
         tool_exec_backend: Some(BackendKind::Ssh),
         ..Default::default()
     };

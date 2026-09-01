@@ -5,6 +5,7 @@ use super::*;
 pub(super) fn test_manifest() -> AgentManifest {
     AgentManifest {
         name: "test-agent".to_string(),
+        source_template: None,
         model: librefang_types::agent::ModelConfig {
             system_prompt: "You are a test agent.".to_string(),
             ..Default::default()
