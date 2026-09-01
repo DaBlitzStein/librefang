@@ -195,14 +195,17 @@ impl OpenAIDriver {
     /// Whether `reasoning_effort` is currently withheld for `model` because
     /// this endpoint already rejected it.
     ///
-    /// Entries older than the mute TTL are pruned lazily here, so the mute
-    /// self-heals without a daemon restart once the operator has reconfigured
-    /// the gateway — see the field doc on `reasoning_effort_unsupported`.
+    /// Reads only the one entry (a single `DashMap` shard, no sweep): an entry
+    /// older than the mute TTL reads as "not muted" and is refreshed by the
+    /// next recorded rejection, so the mute self-heals without a daemon
+    /// restart once the operator has reconfigured the gateway — see the field
+    /// doc on `reasoning_effort_unsupported`. An expired entry for a model
+    /// that is never asked about again just sits there; the map is bounded by
+    /// the number of distinct models this endpoint serves.
     fn reasoning_effort_rejected(&self, model: &str) -> bool {
-        let now = std::time::Instant::now();
         self.reasoning_effort_unsupported
-            .retain(|_, at| now.duration_since(*at) < self.reasoning_effort_mute_ttl);
-        self.reasoning_effort_unsupported.contains_key(model)
+            .get(model)
+            .is_some_and(|at| at.elapsed() < self.reasoning_effort_mute_ttl)
     }
 
     /// Record that this endpoint rejected `reasoning_effort` for `model`.
@@ -737,17 +740,16 @@ fn merge_extra_body(
     }
 }
 
+/// How long a model stays muted after rejecting `reasoning_effort`.
+///
+/// Short enough that an operator who reconfigures the gateway sees the field again without a daemon restart, long enough that a genuinely rejecting gateway is not retried on every single turn of every agent.
+/// Because a re-recorded rejection restarts the clock, the floor that "not retried on every turn" holds at is one relearned 400 per still-rejecting model per TTL window, which is the intended trade.
+const REASONING_EFFORT_MUTE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Map a requested thinking budget to the OpenAI-style `reasoning_effort` bucket.
 ///
 /// There is no cross-vendor convention for requesting extended thinking over the OpenAI-compatible wire; `reasoning_effort` (`low` / `medium` / `high`) is the most widely supported opt-in, with gateways translating it back into a token budget server-side.
 /// Budgets below 1024 tokens are treated as thinking-off — the same minimum-budget gate the anthropic driver applies.
-/// How long a model stays muted after rejecting `reasoning_effort`.
-///
-/// Short enough that an operator who reconfigures the gateway sees the field
-/// again without a daemon restart, long enough that a genuinely rejecting
-/// gateway is not retried on every single turn of every agent.
-const REASONING_EFFORT_MUTE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
-
 fn reasoning_effort_for_budget(budget_tokens: u32) -> Option<&'static str> {
     match budget_tokens {
         0..=1023 => None,
@@ -5907,6 +5909,48 @@ mod tests {
         assert!(
             req.reasoning_effort.is_none(),
             "cached model must never build a request carrying reasoning_effort again"
+        );
+    }
+
+    /// End-to-end counterpart of `reasoning_effort_mute_expires_after_the_ttl`:
+    /// a driver whose TTL is deliberately short learns the rejection from a
+    /// live 400, the mute lapses, and the next `complete()` must re-probe the
+    /// gateway by putting `reasoning_effort` back on the wire (which the mock
+    /// gateway answers with the same 400, re-learning the mute).
+    #[tokio::test]
+    async fn mute_expires_and_field_is_resent_after_the_ttl_passes() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = spawn_reasoning_effort_rejecting_server(seen.clone()).await;
+        let mut driver = OpenAIDriver::new("test-key".to_string(), base);
+        driver.reasoning_effort_mute_ttl = std::time::Duration::from_millis(50);
+        let model = "sensor-model-generic-high";
+
+        // Learn the rejection: 400, then the strip-and-retry 200.
+        driver
+            .complete(thinking_request(model))
+            .await
+            .expect("first call must recover via strip-and-retry");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![true, false],
+            "the first call learns the 400 and retries without the field"
+        );
+
+        // Past the TTL the mute must lapse and the driver must re-probe the gateway by sending reasoning_effort again.
+        tokio::time::sleep(
+            driver.reasoning_effort_mute_ttl + std::time::Duration::from_millis(100),
+        )
+        .await;
+        driver
+            .complete(thinking_request(model))
+            .await
+            .expect("call after the mute lapsed must still recover via strip-and-retry");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![true, false, true, false],
+            "the third HTTP attempt (second complete() call) must carry \
+             reasoning_effort again: the mute expired, so the gateway is re-probed"
         );
     }
 

@@ -1316,6 +1316,25 @@ mod tests {
     }
 
     #[test]
+    fn test_is_unsupported_parameter_error_singular_and_unrecognized_shapes() {
+        // The singular variant (#7984): a gateway naming one parameter rather than a plural list, e.g. litellm's `does not support parameter: ...`.
+        assert!(is_unsupported_parameter_error(
+            "openai does not support parameter: ['reasoning_effort']"
+        ));
+        assert!(is_unsupported_reasoning_effort_error(
+            "openai does not support parameter: ['reasoning_effort']"
+        ));
+
+        // OpenAI's own "unrecognized request argument" phrasing, which this PR added to the pattern list.
+        assert!(is_unsupported_parameter_error(
+            "Unrecognized request argument supplied: reasoning_effort"
+        ));
+        assert!(is_unsupported_reasoning_effort_error(
+            "Unrecognized request argument supplied: reasoning_effort"
+        ));
+    }
+
+    #[test]
     fn test_is_unsupported_parameter_error_rejects_other_400s() {
         for raw in [
             "Invalid API key provided",
