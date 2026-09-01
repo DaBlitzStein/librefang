@@ -31,6 +31,11 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         // `task_claim` matches `assigned_to` against the canonical UUID *or*
         // the display name (issue #2841), so narrowing to one here would
         // reject assignments the claim path handles correctly.
+        //
+        // "Known" means registered, not running: a stopped agent is accepted
+        // on purpose, so a task posted for it waits for the agent to come
+        // back rather than being refused because the worker happens to be
+        // down at post time.
         if let Some(assignee) = assigned_to.filter(|a| !a.is_empty()) {
             let known = match AgentId::from_str(assignee) {
                 Ok(parsed) => self.agents.registry.get(parsed).is_some(),

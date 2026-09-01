@@ -4452,14 +4452,14 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // v55: per-task claim TTL override (task_queue.timeout_secs)
+    // v58: per-task claim TTL override (task_queue.timeout_secs)
     // ---------------------------------------------------------------------
 
     /// The column has to arrive on a board that already holds tasks — a
     /// migration that only works on a fresh file has never run where it
-    /// matters. A pre-v55 row means "use the global TTL", which is `NULL`.
+    /// matters. A pre-v58 row means "use the global TTL", which is `NULL`.
     #[test]
-    fn migrate_v55_adds_timeout_column_to_an_existing_board() {
+    fn migrate_v58_adds_timeout_column_to_an_existing_board() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         conn.execute(
@@ -4471,7 +4471,7 @@ mod tests {
 
         assert!(
             column_exists(&conn, "task_queue", "timeout_secs"),
-            "v55 must add task_queue.timeout_secs"
+            "v58 must add task_queue.timeout_secs"
         );
         let timeout: Option<i64> = conn
             .query_row(
@@ -4487,11 +4487,11 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v55_is_idempotent() {
+    fn migrate_v58_is_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         // The runner can legitimately replay a step after an interrupted
         // upgrade, so a duplicate-column rerun must not fail.
-        migrate_v55(&conn).expect("v55 must survive a rerun");
+        migrate_v58(&conn).expect("v58 must survive a rerun");
     }
 }
