@@ -699,17 +699,17 @@ pub fn goal_status_badge(status: &str) -> (String, Style) {
         )
     } else if lower.contains("paused") || lower.contains("stopped") {
         (
-            crate::i18n::t("tui-goals-phase-paus"),
+            crate::i18n::t("tui-goals-phase-paused"),
             Style::default().fg(theme::YELLOW),
         )
     } else if lower.contains("rate_limited") {
         (
-            crate::i18n::t("tui-goals-phase-rlim"),
+            crate::i18n::t("tui-goals-phase-rate-limited"),
             Style::default().fg(theme::RED),
         )
     } else if lower.contains("max_iterations") {
         (
-            crate::i18n::t("tui-goals-phase-mxit"),
+            crate::i18n::t("tui-goals-phase-max-iterations"),
             Style::default().fg(theme::YELLOW),
         )
     } else if lower.contains("failed") || lower.contains("error") {
