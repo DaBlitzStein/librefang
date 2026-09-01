@@ -914,8 +914,8 @@ bootstrap = "hooks/bootstrap.py"
 // The serve-stale path may serve the disk cache past its TTL when the remote
 // signed index is unreachable, but ONLY after re-verifying the cached bytes
 // against the cached `.sig` sidecar with the same Ed25519 trust root as the
-// remote path. The bad-signature case is the one that must never silently
-// regress (PR #8121 review, round 2).
+// remote path. The bad-signature and missing-signature cases are the ones
+// that must never silently regress (PR #8121 review, round 2).
 
 /// Env guard that restores the *previous* value of every variable it touched
 /// on drop, instead of erasing it (#8058 — an erasing helper disarmed
@@ -1102,6 +1102,52 @@ fn registry_index_serve_stale_refuses_cache_with_bad_signature() {
     let err = result.expect_err("tampered cached index must not be served");
     assert!(
         err.contains("cached index signature verification failed"),
+        "unexpected error text: {err}"
+    );
+}
+
+#[test]
+fn registry_index_serve_stale_refuses_cache_without_signature_sidecar() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = RegistryEnvGuard::default();
+    let (pub_b64, _) = sign_with_test_key(b"");
+    let index_body = br#"[{"name": "echo-memory"}]"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_path = tmp.path().join("index-cache.json");
+    std::fs::write(&cache_path, index_body).unwrap();
+    backdate(&cache_path, 2 * 3600);
+    // Deliberately NO `.sig` sidecar next to the cache: a cache written by a
+    // daemon whose verify step was disabled (or a pre-sidecar daemon) must
+    // not be servable stale once verification is back on — the bytes on disk
+    // were never proven to be signature-verified.
+    assert!(!registry_cache_sig_path(&cache_path).exists());
+
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_URL",
+        Some("http://127.0.0.1:1/index.json"),
+    );
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_SIG_URL",
+        Some("http://127.0.0.1:1/index.json.sig"),
+    );
+    guard.set("LIBREFANG_REGISTRY_PUBKEY", Some(&pub_b64));
+    guard.set("LIBREFANG_REGISTRY_VERIFY", None);
+    guard.set("LIBREFANG_REGISTRY_NO_CACHE", None);
+
+    let client = reqwest::Client::new();
+    let result = serve_stale_runtime().block_on(fetch_verified_index_with_cache_path(
+        &client,
+        "test/registry-serve-stale-no-sig",
+        &cache_path,
+    ));
+
+    let err = result.expect_err("cache without a verified signature must not be served stale");
+    assert!(
+        err.contains("cached signature"),
+        "unexpected error text: {err}"
+    );
+    assert!(
+        err.contains("missing or unreadable"),
         "unexpected error text: {err}"
     );
 }
