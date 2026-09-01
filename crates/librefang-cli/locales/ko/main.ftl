@@ -2417,6 +2417,8 @@ cmd-goal-rate-limited = 목표 중지: 제공자 속도 제한.
 cmd-goal-stopped = 목표 실행이 중지되었습니다.
 cmd-goal-error = 오류: { $error }
 cmd-goal-unknown-error = 알 수 없는 오류
+cmd-goal-watch-poll-error = 실행 상태를 읽을 수 없습니다({ $count }/{ $max }); 다시 시도하는 중…
+cmd-goal-watch-poll-gave-up = { $count }회 연속 폴링 실패 후 관찰을 중단했습니다 — 결과를 알 수 없으며 실행은 계속 진행 중일 수 있습니다.
 
 
 

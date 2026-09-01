@@ -99,12 +99,46 @@ pub(crate) fn cmd_goal(
 
     // 3. Poll GET /api/goals/{id}/run until the loop leaves the running phase.
     eprintln!("{}", i18n::t("cmd-goal-watching"));
+    // A poll the CLI cannot classify must never decide the exit code:
+    // `daemon_json` returns the body of a 5xx unchanged (often `{}`), which
+    // reads as `running=false` with an empty phase and used to end `--watch`
+    // with exit(1) — claiming the goal failed while it kept running in the
+    // daemon. Only a real terminal phase decides the exit; anything else is
+    // retried, bounded, before giving up.
+    const MAX_UNOBSERVABLE_POLLS: u32 = 5;
+    let mut unobservable_polls: u32 = 0;
     loop {
         std::thread::sleep(WATCH_POLL_INTERVAL);
 
-        let run_body = daemon_json(client.get(format!("{base}/api/goals/{goal_id}/run")).send());
+        let (status, run_body) =
+            daemon_json_checked(client.get(format!("{base}/api/goals/{goal_id}/run")).send());
 
-        let running = run_body["running"].as_bool().unwrap_or(false);
+        if let PollVerdict::Unobservable = classify_poll(status, &run_body) {
+            unobservable_polls += 1;
+            if unobservable_polls >= MAX_UNOBSERVABLE_POLLS {
+                eprintln!(
+                    "{}",
+                    i18n::t_args(
+                        "cmd-goal-watch-poll-gave-up",
+                        &[("count", &unobservable_polls.to_string())]
+                    )
+                );
+                std::process::exit(1);
+            }
+            eprintln!(
+                "{}",
+                i18n::t_args(
+                    "cmd-goal-watch-poll-error",
+                    &[
+                        ("count", &unobservable_polls.to_string()),
+                        ("max", &MAX_UNOBSERVABLE_POLLS.to_string())
+                    ]
+                )
+            );
+            continue;
+        }
+        unobservable_polls = 0;
+
         let run = &run_body["run"];
         let phase = run["phase"].as_str().unwrap_or_default();
 
@@ -130,10 +164,8 @@ pub(crate) fn cmd_goal(
             ),
         );
 
-        if !running {
-            if let Some(key) = terminal_phase_message(phase) {
-                eprintln!("{}", i18n::t(key));
-            }
+        if let Some(key) = terminal_phase_message(phase) {
+            eprintln!("{}", i18n::t(key));
             if let Some(err) = run["last_error"].as_str().filter(|e| !e.is_empty()) {
                 eprintln!("{}", i18n::t_args("cmd-goal-error", &[("error", err)]));
             }
@@ -165,6 +197,37 @@ fn terminal_phase_message(phase: &str) -> Option<&'static str> {
         "rate_limited" => Some("cmd-goal-rate-limited"),
         "stopped" => Some("cmd-goal-stopped"),
         _ => None,
+    }
+}
+
+/// How one `--watch` poll of `GET /api/goals/{id}/run` should be treated.
+///
+/// A poll result the CLI cannot classify must never decide the exit code:
+/// `daemon_json` returns the body of a 5xx unchanged (often `{}`), which reads
+/// as `running=false` with an empty phase — a shape that used to end `--watch`
+/// with `exit(1)`, claiming the goal failed while it kept running in the
+/// daemon.
+enum PollVerdict {
+    /// The run is still executing; keep polling.
+    Running,
+    /// The daemon reported a recognized terminal `GoalRunPhase`.
+    Terminal,
+    /// A failed HTTP status, or a body whose `running=false` carries no
+    /// recognized terminal phase — unobservable state, not an outcome.
+    Unobservable,
+}
+
+/// Classify one poll result of the `--watch` loop.
+fn classify_poll(status: reqwest::StatusCode, body: &serde_json::Value) -> PollVerdict {
+    if !status.is_success() {
+        return PollVerdict::Unobservable;
+    }
+    if body["running"].as_bool().unwrap_or(false) {
+        return PollVerdict::Running;
+    }
+    match body["run"]["phase"].as_str().unwrap_or_default() {
+        p if terminal_phase_message(p).is_some() => PollVerdict::Terminal,
+        _ => PollVerdict::Unobservable,
     }
 }
 
@@ -201,5 +264,64 @@ mod tests {
             );
         }
         assert!(terminal_phase_message("running").is_none());
+    }
+
+    #[test]
+    fn classify_poll_treats_a_failed_poll_as_unobservable_not_a_failure() {
+        // The review bug: a transient 5xx parses as `{}` — `running=false` with
+        // an empty phase — and used to end `--watch` with exit(1) claiming the
+        // goal failed while it kept running in the daemon.
+        let body = serde_json::json!({});
+        assert!(matches!(
+            classify_poll(reqwest::StatusCode::INTERNAL_SERVER_ERROR, &body),
+            PollVerdict::Unobservable
+        ));
+        assert!(matches!(
+            classify_poll(reqwest::StatusCode::SERVICE_UNAVAILABLE, &body),
+            PollVerdict::Unobservable
+        ));
+    }
+
+    #[test]
+    fn classify_poll_routes_running_and_terminal_phases() {
+        let running = serde_json::json!({ "running": true, "run": { "phase": "running" } });
+        assert!(matches!(
+            classify_poll(reqwest::StatusCode::OK, &running),
+            PollVerdict::Running
+        ));
+
+        for phase in [
+            "finished",
+            "max_iterations_reached",
+            "rate_limited",
+            "stopped",
+        ] {
+            let body = serde_json::json!({ "running": false, "run": { "phase": phase } });
+            assert!(
+                matches!(
+                    classify_poll(reqwest::StatusCode::OK, &body),
+                    PollVerdict::Terminal
+                ),
+                "phase '{phase}' must classify as terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_poll_never_treats_an_unknown_phase_as_terminal() {
+        // The other half of the review bug: a 200 whose `running=false` carries
+        // no recognized terminal phase — a newer daemon with a phase this CLI
+        // predates, or the run registry having lost the run — is unobservable
+        // state to retry, not an outcome to exit on.
+        for body in [
+            serde_json::json!({ "running": false }),
+            serde_json::json!({ "running": false, "run": {} }),
+            serde_json::json!({ "running": false, "run": { "phase": "some-new-phase" } }),
+        ] {
+            assert!(matches!(
+                classify_poll(reqwest::StatusCode::OK, &body),
+                PollVerdict::Unobservable
+            ));
+        }
     }
 }

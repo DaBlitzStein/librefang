@@ -2479,6 +2479,9 @@ cmd-goal-rate-limited = Ціль зупинено: ліміт запитів п�
 cmd-goal-stopped = Запуск цілі зупинено.
 cmd-goal-error = помилка: { $error }
 cmd-goal-unknown-error = невідома помилка
+cmd-goal-watch-poll-error = Не вдалося прочитати стан запуску ({ $count }/{ $max }); повторна спроба…
+cmd-goal-watch-poll-gave-up = Припинено спостереження після { $count } невдалих опитувань — результат невідомий, і запуск може тривати далі.
+
 # --- Channels screen (#8044) ---
 tui-tab-channels = Канали
 tui-channels-title-screen = Канали

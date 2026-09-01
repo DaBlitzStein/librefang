@@ -2410,6 +2410,8 @@ cmd-goal-rate-limited = 目标已停止：提供商限流。
 cmd-goal-stopped = 目标运行已停止。
 cmd-goal-error = 错误：{ $error }
 cmd-goal-unknown-error = 未知错误
+cmd-goal-watch-poll-error = 无法读取运行状态（{ $count }/{ $max }）；正在重试…
+cmd-goal-watch-poll-gave-up = 已放弃观察：连续 { $count } 次读取运行状态失败 — 结果未知，运行可能仍在执行。
 # --- Channels screen (#8044) ---
 tui-tab-channels = 通道
 tui-channels-title-screen = 通道

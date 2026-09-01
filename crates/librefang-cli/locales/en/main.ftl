@@ -2418,6 +2418,8 @@ cmd-goal-rate-limited = Goal stopped: provider rate limit.
 cmd-goal-stopped = Goal run stopped.
 cmd-goal-error = error: { $error }
 cmd-goal-unknown-error = unknown error
+cmd-goal-watch-poll-error = Could not read the run state ({ $count }/{ $max }); retrying…
+cmd-goal-watch-poll-gave-up = Gave up observing the run after { $count } failed polls — the outcome is unknown and the run may still be executing.
 
 
 
