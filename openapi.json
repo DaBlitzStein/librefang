@@ -12572,7 +12572,7 @@
           "system"
         ],
         "summary": "POST /api/templates/:name/promote — open a PR contributing this agent\ntype to the configured public registry.",
-        "description": "Sanitizes the manifest for publication (stripping private fields),\nrenders it as TOML, then forks the registry repo, pushes the file to\n`agent-types/<name>/agent.toml`, and opens a pull request.\nRequires `GITHUB_TOKEN` (env or vault).",
+        "description": "Runs the privacy scan first and refuses to publish when a finding sits\ninside a field the sanitiser keeps (`removed_by_sanitizer == false`),\nso a credential or private endpoint pasted into free text cannot reach\na public git history. Then it sanitizes the manifest (stripping private\nfields), renders it as TOML, forks the registry repo, pushes the file to\n`agent-types/<name>/agent.toml`, and opens a pull request.\nRequires `GITHUB_TOKEN` (env or vault).",
         "operationId": "promote_agent_type",
         "parameters": [
           {
@@ -12604,6 +12604,9 @@
           },
           "404": {
             "description": "Agent type not found"
+          },
+          "409": {
+            "description": "Manifest still contains private details that require review"
           },
           "502": {
             "description": "GitHub request failed"

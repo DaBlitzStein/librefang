@@ -135,6 +135,18 @@ fn template_error_messages(lang: &str, name: &str) -> (String, String, String) {
     )
 }
 
+/// Render the two promote messages that need no dynamic argument, and drop the translator.
+///
+/// The render-failure message carries the TOML error, which is only known after the
+/// sanitization runs, so it is rendered inline at its one call site instead.
+fn promote_error_messages(lang: &str) -> (String, String) {
+    let t = ErrorTranslator::new(lang);
+    (
+        t.t("api-error-template-promote-no-token"),
+        t.t("api-error-template-promote-review-required"),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Agent-type storage
 // ---------------------------------------------------------------------------
@@ -703,31 +715,17 @@ pub async fn delete_agent_type(
 }
 
 // ---------------------------------------------------------------------------
-// Promote to registry (#8027)
+// Promote to registry (#8043)
 // ---------------------------------------------------------------------------
-
-/// Resolve a GitHub token: env first, vault fallback.
-///
-/// Mirrors `routes::skills::resolve_github_token` — duplicated here (8
-/// lines) because that function is `pub(super)` to the skills module and
-/// extracting it to a shared location is more churn than the duplication.
-fn resolve_github_token(state: &Arc<AppState>) -> Option<String> {
-    if let Ok(tok) = std::env::var("GITHUB_TOKEN") {
-        if !tok.trim().is_empty() {
-            return Some(tok);
-        }
-    }
-    state
-        .kernel
-        .vault_get("GITHUB_TOKEN")
-        .filter(|t| !t.trim().is_empty())
-}
 
 /// POST /api/templates/:name/promote — open a PR contributing this agent
 /// type to the configured public registry.
 ///
-/// Sanitizes the manifest for publication (stripping private fields),
-/// renders it as TOML, then forks the registry repo, pushes the file to
+/// Runs the privacy scan first and refuses to publish when a finding sits
+/// inside a field the sanitiser keeps (`removed_by_sanitizer == false`),
+/// so a credential or private endpoint pasted into free text cannot reach
+/// a public git history. Then it sanitizes the manifest (stripping private
+/// fields), renders it as TOML, forks the registry repo, pushes the file to
 /// `agent-types/<name>/agent.toml`, and opens a pull request.
 /// Requires `GITHUB_TOKEN` (env or vault).
 #[utoipa::path(
@@ -741,6 +739,7 @@ fn resolve_github_token(state: &Arc<AppState>) -> Option<String> {
         (status = 400, description = "Invalid manifest or name"),
         (status = 401, description = "No GitHub token configured"),
         (status = 404, description = "Agent type not found"),
+        (status = 409, description = "Manifest still contains private details that require review"),
         (status = 502, description = "GitHub request failed")
     )
 )]
@@ -751,6 +750,7 @@ pub async fn promote_agent_type(
 ) -> impl IntoResponse {
     let lang = super::resolve_lang(lang.as_ref());
     let (not_found, invalid_manifest, read_failed) = template_error_messages(lang, &name);
+    let (no_token, review_required) = promote_error_messages(lang);
 
     if validate_template_name(&name).is_err() {
         return ApiErrorResponse::not_found(not_found).into_json_tuple();
@@ -772,12 +772,24 @@ pub async fn promote_agent_type(
         }
     };
 
+    // Privacy gate: refuse to publish while any finding sits inside a field
+    // the sanitiser keeps (`removed_by_sanitizer == false`), because that is
+    // material the operator has to edit by hand — a credential or private
+    // endpoint pasted into a system prompt or description. Findings the
+    // sanitiser already strips are fine: publishing drops them. This is the
+    // server-side half of `promotion_preview`, so the advisory hint and the
+    // endpoint agree.
+    let findings = librefang_types::manifest_privacy::scan_for_publication(&manifest);
+    if findings.iter().any(|finding| !finding.removed_by_sanitizer) {
+        return ApiErrorResponse::conflict(review_required)
+            .with_code("review_required")
+            .with_details(serde_json::json!({ "findings": findings }))
+            .into_json_tuple();
+    }
+
     // Token check.
-    let Some(token) = resolve_github_token(&state) else {
-        return ApiErrorResponse::unauthorized(
-            "No GitHub token configured. Connect GitHub in Settings or set GITHUB_TOKEN.",
-        )
-        .into_json_tuple();
+    let Some(token) = super::skills::resolve_github_token(&state) else {
+        return ApiErrorResponse::unauthorized(no_token).into_json_tuple();
     };
 
     // Sanitize for publication and render.
@@ -786,10 +798,14 @@ pub async fn promote_agent_type(
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Could not render publishable manifest for '{name}': {e}");
-            return ApiErrorResponse::bad_request(format!(
-                "Cannot render the sanitized manifest as TOML: {e}"
-            ))
-            .into_json_tuple();
+            let render_failed = {
+                let t = ErrorTranslator::new(lang);
+                t.t_args(
+                    "api-error-template-promote-render-failed",
+                    &[("error", &e.to_string())],
+                )
+            };
+            return ApiErrorResponse::bad_request(render_failed).into_json_tuple();
         }
     };
 
