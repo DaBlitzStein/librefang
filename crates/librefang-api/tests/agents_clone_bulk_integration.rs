@@ -100,6 +100,7 @@ async fn boot(api_key: &str) -> Harness {
 fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
     let manifest = AgentManifest {
         name: name.to_string(),
+        source_template: None,
         ..AgentManifest::default()
     };
     state
@@ -315,6 +316,7 @@ async fn test_clone_without_skills_strips_them() {
     let h = boot(TEST_TOKEN).await;
     let manifest = AgentManifest {
         name: "skilled-source".to_string(),
+        source_template: None,
         skills: vec!["skill-a".to_string(), "skill-b".to_string()],
         ..AgentManifest::default()
     };

@@ -15,6 +15,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { toastErr } from "../lib/errors";
 import {
   Activity, Cpu, HardDrive, Zap, Timer, Layers, CheckCircle2, GitCommit,
   Calendar, Server, Monitor, Settings, HeartPulse, Box, Globe, FolderOpen,
@@ -64,7 +65,7 @@ const BACKUP_COMPONENTS = [
 ];
 
 type BackupConfirmState = {
-  type: "restore" | "delete";
+  type: "create" | "restore" | "delete";
   filename: string;
   keepConfig: boolean;
   components: string[];
@@ -801,12 +802,7 @@ export function RuntimePage() {
                     size="sm"
                     leftIcon={<Download className="w-3 h-3" />}
                     isLoading={backupMutation.isPending}
-                    onClick={() =>
-                      backupMutation.mutate(undefined, {
-                        onSuccess: () =>
-                          addToast(t("runtime.backup_created"), "success"),
-                      })
-                    }
+                    onClick={() => setBackupConfirm({ type: "create", filename: "", keepConfig: false, components: [] })}
                   >
                     {t("runtime.create_backup")}
                   </Button>
@@ -827,6 +823,9 @@ export function RuntimePage() {
                           {formatBytes(b.size_bytes)}
                           {b.created_at ? ` · ${new Date(b.created_at).toLocaleDateString()}` : null}
                         </p>
+                        {b.components && b.components.length > 0 && (
+                          <p className="text-[9px] text-text-dim/70 truncate">{b.components.join(", ")}</p>
+                        )}
                       </div>
                       <button
                         onClick={() => {
@@ -942,6 +941,25 @@ export function RuntimePage() {
         onClose={() => setShowShutdownConfirm(false)}
       />
 
+      <ConfirmDialog
+        isOpen={backupConfirm?.type === "create"}
+        title={t("runtime.create_backup_confirm_title")}
+        message={t("runtime.create_backup_confirm_desc")}
+        confirmLabel={t("runtime.create_backup_confirm")}
+        // `ConfirmDialog` keeps itself open when `onConfirm` rejects, and the only other place a backup failure surfaces is the inline `backupMutation.isError` notice inside the card — which is behind the modal overlay.
+        // Reporting it here and letting the promise resolve closes the dialog and puts the reason where the operator is looking.
+        onConfirm={async () => {
+          try {
+            await backupMutation.mutateAsync(undefined, {
+              onSuccess: () => addToast(t("runtime.backup_created"), "success"),
+            });
+          } catch (err) {
+            addToast(toastErr(err, t("runtime.backup_error")), "error");
+          }
+        }}
+        onClose={() => setBackupConfirm(null)}
+      />
+
       {/* Restore options: keep the target's own config, and/or limit the
            restore to chosen components. */}
       <div className="flex flex-wrap items-center gap-3 text-xs mt-2">
@@ -980,12 +998,16 @@ export function RuntimePage() {
         tone="destructive"
         onConfirm={async () => {
           if (backupConfirm?.type === "restore") {
-            await restoreMutation.mutateAsync({
-              filename: backupConfirm.filename,
-              keepConfig: backupConfirm.keepConfig,
-              components: backupConfirm.components,
-            });
-            addToast(t("runtime.restore_success"), "success");
+            try {
+              await restoreMutation.mutateAsync({
+                filename: backupConfirm.filename,
+                keepConfig: backupConfirm.keepConfig,
+                components: backupConfirm.components,
+              });
+              addToast(t("runtime.restore_success"), "success");
+            } catch (err) {
+              addToast(toastErr(err, t("runtime.restore_error")), "error");
+            }
           }
         }}
         onClose={() => setBackupConfirm(null)}
@@ -1000,7 +1022,11 @@ export function RuntimePage() {
         tone="destructive"
         onConfirm={async () => {
           if (backupConfirm?.type === "delete") {
-            await deleteBackupMutation.mutateAsync(backupConfirm.filename);
+            try {
+              await deleteBackupMutation.mutateAsync(backupConfirm.filename);
+            } catch (err) {
+              addToast(toastErr(err, t("runtime.delete_backup_error")), "error");
+            }
           }
         }}
         onClose={() => setBackupConfirm(null)}

@@ -570,6 +570,7 @@ fn register_agent(h: &Harness, name: &str) -> String {
     let agent_id = AgentId::new();
     let manifest = librefang_types::agent::AgentManifest {
         name: name.to_string(),
+        source_template: None,
         // Start with a NON-EMPTY allowlist so the append is observable.
         // An empty allowlist means "all skills", and the approve path
         // (kernel `assign_skill_to_agent_allowlist`) deliberately leaves
@@ -807,6 +808,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
     let session_id = SessionId::new();
     let manifest = AgentManifest {
         name: "auto_workshop_agent".to_string(),
+        source_template: None,
         description: "test".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -959,6 +961,7 @@ async fn approve_create_auto_assigns_skill_to_creator_allowlist() {
     let session_id = SessionId::new();
     let manifest = AgentManifest {
         name: "allowlist_creator".to_string(),
+        source_template: None,
         description: "test".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
@@ -1050,6 +1053,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
     let session_id = SessionId::new();
     let manifest = AgentManifest {
         name: "orphan_retry_agent".to_string(),
+        source_template: None,
         description: "test".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),

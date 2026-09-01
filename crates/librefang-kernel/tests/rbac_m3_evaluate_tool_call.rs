@@ -306,6 +306,7 @@ async fn submit_tool_approval_hand_agent_force_human_skips_auto_approve() {
 
     let manifest = AgentManifest {
         name: format!("hand-test-{}", uuid::Uuid::new_v4()),
+        source_template: None,
         is_hand: true,
         tags: vec!["hand:test".to_string()],
         module: "builtin:chat".to_string(),
@@ -390,6 +391,7 @@ async fn blocking_hand_approval_does_not_bypass_enabled_rbac() {
     let kernel = boot(vec![user("Bob", "user", "111", None, None)], vec![]);
     let manifest = AgentManifest {
         name: format!("blocking-hand-rbac-{}", uuid::Uuid::new_v4()),
+        source_template: None,
         is_hand: true,
         tags: vec!["hand:test".to_string()],
         module: "builtin:chat".to_string(),
@@ -433,6 +435,7 @@ async fn blocking_hand_approval_without_rbac_context_still_requires_human() {
     let kernel = boot(vec![], vec![]);
     let manifest = AgentManifest {
         name: format!("blocking-hand-single-user-{}", uuid::Uuid::new_v4()),
+        source_template: None,
         is_hand: true,
         tags: vec!["hand:test".to_string()],
         module: "builtin:chat".to_string(),

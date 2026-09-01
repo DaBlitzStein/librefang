@@ -27,6 +27,7 @@ use librefang_types::event::{Event, EventPayload, EventTarget, SystemEvent};
 fn worker_manifest(name: &str) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
+        source_template: None,
         capabilities: ManifestCapabilities {
             tools: vec!["task_claim".to_string(), "task_complete".to_string()],
             ..ManifestCapabilities::default()

@@ -921,6 +921,7 @@ mod tests {
             name: name.to_string(),
             manifest: AgentManifest {
                 name: name.to_string(),
+                source_template: None,
                 description: "test".to_string(),
                 author: "test".to_string(),
                 module: "test".to_string(),

@@ -1443,6 +1443,49 @@ impl std::fmt::Display for WorkflowNameTaken {
 
 impl std::error::Error for WorkflowNameTaken {}
 
+/// The definition could not be written to disk.
+///
+/// `reason` names the step that failed and the path it failed on, because the
+/// caller reporting this to an agent has no other way to say whether the
+/// problem is a full disk, a read-only mount or a serialisation fault.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowPersistError {
+    /// What failed, in the form `"<step> <path>: <os error>"`.
+    pub reason: String,
+}
+
+impl std::fmt::Display for WorkflowPersistError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "workflow definition was not saved ({})", self.reason)
+    }
+}
+
+impl std::error::Error for WorkflowPersistError {}
+
+/// Why [`WorkflowEngine::register_unique_name`] refused a registration.
+///
+/// Two outcomes, and a caller has to tell them apart: a name collision is the
+/// proposer's to fix by picking another name, while a failed write is the
+/// operator's and means nothing was stored at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisterWorkflowError {
+    /// Another registered workflow already carries the proposed name.
+    NameTaken(WorkflowNameTaken),
+    /// The name was free, but the definition did not reach disk.
+    NotPersisted(WorkflowPersistError),
+}
+
+impl std::fmt::Display for RegisterWorkflowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NameTaken(e) => e.fmt(f),
+            Self::NotPersisted(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RegisterWorkflowError {}
+
 /// The workflow engine — manages definitions and executes pipeline runs.
 ///
 /// `runs` is a [`DashMap`] so concurrent step writes for *different* runs
@@ -2174,7 +2217,7 @@ impl WorkflowEngine {
         }
     }
 
-    /// Write one workflow definition to `workflows_dir`.
+    /// Write one workflow definition to `workflows_dir`, reporting whether it landed.
     ///
     /// Persistence is atomic: serialise → write `<id>.workflow.json.tmp` →
     /// rename to `<id>.workflow.json`. A crash mid-write leaves the `.tmp`
@@ -2182,33 +2225,56 @@ impl WorkflowEngine {
     /// never a half-written `<id>.workflow.json` that would later refuse to
     /// parse and stall startup.
     ///
-    /// Every failure path is a `warn!` rather than an error return: refusing the registration because the disk write failed leaves the caller worse off than a workflow that is live now and does not survive a restart.
-    async fn persist_definition(&self, workflow: &Workflow) {
+    /// Returns `Ok(())` when there is no workflows directory configured: an
+    /// in-memory engine is a deliberate configuration, not a failed write.
+    ///
+    /// The failures are still logged here, because the two callers want
+    /// different things from them — [`Self::register`] carries on regardless
+    /// and [`Self::register_unique_name`] propagates — and a log line at the
+    /// point of failure is what names the path and the OS error either way.
+    async fn persist_definition(&self, workflow: &Workflow) -> Result<(), WorkflowPersistError> {
         let Some(ref dir) = self.workflows_dir else {
-            return;
+            return Ok(());
         };
         let id = workflow.id;
         let path = dir.join(format!("{id}.workflow.json"));
         let tmp_path = dir.join(format!("{id}.workflow.json.tmp"));
-        match serde_json::to_string_pretty(workflow) {
-            Ok(json) => {
-                if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                    warn!(workflow_id = %id, error = %e, "Failed to create workflows dir");
-                } else if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
-                    warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (tmp write)");
-                } else if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
-                    warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (atomic rename)");
-                    // Best-effort cleanup so the next register attempt isn't
-                    // blocked by a stale tmp file.
-                    let _ = tokio::fs::remove_file(&tmp_path).await;
-                } else {
-                    debug!(workflow_id = %id, path = %path.display(), "Persisted workflow definition");
-                }
-            }
+        let json = match serde_json::to_string_pretty(workflow) {
+            Ok(json) => json,
             Err(e) => {
                 warn!(workflow_id = %id, error = %e, "Failed to serialize workflow definition");
+                return Err(WorkflowPersistError {
+                    reason: format!("serialize: {e}"),
+                });
             }
+        };
+        if let Err(e) = tokio::fs::create_dir_all(dir).await {
+            warn!(workflow_id = %id, error = %e, "Failed to create workflows dir");
+            return Err(WorkflowPersistError {
+                reason: format!("create {}: {e}", dir.display()),
+            });
         }
+        if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
+            warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (tmp write)");
+            // Same cleanup as the rename branch below: a write that fails
+            // part-way — `ENOSPC` is the ordinary case — leaves a truncated
+            // tmp file behind on a disk that is already full.
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(WorkflowPersistError {
+                reason: format!("write {}: {e}", tmp_path.display()),
+            });
+        }
+        if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+            warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (atomic rename)");
+            // Best-effort cleanup so the next register attempt isn't
+            // blocked by a stale tmp file.
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(WorkflowPersistError {
+                reason: format!("rename to {}: {e}", path.display()),
+            });
+        }
+        debug!(workflow_id = %id, path = %path.display(), "Persisted workflow definition");
+        Ok(())
     }
 
     /// Register a new workflow definition and persist it to disk.
@@ -2217,7 +2283,22 @@ impl WorkflowEngine {
     /// Callers that need the name to be unique must use [`Self::register_unique_name`] instead — checking [`Self::list_workflows`] first and calling this afterwards is a check-then-act race, because the read lock is released before the insert takes the write lock.
     pub async fn register(&self, workflow: Workflow) -> WorkflowId {
         let id = workflow.id;
-        self.persist_definition(&workflow).await;
+        // Still best-effort, and that is a known gap rather than a decision
+        // this function is happy with.
+        //
+        // The callers are `POST /api/workflows` and template instantiation,
+        // both through `LibreFangKernel::register_workflow` — so the CLI's
+        // `workflow create`, the TUI wizard and the dashboard all reach here,
+        // and all of them still answer `201` with an id when the definition
+        // did not reach disk. That is the same defect `register_unique_name`
+        // below now refuses, one door over.
+        //
+        // Closing it means changing this signature, `register_workflow`, and
+        // the `KernelApi` trait method that fronts it, which lands in
+        // `librefang-api` rather than here. Left out of the change that fixed
+        // the agent path deliberately, not by oversight; `persist_definition`
+        // has already logged the reason in the meantime.
+        let _ = self.persist_definition(&workflow).await;
         self.workflows.write().await.insert(id, workflow);
         info!(workflow_id = %id, "Workflow registered");
         id
@@ -2230,11 +2311,13 @@ impl WorkflowEngine {
     ///
     /// The comparison is case-insensitive to match that name-based lookup, which lowercases both sides; a `Deploy` registered next to an existing `deploy` would be unreachable by name half the time.
     ///
-    /// Persistence deliberately runs *after* the lock is released. Holding the registry write lock across a `tokio::fs` round-trip would block every reader on disk IO, and the reservation is already in force the moment the entry is in the map.
+    /// Persistence deliberately runs *after* the lock is released. Holding the registry write lock across a `tokio::fs` round-trip would block every reader on disk IO.
+    ///
+    /// The consequence is a visibility window: between the insert and a failed write, the workflow is in the map, so a concurrent `workflow_list` can see it, `workflow_run` can resolve it by name, and a concurrent registration of the same name is rejected against an id that is about to disappear. The rollback narrows that window to one disk round-trip; it does not close it. Closing it would mean either writing the tmp file before taking the lock and holding the lock only across the rename, or reserving names in a structure separate from the registry — both worth doing if the window ever bites, neither necessary for the failure this ordering exists to survive, which is a write that fails on every attempt rather than a race.
     pub async fn register_unique_name(
         &self,
         workflow: Workflow,
-    ) -> Result<WorkflowId, WorkflowNameTaken> {
+    ) -> Result<WorkflowId, RegisterWorkflowError> {
         let id = workflow.id;
         let name_lower = workflow.name.to_lowercase();
         {
@@ -2243,14 +2326,32 @@ impl WorkflowEngine {
                 .values()
                 .find(|w| w.name.to_lowercase() == name_lower)
             {
-                return Err(WorkflowNameTaken {
+                return Err(RegisterWorkflowError::NameTaken(WorkflowNameTaken {
                     name: workflow.name.clone(),
                     existing_id: existing.id,
-                });
+                }));
             }
             registry.insert(id, workflow.clone());
         }
-        self.persist_definition(&workflow).await;
+        // Roll the reservation back when the write fails, rather than
+        // reporting an error while keeping the entry.
+        //
+        // The insert has to happen first — it is what makes the name check and
+        // the reservation one operation — so the failure path has to undo it.
+        // Leaving it in place would be worse than the bug being fixed: the
+        // caller is told the workflow was not created, the name is held by
+        // something that will not survive a restart, and the obvious retry
+        // comes back as `NameTaken` against a workflow nobody can find.
+        if let Err(e) = self.persist_definition(&workflow).await {
+            self.workflows.write().await.remove(&id);
+            warn!(
+                workflow_id = %id,
+                name = %workflow.name,
+                error = %e,
+                "Rolled back workflow registration: definition was not persisted"
+            );
+            return Err(RegisterWorkflowError::NotPersisted(e));
+        }
         info!(workflow_id = %id, name = %workflow.name, "Workflow registered with a reserved name");
         Ok(id)
     }
@@ -2386,21 +2487,19 @@ impl WorkflowEngine {
             workflow.id = id; // ensure ID stays the same
             entry.insert(workflow.clone());
             // Persist to disk so agent assignment, prompt changes, and
-            // parameter edits survive daemon restart (mirrors register()).
-            if let Some(ref dir) = self.workflows_dir {
-                let path = dir.join(format!("{id}.workflow.json"));
-                let tmp_path = dir.join(format!("{id}.workflow.json.tmp"));
-                if let Ok(json) = serde_json::to_string_pretty(&workflow) {
-                    if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                        warn!(workflow_id = %id, error = %e, "update_workflow: failed to create dir");
-                    } else if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
-                        warn!(workflow_id = %id, error = %e, "update_workflow: tmp write failed");
-                    } else if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
-                        warn!(workflow_id = %id, error = %e, "update_workflow: atomic rename failed");
-                        let _ = tokio::fs::remove_file(&tmp_path).await;
-                    }
-                }
-            }
+            // parameter edits survive daemon restart.
+            //
+            // Through `persist_definition` rather than a second copy of its
+            // body: the copy that used to live here wrapped the whole write in
+            // `if let Ok(json)` with no `else`, so a serialisation failure was
+            // silent even in the log — the one failure mode the shared writer
+            // reports.
+            //
+            // Still best-effort, for the same reason as `register` above and
+            // with the same gap: `PUT /api/workflows/{id}` answers `200`
+            // whether or not the edit reached disk, and a restart brings the
+            // old definition back.
+            let _ = self.persist_definition(&workflow).await;
             true
         } else {
             false
@@ -7751,14 +7850,15 @@ prompt_template = "go"
         }
 
         let mut winners = Vec::new();
-        let mut losers = 0usize;
+        let mut loser_incumbents = Vec::new();
         for h in handles {
             match h.await.expect("registration task must not panic") {
                 Ok(id) => winners.push(id),
-                Err(taken) => {
+                Err(RegisterWorkflowError::NameTaken(taken)) => {
                     assert_eq!(taken.name, "deploy");
-                    losers += 1;
+                    loser_incumbents.push(taken.existing_id);
                 }
+                Err(other) => panic!("losing a race is a name collision, not {other:?}"),
             }
         }
 
@@ -7767,7 +7867,15 @@ prompt_template = "go"
             1,
             "exactly one caller may win the name, got {winners:?}"
         );
-        assert_eq!(losers, CALLERS - 1, "every other caller must be rejected");
+        assert_eq!(
+            loser_incumbents.len(),
+            CALLERS - 1,
+            "every other caller must be rejected"
+        );
+        assert!(
+            loser_incumbents.iter().all(|id| *id == winners[0]),
+            "every rejected caller must point at the same incumbent"
+        );
         assert_eq!(
             count_named(&engine, "deploy").await,
             1,
@@ -7793,7 +7901,10 @@ prompt_template = "go"
             .register_unique_name(named_workflow("deploy"))
             .await
             .expect_err("second registration must be rejected");
-        assert_eq!(err.existing_id, first);
+        let RegisterWorkflowError::NameTaken(taken) = &err else {
+            panic!("a duplicate name must be reported as a collision, got {err:?}");
+        };
+        assert_eq!(taken.existing_id, first);
         assert!(
             err.to_string().contains("already exists"),
             "rendered error should read as a collision: {err}"
@@ -7814,8 +7925,11 @@ prompt_template = "go"
             .register_unique_name(named_workflow("Deploy"))
             .await
             .expect_err("a case variant is the same name to lookup, so it must collide");
+        let RegisterWorkflowError::NameTaken(taken) = &err else {
+            panic!("a case variant is a collision, not a write failure: {err:?}");
+        };
         assert_eq!(
-            err.name, "Deploy",
+            taken.name, "Deploy",
             "the rejection echoes the proposed name as supplied"
         );
         assert_eq!(count_named(&engine, "deploy").await, 1);
@@ -7842,6 +7956,108 @@ prompt_template = "go"
             reloaded.get_workflow(id).await.map(|w| w.name),
             Some("deploy".to_string()),
             "the reserved workflow must be on disk under its own id"
+        );
+    }
+
+    /// A definition that does not reach disk is a failed registration, not a
+    /// successful one with a warning in the log.
+    ///
+    /// `workflow_create` promises the agent that the workflow "becomes
+    /// available immediately and outlives the conversation". Returning an id
+    /// after the write failed breaks the second half silently: the agent is
+    /// told it succeeded, `workflow_list` agrees for as long as the process
+    /// lives, and the workflow is gone after a restart with nothing to point
+    /// at.
+    ///
+    /// The rollback matters as much as the error. Leaving the entry in memory
+    /// would hold the name against a workflow that will not survive, so the
+    /// obvious retry comes back as a collision with something unfindable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_unique_name_rolls_back_when_the_workflows_dir_cannot_be_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Occupy the workflows path with a regular file, so `create_dir_all`
+        // cannot make the directory the writer needs. Portable: `mkdir` over an
+        // existing file fails with `EEXIST` on Unix and `ERROR_ALREADY_EXISTS`
+        // on Windows, and `create_dir_all`'s "already exists" tolerance only
+        // covers an existing *directory*, so this fails as root too.
+        let workflows_path = tmp.path().join("workflows");
+        std::fs::write(&workflows_path, b"not a directory").unwrap();
+
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        let err = engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect_err("a definition that cannot be written is not registered");
+
+        let RegisterWorkflowError::NotPersisted(persist) = &err else {
+            panic!("a write failure must not be reported as a name collision: {err:?}");
+        };
+        // Pin the step, not just the variant: `reason` exists so a caller can
+        // tell a full disk from a read-only mount, and a test that never reads
+        // it would keep passing if every failure collapsed to one message.
+        assert!(
+            persist.reason.contains("create") && persist.reason.contains("workflows"),
+            "the reason must name the step and the path that failed, got: {}",
+            persist.reason
+        );
+
+        assert_eq!(
+            count_named(&engine, "deploy").await,
+            0,
+            "the reservation must be rolled back, or the name is held by a workflow that does not exist"
+        );
+
+        // And the name is free again: the retry an agent would make must not
+        // collide with the row the failed attempt left behind.
+        std::fs::remove_file(&workflows_path).unwrap();
+        engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect("retry must succeed once the write path is usable");
+    }
+
+    /// The rename branch, which is the one that fails *after* bytes have
+    /// reached the disk and the only one with cleanup of its own.
+    ///
+    /// A directory sitting where the definition file goes makes `rename`
+    /// fail — `EISDIR` / `ENOTEMPTY` on Unix, `ERROR_ACCESS_DENIED` on
+    /// Windows — with the tmp file already written, so this also pins that the
+    /// tmp file does not survive a failed registration.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_unique_name_rolls_back_when_the_rename_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workflows_dir = tmp.path().join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+
+        let workflow = named_workflow("deploy");
+        let id = workflow.id;
+        // Block the destination with a directory of the same name.
+        std::fs::create_dir(workflows_dir.join(format!("{id}.workflow.json"))).unwrap();
+
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        let err = engine
+            .register_unique_name(workflow)
+            .await
+            .expect_err("a definition that cannot be renamed into place is not registered");
+
+        let RegisterWorkflowError::NotPersisted(persist) = &err else {
+            panic!("a rename failure is a write failure, not a collision: {err:?}");
+        };
+        assert!(
+            persist.reason.contains("rename"),
+            "the reason must name the rename step, got: {}",
+            persist.reason
+        );
+        assert_eq!(
+            count_named(&engine, "deploy").await,
+            0,
+            "the reservation must be rolled back on the rename branch too"
+        );
+        assert!(
+            !workflows_dir
+                .join(format!("{id}.workflow.json.tmp"))
+                .exists(),
+            "the tmp file must not survive a failed registration"
         );
     }
 

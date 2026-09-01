@@ -92,6 +92,7 @@ async fn json_request(
 fn spawn_agent(state: &Arc<AppState>) -> AgentId {
     let manifest = AgentManifest {
         name: format!("trigger-test-{}", uuid::Uuid::new_v4()),
+        source_template: None,
         ..AgentManifest::default()
     };
     state

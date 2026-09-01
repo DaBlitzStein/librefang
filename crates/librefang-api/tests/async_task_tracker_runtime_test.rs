@@ -86,6 +86,7 @@ fn spawn_agent(state: &Arc<AppState>) -> AgentId {
 fn spawn_agent_with_async_tasks(state: &Arc<AppState>, async_tasks: AsyncTasksConfig) -> AgentId {
     let manifest = AgentManifest {
         name: format!("async-task-test-{}", Uuid::new_v4()),
+        source_template: None,
         async_tasks,
         ..AgentManifest::default()
     };
