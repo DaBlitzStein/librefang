@@ -8,6 +8,7 @@
 
 use super::AppState;
 use crate::middleware::RequestLanguage;
+use crate::routes::agents::lifecycle::MAX_MANIFEST_SIZE;
 use crate::types::ApiErrorResponse;
 use axum::extract::Path;
 use axum::http::StatusCode;
@@ -129,6 +130,30 @@ fn template_error_messages(lang: &str, name: &str) -> (String, String, String) {
         t.t("api-error-template-invalid-manifest"),
         t.t("api-error-template-read-failed"),
     )
+}
+/// Top-level keys the submitted TOML carries that `AgentManifest` does not recognize.
+///
+/// The write path re-serializes from the parsed struct, so any key that does not
+/// round-trip through `AgentManifest` is dropped on persist. Diffing against the
+/// re-serialized struct rather than a hand-kept key list means the check stays
+/// correct as the struct's serde attributes evolve; a key that deserializes but
+/// does not re-serialize is dropped too, so flagging it is the honest answer either way.
+fn unrecognized_manifest_keys(doc: &toml::Value, manifest: &AgentManifest) -> Vec<String> {
+    let Ok(round_tripped) = toml::Value::try_from(manifest) else {
+        return Vec::new();
+    };
+    let Some(doc_table) = doc.as_table() else {
+        return Vec::new();
+    };
+    let recognized: std::collections::HashSet<&String> = round_tripped
+        .as_table()
+        .map(|t| t.keys().collect())
+        .unwrap_or_default();
+    doc_table
+        .keys()
+        .filter(|k| !recognized.contains(*k))
+        .cloned()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +537,14 @@ pub async fn get_agent_template_toml(
 ///
 /// Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.
 /// This is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.
+///
+/// Two contracts worth stating before touching this handler:
+///
+/// - **Identity is pinned to the URL.** The document's `name` key is overwritten with the path segment, so an operator who edits `name = "…"` in the raw-TOML tab gets a 200 whose response carries the URL's name — the same deliberate pin the flat `PUT /templates/{name}` makes.
+///   It is asserted by `toml_put_pins_the_name_to_the_url_rather_than_the_body`.
+/// - **Keys the manifest does not recognize are reported, not dropped in silence.**
+///   `AgentManifest` is `#[serde(default)]` without `deny_unknown_fields` (forward compatibility with manifests written by a newer daemon), so a typo like `sesion_mode` would otherwise parse cleanly, persist, and vanish from the file.
+///   The handler round-trips the submitted document through `AgentManifest` and reports any top-level key that did not survive as `unknown_keys` in the 200 response, with a `WARN` log naming the template.
 #[utoipa::path(put, path = "/api/templates/{name}/toml", tag = "system", operation_id = "put_agent_template_toml", params(("name" = String, Path, description = "Template name")), request_body(content = String, content_type = "text/plain"), responses((status = 200, description = "Template updated", body = crate::types::JsonObject), (status = 400, description = "Invalid TOML"), (status = 404, description = "No such agent type"), (status = 409, description = "Name belongs to a live agent")))]
 pub async fn put_agent_template_toml(
     Path(name): Path<String>,
@@ -519,12 +552,15 @@ pub async fn put_agent_template_toml(
     body: String,
 ) -> impl IntoResponse {
     let lang = super::resolve_lang(lang.as_ref());
-    let (not_found, invalid_manifest, _read_failed) = template_error_messages(lang, &name);
-    let (invalid_name, managed_elsewhere) = {
+    // `ErrorTranslator` is `!Send`, so every message this handler might need is rendered and the
+    // translator dropped before the first `.await` — see the note in the root `CLAUDE.md`.
+    let (not_found, invalid_manifest, ..) = template_error_messages(lang, &name);
+    let (invalid_name, managed_elsewhere, manifest_too_large) = {
         let t = ErrorTranslator::new(lang);
         (
             t.t("api-error-template-invalid-name"),
             t.t_args("api-error-agent-type-not-editable", &[("name", &name)]),
+            t.t("api-error-manifest-too-large"),
         )
     };
 
@@ -546,27 +582,59 @@ pub async fn put_agent_template_toml(
         };
     }
 
+    // Size guard — the same cap the agent spawn path enforces (routes/agents/lifecycle.rs).
+    // The global RequestBodyLimitLayer uses the operator-configurable max_request_body_bytes,
+    // which may be raised for file uploads and is explicitly not the manifest cap.
+    if body.len() > MAX_MANIFEST_SIZE {
+        return ApiErrorResponse::bad_request(manifest_too_large)
+            .with_code("template_manifest_too_large")
+            .into_json_tuple();
+    }
+
+    // Parse twice: once into the generic document (for the unknown-key report) and once into
+    // AgentManifest (for validation). `AgentManifest` is #[serde(default)] with no
+    // deny_unknown_fields, so a typo like `sesion_mode` parses cleanly and would otherwise be
+    // dropped from the file by the persist re-serialization without a word.
+    let doc: toml::Value = match toml::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return ApiErrorResponse::bad_request(invalid_manifest)
+                .with_code("template_invalid_toml")
+                .with_details(serde_json::json!({ "toml_error": e.to_string() }))
+                .into_json_tuple()
+        }
+    };
+
     let mut manifest: AgentManifest = match toml::from_str(&body) {
         Ok(m) => m,
         Err(e) => {
-            return ApiErrorResponse::bad_request(format!("{invalid_manifest}: {e}"))
+            return ApiErrorResponse::bad_request(invalid_manifest)
+                .with_details(serde_json::json!({ "toml_error": e.to_string() }))
                 .with_code("template_invalid_toml")
-                .into_json_tuple();
+                .into_json_tuple()
         }
     };
 
     manifest.name = name.clone();
 
+    // Report what would be silently dropped. The response stays 200 — the recognized
+    // document did save — but the caller sees exactly which keys went missing.
+    let unknown_keys = unrecognized_manifest_keys(&doc, &manifest);
+    if !unknown_keys.is_empty() {
+        tracing::warn!(
+            "agent type '{name}': submitted TOML carries keys AgentManifest does not recognize, which this save will drop: {unknown_keys:?}"
+        );
+    }
+
     match persist_agent_type(&name, &manifest) {
-        Ok(rendered) => (
-            StatusCode::OK,
-            Json(agent_type_detail(
-                &name,
-                TemplateSource::AgentType,
-                &manifest,
-                &rendered,
-            )),
-        ),
+        Ok(rendered) => {
+            let mut detail =
+                agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
+            if !unknown_keys.is_empty() {
+                detail["unknown_keys"] = serde_json::json!(unknown_keys);
+            }
+            (StatusCode::OK, Json(detail))
+        }
         Err(e) => {
             tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()

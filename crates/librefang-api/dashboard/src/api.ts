@@ -1772,13 +1772,6 @@ export async function createAgentType(spec: AgentTypeSpec): Promise<AgentTypeDet
   return post<AgentTypeDetail>("/api/templates", spec);
 }
 
-export async function updateAgentType(
-  name: string,
-  spec: AgentTypeSpec,
-): Promise<AgentTypeDetail> {
-  return put<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}`, spec);
-}
-
 export async function deleteAgentType(name: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
