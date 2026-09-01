@@ -483,6 +483,27 @@ mod tests {
         assert_eq!(texts(&out), vec!["[Image description unavailable]"]);
     }
 
+    /// Pins the empty-but-`Ok` arm specifically: the describer *succeeded* but
+    /// had nothing to say, and the model must be told the image is unavailable
+    /// rather than handed a description block with an empty description inside
+    /// it. Collapsing the arm back to `Ok(d) =>` produces
+    /// `[Image description: ]` here and fails this test.
+    #[tokio::test]
+    async fn an_empty_ok_description_does_not_inject_a_blank_text_block() {
+        let stub = StubDescriber::ok("");
+        let out =
+            enrich_blocks_with_image_descriptions(vec![image_file("/tmp/x.png")], &stub).await;
+
+        let blank = texts(&out).into_iter().any(|t| t.trim().is_empty());
+        assert!(!blank, "no blank text block may reach the model: {out:?}");
+        assert_eq!(
+            texts(&out),
+            vec!["[Image description unavailable]"],
+            "an empty description must read as unavailable, not as an (empty) answer"
+        );
+        assert_eq!(out.len(), 2, "the image block is still delivered");
+    }
+
     #[tokio::test]
     async fn a_turn_with_no_images_is_returned_untouched_without_calling_the_provider() {
         let stub = StubDescriber::ok("never");
