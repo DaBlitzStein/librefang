@@ -1107,7 +1107,7 @@ fn content_to_text(content: &ChannelContent) -> String {
 /// sanitizer entirely, even in Block mode (this closed the gap where
 /// `File` / `FileData` filenames and `Interactive` text reached the agent
 /// unchecked). Variants that never carry free-form user text (Location,
-/// ButtonCallback action, Sticker, poll ids, …) return `None`.
+/// Sticker, poll ids, …) return `None`; `ButtonCallback` is not among them — its `action` is attacker-controlled text that `content_to_text` renders into the prompt, so the arm above returns `Some(action)`.
 fn sanitizer_text_to_check(content: &ChannelContent) -> Option<String> {
     // Every arm that `content_to_text` renders into agent-facing prompt text
     // from an attacker-controlled field MUST be scanned here, or Block mode is
