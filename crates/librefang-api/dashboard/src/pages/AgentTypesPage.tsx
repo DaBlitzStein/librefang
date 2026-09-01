@@ -585,6 +585,14 @@ function RestoreDiffModal({
             </table>
           </div>
 
+          {(diff.data?.unlisted_diffs ?? 0) > 0 && (
+            <p className="text-[11px] text-text-dim">
+              {t("agentTypes.restore_diff_more", {
+                count: diff.data!.unlisted_diffs,
+              })}
+            </p>
+          )}
+
           <p className="rounded-lg border border-border-subtle bg-main/30 px-3 py-2 text-[11px] text-text-dim">
             {t("agentTypes.restore_confirm")}
           </p>

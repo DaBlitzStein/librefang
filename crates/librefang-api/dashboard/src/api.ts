@@ -1778,6 +1778,7 @@ export interface FieldDiff {
 export interface RegistryDiffResult {
   name: string;
   identical: boolean;
+  unlisted_diffs: number;
   diffs: FieldDiff[];
   local_toml: string;
   registry_toml: string;

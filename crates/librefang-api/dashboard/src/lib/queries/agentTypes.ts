@@ -27,7 +27,7 @@ export const agentTypeQueries = {
     }),
   registryDiff: (name: string) =>
     queryOptions({
-      queryKey: [...agentTypeKeys.detail(name), "registry-diff"] as const,
+      queryKey: agentTypeKeys.registryDiff(name),
       queryFn: () => getAgentTypeRegistryDiff(name),
       staleTime: STALE_MS,
     }),

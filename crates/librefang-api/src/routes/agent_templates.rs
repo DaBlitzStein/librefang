@@ -717,10 +717,9 @@ pub async fn delete_agent_type(
 /// (or legacy `agents/{name}/agent.toml`).
 /// Returns `Ok(None)` when the type is not in the registry.
 async fn read_registry_agent_type(name: &str) -> std::io::Result<Option<String>> {
-    let home = agent_types_dir()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_default();
+    let Some(home) = agent_types_dir().parent().map(|p| p.to_path_buf()) else {
+        return Ok(None);
+    };
     let registry_cache = home.join("registry");
     let Some(agent_types_src) =
         librefang_types::registry_paths::resolve_agent_types_dir(&registry_cache)
@@ -802,6 +801,39 @@ fn diff_manifests(local: &AgentManifest, registry: &AgentManifest) -> Vec<FieldD
     diffs
 }
 
+/// Count differing leaf paths between two JSON values.
+///
+/// [`diff_manifests`] is deliberately a partial, operator-facing projection, so
+/// `identical` must not be derived from it. This walks the full serialized
+/// manifests and returns the total number of differing leaves, which drives both
+/// `identical` (zero) and the "…and N other differences" figure the drawer shows
+/// so the partial list does not read as exhaustive.
+fn json_diff_count(a: &serde_json::Value, b: &serde_json::Value) -> usize {
+    match (a, b) {
+        (serde_json::Value::Object(oa), serde_json::Value::Object(ob)) => {
+            let keys: std::collections::BTreeSet<&String> = oa.keys().chain(ob.keys()).collect();
+            keys.into_iter()
+                .map(|k| match (oa.get(k), ob.get(k)) {
+                    (Some(va), Some(vb)) => json_diff_count(va, vb),
+                    _ => 1,
+                })
+                .sum()
+        }
+        (serde_json::Value::Array(xa), serde_json::Value::Array(xb)) => {
+            if xa.len() != xb.len() {
+                1
+            } else {
+                xa.iter()
+                    .zip(xb)
+                    .map(|(va, vb)| json_diff_count(va, vb))
+                    .sum()
+            }
+        }
+        (x, y) if x == y => 0,
+        _ => 1,
+    }
+}
+
 /// GET /api/templates/:name/registry-diff — Compare local agent type with its registry original.
 #[utoipa::path(
     get,
@@ -851,13 +883,9 @@ pub async fn get_registry_diff(
     let registry_content = match read_registry_agent_type(&name).await {
         Ok(Some(content)) => content,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": registry_not_found,
-                    "code": "registry_type_not_found",
-                })),
-            )
+            return ApiErrorResponse::not_found(registry_not_found)
+                .with_code("registry_type_not_found")
+                .into_json_tuple();
         }
         Err(e) => {
             tracing::warn!("Failed to read registry type '{name}': {e}");
@@ -873,14 +901,24 @@ pub async fn get_registry_diff(
         }
     };
 
+    // `identical` is a correctness claim, so it comes from the full manifests, not
+    // the hand-picked projection. `diffs` stays as the human-readable summary.
+    let local_json = serde_json::to_value(&local_manifest).unwrap_or_default();
+    let registry_json = serde_json::to_value(&registry_manifest).unwrap_or_default();
+    let identical = local_json == registry_json;
     let diffs = diff_manifests(&local_manifest, &registry_manifest);
-    let identical = diffs.is_empty();
+    let unlisted_diffs = if identical {
+        0
+    } else {
+        json_diff_count(&local_json, &registry_json).saturating_sub(diffs.len())
+    };
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "name": name,
             "identical": identical,
+            "unlisted_diffs": unlisted_diffs,
             "diffs": diffs,
             "local_toml": local_content,
             "registry_toml": registry_content,
@@ -943,13 +981,9 @@ pub async fn restore_from_registry(
     let registry_content = match read_registry_agent_type(&name).await {
         Ok(Some(content)) => content,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": registry_not_found,
-                    "code": "registry_type_not_found",
-                })),
-            )
+            return ApiErrorResponse::not_found(registry_not_found)
+                .with_code("registry_type_not_found")
+                .into_json_tuple();
         }
         Err(e) => {
             tracing::warn!("Failed to read registry type '{name}': {e}");

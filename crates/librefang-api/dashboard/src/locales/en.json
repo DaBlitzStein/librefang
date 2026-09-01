@@ -4252,6 +4252,7 @@
     "restore_failed": "Could not restore from registry",
     "restore_diff_field": "Field",
     "restore_diff_local": "Local",
-    "restore_diff_registry": "Registry"
+    "restore_diff_registry": "Registry",
+    "restore_diff_more": "…and {{count}} other differences not itemised"
   }
 }

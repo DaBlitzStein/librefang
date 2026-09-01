@@ -4255,15 +4255,16 @@
     "tools": "Narzędzia",
     "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
     "tools_search": "Szukaj narzędzi…",
-    "restore": "Restore",
-    "restore_title": "Restore from registry — {{name}}",
-    "restore_confirm": "Overwrite the local agent type with the registry version? This cannot be undone.",
-    "restore_identical": "This agent type is identical to the registry version.",
-    "restore_no_registry": "This agent type does not exist in the registry.",
-    "restore_success": "Agent type restored from registry",
-    "restore_failed": "Could not restore from registry",
-    "restore_diff_field": "Field",
-    "restore_diff_local": "Local",
-    "restore_diff_registry": "Registry"
+    "restore": "Przywróć",
+    "restore_title": "Przywróć z rejestru — {{name}}",
+    "restore_confirm": "Zastąpić lokalny typ agenta wersją z rejestru? Tej operacji nie można cofnąć.",
+    "restore_identical": "Ten typ agenta jest identyczny z wersją z rejestru.",
+    "restore_no_registry": "Ten typ agenta nie istnieje w rejestrze.",
+    "restore_success": "Przywrócono typ agenta z rejestru",
+    "restore_failed": "Nie udało się przywrócić z rejestru",
+    "restore_diff_field": "Pole",
+    "restore_diff_local": "Lokalnie",
+    "restore_diff_registry": "Rejestr",
+    "restore_diff_more": "…oraz {{count}} innych różnic nieuwzględnionych"
   }
 }
