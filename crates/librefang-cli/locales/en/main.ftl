@@ -2391,9 +2391,13 @@ purge-failed-open-database = Purge failed: open database: { $error }
 purge-nothing-to-purge = Nothing to purge: '{ $agent }' left no trace in this installation.
 purge-purged-header = Purged '{ $agent }':
 purge-removed-roster-entry =   - roster entry, sessions, memories and KV rows
+purge-removed-orphaned-data =   - orphaned sessions, memories and KV rows (roster entry was already gone)
+purge-removed-identity-record =   - canonical UUID record in agent_identities.toml
 purge-removed-workspace =   - workspace directory
 purge-removed-agent-type =   - agent-type template
-purge-failed = Purge failed: { $error }
+purge-failure-line =   - FAILED: { $error }
+purge-confirm-warning = About to permanently purge '{ $agent }': roster entry, any orphaned sessions/memories/KV rows, the canonical UUID record, the workspace directory and any agent-type of the same name. This cannot be undone.
+purge-dry-run-header = Dry run — nothing was changed. Would purge '{ $agent }':
 
 # --- Channels screen (#8044) ---
 tui-tab-channels = Channels
