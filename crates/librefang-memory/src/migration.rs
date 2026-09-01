@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 55;
+const SCHEMA_VERSION: u32 = 56;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -276,10 +276,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
     run_step!(54, migrate_v54);
 
-    // v55: agent manifest version history so operators can see how an
+    // v56: agent manifest version history so operators can see how an
     // agent's config changed over time and roll back to a prior state.
     // Purely additive: one new table, no existing row changes meaning.
-    run_step!(55, migrate_v55);
+    // Numbered against #8047, which holds v55 (`template_versions`); the
+    // first schema PR to merge keeps 55 and the rest renumber on rebase.
+    run_step!(56, migrate_v56);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1217,7 +1219,7 @@ fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// v55: agent manifest version history.
+/// v56: agent manifest version history.
 ///
 /// Every write to `agent.toml` (dashboard edits, model changes, skill
 /// allowlist updates, hot-reload from disk) records the full serialized
@@ -1226,7 +1228,7 @@ fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// `"boot"`, or `"unknown"`.
 ///
 /// Retention is per-agent, trimmed on insert by the store (not here).
-fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS manifest_versions (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1242,7 +1244,7 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (55, datetime('now'), 'Agent manifest version history table')",
+         VALUES (56, datetime('now'), 'Agent manifest version history table')",
         [],
     )?;
     Ok(())

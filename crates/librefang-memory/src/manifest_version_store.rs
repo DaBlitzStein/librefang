@@ -29,7 +29,7 @@ pub struct ManifestVersionRow {
 ///
 /// Shares the connection pool every other store in `MemorySubstrate`
 /// uses. The `manifest_versions` table is created by
-/// `migration::migrate_v55`.
+/// `migration::migrate_v56`.
 #[derive(Clone)]
 pub struct ManifestVersionStore {
     pool: Pool<SqliteConnectionManager>,
