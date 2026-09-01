@@ -68,6 +68,7 @@ use crate::types;
         routes::spawn_agent,
         routes::spawn_ephemeral_agent,
         routes::get_agent,
+        routes::get_agent_manifest_toml,
         routes::kill_agent,
         routes::patch_agent,
         routes::send_message,

@@ -8,6 +8,8 @@ import {
   type CloneAgentResult,
   type PromptVersion,
   type ToolDefinition,
+  getAgentManifestToml,
+  patchAgent,
 } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
 import { isProviderAvailable } from "../lib/status";
@@ -385,6 +387,16 @@ export function AgentsPage() {
   // popping a drawer; the drawer is only opened when the user explicitly
   // clicks "Configure" / "Edit" from the detail header's overflow menu.
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
+  // Full-manifest editor mode inside the drawer (issue: partial drawer
+  // regression — AgentManifestForm was CREATE-only). Mirrors the create
+  // modal's form/toml state but scoped to the drawer's own local draft.
+  const [drawerEditMode, setDrawerEditMode] = useState(false);
+  const [editFormState, setEditFormState] = useState<ManifestFormState>(emptyManifestForm);
+  const [editFormExtras, setEditFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
+  const [editTomlDraft, setEditTomlDraft] = useState("");
+  const [editViewMode, setEditViewMode] = useState<"form" | "toml">("form");
+  const [editTomlParseError, setEditTomlParseError] = useState<string | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
   const templatesQuery = useAgentTemplates({
@@ -494,6 +506,8 @@ export function AgentsPage() {
     setDetailDrawerOpen(false);
     setEditingModel(false);
     setEditingName(false);
+    setDrawerEditMode(false);
+    setEditTomlParseError(null);
     closeToolsEditor();
   }
 
@@ -559,6 +573,60 @@ export function AgentsPage() {
     }
   }
 
+  async function loadAgentManifestForEdit(agentId: string) {
+    try {
+      const toml = await getAgentManifestToml(agentId);
+      setEditTomlDraft(toml);
+      const parsed = parseManifestToml(toml);
+      if (parsed.ok) {
+        setEditFormState(parsed.form);
+        setEditFormExtras(parsed.extras);
+        setEditTomlParseError(null);
+        setEditViewMode("form");
+      } else {
+        setEditTomlParseError(parsed.message);
+        setEditViewMode("toml");
+      }
+      setDrawerEditMode(true);
+    } catch (err) {
+      addToast(toastErr(err, t("agents.manifest_load_failed", { defaultValue: "Failed to load agent manifest" })), "error");
+    }
+  }
+
+  function switchEditMode(mode: "form" | "toml") {
+    if (mode === editViewMode) return;
+    if (mode === "toml") {
+      setEditTomlDraft(serializeManifestForm(editFormState, editFormExtras));
+      setEditViewMode("toml");
+      return;
+    }
+    const parsed = parseManifestToml(editTomlDraft);
+    if (parsed.ok) {
+      setEditFormState(parsed.form);
+      setEditFormExtras(parsed.extras);
+      setEditTomlParseError(null);
+      setEditViewMode("form");
+    } else {
+      setEditTomlParseError(parsed.message);
+    }
+  }
+
+  async function saveFullEdit() {
+    if (!detailAgent) return;
+    setEditSaving(true);
+    try {
+      const toml = editViewMode === "toml" ? editTomlDraft : serializeManifestForm(editFormState, editFormExtras);
+      await patchAgent(detailAgent.id, { manifest_toml: toml });
+      await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+      setDrawerEditMode(false);
+      addToast(t("agents.manifest_saved", { defaultValue: "Agent configuration saved" }), "success");
+    } catch (err) {
+      addToast(toastErr(err, t("agents.manifest_save_failed", { defaultValue: "Failed to save agent configuration" })), "error");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
   function closeToolsEditor() {
     setShowToolsEditor(false);
     setToolsEditorAgentId(null);
@@ -582,6 +650,11 @@ export function AgentsPage() {
   const agentToolsQuery = useAgentTools(toolsEditorAgentId ?? "", { enabled: showToolsEditor && !!toolsEditorAgentId });
   const toolsEditorLoading = showToolsEditor && !!toolsEditorAgentId && (toolsListQuery.isLoading || agentToolsQuery.isLoading);
   const toolsEditorInitRef = useRef(false);
+
+  useEffect(() => {
+    setDrawerEditMode(false);
+    setEditTomlParseError(null);
+  }, [detailAgent?.id]);
 
   useEffect(() => {
     if (!showToolsEditor || !toolsEditorAgentId) {
@@ -2584,7 +2657,7 @@ export function AgentsPage() {
         <DrawerPanel
           isOpen
           onClose={closeDetailModal}
-          size="xl"
+          size={drawerEditMode ? "2xl" : "xl"}
           hideCloseButton
         >
             <div className="px-6 py-4 border-b border-border-subtle sticky top-0 bg-surface z-10">
@@ -2681,7 +2754,62 @@ export function AgentsPage() {
             </div>
             {/* Body — scrollable inspectable sections. */}
             <div className="px-6 py-5 space-y-5">
-
+            {drawerEditMode ? (
+              <>
+                <div className="flex gap-2 items-center">
+                  <button
+                    type="button"
+                    onClick={() => switchEditMode("form")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${editViewMode === "form" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+                  >
+                    {t("agents.form_view", { defaultValue: "Form" })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => switchEditMode("toml")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${editViewMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+                  >
+                    TOML
+                  </button>
+                  <div className="flex-1" />
+                  <button
+                    type="button"
+                    onClick={() => setDrawerEditMode(false)}
+                    className="text-xs text-text-dim hover:text-text"
+                  >
+                    {t("common.cancel")}
+                  </button>
+                  <Button variant="primary" size="sm" onClick={saveFullEdit} disabled={editSaving}>
+                    {editSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Save className="w-3.5 h-3.5 mr-1" />}
+                    {editSaving ? t("common.saving") : t("common.save")}
+                  </Button>
+                </div>
+                {editTomlParseError && (
+                  <p className="text-xs text-error">{t("agents.form.toml_parse_error", { msg: editTomlParseError })}</p>
+                )}
+                {editViewMode === "form" ? (
+                  <AgentManifestForm
+                    value={editFormState}
+                    onChange={setEditFormState}
+                    providers={formProviderOptions}
+                    models={formModelOptions}
+                    invalidFields={new Set()}
+                    extras={editFormExtras}
+                    skillCatalog={skillCatalogForForm}
+                    toolCatalog={toolCatalogForForm}
+                    mcpCatalog={mcpCatalogForForm}
+                  />
+                ) : (
+                  <textarea
+                    value={editTomlDraft}
+                    onChange={e => setEditTomlDraft(e.target.value)}
+                    className="w-full h-[60vh] font-mono text-xs p-3 rounded-lg border border-border-subtle bg-main outline-none focus:border-brand resize-y"
+                    spellCheck={false}
+                  />
+                )}
+              </>
+            ) : (
+              <>
               {/* Model */}
               {detailAgent.model && (
                 <section>
@@ -3031,6 +3159,8 @@ export function AgentsPage() {
                   </div>
                 </section>
               )}
+              </>
+            )}
             </div>
 
             {/* Footer — sticky, primary + secondary actions reachable on long specs. */}
@@ -3046,6 +3176,21 @@ export function AgentsPage() {
               </Button>
 
               <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="flex-1 min-w-[88px]"
+                  onClick={() => {
+                    if (drawerEditMode) {
+                      setDrawerEditMode(false);
+                    } else {
+                      void loadAgentManifestForEdit(detailAgent.id);
+                    }
+                  }}
+                >
+                  <Wrench className="w-3.5 h-3.5 mr-1.5" />
+                  {drawerEditMode ? t("agents.quick_view", { defaultValue: "Quick View" }) : t("agents.full_editor", { defaultValue: "Full Editor" })}
+                </Button>
                 {isDetailDrawerSuspended ? (
                   <Button
                     variant="secondary"

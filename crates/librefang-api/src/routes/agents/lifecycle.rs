@@ -1137,6 +1137,68 @@ pub async fn get_agent(
         .into_response()
 }
 
+/// GET /api/agents/{id}/manifest — Return the agent's live manifest as TOML text.
+///
+/// Serializes the in-memory `AgentManifest` (not the on-disk `agent.toml`,
+/// which can lag when a partial-update PATCH hasn't triggered a persist) so
+/// the dashboard's full-manifest editor always starts from what the kernel
+/// currently runs. Read-only counterpart to `PATCH /api/agents/{id}` with a
+/// `manifest_toml` body.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/manifest",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Agent manifest TOML content as plain text", body = String),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Manifest failed to serialize")
+    )
+)]
+pub async fn get_agent_manifest_toml(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                t.t("api-error-agent-invalid-id"),
+            )
+                .into_response();
+        }
+    };
+    let Some(entry) = state.kernel.agent_registry().get(agent_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            t.t("api-error-agent-not-found"),
+        )
+            .into_response();
+    };
+    match toml::to_string_pretty(&entry.manifest) {
+        Ok(toml_str) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/toml")],
+            toml_str,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "agent manifest serialization failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                t.t("api-error-internal"),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// POST /api/agents/{id}/stop — Cancel an agent's current LLM run.
 #[utoipa::path(
     post,

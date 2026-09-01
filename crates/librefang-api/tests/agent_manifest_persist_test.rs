@@ -99,6 +99,15 @@ fn patch_json(path: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
+fn get_req(path: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
 fn manifest_of(state: &Arc<AppState>, id: AgentId) -> AgentManifest {
     state
         .kernel
@@ -324,4 +333,66 @@ async fn manifest_toml_cannot_rename_an_agent_out_from_under_the_registry() {
         "renamed-properly",
         "the registry entry tracks the rename, which is the invariant the pin protects"
     );
+}
+
+/// `GET /api/agents/{id}/manifest` backs the dashboard's full-manifest editor drawer: it has to
+/// hand back TOML the PATCH round-trip above already proves is faithful, so the two routes are a
+/// matched pair — read what you can write, write what you read.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_manifest_round_trips_through_a_patch() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "manifest-reader");
+
+    // The name PATCH below is a distinct field-update route from `manifest_toml` (see
+    // `patch_agent_only_updates_mcp_servers` and friends), so give the GET endpoint something to
+    // report that only a manifest write could have produced.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({
+                "manifest_toml": "name = \"manifest-reader\"\ndescription = \"read me back\"\n\n[model]\nprovider = \"ollama\"\nmodel = \"test-model\"\n"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(get_req(&format!("/api/agents/{id}/manifest")))
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let toml_text = String::from_utf8(bytes.to_vec()).expect("utf8");
+
+    let parsed: AgentManifest = toml::from_str(&toml_text).expect("GET body must be valid TOML");
+    assert_eq!(parsed.description, "read me back");
+
+    // Feeding the GET response straight back into PATCH is the exact flow the drawer's "Full
+    // Editor" button performs, so this is the round-trip that has to hold.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({"manifest_toml": toml_text}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the GET body must be PATCH-able as-is"
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        get_req("/api/agents/does-not-exist/manifest"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
 }
