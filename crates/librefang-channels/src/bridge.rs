@@ -1107,7 +1107,8 @@ fn content_to_text(content: &ChannelContent) -> String {
 /// sanitizer entirely, even in Block mode (this closed the gap where
 /// `File` / `FileData` filenames and `Interactive` text reached the agent
 /// unchecked). Variants that never carry free-form user text (Location,
-/// Sticker, poll ids, …) return `None`; `ButtonCallback` is not among them — its `action` is attacker-controlled text that `content_to_text` renders into the prompt, so the arm above returns `Some(action)`.
+/// Sticker, poll ids, …) return `None`.
+/// `ButtonCallback` is not among them — its `action` is attacker-controlled text that `content_to_text` renders into the prompt, so its arm returns `Some(action)`.
 fn sanitizer_text_to_check(content: &ChannelContent) -> Option<String> {
     // Every arm that `content_to_text` renders into agent-facing prompt text
     // from an attacker-controlled field MUST be scanned here, or Block mode is
@@ -10496,6 +10497,28 @@ mod tests {
             assert!(result.is_some());
             let (drained_msg, _) = result.unwrap();
             assert_content_eq(&drained_msg.content, "/agent foo\n/agent bar");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_single_button_callback_slash_action_survives_drain_unchanged() {
+            // A lone slash-action ButtonCallback in the buffer drains with its content untouched (drain's single-message fast path), so `dispatch_message` still sees the `ButtonCallback` arm and routes `/agent foo` through the slash-command dispatcher.
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: make_test_button_callback("/agent foo"),
+                    media: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, media) = result.unwrap();
+            assert!(media.is_empty());
+            assert_content_eq(&drained_msg.content, "/agent foo");
         }
 
         #[tokio::test]
