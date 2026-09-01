@@ -180,6 +180,8 @@ type SettingsState = {
   visionOverride: CapOverride;
   streamingOverride: CapOverride;
   thinkingOverride: CapOverride;
+  contextWindow: number;
+  contextWindowEnabled: boolean;
 };
 
 type SettingsAction =
@@ -206,6 +208,8 @@ const settingsInitial: SettingsState = {
   visionOverride: "default",
   streamingOverride: "default",
   thinkingOverride: "default",
+  contextWindow: 128000,
+  contextWindowEnabled: false,
 };
 
 function boolToOverride(v: boolean | undefined | null): CapOverride {
@@ -249,6 +253,9 @@ export function settingsStateFromOverrides(
     visionOverride: boolToOverride(overrides.supports_vision),
     streamingOverride: boolToOverride(overrides.supports_streaming),
     thinkingOverride: boolToOverride(overrides.supports_thinking),
+    ...(overrides.context_window != null
+      ? { contextWindow: overrides.context_window, contextWindowEnabled: true }
+      : {}),
   };
 }
 
@@ -941,6 +948,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     setSaving(true);
     const overrides: ModelOverrides = {};
     if (s.modelType !== "chat") overrides.model_type = s.modelType;
+    if (s.contextWindowEnabled) overrides.context_window = s.contextWindow;
     if (s.tempEnabled) overrides.temperature = s.temperature;
     if (s.topPEnabled) overrides.top_p = s.topP;
     if (s.maxTokensEnabled) overrides.max_tokens = s.maxTokens;
@@ -1079,10 +1087,16 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
 
           <SliderInput
             label={t("models.context_window")}
-            value={model.context_window ?? 128000}
-            onChange={() => {}}
-            min={1024} max={1048576} step={1024}
-            enabled={false}
+            value={state.contextWindowEnabled ? state.contextWindow : (model.context_window ?? 128000)}
+            onChange={(v) => dispatch({ type: "SET_FIELD", field: "contextWindow", value: Math.round(v) })}
+            min={1024} max={2097152} step={1024}
+            enabled={state.contextWindowEnabled}
+            onToggle={(v) => {
+              dispatch({ type: "SET_FIELD", field: "contextWindowEnabled", value: v });
+              if (v && state.contextWindow === settingsInitial.contextWindow) {
+                dispatch({ type: "SET_FIELD", field: "contextWindow", value: model.context_window ?? 128000 });
+              }
+            }}
             ticks={[32768, 131072, 524288, 1048576]}
             formatTick={(v) => v >= 1048576 ? "1M" : `${Math.round(v/1024)}K`}
           />
