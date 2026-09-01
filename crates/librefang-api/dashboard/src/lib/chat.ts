@@ -209,8 +209,19 @@ export interface TerminalFrame {
  */
 
 export function extractWorkflowJson(content: string): string | null {
-  const fenced = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (fenced) return fenced[1];
+  // Scan every fenced block and return the first whose body parses as JSON.
+  // Skipping non-`json`-tagged fences keeps an explanatory shell/TOML block ahead of the real payload from winning, and the `JSON.parse` probe keeps a prose fence from returning garbage that the caller cannot parse downstream.
+  for (const fence of content.matchAll(/```([^\n]*)\n([\s\S]*?)```/g)) {
+    const lang = fence[1].trim().toLowerCase();
+    if (lang && lang !== "json") continue;
+    const body = fence[2].trim();
+    try {
+      JSON.parse(body);
+    } catch {
+      continue;
+    }
+    return body;
+  }
 
   const start = content.indexOf("{");
   if (start === -1) return null;
