@@ -92,10 +92,10 @@ describe("SliderInput", () => {
     it("still dims the values the row is inheriting", () => {
       renderInherited();
 
-      expect(screen.getByText("Temperature").className).toMatch(/opacity-40/);
-      expect(screen.getByRole("spinbutton").className).toMatch(/opacity-40/);
-      expect(screen.getByRole("slider").className).toMatch(/opacity-40/);
-      expect(screen.getByText("1").parentElement?.className).toMatch(/opacity-40/);
+      expect(screen.getByText("Temperature").className).toMatch(/opacity-50/);
+      expect(screen.getByRole("spinbutton").className).toMatch(/opacity-50/);
+      expect(screen.getByRole("slider").className).toMatch(/opacity-50/);
+      expect(screen.getByText("1").parentElement?.className).toMatch(/opacity-50/);
     });
 
     it("undims the values and checks the switch once the row is active", () => {
@@ -114,9 +114,9 @@ describe("SliderInput", () => {
       );
 
       expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
-      expect(screen.getByText("Temperature").className).not.toMatch(/opacity-40/);
-      expect(screen.getByRole("spinbutton").className).not.toMatch(/opacity-40/);
-      expect(screen.getByRole("slider").className).not.toMatch(/opacity-40/);
+      expect(screen.getByText("Temperature").className).not.toMatch(/opacity-50/);
+      expect(screen.getByRole("spinbutton").className).not.toMatch(/opacity-50/);
+      expect(screen.getByRole("slider").className).not.toMatch(/opacity-50/);
     });
   });
 

@@ -243,6 +243,69 @@ export function AgentManifestForm({
           </Field>
         </div>
         <div className="grid grid-cols-2 gap-3">
+          <Field label={t("agents.form.context_window", { defaultValue: "Context window" })}>
+            <input
+              type="number"
+              min="1024"
+              step="1024"
+              value={value.model.context_window}
+              onChange={(e) => updateModel({ context_window: e.target.value })}
+              placeholder={t("agents.form.context_window_placeholder", { defaultValue: "Catalog default" })}
+              className={inputClass}
+            />
+          </Field>
+          <Field label={t("agents.form.top_p", { defaultValue: "Top P" })}>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              max="1"
+              value={value.model.top_p}
+              onChange={(e) => updateModel({ top_p: e.target.value })}
+              placeholder={t("agents.form.top_p_placeholder", { defaultValue: "Default (1.0)" })}
+              className={inputClass}
+            />
+          </Field>
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          <Field label={t("agents.form.frequency_penalty", { defaultValue: "Freq. penalty" })}>
+            <input
+              type="number"
+              step="0.01"
+              min="-2"
+              max="2"
+              value={value.model.frequency_penalty}
+              onChange={(e) => updateModel({ frequency_penalty: e.target.value })}
+              placeholder="0"
+              className={inputClass}
+            />
+          </Field>
+          <Field label={t("agents.form.presence_penalty", { defaultValue: "Pres. penalty" })}>
+            <input
+              type="number"
+              step="0.01"
+              min="-2"
+              max="2"
+              value={value.model.presence_penalty}
+              onChange={(e) => updateModel({ presence_penalty: e.target.value })}
+              placeholder="0"
+              className={inputClass}
+            />
+          </Field>
+          <Field label={t("agents.form.reasoning_effort", { defaultValue: "Reasoning" })}>
+            <select
+              value={value.model.reasoning_effort}
+              onChange={(e) => updateModel({ reasoning_effort: e.target.value })}
+              className={inputClass}
+            >
+              <option value="">—</option>
+              <option value="low">{t("models.effort_low", { defaultValue: "Low" })}</option>
+              <option value="medium">{t("models.effort_medium", { defaultValue: "Medium" })}</option>
+              <option value="high">{t("models.effort_high", { defaultValue: "High" })}</option>
+            </select>
+          </Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.api_key_env")} hint={t("agents.form.api_key_env_hint")}>
             <input
               type="text"
