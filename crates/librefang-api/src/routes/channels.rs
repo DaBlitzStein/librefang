@@ -101,10 +101,15 @@ use crate::types::ApiErrorResponse;
 /// are still channels — surface the configured ones here so the
 /// operator view stays consistent regardless of whether an adapter
 /// runs in-process or as a sidecar. These rows are config.toml-managed
-/// (`[[sidecar_channels]]`, also under Config -> Sidecar Channels), so
-/// they carry no editable `fields`; the page renders them as
-/// configured/online cards (it conditionally hides empty
-/// `fields`/`setup_steps`).
+/// (`[[sidecar_channels]]`, also under Config -> Sidecar Channels) and are
+/// also editable in place: each one carries the `fields` its adapter's
+/// cached `--describe` schema declares, merged with this instance's stored
+/// values (see `configured_instance_fields`), plus the same
+/// `schema_error` / `sdk_version` provenance a discovery row carries so the
+/// dashboard can explain an empty `fields` list instead of rendering a
+/// drawer with a dead Save button (#8063). The page renders them as
+/// configured/online cards and conditionally hides an empty
+/// `fields`/`setup_steps`.
 ///
 /// # Liveness (#6606)
 ///
@@ -125,6 +130,7 @@ fn sidecar_channel_rows(
     msgs_24h_by_type: &std::collections::HashMap<String, u64>,
     with_msgs: bool,
     adapters: &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>>,
+    secrets_env_keys: &std::collections::HashSet<String>,
 ) -> Vec<serde_json::Value> {
     // Previously skipped sidecar entries whose `name` collided with an
     // in-process `CHANNEL_REGISTRY` row; that registry is empty now so
@@ -136,6 +142,12 @@ fn sidecar_channel_rows(
     }
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut rows = Vec::new();
+    // Both describe caches are read once for the whole loop rather than per
+    // row. `std::sync::RwLock` gives no re-entrancy guarantee, so taking a
+    // second read guard inside the loop while one is already held here can
+    // deadlock against a waiting writer.
+    let schema_guard = read_cache_recover(schema_cache(), "schema");
+    let schema_err_guard = read_cache_recover(schema_error_cache(), "schema error");
     for sc in sidecar {
         let name = sc.name.as_str();
         // One card per distinct sidecar name.
@@ -143,6 +155,7 @@ fn sidecar_channel_rows(
             continue;
         }
         let channel_type = sc.channel_type.as_deref().unwrap_or(name);
+        let schema = schema_guard.get(channel_type);
         let mut row = serde_json::json!({
             "name": name,
             "display_name": name,
@@ -160,7 +173,13 @@ fn sidecar_channel_rows(
             "configured": true,
             "instance_count": instance_counts.get(name).copied().unwrap_or(1),
             "has_token": true,
-            "fields": Vec::<serde_json::Value>::new(),
+            // Merges the catalog's cached `--describe` schema with this
+            // instance's current `env` values (and secrets.env presence) so
+            // the gear icon's SidecarForm has something to edit — see
+            // `configured_instance_fields`. Empty only when no schema is
+            // cached for `channel_type` (SDK missing and no static
+            // fallback), same as an unconfigured discovery row.
+            "fields": configured_instance_fields(schema, channel_type, sc, secrets_env_keys),
             "setup_steps": [
                 "Runs as an out-of-process sidecar adapter",
                 "Configured via [[sidecar_channels]] in config.toml \
@@ -173,7 +192,23 @@ fn sidecar_channel_rows(
             // `config_template`) so the UI can label the per-type traffic
             // figure with the type it actually covers.
             "channel_type": channel_type,
+            // Per-instance default-agent binding (multi-instance support).
+            // `null` when this instance has no default agent configured.
+            "agent": sc.agent,
         });
+        // The two schema-provenance keys a discovery row has always carried.
+        // A configured row omitted both, and the missing `schema_error` is the
+        // whole of #8063: with no cached schema `fields` is empty, so the gear
+        // icon opened a drawer with nothing to edit, no explanation of why, and
+        // a live Save button whose request could only ever 503. The dashboard
+        // can only distinguish "this adapter has no form" from "this adapter's
+        // form could not be loaded, here is the fix" if the row says so.
+        if let Some(version) = schema.and_then(|s| s.sdk_version.as_deref()) {
+            row["sdk_version"] = serde_json::json!(version);
+        }
+        if let Some(reason) = schema_err_guard.get(channel_type) {
+            row["schema_error"] = serde_json::json!(reason);
+        }
         // Per-instance liveness from the sidecar supervisor.
         // Adapters are registered under the instance `name` (the qualified `name:account_id` alias points at the same adapter), which is the same key this loop iterates, so the lookup is per-bot.
         // `json!` of an `Option` yields `null` for `None`, so the three nullable fields keep a stable shape whether or not an adapter is registered — a consumer never has to distinguish "absent" from "unknown".
@@ -203,6 +238,81 @@ fn sidecar_channel_rows(
         rows.push(row);
     }
     rows
+}
+
+/// Build the editable `fields[]` for an already-configured sidecar
+/// instance, merging the catalog's cached `--describe` schema (fetched by
+/// `channel_type`) with this instance's current values so the gear icon's
+/// SidecarForm has something to save back — before this, configured rows
+/// always carried an empty `fields[]`, which reached the dashboard as an
+/// unusable edit form (#7892 covered enabling the gear icon at all, not
+/// this).
+///
+/// `has_value` / `value` for non-secret fields come straight from
+/// `sc.env` (each `[[sidecar_channels]]` block owns its own env table, so
+/// this is already correctly scoped per instance). Secret fields have no
+/// stored value here by design (never echoed back as plaintext) — only
+/// `has_value`, computed from `secrets_env_keys`, the caller's one-time
+/// parse of `secrets.env`. A secondary instance (`sc.name != channel_type`)
+/// checks its own `<PREFIX>__KEY` namespaced key rather than the bare
+/// global one, mirroring the precedence `write_sidecar_configuration` writes
+/// under and `librefang_channels::sidecar::build_spawn_env` reads back.
+///
+/// `schema` is the caller's already-held lookup of `channel_type` in
+/// [`schema_cache`] — the lock is taken once for the whole row loop rather
+/// than re-entered here, because `std::sync::RwLock` promises nothing about a
+/// nested read guard.
+///
+/// Returns an empty vec when no schema is cached for `channel_type`. The row
+/// then carries `schema_error` instead, which is what lets the dashboard
+/// explain the empty form rather than rendering a dead one (#8063).
+fn configured_instance_fields(
+    schema: Option<&SidecarSchema>,
+    channel_type: &str,
+    sc: &librefang_types::config::SidecarChannelConfig,
+    secrets_env_keys: &std::collections::HashSet<String>,
+) -> Vec<serde_json::Value> {
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    let namespace = if sc.name == channel_type {
+        None
+    } else {
+        Some(librefang_channels::sidecar::instance_secret_prefix(
+            &sc.name,
+        ))
+    };
+    schema
+        .fields
+        .iter()
+        .map(|f| {
+            let (has_value, value) = if f.field_type == "secret" {
+                let key = match &namespace {
+                    Some(prefix) => format!("{prefix}__{}", f.key),
+                    None => f.key.clone(),
+                };
+                (secrets_env_keys.contains(&key), None)
+            } else {
+                let stored = sc.env.get(&f.key).filter(|v| !v.is_empty()).cloned();
+                (stored.is_some(), stored)
+            };
+            let mut field = serde_json::json!({
+                "key": f.key,
+                "label": f.label,
+                "type": f.field_type,
+                "required": f.required,
+                "placeholder": f.placeholder,
+                "advanced": f.advanced,
+                "options": f.options,
+                "has_value": has_value,
+                "env_var": f.key,
+            });
+            if let Some(value) = value {
+                field["value"] = serde_json::json!(value);
+            }
+            field
+        })
+        .collect()
 }
 
 /// Compile-time field descriptor used as a fallback when the Python sidecar
@@ -700,9 +810,9 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                     tracing::warn!(
                         adapter = entry.name,
                         error = %e,
-                        "sidecar --describe failed; discovery card will have no form fields"
+                        "sidecar --describe failed; channel cards will have no form fields"
                     );
-                    // Stash the failure reason so the discovery row can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
+                    // Stash the failure reason so every row for this adapter — the discovery card and each configured `[[sidecar_channels]]` instance of the type (#8063) — can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
                     write_cache_recover(schema_error_cache(), "schema error")
                         .insert(entry.name, e.to_string());
                 }
@@ -738,35 +848,25 @@ pub fn __test_seed_sidecar_schema_error_cache(entries: &[(&'static str, String)]
     }
 }
 
-/// Synthesize **unconfigured** dashboard rows for catalog sidecar
-/// adapters (`telegram`, `ntfy`) so they remain discoverable in the
-/// Add picker after the out-of-process migration. A catalog entry is
-/// suppressed when ANY `[[sidecar_channels]]` already has a matching
-/// `channel_type` (or, when `channel_type` is unset, a matching `name`)
-/// — i.e. once the operator has set up "telegram" under whatever local
-/// alias, the discovery card has done its job and should yield to the
-/// configured rows emitted by [`sidecar_channel_rows`].
-fn sidecar_discovery_rows(
-    sidecar: &[librefang_types::config::SidecarChannelConfig],
-) -> Vec<serde_json::Value> {
-    // The historical in-process `CHANNEL_REGISTRY` shadow check is
-    // gone (registry is deleted; every channel runs as a sidecar).
-    // Only suppress catalog rows whose channel name is already
-    // covered by a configured `[[sidecar_channels]]` entry.
-    let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for sc in sidecar {
-        let kind = sc.channel_type.as_deref().unwrap_or(sc.name.as_str());
-        covered.insert(kind);
-        covered.insert(sc.name.as_str());
-    }
-
+/// Synthesize **catalog** dashboard rows — one per `SIDECAR_CATALOG` entry,
+/// always, regardless of how many `[[sidecar_channels]]` instances of that
+/// type are already configured. These feed the Add-channel picker.
+///
+/// Before multi-instance support (#8xxx) a catalog entry was suppressed
+/// once ANY `[[sidecar_channels]]` matched its type, on the theory that a
+/// configured channel type "has done its job" and should yield entirely to
+/// the configured rows from [`sidecar_channel_rows`]. That precluded ever
+/// adding a *second* instance of an already-configured type (a second
+/// Telegram bot, a second Slack workspace) from the dashboard — the type's
+/// only picker entry was gone. The catalog row is a always a "start a new
+/// instance of this type" affordance now; `configured` rows (with their own
+/// edit/delete actions) are the only place an *existing* instance is
+/// edited.
+fn sidecar_discovery_rows() -> Vec<serde_json::Value> {
     let cache_guard = read_cache_recover(schema_cache(), "schema");
     let err_guard = read_cache_recover(schema_error_cache(), "schema error");
     let mut rows = Vec::new();
     for entry in SIDECAR_CATALOG {
-        if covered.contains(entry.name) {
-            continue;
-        }
         let fields: Vec<serde_json::Value> = cache_guard
             .get(entry.name)
             .map(|s| {
@@ -842,6 +942,24 @@ fn sidecar_discovery_rows(
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct ConfigureSidecarBody {
     pub values: HashMap<String, String>,
+    /// Multi-instance support: the unique `[[sidecar_channels]].name` to
+    /// write. Defaults to the path `{name}` (the catalog type) when absent
+    /// or blank, which is exactly today's one-instance-per-type behaviour —
+    /// existing dashboard builds and API callers that never send this field
+    /// keep working unchanged. Set it to a distinct value to configure a
+    /// second (or third, …) instance of the same catalog type — e.g. two
+    /// Telegram bots named `telegram` and `telegram-support`.
+    #[serde(default)]
+    pub instance_name: Option<String>,
+    /// Per-instance default agent (`[[sidecar_channels]].agent`) — inbound
+    /// messages on this instance with no more specific binding route here.
+    /// `None` / empty clears the field; omitted entirely leaves an existing
+    /// value untouched only insofar as the whole `agent` key is untouched by
+    /// this form — unlike `values`, there is no partial-update semantics
+    /// here because there's exactly one field, so send the field's current
+    /// value back to keep it.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Detect `[[sidecar_channels]]` entries in files referenced from the root
@@ -964,6 +1082,97 @@ fn included_files_with_sidecars_blocking(
 enum ConfigureSidecarWriteError {
     IncludedSidecars(Vec<std::path::PathBuf>),
     Write(String),
+    /// A different `[[sidecar_channels]]` entry already owns `instance_name`
+    /// under a different `channel_type`. Carries that entry's channel type
+    /// so the 409 body can name the collision. Same-type reuse of a name is
+    /// not a conflict — it is the update path (`upsert_sidecar_block`
+    /// matches by name and edits in place).
+    NameConflict(String),
+    /// A `required` secret field carries no value: the payload omitted it (or
+    /// sent whitespace) and this instance has no non-empty value stored for it
+    /// either (a bare `KEY=` line in secrets.env is a key, not a value).
+    /// Carries the field key so the 400 body can name it. Checked inside the
+    /// write step rather than in the handler because deciding it needs the
+    /// same `secrets.env` snapshot the write uses — reading it earlier, outside
+    /// `config_write_lock`, would be a TOCTOU against a concurrent save.
+    MissingRequiredSecret(String),
+    /// `instance_name` normalizes to the same `<PREFIX>__` secret namespace as one or more already-configured instances, so saving it would overwrite their secrets.
+    /// Carries the shared prefix and the colliding names.
+    SecretPrefixConflict {
+        prefix: String,
+        names: Vec<String>,
+    },
+}
+
+/// Names of the configured `[[sidecar_channels]]` entries that keep their secrets in a `<PREFIX>__` namespace — that is, every entry whose `name` differs from its `channel_type`.
+/// The instance sharing the catalog's own name writes bare keys and so cannot collide through the prefix.
+fn namespaced_instance_names(config_content: &str) -> Result<Vec<String>, String> {
+    if config_content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let document: toml_edit::DocumentMut = config_content
+        .parse()
+        .map_err(|error| format!("parse config.toml: {error}"))?;
+    let Some(array) = document
+        .get("sidecar_channels")
+        .and_then(|item| item.as_array_of_tables())
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(array
+        .iter()
+        .filter_map(|table| {
+            let name = table.get("name").and_then(|item| item.as_str())?;
+            let channel_type = table
+                .get("channel_type")
+                .and_then(|item| item.as_str())
+                .unwrap_or(name);
+            (name != channel_type).then(|| name.to_string())
+        })
+        .collect())
+}
+
+/// Look for an existing `[[sidecar_channels]]` entry named `instance_name`
+/// whose `channel_type` (or, when unset, its own `name`) differs from
+/// `channel_type`. Multiple instances are allowed to share a `name` only
+/// when they are actually the same instance being edited — a name collision
+/// across two different adapter types would otherwise silently reassign an
+/// existing bot's block to a new command/schema on the next save.
+fn find_conflicting_channel_type(
+    config_content: &str,
+    instance_name: &str,
+    channel_type: &str,
+) -> Result<Option<String>, String> {
+    if config_content.trim().is_empty() {
+        return Ok(None);
+    }
+    let document: toml_edit::DocumentMut = config_content
+        .parse()
+        .map_err(|error| format!("parse config.toml: {error}"))?;
+    let Some(array) = document
+        .get("sidecar_channels")
+        .and_then(|item| item.as_array_of_tables())
+    else {
+        return Ok(None);
+    };
+    for table in array.iter() {
+        let name = table
+            .get("name")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        if name != instance_name {
+            continue;
+        }
+        let existing_type = table
+            .get("channel_type")
+            .and_then(|item| item.as_str())
+            .unwrap_or(name);
+        if existing_type != channel_type {
+            return Ok(Some(existing_type.to_string()));
+        }
+        return Ok(None);
+    }
+    Ok(None)
 }
 
 fn read_file_snapshot(
@@ -1060,9 +1269,11 @@ fn rollback_sidecar_configuration(
 fn write_sidecar_configuration(
     config_path: &std::path::Path,
     secrets_path: &std::path::Path,
+    instance_name: &str,
     entry: &SidecarCatalogEntry,
     schema: &SidecarSchema,
     values: &HashMap<String, String>,
+    agent: Option<&str>,
 ) -> Result<Vec<String>, ConfigureSidecarWriteError> {
     let shadowing = included_files_with_sidecars_blocking(config_path)
         .map_err(ConfigureSidecarWriteError::Write)?;
@@ -1078,13 +1289,138 @@ fn write_sidecar_configuration(
     let original_config = read_file_snapshot(config_path)?;
     let original_secrets = read_file_snapshot(secrets_path)?;
 
-    let secrets_env_keys: std::collections::HashSet<String> =
-        librefang_channels::sidecar::parse_secrets_env_contents(
-            original_secrets.as_deref().unwrap_or_default(),
-        )
+    // Multi-instance support (several `[[sidecar_channels]]` of the same
+    // catalog type, each with its own `name`): refuse a save that would
+    // reassign an existing, differently-typed instance's block to this
+    // request's adapter. Checked against the pre-write snapshot, before any
+    // file is touched, so a rejected request leaves both files untouched —
+    // same "fail before the first mutation" contract as the include check
+    // above.
+    if let Some(conflicting_type) = find_conflicting_channel_type(
+        original_config.as_deref().unwrap_or_default(),
+        instance_name,
+        entry.name,
+    )
+    .map_err(ConfigureSidecarWriteError::Write)?
+    {
+        return Err(ConfigureSidecarWriteError::NameConflict(conflicting_type));
+    }
+
+    // `instance_secret_prefix` uppercases and maps every non-alphanumeric character to `_`, so it is many-to-one: `bot-1`, `bot.1` and `BOT+1` all land on `BOT_1`.
+    // Two instances that collapse together share one `<PREFIX>__KEY` namespace in secrets.env, and the second save silently overwrites the first one's token — the opposite of the isolation this endpoint exists to provide.
+    //
+    // `warn_secret_prefix_collisions` reports that from the boot / reload loop, which was enough while a second instance meant hand-editing config.toml in front of the existing entries.
+    // It is not enough for a two-field form: by the time the WARN appears the token is already gone. Refuse here, on the same "fail before the first mutation" contract as the checks above.
+    //
+    // Only namespaced instances can collide this way — the one sharing the catalog's own name writes bare keys — so a default-named save skips it.
+    if instance_name != entry.name {
+        let existing = namespaced_instance_names(original_config.as_deref().unwrap_or_default())
+            .map_err(ConfigureSidecarWriteError::Write)?;
+        let names = librefang_channels::sidecar::secret_prefix_conflict(&existing, instance_name);
+        if !names.is_empty() {
+            return Err(ConfigureSidecarWriteError::SecretPrefixConflict {
+                prefix: librefang_channels::sidecar::instance_secret_prefix(instance_name),
+                names,
+            });
+        }
+    }
+
+    // A second (third, …) named instance of the same catalog type must not
+    // share the first instance's secret — `TELEGRAM_BOT_TOKEN` can only ever
+    // hold one value. `librefang_channels::sidecar::build_spawn_env` already
+    // resolves a `<PREFIX>__<KEY>` namespaced secret ahead of the bare
+    // global key for exactly this reason (#6169); this save just has to
+    // start writing into that namespace once there's more than one instance
+    // of the type. The instance sharing the catalog's own name keeps writing
+    // the bare key — zero behaviour change for every config that predates
+    // multi-instance support.
+    let secret_namespace = if instance_name == entry.name {
+        None
+    } else {
+        Some(librefang_channels::sidecar::instance_secret_prefix(
+            instance_name,
+        ))
+    };
+    let secret_key = |field_key: &str| match &secret_namespace {
+        Some(prefix) => format!("{prefix}__{field_key}"),
+        None => field_key.to_string(),
+    };
+
+    let secrets_env_entries = librefang_channels::sidecar::parse_secrets_env_contents(
+        original_secrets.as_deref().unwrap_or_default(),
+    );
+    // Every key present in the file, regardless of whether it holds a value —
+    // what the shadow-warning check below wants ("was this key already in
+    // secrets.env before this save?").
+    let secrets_env_keys: std::collections::HashSet<String> = secrets_env_entries
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect();
+    // Keys that actually hold a value. This is the set the required-secret
+    // check below reads, and it applies the same filter `read_secrets_env_keys`
+    // applies when it computes the row's `has_value` — so a save is accepted on
+    // exactly the secrets the drawer showed as set, and a hand-edited `KEY=`
+    // line (a key with no value) cannot satisfy a required field.
+    let secrets_env_values: std::collections::HashSet<String> = secrets_env_entries
         .into_iter()
+        .filter(|(_, value)| !value.is_empty())
         .map(|(key, _)| key)
         .collect();
+
+    // Required-secret validation, deliberately "has a value after this save"
+    // rather than "is present in this payload" (#8063).
+    //
+    // The configure drawer never echoes a stored secret back as plaintext, so
+    // editing one non-secret field on a configured instance submits a payload
+    // with no token in it — and the write path below already treats that as
+    // "leave the stored secret alone" (an absent key never reaches
+    // `upsert_secret`). Rejecting it here anyway made every edit of a
+    // configured Slack instance 400 with `required field SLACK_APP_TOKEN is
+    // missing or empty` unless the operator re-pasted both workspace tokens
+    // from scratch, which is the failure the issue reproduced.
+    //
+    // The guarantee the check exists for is unchanged: after a successful save
+    // the instance has a value for every required secret. Accepted sources, in
+    // the order `librefang_channels::sidecar::build_spawn_env` resolves them —
+    // this request's payload, then this instance's `secrets.env` key
+    // (namespaced `<INSTANCE>__<KEY>` for a secondary instance, bare for the
+    // one named after its catalog type), then the daemon's own environment.
+    //
+    // The daemon-environment source is deliberately accepted for the bare-key
+    // path only, and that is narrower than what the child actually sees: the
+    // supervisor never calls `Command::env_clear` (see the precedence notes on
+    // `build_spawn_env`), so an exported bare key is inherited by *every*
+    // sidecar child, namespaced instances included. Widening it here would
+    // undo the point of per-instance namespacing — a second instance would be
+    // allowed to save with no secret of its own and silently run on the first
+    // one's token — so a namespaced instance must name its own secret.
+    //
+    // Required non-secret fields stay strict in the handler's earlier pass:
+    // their current values *are* echoed into the form, so the form always
+    // resubmits them, and `write_form_managed` deletes a managed env key that
+    // a save omits. Accepting an omission here would green-light a save that
+    // then removes the very key it was told was satisfied.
+    for field in &schema.fields {
+        if !field.required || field.field_type != "secret" {
+            continue;
+        }
+        let submitted = values
+            .get(&field.key)
+            .is_some_and(|value| !value.trim().is_empty());
+        let stored = secrets_env_values.contains(&secret_key(&field.key));
+        let inherited = secret_namespace.is_none()
+            && std::env::var(&field.key).is_ok_and(|value| !value.trim().is_empty());
+        if !submitted && !stored && !inherited {
+            return Err(ConfigureSidecarWriteError::MissingRequiredSecret(
+                field.key.clone(),
+            ));
+        }
+    }
+
+    // Namespaced per-instance secrets always win over the parent process env
+    // (`build_spawn_env` never consults it for them), so the shadow warning
+    // — "a shell-exported var will out-rank what this save just wrote" — is
+    // only meaningful for the bare-key (single/default-instance) path.
     let mut shadowed_secrets: Vec<String> = schema
         .fields
         .iter()
@@ -1094,7 +1430,11 @@ fn write_sidecar_configuration(
                 .get(&field.key)
                 .is_some_and(|value| !value.trim().is_empty())
         })
-        .filter(|field| std::env::var(&field.key).is_ok() && !secrets_env_keys.contains(&field.key))
+        .filter(|field| {
+            secret_namespace.is_none()
+                && std::env::var(&field.key).is_ok()
+                && !secrets_env_keys.contains(&field.key)
+        })
         .map(|field| field.key.clone())
         .collect();
     shadowed_secrets.sort();
@@ -1110,7 +1450,8 @@ fn write_sidecar_configuration(
                 continue;
             }
             if field.field_type == "secret" {
-                super::secrets_env::upsert_secret(secrets_path, &field.key, trimmed)?;
+                let key = secret_key(&field.key);
+                super::secrets_env::upsert_secret(secrets_path, &key, trimmed)?;
             } else {
                 nonsecret_env.insert(field.key.clone(), trimmed.to_string());
             }
@@ -1124,12 +1465,13 @@ fn write_sidecar_configuration(
             .collect();
         super::sidecar_toml::upsert_sidecar_block(
             config_path,
-            entry.name,
+            instance_name,
             entry.name,
             entry.command,
             entry.args,
             &nonsecret_env,
             &managed_env_keys,
+            agent,
         )
     })();
     if let Err(error) = write_result {
@@ -1153,8 +1495,13 @@ fn write_sidecar_configuration(
 /// `POST /api/channels/sidecar/{name}/configure` — save schema-driven
 /// sidecar form values, splitting the payload across `secrets.env` and
 /// `config.toml`, then trigger a hot-reload so the kernel picks up the
-/// new `[[sidecar_channels]]` block without a restart. `name` is the
-/// `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …).
+/// new `[[sidecar_channels]]` block without a restart. `name` is always the
+/// `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …) — it picks the adapter's
+/// schema/command/args and never changes across a rename. The
+/// `[[sidecar_channels]].name` actually written is `body.instance_name`
+/// when present, falling back to `name` (today's one-instance-per-type
+/// behaviour) so multiple named instances of the same catalog type
+/// (e.g. two Telegram bots) can be configured side by side.
 #[utoipa::path(
     post,
     path = "/api/channels/sidecar/{name}/configure",
@@ -1172,7 +1519,7 @@ fn write_sidecar_configuration(
             until the operator unsets them and restarts the daemon.", body = crate::types::JsonObject),
         (status = 400, description = "Missing required field or invalid value", body = crate::types::JsonObject),
         (status = 404, description = "Unknown catalog name", body = crate::types::JsonObject),
-        (status = 409, description = "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.", body = crate::types::JsonObject),
+        (status = 409, description = "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow; or `instance_name` already names a differently-typed instance.", body = crate::types::JsonObject),
         (status = 423, description = "Configuration is managed by the deployment; declare the sidecar in the manifest instead.", body = crate::types::JsonObject),
         (status = 503, description = "Schema not cached — SDK module may be missing", body = crate::types::JsonObject),
     )
@@ -1212,9 +1559,18 @@ pub async fn configure_sidecar_channel(
             .into_json_tuple()
         })?;
 
-    // 3. Validate required fields: present in payload AND non-empty after trim.
+    // 3. Validate required NON-SECRET fields: present in payload AND non-empty
+    //    after trim. The form renders these with their current values, so a
+    //    save always resubmits them, and `write_form_managed` removes a managed
+    //    env key that a save omits — an omission here really is a request to
+    //    end up with no value.
+    //
+    //    Required *secret* fields are validated in `write_sidecar_configuration`
+    //    instead, against the `secrets.env` snapshot the write itself uses: a
+    //    stored secret is never echoed into the form, so "absent from the
+    //    payload" means "keep what is stored", not "clear it" (#8063).
     for f in &schema.fields {
-        if f.required {
+        if f.required && f.field_type != "secret" {
             let v = body.values.get(&f.key).map(|s| s.trim()).unwrap_or("");
             if v.is_empty() {
                 return Err(ApiErrorResponse::bad_request(format!(
@@ -1225,6 +1581,24 @@ pub async fn configure_sidecar_channel(
             }
         }
     }
+
+    // 3a. Resolve the instance name this save actually writes under.
+    //     Blank is treated the same as absent — a stray empty string from a
+    //     cleared form field must not become a `[[sidecar_channels]]` with
+    //     name = "".
+    let instance_name = body
+        .instance_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(name.as_str())
+        .to_string();
+    let agent = body
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     // 3b. Resolve `~/.librefang` paths from the kernel's configured
     //     `home_dir` rather than recomputing from `LIBREFANG_HOME` /
@@ -1248,8 +1622,17 @@ pub async fn configure_sidecar_channel(
     //    Keeping include detection under the lock also prevents another config writer from changing the include list between the check and write.
     let shadowed_secrets = {
         let _config_guard = state.config_write_lock.lock().await;
+        let write_instance_name = instance_name.clone();
         tokio::task::spawn_blocking(move || {
-            write_sidecar_configuration(&config_path, &secrets_path, entry, &schema, &body.values)
+            write_sidecar_configuration(
+                &config_path,
+                &secrets_path,
+                &write_instance_name,
+                entry,
+                &schema,
+                &body.values,
+                agent.as_deref(),
+            )
         })
         .await
         .map_err(|e| {
@@ -1266,6 +1649,30 @@ pub async fn configure_sidecar_channel(
                 ApiErrorResponse::conflict(format!(
                     "config.toml uses `include` directive and existing `[[sidecar_channels]]` entries live in {files}. Edit that file directly to avoid silently shadowing the included sidecars."
                 ))
+                .into_json_tuple()
+            }
+            ConfigureSidecarWriteError::NameConflict(conflicting_type) => {
+                ApiErrorResponse::conflict(format!(
+                    "instance name `{instance_name}` is already used by a configured `{conflicting_type}` channel. Pick a different instance name."
+                ))
+                .into_json_tuple()
+            }
+            ConfigureSidecarWriteError::MissingRequiredSecret(key) => {
+                ApiErrorResponse::bad_request(format!(
+                    "required field `{key}` is missing or empty"
+                ))
+                .into_json_tuple()
+            }
+            ConfigureSidecarWriteError::SecretPrefixConflict { prefix, names } => {
+                ApiErrorResponse::conflict(format!(
+                    "instance name `{instance_name}` normalizes to the same secret namespace `{prefix}__` as the configured instance(s) {}. Saving it would overwrite their `{prefix}__<KEY>` secrets in secrets.env. Pick a name that differs by more than punctuation or case.",
+                    names
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .with_code("sidecar_secret_prefix_conflict")
                 .into_json_tuple()
             }
             ConfigureSidecarWriteError::Write(error) => {
@@ -1495,15 +1902,17 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .channel_type_msgs_24h_bulk()
         .unwrap_or_default();
     let kcfg = state.kernel.config_ref();
+    let secrets_env_keys = read_secrets_env_keys(state.kernel.home_dir());
     let configured_rows = sidecar_channel_rows(
         &kcfg.sidecar_channels,
         &msgs_24h_by_type,
         true,
         state.kernel.channel_adapters_ref(),
+        &secrets_env_keys,
     );
     let configured_count = configured_rows.len() as u32;
     let mut channels = configured_rows;
-    channels.extend(sidecar_discovery_rows(&kcfg.sidecar_channels));
+    channels.extend(sidecar_discovery_rows());
 
     let total = channels.len();
     // Canonical PaginatedResponse envelope (#3842) hand-built so the bespoke
@@ -1528,14 +1937,33 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
     // `list_channels` for the history of the in-process loop that this
     // used to mirror.
     let kcfg = state.kernel.config_ref();
+    let secrets_env_keys = read_secrets_env_keys(state.kernel.home_dir());
     let mut channels = sidecar_channel_rows(
         &kcfg.sidecar_channels,
         &std::collections::HashMap::new(),
         false,
         state.kernel.channel_adapters_ref(),
+        &secrets_env_keys,
     );
-    channels.extend(sidecar_discovery_rows(&kcfg.sidecar_channels));
+    channels.extend(sidecar_discovery_rows());
     channels
+}
+
+/// One-shot parse of `secrets.env` into the set of keys with a non-empty
+/// value, for [`configured_instance_fields`]'s `has_value` check. Missing
+/// file (no secrets configured yet) is not an error — same "nothing set"
+/// outcome as an empty file.
+fn read_secrets_env_keys(home_dir: &std::path::Path) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(home_dir.join("secrets.env"))
+        .ok()
+        .map(|content| {
+            librefang_channels::sidecar::parse_secrets_env_contents(&content)
+                .into_iter()
+                .filter(|(_, value)| !value.is_empty())
+                .map(|(key, _)| key)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -1804,7 +2232,7 @@ mod schema_error_discovery_tests {
         // --- describe failed, no static fallback: row carries the reason ---
         __test_seed_sidecar_schema_cache(&[]);
         __test_seed_sidecar_schema_error_cache(&[("wechat", HINT.to_string())]);
-        let rows = sidecar_discovery_rows(&[]);
+        let rows = sidecar_discovery_rows();
         let wechat = rows
             .iter()
             .find(|r| r["name"] == "wechat")
@@ -1841,7 +2269,7 @@ mod schema_error_discovery_tests {
         };
         __test_seed_sidecar_schema_cache(&[("wechat", schema)]);
         __test_seed_sidecar_schema_error_cache(&[]);
-        let rows = sidecar_discovery_rows(&[]);
+        let rows = sidecar_discovery_rows();
         let wechat = rows
             .iter()
             .find(|r| r["name"] == "wechat")
@@ -1958,8 +2386,16 @@ mod sidecar_configuration_write_tests {
             ("ROOM".to_string(), "alerts".to_string()),
         ]);
 
-        write_sidecar_configuration(&config_path, &secrets_path, &TEST_ENTRY, &schema(), &values)
-            .unwrap();
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            TEST_ENTRY.name,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&secrets_path).unwrap(),
@@ -1969,6 +2405,80 @@ mod sidecar_configuration_write_tests {
         assert!(config.contains("name = \"test-sidecar\""));
         assert!(config.contains("ROOM = \"alerts\""));
         assert!(!config.contains("TEST_TOKEN"));
+    }
+
+    /// An omitted required secret is satisfied by a *stored value*, not by a
+    /// bare key sitting in secrets.env.
+    ///
+    /// `parse_secrets_env_contents` yields `("TEST_TOKEN", "")` for a
+    /// hand-edited `TEST_TOKEN=` line, and `read_secrets_env_keys` — the GET
+    /// path that computes the row's `has_value` — filters exactly that out. If
+    /// the required-secret check keyed on key presence instead, the drawer would
+    /// show the field as empty and required while the save it rejects came back
+    /// 200, and the adapter would then spawn with an empty token.
+    #[test]
+    fn empty_stored_secret_does_not_satisfy_a_required_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        std::fs::write(&secrets_path, "TEST_TOKEN=\nKEEP_ME=unchanged\n").unwrap();
+        let values = HashMap::from([("ROOM".to_string(), "alerts".to_string())]);
+
+        let result = write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            TEST_ENTRY.name,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            None,
+        );
+
+        assert!(
+            matches!(
+                &result,
+                Err(ConfigureSidecarWriteError::MissingRequiredSecret(key)) if key == "TEST_TOKEN"
+            ),
+            "{result:?}"
+        );
+        // Rejected before the first mutation, same contract as every other
+        // pre-write refusal in this function.
+        assert!(!config_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&secrets_path).unwrap(),
+            "TEST_TOKEN=\nKEEP_ME=unchanged\n"
+        );
+    }
+
+    /// The other half: a required secret that really is stored needs no
+    /// re-paste, which is the #8063 relaxation itself.
+    #[test]
+    fn stored_secret_satisfies_an_omitted_required_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        std::fs::write(&secrets_path, "TEST_TOKEN=already-stored\n").unwrap();
+        let values = HashMap::from([("ROOM".to_string(), "alerts".to_string())]);
+
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            TEST_ENTRY.name,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            None,
+        )
+        .expect("an omitted-but-stored required secret must not block the save");
+
+        assert_eq!(
+            std::fs::read_to_string(&secrets_path).unwrap(),
+            "TEST_TOKEN=already-stored\n",
+            "the omitted secret must be left exactly as it was"
+        );
+        assert!(std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("ROOM = \"alerts\""));
     }
 
     #[test]
@@ -1988,9 +2498,11 @@ mod sidecar_configuration_write_tests {
         let result = write_sidecar_configuration(
             &config_path,
             &secrets_path,
+            TEST_ENTRY.name,
             &TEST_ENTRY,
             &schema(),
             &values,
+            None,
         );
 
         assert!(matches!(
@@ -2019,9 +2531,11 @@ mod sidecar_configuration_write_tests {
         let result = write_sidecar_configuration(
             &config_path,
             &secrets_path,
+            TEST_ENTRY.name,
             &TEST_ENTRY,
             &schema(),
             &values,
+            None,
         );
 
         assert!(matches!(result, Err(ConfigureSidecarWriteError::Write(_))));
@@ -2059,9 +2573,11 @@ mod sidecar_configuration_write_tests {
         let result = write_sidecar_configuration(
             &config_path,
             &secrets_path,
+            TEST_ENTRY.name,
             &TEST_ENTRY,
             &schema(),
             &values,
+            None,
         );
 
         assert!(matches!(result, Err(ConfigureSidecarWriteError::Write(_))));
@@ -2070,5 +2586,189 @@ mod sidecar_configuration_write_tests {
             original_config
         );
         assert!(!secrets_path.exists());
+    }
+
+    static TEST_ENTRY_2: SidecarCatalogEntry = SidecarCatalogEntry {
+        name: "other-sidecar",
+        display_name: "Other Sidecar",
+        description: "test",
+        command: "other-command",
+        args: &["--serve"],
+        static_fields: None,
+    };
+
+    /// Multi-instance support: two `[[sidecar_channels]]` of the same
+    /// catalog type, distinguished only by `name`, must coexist with
+    /// independent env values and independent `agent` bindings.
+    #[test]
+    fn writes_two_named_instances_of_the_same_catalog_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            "test-sidecar-a",
+            &TEST_ENTRY,
+            &schema(),
+            &HashMap::from([
+                ("TEST_TOKEN".to_string(), "token-a".to_string()),
+                ("ROOM".to_string(), "room-a".to_string()),
+            ]),
+            Some("agent-a"),
+        )
+        .unwrap();
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            "test-sidecar-b",
+            &TEST_ENTRY,
+            &schema(),
+            &HashMap::from([
+                ("TEST_TOKEN".to_string(), "token-b".to_string()),
+                ("ROOM".to_string(), "room-b".to_string()),
+            ]),
+            Some("agent-b"),
+        )
+        .unwrap();
+
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("name = \"test-sidecar-a\""));
+        assert!(config.contains("name = \"test-sidecar-b\""));
+        assert_eq!(
+            config.matches("channel_type = \"test-sidecar\"").count(),
+            2,
+            "both instances share the catalog channel_type: {config}"
+        );
+        assert!(config.contains("ROOM = \"room-a\""));
+        assert!(config.contains("ROOM = \"room-b\""));
+        assert!(config.contains("agent = \"agent-a\""));
+        assert!(config.contains("agent = \"agent-b\""));
+
+        let secrets = std::fs::read_to_string(&secrets_path).unwrap();
+        assert!(secrets.contains("TEST_TOKEN=token-b"));
+    }
+
+    /// Re-saving the same instance with `agent: None` must clear the
+    /// field rather than leaving the previous value stuck.
+    #[test]
+    fn clears_agent_when_omitted_on_a_resave() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        let values = HashMap::from([("TEST_TOKEN".to_string(), "secret-value".to_string())]);
+
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            TEST_ENTRY.name,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            Some("some-agent"),
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("agent = \"some-agent\""));
+
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            TEST_ENTRY.name,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            None,
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!config.contains("agent ="), "agent cleared: {config}");
+    }
+
+    /// A second catalog type may not steal an instance name already owned
+    /// by a different type — that would silently reassign the existing
+    /// bot's block to a new command/schema on the very next save.
+    #[test]
+    fn rejects_instance_name_already_used_by_a_different_channel_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        let values = HashMap::from([("TEST_TOKEN".to_string(), "secret-value".to_string())]);
+
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            "shared-name",
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            None,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        let result = write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            "shared-name",
+            &TEST_ENTRY_2,
+            &schema(),
+            &values,
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ConfigureSidecarWriteError::NameConflict(conflicting_type))
+                if conflicting_type == "test-sidecar"
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            before,
+            "rejected save must not touch config.toml"
+        );
+    }
+
+    /// Same instance name AND same channel_type is the ordinary update
+    /// path, not a conflict.
+    #[test]
+    fn same_instance_name_and_type_is_an_update_not_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            "test-sidecar",
+            &TEST_ENTRY,
+            &schema(),
+            &HashMap::from([("TEST_TOKEN".to_string(), "v1".to_string())]),
+            None,
+        )
+        .unwrap();
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            "test-sidecar",
+            &TEST_ENTRY,
+            &schema(),
+            &HashMap::from([
+                ("TEST_TOKEN".to_string(), "v2".to_string()),
+                ("ROOM".to_string(), "updated".to_string()),
+            ]),
+            None,
+        )
+        .unwrap();
+
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(
+            config.matches("name = \"test-sidecar\"").count(),
+            1,
+            "update in place, not a second block: {config}"
+        );
+        assert!(config.contains("ROOM = \"updated\""));
     }
 }

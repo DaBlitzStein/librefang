@@ -786,7 +786,21 @@
         "audio_model": null,
         "audio_language": null,
         "audio_prompt": null,
+        "video_provider": null,
+        "video_model": null,
         "custom_stt": {
+          "base_url": "",
+          "api_key_env": "",
+          "key_required": false,
+          "model": null
+        },
+        "custom_image": {
+          "base_url": "",
+          "api_key_env": "",
+          "key_required": false,
+          "model": null
+        },
+        "custom_video": {
           "base_url": "",
           "api_key_env": "",
           "key_required": false,
@@ -3189,6 +3203,35 @@
         }
       ]
     },
+    "CustomImageConfig": {
+      "description": "Configuration for a custom / self-hosted vision endpoint used by image description (the understanding path, not generation).\n\nPoints `describe_image` at any OpenAI-compatible `/v1/chat/completions` endpoint that accepts a vision message — e.g. a local `llama.cpp` server, `ollama` with a multimodal model, or any other OpenAI-compatible service.\n\n## Example (`config.toml`) ```toml [media] image_provider = \"local-llava\"\n\n[media.custom_image] base_url = \"http://localhost:11434/v1/chat/completions\" # api_key_env = \"MY_LOCAL_VISION_KEY\"  # omit for keyless servers  # pragma: allowlist secret key_required = false model = \"llava\" ```",
+      "type": "object",
+      "properties": {
+        "api_key_env": {
+          "description": "Environment variable that holds the API key for this endpoint. When empty (default), no `Authorization` header is sent.",
+          "default": "",
+          "type": "string"
+        },
+        "base_url": {
+          "description": "Full URL of the OpenAI-compatible chat/completions endpoint. E.g. `\"http://localhost:11434/v1/chat/completions\"`.",
+          "default": "",
+          "type": "string"
+        },
+        "key_required": {
+          "description": "When `true`, the request is rejected immediately if the env var named by `api_key_env` is not set. When `false` (default), a missing key simply means no auth header is added — suitable for keyless local servers.",
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "description": "Model identifier forwarded to the endpoint. When unset the endpoint default is used.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
     "CustomSttConfig": {
       "description": "Configuration for a self-hosted / custom-URL speech-to-text provider.\n\nPoints STT at any OpenAI-compatible `/v1/audio/transcriptions` endpoint — e.g. a local `faster-whisper-server`, `whisper.cpp` HTTP server, or any other Whisper-API-compatible service. No new dependencies are needed: the same multipart HTTP path used for cloud providers is reused here.\n\n## Example (`config.toml`) ```toml [media] audio_provider = \"local-whisper\"\n\n[media.custom_stt] base_url = \"http://localhost:8080/v1/audio/transcriptions\" # api_key_env = \"MY_LOCAL_WHISPER_KEY\"  # omit for keyless servers  # pragma: allowlist secret key_required = false model = \"large-v3\" ```",
       "type": "object",
@@ -3251,6 +3294,35 @@
           "description": "Voice identifier forwarded to the endpoint. Default: `\"alloy\"`.",
           "default": "alloy",
           "type": "string"
+        }
+      }
+    },
+    "CustomVideoConfig": {
+      "description": "Configuration for a custom / self-hosted video description endpoint.\n\nPoints `describe_video` at any OpenAI-compatible multimodal endpoint that accepts video input — mirrors `CustomImageConfig` for video.\n\n## Example (`config.toml`) ```toml [media] video_provider = \"local-video\"\n\n[media.custom_video] base_url = \"http://localhost:8080/v1/chat/completions\" key_required = false model = \"video-llava\" ```",
+      "type": "object",
+      "properties": {
+        "api_key_env": {
+          "description": "Environment variable that holds the API key for this endpoint.",
+          "default": "",
+          "type": "string"
+        },
+        "base_url": {
+          "description": "Full URL of the multimodal endpoint.",
+          "default": "",
+          "type": "string"
+        },
+        "key_required": {
+          "description": "When `true`, the request is rejected if the env var is not set.",
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "description": "Model identifier forwarded to the endpoint.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -4713,6 +4785,20 @@
           "default": true,
           "type": "boolean"
         },
+        "custom_image": {
+          "description": "Custom / self-hosted vision endpoint for image description.\n\nWhen `image_provider` is set to a name that is not one of the built-in providers (`anthropic`, `openai`, `groq`, `gemini`), this block is consulted and the request is forwarded to an OpenAI-compatible chat/completions endpoint at `custom_image.base_url`.",
+          "default": {
+            "base_url": "",
+            "api_key_env": "",
+            "key_required": false,
+            "model": null
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/CustomImageConfig"
+            }
+          ]
+        },
         "custom_stt": {
           "description": "Custom / self-hosted STT endpoint configuration.\n\nWhen `audio_provider` is set to a name that is not one of the built-in providers (`groq`, `openai`, `minimax`, `fireworks`, `together`, `siliconflow`, `gemini`, `elevenlabs`), this block is consulted and the request is forwarded to an OpenAI-compatible Whisper endpoint at `custom_stt.base_url`.",
           "default": {
@@ -4724,6 +4810,20 @@
           "allOf": [
             {
               "$ref": "#/definitions/CustomSttConfig"
+            }
+          ]
+        },
+        "custom_video": {
+          "description": "Custom / self-hosted endpoint for video description.\n\nWhen `video_provider` is set to a name that is not one of the built-in providers (`gemini`), this block is consulted.",
+          "default": {
+            "base_url": "",
+            "api_key_env": "",
+            "key_required": false,
+            "model": null
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/CustomVideoConfig"
             }
           ]
         },
@@ -4748,7 +4848,7 @@
           ]
         },
         "image_provider": {
-          "description": "Preferred image description provider (auto-detect if None).",
+          "description": "Preferred image description provider (auto-detect if None).\n\nSet to any string (e.g. `\"local-llava\"`) to use the custom vision endpoint defined in `[media.custom_image]`.",
           "default": null,
           "type": [
             "string",
@@ -4773,6 +4873,22 @@
           "description": "Enable video description. Default: false (expensive).",
           "default": false,
           "type": "boolean"
+        },
+        "video_model": {
+          "description": "Preferred video description model (provider default if None).",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "video_provider": {
+          "description": "Preferred video description provider (auto-detect if None).\n\nSet to any string (e.g. `\"local-video\"`) to use the custom video endpoint defined in `[media.custom_video]`.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -6010,6 +6126,39 @@
         }
       }
     },
+    "ReasoningMode": {
+      "description": "How hard the model should reason on a turn (#7946).\n\n`budget_tokens` cannot express two things operators need. It cannot say \"do not reason at all\" — a sub-1024 budget merely omits the opt-in, which leaves a model that reasons by default (every DeepSeek V4 id) reasoning anyway — and it cannot reach the top rung of providers that have one (`max` / `xhigh`), because the bucket mapping in the OpenAI-compatible driver tops out at `high`. This enum is the direct control: it names the intent and each driver translates it into whatever its wire actually accepts.\n\nDeliberately four rungs rather than the union of every provider's vocabulary. `medium` is reachable only as the `budget_tokens` fallback bucket, because a fifth rung whose only distinct meaning is \"DeepSeek folds it into `high`\" is a knob that does nothing on the provider that motivated it.",
+      "oneOf": [
+        {
+          "description": "Do not reason — the wire-level \"non-think\" toggle.",
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "description": "Reason briefly.",
+          "type": "string",
+          "enum": [
+            "low"
+          ]
+        },
+        {
+          "description": "Reason at the provider's normal full effort.",
+          "type": "string",
+          "enum": [
+            "high"
+          ]
+        },
+        {
+          "description": "Reason at the provider's highest available effort.",
+          "type": "string",
+          "enum": [
+            "max"
+          ]
+        }
+      ]
+    },
     "RegistryConfig": {
       "description": "Registry sync configuration.\n\nConfigure in config.toml: ```toml [registry] cache_ttl_secs = 86400 # Optional: proxy/mirror prefix for users behind the GFW. # All GitHub URLs are prefixed with this value, e.g. #   registry_mirror = \"https://ghproxy.cn\" # turns \"https://github.com/...\" into \"https://ghproxy.cn/https://github.com/...\" registry_mirror = \"\" # Optional: full base URL of the forge that hosts the registry repo. # Default unset = GitHub. Set to consume a Codeberg-hosted registry, e.g. #   registry_host = \"https://codeberg.org\" ```",
       "type": "object",
@@ -7211,6 +7360,18 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
+        },
+        "reasoning_mode": {
+          "description": "Explicit reasoning mode (#7946).\n\nWhen set it wins over the [`Self::budget_tokens`] bucket mapping for drivers that honour it; when `None` the budget bucket is used, which is the pre-#7946 behaviour.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "stream_thinking": {
           "description": "Whether to stream thinking tokens to the client.",
