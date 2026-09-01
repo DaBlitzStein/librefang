@@ -1,0 +1,4 @@
+An agent's own inference settings now win over the per-model override instead of losing to it.
+`ModelConfig.max_tokens` / `.temperature` were plain numbers, so every agent carried a concrete 4096 / 0.7 whether or not anyone chose them, and letting the manifest win would have made per-model overrides unreachable for every agent in existence — both fields are now `Option`, `None` means "inherit", and the chain runs agent manifest > per-model override > system default.
+`top_p`, `frequency_penalty` and `presence_penalty` gain a per-agent equivalent, and the two endpoint limits, `context_window` and `max_output_tokens`, are editable per agent from every surface.
+Existing agents are unaffected on upgrade — every persisted manifest carries explicit numbers, which stay explicit; the inherit state appears only on new agents and where an operator picks it (#7786) (@DaBlitzStein)
