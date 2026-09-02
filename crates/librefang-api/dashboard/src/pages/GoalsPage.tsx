@@ -17,7 +17,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight, Pause, Zap, Ban } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight, Zap, Ban } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -162,23 +162,25 @@ function GoalRunInfo({ goal }: { goal: GoalItem }) {
   );
 }
 
-const RUN_PHASE_CONFIG: Record<string, { variant: "success" | "warning" | "error" | "info" | "default"; icon: React.ComponentType<{ className?: string }>; labelKey: string }> = {
-  running: { variant: "success", icon: Play, labelKey: "goals.phase_running" },
-  paused: { variant: "warning", icon: Pause, labelKey: "goals.phase_paused" },
-  finished: { variant: "info", icon: CheckCircle2, labelKey: "goals.phase_finished" },
-  max_iterations_reached: { variant: "warning", icon: Zap, labelKey: "goals.phase_max_iter" },
-  rate_limited: { variant: "error", icon: AlertTriangle, labelKey: "goals.phase_rate_limited" },
-  stopped: { variant: "default", icon: Ban, labelKey: "goals.phase_stopped" },
+const RUN_PHASE_CONFIG: Record<string, { variant: "success" | "warning" | "error" | "info" | "default"; icon?: React.ComponentType<{ className?: string }>; labelKey?: string }> = {
+  running: { variant: "success", icon: Play, labelKey: "goals.run_phase_running" },
+  finished: { variant: "info", icon: CheckCircle2, labelKey: "goals.run_phase_finished" },
+  max_iterations_reached: { variant: "warning", icon: Zap, labelKey: "goals.run_phase_max_iterations_reached" },
+  rate_limited: { variant: "error", icon: AlertTriangle, labelKey: "goals.run_phase_rate_limited" },
+  stopped: { variant: "default", icon: Ban, labelKey: "goals.run_phase_stopped" },
 };
 
-function GoalRunPhaseBadge({ phase, iteration, maxIterations }: { phase: string; iteration: number; maxIterations: number }) {
+// `phase` stays `string` (not the wire union) so an out-of-union value still reaches the fallback branch.
+export function GoalRunPhaseBadge({ phase, iteration, maxIterations }: { phase: string; iteration: number; maxIterations: number }) {
   const { t } = useTranslation();
-  const cfg = RUN_PHASE_CONFIG[phase] ?? RUN_PHASE_CONFIG.stopped;
+  const cfg = RUN_PHASE_CONFIG[phase] ?? {};
   const Icon = cfg.icon;
   return (
-    <Badge variant={cfg.variant} dot>
-      <Icon className="h-3 w-3 mr-0.5 inline-block" />
-      {t(cfg.labelKey, { defaultValue: phase.replace(/_/g, " ") })}
+    <Badge variant={cfg.variant ?? "default"} dot>
+      {Icon && <Icon className="h-3 w-3 mr-0.5 inline-block" />}
+      {cfg.labelKey
+        ? t(cfg.labelKey, { defaultValue: phase.replace(/_/g, " ") })
+        : phase.replace(/_/g, " ")}
       {phase === "running" && <span className="ml-1 font-mono text-[10px]">{iteration}/{maxIterations}</span>}
     </Badge>
   );
@@ -193,6 +195,7 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const hasAgent = !!goal.agent_id;
+  // Poll the run state only while a run could be active; cheap GET otherwise.
   const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
   const startMutation = useStartGoalRun();
   const stopMutation = useStopGoalRun();
@@ -228,20 +231,16 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
     }
   };
 
-  if (isRunning) {
+  if (isRunning && run) {
     return (
       <>
-        <GoalRunPhaseBadge phase={run!.phase} iteration={run!.iteration} maxIterations={run!.max_iterations} />
+        <GoalRunPhaseBadge phase={run.phase} iteration={run.iteration} maxIterations={run.max_iterations} />
         <button
           type="button"
           onClick={() => void onStop()}
           disabled={stopMutation.isPending}
           className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-          title={
-            run
-              ? t("goals.run_active", { iteration: run.iteration, max: run.max_iterations })
-              : t("goals.run_stop")
-          }
+          title={t("goals.run_active", { iteration: run.iteration, max: run.max_iterations })}
         >
           {stopMutation.isPending ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -258,7 +257,7 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
 
   return (
     <>
-      {showTerminalBadge && (
+      {showTerminalBadge && run && (
         <GoalRunPhaseBadge phase={run.phase} iteration={run.iteration} maxIterations={run.max_iterations} />
       )}
       <button
