@@ -1308,6 +1308,7 @@ fn test_prepare_llm_messages_current_time_msg_survives_trim_in_long_session() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1380,6 +1381,7 @@ fn test_prepare_llm_messages_current_time_msg_never_splits_tool_use_result_pair(
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
