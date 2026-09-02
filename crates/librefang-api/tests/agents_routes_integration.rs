@@ -3175,3 +3175,66 @@ async fn test_spawn_without_template_leaves_source_template_unset() {
         "an agent spawned from an inline manifest must not report a source_template: {detail}"
     );
 }
+
+/// An unreadable template is a server-side fault, not a malformed request, and it
+/// must report that in every locale.
+///
+/// The status used to be decided by `contains()` on `ManifestError::message`, which
+/// is already translated — so the arm only ever matched English and every other
+/// locale fell through to `400 invalid_manifest`, telling the operator their request
+/// was wrong. This test sends `Accept-Language: es` precisely because that is the
+/// case the substring match could not see.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_with_unreadable_template_reports_a_server_fault_in_any_locale() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = boot(TEST_TOKEN).await;
+
+    let store_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
+    std::fs::create_dir_all(&store_dir).expect("create agent-types dir");
+    let path = store_dir.join("unreadable-tmpl.toml");
+    std::fs::write(&path, "name = \"unreadable-tmpl\"\n").expect("write agent type");
+    // Chmod 000: the file exists, so this is not a not-found.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+        .expect("drop read permission");
+
+    // Running as root defeats the permission bits entirely — the read would succeed
+    // and the test would assert nothing. Skip rather than pass vacuously.
+    if std::fs::read_to_string(&path).is_ok() {
+        eprintln!("skipping: this process can read a 0o000 file (running as root?)");
+        return;
+    }
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/agents")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", TEST_TOKEN))
+        .header("accept-language", "es")
+        .body(Body::from(
+            serde_json::json!({ "template": "unreadable-tmpl" }).to_string(),
+        ))
+        .unwrap();
+    let (status, body) = send(h.app.clone(), request).await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable template must not be reported as a client error: {body}"
+    );
+    assert_eq!(
+        body["code"].as_str(),
+        Some("template_read_failed"),
+        "the code must name the real fault, not template_not_found or invalid_manifest: {body}"
+    );
+    // The message is Spanish here, which is the whole point: the status and code
+    // must not depend on the response text the operator happens to receive.
+    assert!(
+        !body["error"].as_str().unwrap_or_default().is_empty(),
+        "the error message should still be rendered in the requested locale: {body}"
+    );
+
+    // Restore so the temp dir can be cleaned up.
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+}
