@@ -15,6 +15,12 @@ struct ResolvedManifest {
 /// Error from manifest resolution — carries a user-facing message.
 struct ManifestError {
     message: String,
+    /// Status/code decided at the raise site instead of by matching substrings of
+    /// `message`.
+    /// `message` is already translated, so a `contains("…")` on it only ever matches
+    /// the English locale — the other eight fall through to whatever the last arm is.
+    /// The pre-existing arms still match by substring; new ones should set this.
+    code: Option<&'static str>,
 }
 
 /// Resolve a `SpawnRequest` into a parsed `AgentManifest`.
@@ -38,6 +44,7 @@ async fn resolve_manifest(
                 let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {
                     message: t.t("api-error-template-invalid-name"),
+                    code: None,
                 });
             }
             // Same precedence as the template catalog (`read_agent_type`):
@@ -54,6 +61,7 @@ async fn resolve_manifest(
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
                         message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                        code: None,
                     });
                 }
                 Err(e) => {
@@ -64,6 +72,7 @@ async fn resolve_manifest(
                     // looking for a missing file instead of at the error in the log.
                     return Err(ManifestError {
                         message: t.t("api-error-template-read-failed"),
+                        code: Some("template_read_failed"),
                     });
                 }
             }
@@ -71,6 +80,7 @@ async fn resolve_manifest(
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
                 message: t.t("api-error-template-required"),
+                code: None,
             });
         }
     } else {
@@ -82,6 +92,7 @@ async fn resolve_manifest(
         let t = ErrorTranslator::new(lang);
         return Err(ManifestError {
             message: t.t("api-error-manifest-too-large"),
+            code: None,
         });
     }
 
@@ -94,6 +105,7 @@ async fn resolve_manifest(
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
                         message: t.t("api-error-manifest-signature-mismatch"),
+                        code: None,
                     });
                 }
             }
@@ -108,6 +120,7 @@ async fn resolve_manifest(
                 let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {
                     message: t.t("api-error-manifest-signature-failed"),
+                    code: None,
                 });
             }
         }
@@ -121,6 +134,7 @@ async fn resolve_manifest(
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
                 message: t.t("api-error-manifest-invalid-format"),
+                code: None,
             });
         }
     };
@@ -200,18 +214,25 @@ async fn spawn_agent_inner(
     let resolved = match resolve_manifest(&state, &req, l).await {
         Ok(r) => r,
         Err(e) => {
-            let (status, code) = if e.message.contains("too large") {
-                (StatusCode::PAYLOAD_TOO_LARGE, "manifest_too_large")
-            } else if e.message.contains("not found") && e.message.contains("Template") {
-                (StatusCode::NOT_FOUND, "template_not_found")
-            } else if e.message.contains("signature verification failed") {
-                (StatusCode::FORBIDDEN, "signature_invalid")
-            } else if e.message.contains("Failed to read template") {
+            // A code set at the raise site wins: `e.message` is already translated,
+            // so the substring arms below only ever match the English locale. The
+            // older arms keep their existing behaviour rather than being rewritten
+            // here, but nothing new should be added to them.
+            let (status, code) = match e.code {
                 // The template exists as far as we know; we could not read it.
                 // That is a server-side fault, not a malformed request.
-                (StatusCode::INTERNAL_SERVER_ERROR, "template_read_failed")
-            } else {
-                (StatusCode::BAD_REQUEST, "invalid_manifest")
+                Some(c @ "template_read_failed") => (StatusCode::INTERNAL_SERVER_ERROR, c),
+                Some(c) => (StatusCode::BAD_REQUEST, c),
+                None if e.message.contains("too large") => {
+                    (StatusCode::PAYLOAD_TOO_LARGE, "manifest_too_large")
+                }
+                None if e.message.contains("not found") && e.message.contains("Template") => {
+                    (StatusCode::NOT_FOUND, "template_not_found")
+                }
+                None if e.message.contains("signature verification failed") => {
+                    (StatusCode::FORBIDDEN, "signature_invalid")
+                }
+                None => (StatusCode::BAD_REQUEST, "invalid_manifest"),
             };
             return json_error(status, code, e.message);
         }
