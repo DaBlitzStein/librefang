@@ -421,6 +421,9 @@ fn reduce_model(model: ModelConfig) -> ModelConfig {
         base_url: _,
         context_window,
         max_output_tokens,
+        top_p: _,
+        frequency_penalty: _,
+        presence_penalty: _,
         extra_params: _,
     } = model;
 
@@ -437,6 +440,9 @@ fn reduce_model(model: ModelConfig) -> ModelConfig {
         base_url: None,
         context_window,
         max_output_tokens,
+        top_p: None,
+        frequency_penalty: None,
+        presence_penalty: None,
         extra_params: BTreeMap::new(),
     }
 }
