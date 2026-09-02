@@ -1013,6 +1013,7 @@ bootstrap = "hooks/bootstrap.py"
 /// Env guard that restores the *previous* value of every variable it touched
 /// on drop, instead of erasing it (#8058 — an erasing helper disarmed
 /// `LIBREFANG_REGISTRY_OFFLINE` for a whole CI job).
+#[derive(Default)]
 struct RegistryEnvGuard {
     saved: Vec<(&'static str, Option<String>)>,
 }
@@ -1024,12 +1025,6 @@ impl RegistryEnvGuard {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
         }
-    }
-}
-
-impl Default for RegistryEnvGuard {
-    fn default() -> Self {
-        Self { saved: Vec::new() }
     }
 }
 
