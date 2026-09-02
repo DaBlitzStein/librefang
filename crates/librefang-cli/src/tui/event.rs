@@ -18,6 +18,7 @@ use super::screens::{
     channels::{ChannelAdapterInfo, ChannelFieldInfo, ChannelInstance, ConfigureRequest},
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
+    goals::GoalInfo,
     groups::GroupInfo,
     hands::{HandInfo, HandInstanceInfo},
     logs::LogEntry,
@@ -31,7 +32,7 @@ use super::screens::{
     templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
     usage::{AgentUsage, ModelUsage, UsageSummary},
-    workflows::{WorkflowInfo, WorkflowRun},
+    workflows::{WorkflowInfo, WorkflowParamField, WorkflowParamsFetch, WorkflowRun},
 };
 
 // ── BackendRef ──────────────────────────────────────────────────────────────
@@ -127,6 +128,10 @@ pub enum AppEvent {
     WorkflowRunResult(String),
     /// Workflow created successfully.
     WorkflowCreated(String),
+    /// Workflow declared parameters loaded for the run-input form. Every
+    /// fetch outcome arrives here — declared parameters, "declares none",
+    /// or "could not consult the schema" (see [`WorkflowParamsFetch`]).
+    WorkflowParamsLoaded(crate::tui::screens::workflows::WorkflowParamsFetch),
     /// Trigger list loaded.
     TriggerListLoaded(Vec<TriggerInfo>),
     /// Trigger created.
@@ -232,6 +237,23 @@ pub enum AppEvent {
     GroupsLoaded(Vec<GroupInfo>),
     /// Log entries loaded.
     LogsLoaded(Vec<LogEntry>),
+    /// Goals loaded.
+    GoalsLoaded(Vec<GoalInfo>),
+    /// Live run state fetched for one goal.
+    GoalRunLoaded {
+        goal_id: String,
+        phase: Option<String>,
+        iteration: Option<u32>,
+        max_iterations: Option<u32>,
+    },
+    /// Goal created.
+    GoalCreated(String),
+    /// Goal deleted.
+    GoalDeleted(String),
+    /// Goal run started.
+    GoalRunStarted(String),
+    /// Goal run stopped.
+    GoalRunStopped(String),
     /// Hand definitions loaded (marketplace).
     HandsLoaded(Vec<HandInfo>),
     /// Active hand instances loaded.
@@ -1260,6 +1282,76 @@ pub fn spawn_fetch_workflow_runs(
     });
 }
 
+/// Fetch a workflow's declared `input_schema` parameters for the run-input form.
+///
+/// Every outcome sends `WorkflowParamsLoaded`, in daemon and in-process mode
+/// alike: declared parameters, "declares none", or "could not consult the
+/// schema" (see [`WorkflowParamsFetch`]). The form then renders one editable
+/// row per declared parameter, the bare-string box, or the bare-string box
+/// plus a status line that says the schema was not consulted - never a
+/// silent fallback to free text.
+pub fn spawn_fetch_workflow_params(
+    backend: BackendRef,
+    workflow_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let fetch = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                client
+                    .get(format!("{base_url}/api/workflows/{workflow_id}"))
+                    .send()
+                    .ok()
+                    .filter(|r| r.status().is_success())
+                    .and_then(|r| r.json::<serde_json::Value>().ok())
+                    .map(|body| {
+                        match body.get("input_schema").and_then(|v| v.as_array()) {
+                            // A 200 with a declared schema - possibly empty, which
+                            // still means the workflow has no parameters.
+                            Some(arr) => {
+                                let params = arr
+                                    .iter()
+                                    .filter_map(|p| {
+                                        let name = p.get("name")?.as_str()?.to_string();
+                                        Some(WorkflowParamField {
+                                            name,
+                                            param_type: p
+                                                .get("param_type")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("string")
+                                                .to_string(),
+                                            required: p
+                                                .get("required")
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(true),
+                                            description: p
+                                                .get("description")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string(),
+                                            value: String::new(),
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                WorkflowParamsFetch::Loaded(params)
+                            }
+                            // A 200 whose body carries no `input_schema` array: the
+                            // kernel omits the key when the workflow declares
+                            // nothing (skip_serializing_if), so this is "declares
+                            // none", not a failure.
+                            None => WorkflowParamsFetch::None,
+                        }
+                    })
+                    .unwrap_or(WorkflowParamsFetch::Failed)
+            }
+            // In-process mode has no daemon HTTP API to consult, so the schema
+            // cannot be known. Say so instead of silently pretending it was.
+            BackendRef::InProcess(_) => WorkflowParamsFetch::Failed,
+        };
+        let _ = tx.send(AppEvent::WorkflowParamsLoaded(fetch));
+    });
+}
 /// How long the daemon may hold the run request open before handing the run back as a background task.
 ///
 /// Same reasoning as `WORKFLOW_RUN_WAIT_MS` in the `workflow run` command: `?wait=true` on its own ties the run's lifetime to the request, so a workflow slower than this thread's 60 s client timeout would be killed by the disconnect.
@@ -3665,6 +3757,241 @@ pub fn spawn_fetch_logs(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             let _ = tx.send(AppEvent::LogsLoaded(Vec::new()));
         }
     });
+}
+
+// ── Goals events ────────────────────────────────────────────────────────────
+
+/// Fetch the goals list.
+pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/goals")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    // `GET /api/goals` answers with a `PaginatedResponse`
+                    // (`{"items": [...]}`); the bare-array fallback keeps an
+                    // older daemon working.
+                    let goals: Vec<GoalInfo> = body
+                        .get("items")
+                        .and_then(|v| v.as_array())
+                        .or_else(|| body.as_array())
+                        .map(|arr| arr.iter().map(goal_from_json).collect())
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::GoalsLoaded(goals));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::GoalsLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Read one goal document into a [`GoalInfo`].
+///
+/// Run state is deliberately absent: the stored document never carries it, so
+/// it is fetched per goal by [`spawn_fetch_goal_run`] when the detail pane opens.
+fn goal_from_json(g: &serde_json::Value) -> GoalInfo {
+    GoalInfo {
+        id: g["id"].as_str().unwrap_or_default().to_string(),
+        title: g["title"].as_str().unwrap_or_default().to_string(),
+        description: g["description"].as_str().unwrap_or_default().to_string(),
+        status: g["status"].as_str().unwrap_or_default().to_string(),
+        progress: g["progress"].as_u64().unwrap_or(0).min(100) as u8,
+        agent_id: g["agent_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        run_phase: None,
+        run_iteration: None,
+        run_max_iterations: None,
+    }
+}
+
+/// Fetch the live run state for a single goal.
+pub fn spawn_fetch_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let BackendRef::Daemon { base_url, api_key } = backend else {
+            return;
+        };
+        let client = make_daemon_client(api_key.as_deref());
+        let Ok(resp) = client
+            .get(format!("{base_url}/api/goals/{goal_id}/run"))
+            .send()
+        else {
+            return;
+        };
+        let Ok(body) = resp.json::<serde_json::Value>() else {
+            return;
+        };
+        // A goal that never ran answers `{"running": false}` with no `run`
+        // object, which correctly leaves every field `None`.
+        let run = &body["run"];
+        let _ = tx.send(AppEvent::GoalRunLoaded {
+            goal_id,
+            phase: run["phase"].as_str().map(str::to_string),
+            iteration: run["iteration"].as_u64().map(|v| v as u32),
+            max_iterations: run["max_iterations"].as_u64().map(|v| v as u32),
+        });
+    });
+}
+
+/// Create a goal.
+pub fn spawn_create_goal(
+    backend: BackendRef,
+    title: String,
+    description: String,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = serde_json::json!({
+                "title": title,
+                "description": description,
+                "agent_id": agent_id,
+            });
+            match client
+                .post(format!("{base_url}/api/goals"))
+                .json(&body)
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let resp_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let id = resp_body["id"].as_str().unwrap_or_default().to_string();
+                    let _ = tx.send(AppEvent::GoalCreated(id));
+                }
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::FetchError(api_error_text(
+                        resp,
+                        "tui-goal-create-failed",
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-goal-create-error",
+                        &[("error", &e.to_string())],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Delete a goal.
+pub fn spawn_delete_goal(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .delete(format!("{base_url}/api/goals/{goal_id}"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalDeleted(goal_id));
+                }
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::FetchError(api_error_text(
+                        resp,
+                        "tui-goal-delete-failed",
+                    )));
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-delete-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Start a goal run.
+pub fn spawn_start_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/start"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunStarted(goal_id));
+                }
+                Ok(resp) => {
+                    // The daemon's own message is the useful one here — it
+                    // names the cause, e.g. an unassigned or unparsable agent.
+                    let _ = tx.send(AppEvent::FetchError(api_error_text(
+                        resp,
+                        "tui-goal-start-failed",
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-goal-start-error",
+                        &[("error", &e.to_string())],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Stop a goal run.
+pub fn spawn_stop_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/stop"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunStopped(goal_id));
+                }
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::FetchError(api_error_text(
+                        resp,
+                        "tui-goal-stop-failed",
+                    )));
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-goal-stop-failed")));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// The `error` field of a failed daemon response, or the given fallback message.
+fn api_error_text(resp: reqwest::blocking::Response, fallback_key: &str) -> String {
+    let body: serde_json::Value = resp.json().unwrap_or_default();
+    body["error"]
+        .as_str()
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::i18n::t(fallback_key))
 }
 
 // ── Hands events ────────────────────────────────────────────────────────────
