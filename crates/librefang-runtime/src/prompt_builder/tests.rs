@@ -866,6 +866,38 @@ fn test_channel_send_hint_without_tool() {
 }
 
 #[test]
+fn test_channel_send_hint_suppressed_for_webui() {
+    let tools = vec!["channel_send".to_string()];
+    let section =
+        build_channel_section("webui", Some("Alice"), Some("user-1"), false, false, &tools);
+    assert!(
+        section.contains("web interface"),
+        "webui should be told media flows through the response stream"
+    );
+    assert!(
+        !section.contains("image_url"),
+        "webui should not get the channel_send media hint"
+    );
+}
+
+#[test]
+fn test_channel_send_hint_suppressed_for_cron_and_autonomous() {
+    let tools = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
+        let section =
+            build_channel_section(channel, Some("Alice"), Some("12345"), false, false, &tools);
+        assert!(
+            section.contains("background run"),
+            "{channel} should be told channel_send cannot reach a system channel"
+        );
+        assert!(
+            !section.contains("image_url"),
+            "{channel} should not get the channel_send media hint"
+        );
+    }
+}
+
+#[test]
 fn test_user_name_known() {
     let mut ctx = basic_ctx();
     ctx.user_name = Some("Alice".to_string());
