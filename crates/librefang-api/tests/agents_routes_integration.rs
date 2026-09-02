@@ -3184,6 +3184,64 @@ async fn test_spawn_without_template_leaves_source_template_unset() {
 /// locale fell through to `400 invalid_manifest`, telling the operator their request
 /// was wrong. This test sends `Accept-Language: es` precisely because that is the
 /// case the substring match could not see.
+/// Every manifest-resolution failure must report the same status regardless of the
+/// caller's language.
+///
+/// These statuses used to be recovered by matching English substrings of an
+/// already-translated message, so a Spanish client got `400 invalid_manifest` for all
+/// of them. The signature case is the one that mattered most: "malformed request" is
+/// not what the server meant by a rejected signature.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_manifest_errors_keep_their_status_in_a_non_english_locale() {
+    let h = boot(TEST_TOKEN).await;
+
+    let spanish = |body: serde_json::Value| {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", TEST_TOKEN))
+            .header("accept-language", "es")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    // Missing template → 404, not 400.
+    let (status, body) = send(
+        h.app.clone(),
+        spanish(serde_json::json!({ "template": "no-such-template-here" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"].as_str(), Some("template_not_found"), "{body}");
+
+    // Oversized manifest → 413, not 400.
+    let huge = format!(
+        "name = \"huge\"\nversion = \"0.1.0\"\nmodule = \"builtin:chat\"\ndescription = \"{}\"\n",
+        "x".repeat(1024 * 1024 + 1)
+    );
+    let (status, body) = send(
+        h.app.clone(),
+        spanish(serde_json::json!({ "manifest_toml": huge })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"].as_str(), Some("manifest_too_large"), "{body}");
+
+    // Rejected signature → 403, not 400. A client that only reads the status must not
+    // be told its request was malformed when the server refused to trust it.
+    let (status, body) = send(
+        h.app.clone(),
+        spanish(serde_json::json!({
+            "manifest_toml": "name = \"signed\"\nversion = \"0.1.0\"\nmodule = \"builtin:chat\"\ndescription = \"d\"\n\n[model]\nprovider = \"default\"\nmodel = \"default\"\n",
+            "signed_manifest": "{\"not\":\"a valid signed envelope\"}",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"].as_str(), Some("signature_invalid"), "{body}");
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_with_unreadable_template_reports_a_server_fault_in_any_locale() {
