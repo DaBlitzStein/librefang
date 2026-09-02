@@ -4280,6 +4280,12 @@
     "title": "에이전트 타입",
     "tools": "도구",
     "tools_hint": "이 데몬이 제공하는 도구 목록에서 선택하며, 목록에 없는 식별자도 입력할 수 있습니다.",
-    "tools_search": "도구 검색…"
+    "tools_search": "도구 검색…",
+    "promote": "레지스트리에 등록",
+    "confirm_promote": "에이전트 유형 '{{name}}'을(를) 공개 레지스트리에 등록하시겠습니까? 매니페스트가 정리된 후 GitHub pull request로 제출됩니다.",
+    "promoted": "레지스트리 PR 생성됨",
+    "promote_failed": "에이전트 유형을 등록할 수 없습니다",
+    "promote_success": "레지스트리에 pull request가 생성되었습니다. 검토 후 병합하세요.",
+    "view_pr": "Pull request 보기"
   }
 }

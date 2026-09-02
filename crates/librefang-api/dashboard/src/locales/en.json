@@ -4281,6 +4281,12 @@
     "title": "Agent Types",
     "tools": "Tools",
     "tools_hint": "Picked from the tools this daemon exposes; unknown identifiers can still be typed.",
-    "tools_search": "Search tools…"
+    "tools_search": "Search tools…",
+    "promote": "Promote to registry",
+    "confirm_promote": "Promote the agent type '{{name}}' to the public registry? The manifest will be sanitized for publication and submitted as a GitHub pull request.",
+    "promoted": "Registry PR opened",
+    "promote_failed": "Could not promote the agent type",
+    "promote_success": "A pull request has been opened against the registry. Review it and merge when ready.",
+    "view_pr": "View pull request"
   }
 }
