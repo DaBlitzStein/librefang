@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   createAgentType,
   deleteAgentType,
+  restoreTemplateVersion,
   spawnEphemeral,
   putAgentTemplateToml,
 } from "../http/client";
@@ -33,6 +34,25 @@ export function useDeleteAgentType() {
   return useMutation({
     mutationFn: (name: string) => deleteAgentType(name),
     onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
+  });
+}
+
+/**
+ * Restore a template to a prior version from its history.
+ *
+ * Invalidates the detail and history caches so both the editor and the
+ * history tab reflect the restored content immediately.
+ */
+export function useRestoreTemplateVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, versionId }: { name: string; versionId: number }) =>
+      restoreTemplateVersion(name, versionId),
+    onSuccess: (_data, { name }) => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.history(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
+    },
   });
 }
 

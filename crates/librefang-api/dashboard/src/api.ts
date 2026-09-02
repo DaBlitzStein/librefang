@@ -1776,6 +1776,35 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
+// ---------------------------------------------------------------------------
+// Template version history
+// ---------------------------------------------------------------------------
+
+export interface TemplateVersionEntry {
+  id: number;
+  template_name: string;
+  timestamp: string;
+  manifest_toml: string;
+  change_source: string;
+}
+
+export async function getTemplateHistory(
+  name: string,
+  limit = 30,
+): Promise<{ versions: TemplateVersionEntry[] }> {
+  return get(`/api/templates/${encodeURIComponent(name)}/history?limit=${limit}`);
+}
+
+export async function restoreTemplateVersion(
+  name: string,
+  versionId: number,
+): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>(
+    `/api/templates/${encodeURIComponent(name)}/history/${versionId}/restore`,
+    {},
+  );
+}
+
 /**
  * One ephemeral worker run (#6699).
  *
@@ -1974,6 +2003,12 @@ export interface ModelItem {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Provenance of `supports_vision`, resolved through any operator override. Refs #7957.
+  // "supported" / "unsupported" mean a source declared it; "unknown" means the boolean above was
+  // inferred from the model's name, and the agent loop then keeps sending images rather than
+  // stripping them on a guess. Surface it wherever a text-only model is presented as a fact, so an
+  // operator can tell "this model cannot see" from "nobody has told us".
+  vision_support?: "supported" | "unsupported" | "unknown";
   // Raw catalog defaults — use for "Auto = revert target" in override editors.
   capabilities_catalog?: {
     supports_tools?: boolean;
