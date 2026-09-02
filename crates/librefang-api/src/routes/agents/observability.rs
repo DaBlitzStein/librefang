@@ -692,11 +692,26 @@ pub async fn list_agent_ephemeral_runs(
 // Agent manifest version history
 // ---------------------------------------------------------------------------
 
+/// Query parameters for `GET /api/agents/{id}/manifest-history`.
+///
+/// A non-numeric `limit` is rejected at extraction (400) instead of being
+/// silently coerced to the default.
+#[derive(Debug, serde::Deserialize)]
+pub struct ManifestHistoryQuery {
+    #[serde(default = "default_history_limit")]
+    pub limit: u32,
+}
+
+/// Default page size for the manifest history listing.
+fn default_history_limit() -> u32 {
+    30
+}
+
 /// GET /api/agents/{id}/manifest-history — how this agent's config changed over time.
 ///
 /// Returns an array of manifest snapshots, newest first.
-/// Each entry carries the full TOML so the dashboard can render a diff
-/// between consecutive versions and offer a one-click restore.
+/// Each entry carries the full TOML so the dashboard can render a diff between
+/// consecutive versions. This endpoint is read-only: there is no restore.
 #[utoipa::path(
     get,
     path = "/api/agents/{id}/manifest-history",
@@ -707,38 +722,44 @@ pub async fn list_agent_ephemeral_runs(
     ),
     responses(
         (status = 200, description = "Manifest version history", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid agent id"),
+        (status = 400, description = "Invalid agent id or limit"),
         (status = 404, description = "Agent not found")
     )
 )]
 pub async fn list_agent_manifest_history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    query: Result<Query<ManifestHistoryQuery>, axum::extract::rejection::QueryRejection>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    let Query(params) = match query {
+        Ok(q) => q,
+        Err(rejection) => {
+            let reason = rejection.body_text();
+            return ApiErrorResponse::bad_request(
+                t.t_args("api-error-bad-request", &[("reason", &reason)]),
+            )
+            .into_response();
+        }
+    };
+
     let agent_uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => librefang_types::agent::AgentId(u),
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "invalid agent id" })),
-            )
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
                 .into_response();
         }
     };
     if state.kernel.agent_registry().get(agent_uuid).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "agent not found" })),
-        )
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
             .into_response();
     }
 
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(30)
-        .min(200) as usize;
+    let limit = params.limit.clamp(1, 200) as usize;
 
     let store = librefang_memory::ManifestVersionStore::new(state.kernel.memory_substrate().pool());
     match store.list_for_agent(&agent_uuid.0.to_string(), limit) {
