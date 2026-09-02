@@ -15,6 +15,10 @@ use r2d2_sqlite::SqliteConnectionManager;
 pub const MAX_VERSIONS_PER_AGENT: usize = 50;
 
 /// One recorded manifest snapshot.
+///
+/// `agent_name` is denormalised on purpose: it is the name at snapshot time, so a rename leaves old rows carrying the historical name.
+/// `change_source` is a short tag naming the write outcome — the kernel persist path writes `update` on success and `update-persist-failed` when the disk write failed after the in-memory manifest had already changed.
+/// The schema default `unknown` covers rows written by any future writer that does not classify its persist.
 #[derive(Debug, Clone)]
 pub struct ManifestVersionRow {
     pub id: i64,
