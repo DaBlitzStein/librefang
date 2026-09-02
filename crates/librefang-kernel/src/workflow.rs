@@ -8079,10 +8079,14 @@ prompt_template = "go"
         }
 
         let mut winners = Vec::new();
+        let mut loser_incumbents = Vec::new();
         for h in handles {
             match h.await.expect("registration task must not panic") {
                 Ok(id) => winners.push(id),
-                Err(RegisterWorkflowError::NameTaken(_)) => {}
+                Err(RegisterWorkflowError::NameTaken(taken)) => {
+                    assert_eq!(taken.name, "deploy");
+                    loser_incumbents.push(taken.existing_id);
+                }
                 Err(other) => panic!("unexpected error variant: {other:?}"),
             }
         }
@@ -8091,6 +8095,15 @@ prompt_template = "go"
             winners.len(),
             1,
             "exactly one caller may win, got {winners:?}"
+        );
+        assert_eq!(
+            loser_incumbents.len(),
+            CALLERS - 1,
+            "every other caller must be rejected with a collision"
+        );
+        assert!(
+            loser_incumbents.iter().all(|id| *id == winners[0]),
+            "every rejected caller must point at the same incumbent"
         );
         assert_eq!(
             count_named(&engine, "deploy").await,
