@@ -4290,6 +4290,12 @@
     "title": "智能体类型",
     "tools": "工具",
     "tools_hint": "从本守护进程提供的工具中选择，也可手动输入目录之外的标识符。",
-    "tools_search": "搜索工具…"
+    "tools_search": "搜索工具…",
+    "promote": "推广到注册表",
+    "confirm_promote": "将代理类型 '{{name}}' 推广到公共注册表？清单将被清理后作为 GitHub pull request 提交。",
+    "promoted": "注册表 PR 已创建",
+    "promote_failed": "无法推广代理类型",
+    "promote_success": "已在注册表中创建 pull request。审查后合并即可。",
+    "view_pr": "查看 pull request"
   }
 }
