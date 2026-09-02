@@ -23,6 +23,7 @@ fn appends_when_absent_preserves_existing_keys() {
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "1,2")]),
         &["ALLOWED_USERS"],
+        None,
     )
     .unwrap();
 
@@ -66,6 +67,7 @@ fn replaces_existing_block_with_same_name() {
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "1,2")]),
         &["ALLOWED_USERS", "OBSOLETE", "TELEGRAM_BOT_TOKEN"],
+        None,
     )
     .unwrap();
 
@@ -104,6 +106,7 @@ fn does_not_touch_other_sidecar_blocks() {
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "99")]),
         &["ALLOWED_USERS"],
+        None,
     )
     .unwrap();
 
@@ -151,6 +154,7 @@ fn preserves_operator_tuned_fields_on_replace() {
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "1")]),
         &["ALLOWED_USERS", "OBSOLETE"],
+        None,
     )
     .unwrap();
 
@@ -196,6 +200,7 @@ fn preserves_operator_custom_command_and_args_on_replace() {
         &["-m", "librefang.sidecar.adapters.telegram"], // catalog default — must NOT drop --debug
         &pairs(&[("ALLOWED_USERS", "1")]),
         &["ALLOWED_USERS", "OLD"],
+        None,
     )
     .unwrap();
 
@@ -238,6 +243,7 @@ fn backfills_command_and_args_when_existing_block_is_a_stub() {
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "1")]),
         &["ALLOWED_USERS"],
+        None,
     )
     .unwrap();
 
@@ -272,6 +278,7 @@ fn backfills_args_without_overwriting_operator_command() {
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[]),
         &[],
+        None,
     )
     .unwrap();
 
@@ -300,6 +307,7 @@ fn backfills_command_without_overwriting_operator_args() {
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[]),
         &[],
+        None,
     )
     .unwrap();
 
@@ -344,6 +352,7 @@ fn preserves_non_schema_env_keys_on_replace() {
         // Schema-managed non-secret keys only — PYTHONPATH / HTTP_PROXY
         // are intentionally absent and must be preserved.
         &["ALLOWED_USERS", "TELEGRAM_CLEAR_DONE_REACTION"],
+        None,
     )
     .unwrap();
 
@@ -390,6 +399,7 @@ fn removes_schema_managed_env_keys_when_form_clears_them() {
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[]), // form cleared ALLOWED_USERS
         &["ALLOWED_USERS", "TELEGRAM_CLEAR_DONE_REACTION"],
+        None,
     )
     .unwrap();
 
