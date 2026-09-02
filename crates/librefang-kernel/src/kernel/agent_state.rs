@@ -968,13 +968,10 @@ impl LibreFangKernel {
 
     /// Best-effort record of a manifest snapshot for version history.
     ///
-    /// `change_source` vocabulary: the persist path is shared by every
-    /// control-plane write (API routes, TUI commands, and the MCP-servers
-    /// fallback all funnel through the same kernel setters), so the call
-    /// site cannot tell who triggered the persist. It records two values:
+    /// `change_source` vocabulary: the persist path is shared by every control-plane write (API routes, TUI commands, and the MCP-servers fallback all funnel through the same kernel setters), so the call site cannot tell who triggered the persist.
+    /// It records two values:
     /// - `update` — the `agent.toml` write succeeded.
-    /// - `update-persist-failed` — the in-memory manifest changed but the
-    ///   disk write failed, so disk and memory now disagree.
+    /// - `update-persist-failed` — the in-memory manifest changed but the disk write failed, so disk and memory now disagree.
     fn record_manifest_version(
         &self,
         entry: &librefang_types::agent::AgentEntry,
