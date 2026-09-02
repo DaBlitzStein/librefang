@@ -2963,6 +2963,7 @@
     "run_resume": "Відновити автономний запуск",
     "run_needs_agent": "Призначте агента для автономного запуску цієї цілі",
     "run_phase_running": "Виконується",
+    "run_phase_paused": "Призупинено",
     "run_phase_finished": "Завершено",
     "run_phase_stopped": "Зупинено",
     "run_phase_rate_limited": "Обмеження швидкості",

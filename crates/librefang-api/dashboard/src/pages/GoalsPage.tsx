@@ -107,14 +107,12 @@ async function runSequentialBatch<T>(
 
 export function progressForGoalStatus(status: string, current: number): number {
   if (status === "completed") return 100;
-  if (status === "paused") return Math.max(current, 50);
   if (status === "in_progress") return Math.max(current, 50);
   return 0;
 }
 
 export function goalStatusBadgeVariant(status: string) {
   if (status === "completed") return "success";
-  if (status === "paused") return "default";
   if (status === "in_progress") return "warning";
   return "default";
 }
@@ -140,6 +138,7 @@ const goalRunPhaseBadge = (
 ): { variant: BadgeVariant; icon?: React.ComponentType<{ className?: string }> } => {
   switch (phase) {
     case "running":                 return { variant: "brand",   icon: Activity };
+    case "paused":                  return { variant: "warning", icon: Pause };
     case "finished":                return { variant: "success", icon: CheckCircle2 };
     case "stopped":                 return { variant: "warning", icon: Ban };
     case "rate_limited":            return { variant: "error",   icon: AlertTriangle };
@@ -252,7 +251,7 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
           onClick={() => void onPause()}
           disabled={pauseMutation.isPending}
           className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-colors"
-          title={t("goals.run_pause", { defaultValue: "Pause" })}
+          title={t("goals.run_pause")}
         >
           {pauseMutation.isPending ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -285,7 +284,7 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
           onClick={() => void onResume()}
           disabled={resumeMutation.isPending}
           className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
-          title={t("goals.run_resume", { defaultValue: "Resume" })}
+          title={t("goals.run_resume")}
         >
           {resumeMutation.isPending ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -298,7 +297,7 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
           onClick={() => void onStop()}
           disabled={stopMutation.isPending}
           className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-          title={t("goals.run_stop", { defaultValue: "Stop" })}
+          title={t("goals.run_stop")}
         >
           {stopMutation.isPending ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
