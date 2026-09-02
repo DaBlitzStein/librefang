@@ -2918,6 +2918,7 @@
     "run_needs_agent": "Assign an agent to run this goal autonomously",
     "run_active": "Running · iteration {{iteration}}/{{max}}",
     "run_phase_running": "Running",
+    "run_phase_paused": "Paused",
     "run_phase_finished": "Finished",
     "run_phase_stopped": "Stopped",
     "run_phase_rate_limited": "Rate Limited",

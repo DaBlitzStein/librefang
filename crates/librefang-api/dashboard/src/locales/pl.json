@@ -2924,6 +2924,7 @@
     "run_needs_agent": "Przypisz agenta, aby uruchomić ten cel autonomicznie",
     "run_active": "Działa · iteracja {{iteration}}/{{max}}",
     "run_phase_running": "Działa",
+    "run_phase_paused": "Wstrzymano",
     "run_phase_finished": "Zakończono",
     "run_phase_stopped": "Zatrzymano",
     "run_phase_rate_limited": "Limit szybkości",

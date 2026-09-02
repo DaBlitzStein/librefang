@@ -438,6 +438,49 @@ describe("GoalsPage", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("3/10")).toBeInTheDocument();
   });
+
+  const RUNNING_RUN = {
+    goal_id: "g-r",
+    agent_id: "a1",
+    phase: "running",
+    iteration: 2,
+    max_iterations: 10,
+    last_progress: 20,
+    started_at: "",
+    updated_at: "",
+  } as const;
+
+  it("fires usePauseGoalRun from the pause button on a running goal", async () => {
+    const goalWithAgent: GoalItem = { ...PARENT_GOAL, agent_id: "a1" };
+    useGoalsMock.mockReturnValue(makeQuery([goalWithAgent]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    useGoalRunMock.mockReturnValue(makeQuery({ running: true, run: RUNNING_RUN }));
+    const pause = vi.fn().mockResolvedValue({});
+    usePauseGoalRunMock.mockReturnValue({ mutateAsync: pause, isPending: false });
+    renderPage();
+
+    fireEvent.click(screen.getByTitle("goals.run_pause"));
+    await Promise.resolve();
+
+    expect(pause).toHaveBeenCalledWith("g-parent");
+  });
+
+  it("fires useResumeGoalRun from the resume button on a paused run", async () => {
+    const goalWithAgent: GoalItem = { ...PARENT_GOAL, agent_id: "a1" };
+    useGoalsMock.mockReturnValue(makeQuery([goalWithAgent]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    useGoalRunMock.mockReturnValue(
+      makeQuery({ running: false, run: { ...RUNNING_RUN, phase: "paused" } }),
+    );
+    const resume = vi.fn().mockResolvedValue(undefined);
+    useResumeGoalRunMock.mockReturnValue({ mutateAsync: resume, isPending: false });
+    renderPage();
+
+    fireEvent.click(screen.getByTitle("goals.run_resume"));
+    await Promise.resolve();
+
+    expect(resume).toHaveBeenCalledWith("g-parent");
+  });
 });
 
 describe("GoalsPage helpers", () => {

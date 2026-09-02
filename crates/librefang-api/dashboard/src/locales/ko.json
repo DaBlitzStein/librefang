@@ -2917,6 +2917,7 @@
     "run_needs_agent": "이 목표를 자율적으로 실행할 에이전트를 할당하세요.",
     "run_active": "실행 · 반복 {{iteration}}/{{max}}",
     "run_phase_running": "실행 중",
+    "run_phase_paused": "일시 중지됨",
     "run_phase_finished": "완료",
     "run_phase_stopped": "중지됨",
     "run_phase_rate_limited": "속도 제한",
