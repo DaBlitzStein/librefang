@@ -195,6 +195,8 @@ type SettingsState = {
   thinkingOverride: CapOverride;
   contextWindow: number;
   contextWindowEnabled: boolean;
+  maxOutputTokens: number;
+  maxOutputTokensEnabled: boolean;
 };
 
 type SettingsAction =
@@ -223,6 +225,8 @@ const settingsInitial: SettingsState = {
   thinkingOverride: "default",
   contextWindow: 128000,
   contextWindowEnabled: false,
+  maxOutputTokens: 8192,
+  maxOutputTokensEnabled: false,
 };
 
 function boolToOverride(v: boolean | undefined | null): CapOverride {
@@ -268,6 +272,12 @@ export function settingsStateFromOverrides(
     thinkingOverride: boolToOverride(overrides.supports_thinking),
     ...(overrides.context_window != null
       ? { contextWindow: overrides.context_window, contextWindowEnabled: true }
+      : {}),
+    ...(overrides.max_output_tokens != null
+      ? {
+          maxOutputTokens: overrides.max_output_tokens,
+          maxOutputTokensEnabled: true,
+        }
       : {}),
   };
 }
@@ -1373,6 +1383,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     const overrides: ModelOverrides = {};
     if (s.modelType !== "chat") overrides.model_type = s.modelType;
     if (s.contextWindowEnabled) overrides.context_window = s.contextWindow;
+    if (s.maxOutputTokensEnabled) overrides.max_output_tokens = s.maxOutputTokens;
     if (s.tempEnabled) overrides.temperature = s.temperature;
     if (s.topPEnabled) overrides.top_p = s.topP;
     if (s.maxTokensEnabled) overrides.max_tokens = s.maxTokens;
@@ -1521,8 +1532,34 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
                 dispatch({ type: "SET_FIELD", field: "contextWindow", value: model.context_window ?? 128000 });
               }
             }}
-            ticks={[32768, 131072, 524288, 1048576]}
-            formatTick={(v) => v >= 1048576 ? "1M" : `${Math.round(v/1024)}K`}
+            ticks={[32768, 131072, 524288, 1048576, 2097152]}
+            formatTick={(v) =>
+              v >= 1048576 ? `${Math.round(v / 1048576)}M` : `${Math.round(v / 1024)}K`
+            }
+          />
+
+          <SliderInput
+            label={t("models.max_output")}
+            value={
+              state.maxOutputTokensEnabled
+                ? state.maxOutputTokens
+                : (model.max_output_tokens || 8192)
+            }
+            onChange={(v) =>
+              dispatch({ type: "SET_FIELD", field: "maxOutputTokens", value: Math.round(v) })
+            }
+            min={256} max={131072} step={256}
+            enabled={state.maxOutputTokensEnabled}
+            onToggle={(v) => {
+              dispatch({ type: "SET_FIELD", field: "maxOutputTokensEnabled", value: v });
+              if (v && state.maxOutputTokens === settingsInitial.maxOutputTokens) {
+                dispatch({
+                  type: "SET_FIELD",
+                  field: "maxOutputTokens",
+                  value: model.max_output_tokens || 8192,
+                });
+              }
+            }}
           />
 
           <SliderInput
