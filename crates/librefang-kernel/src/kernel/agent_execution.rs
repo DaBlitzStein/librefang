@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::kernel::llm_drivers::resolve_effective_fallbacks;
+use crate::kernel::prompt_context::{attach_current_time_msg, current_time_precise_for_prompt};
 use crate::MeteringSubsystemApi;
 use librefang_skills::SkillError;
 
@@ -410,7 +411,7 @@ impl LibreFangKernel {
     /// The last guard mirrors the tier router a few lines below: routing an
     /// agent onto a provider the operator never configured would turn a
     /// cost optimisation into a hard failure on every turn.
-    fn route_to_profile(
+    pub fn route_to_profile(
         &self,
         manifest: &librefang_types::agent::AgentManifest,
         message: &str,
@@ -454,8 +455,14 @@ impl LibreFangKernel {
         }
 
         if profile.provider != manifest.model.provider {
-            let key_env = cfg.resolve_api_key_env(&profile.provider);
-            if std::env::var(&key_env).is_err() {
+            let provider = &profile.provider;
+            let is_local = librefang_runtime::provider_health::is_local_provider(provider);
+            let has_pool = self.llm.credential_pools.contains_key(provider.as_str());
+            let has_key = || {
+                let key_env = self.resolve_non_default_api_key_env(cfg, provider);
+                std::env::var(&key_env).is_ok()
+            };
+            if !is_local && !has_pool && !has_key() {
                 warn!(
                     agent = %manifest.name,
                     profile = %profile.name,
@@ -1006,6 +1013,7 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
+                current_time_precise: current_time_precise_for_prompt(stable_prefix_mode),
                 active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,
@@ -1027,6 +1035,10 @@ impl LibreFangKernel {
                     serde_json::Value::String(cc_msg),
                 );
             }
+            // Same rationale as canonical_context_msg above: precise time
+            // travels as a per-turn user message, not the cached system
+            // prompt (#8131).
+            attach_current_time_msg(&mut manifest, &prompt_ctx);
 
             // Pass prompt_caching config to the agent loop via metadata.
             manifest.metadata.insert(
@@ -1944,5 +1956,220 @@ mod billing_attribution_tests {
             entry.id,
             "a parented worker must not also bill to itself"
         );
+    }
+}
+
+/// Regression tests for the credential gate inside `route_to_profile` (#7781 review).
+///
+/// The gate must resolve the env-var name through `resolve_non_default_api_key_env`, which consults the provider catalog's `api_key_env`, instead of deriving the name by convention.
+///
+/// Before the fix, a catalog provider declaring `api_key_env = "UNSLOTH_API_KEY"` was invisible to the gate, which looked for `UNSLOTH_STUDIO_API_KEY` only — so a fully configured provider silently fell back to the agent's own model.
+///
+/// A local provider (`ollama`, `vllm`, `lmstudio`, `lemonade`) is exempt from the check entirely.
+#[cfg(test)]
+mod route_to_profile_credential_gate_tests {
+    use super::*;
+    use librefang_types::agent::{AgentManifest, ModelConfig, ModelMode};
+    use librefang_types::config::KernelConfig;
+    use librefang_types::model_profile::AgentRouterOverride;
+
+    /// Restore-on-drop env guard, mirroring `kernel::tests::set_test_env`.
+    ///
+    /// A dropped guard puts back whatever the variable held before, so a test can neither leak its value into other tests nor erase one the ambient environment had set.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: callers are annotated `#[serial_test::serial(route_to_profile_env)]`, so no two tests mutate process-global env state concurrently.
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
+        let previous = std::env::var(key).ok();
+        // SAFETY: see `EnvVarGuard::drop`.
+        unsafe { std::env::set_var(key, value) };
+        EnvVarGuard { key, previous }
+    }
+
+    fn unset_test_env(key: &'static str) -> EnvVarGuard {
+        let previous = std::env::var(key).ok();
+        // SAFETY: see `EnvVarGuard::drop`.
+        unsafe { std::env::remove_var(key) }
+        EnvVarGuard { key, previous }
+    }
+
+    /// Boot a kernel against a throwaway home dir laid out like the credential-resolver tests in `llm_drivers.rs`: offline registry marker, empty data dir, and any pre-seeded files the caller already wrote into `home`.
+    fn boot_kernel(home: &std::path::Path) -> (LibreFangKernel, KernelConfig) {
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        std::fs::create_dir_all(home.join("skills")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("agents")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("hands")).unwrap();
+        let registry_dir = home.join("registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+
+        let config = KernelConfig {
+            home_dir: home.to_path_buf(),
+            data_dir: home.join("data"),
+            network_enabled: false,
+            model_router: librefang_types::model_profile::ModelRouterConfig {
+                enabled: true,
+                ..librefang_types::model_profile::ModelRouterConfig::default()
+            },
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config.clone()).expect("kernel boot");
+        (kernel, config)
+    }
+
+    /// A flexible-mode manifest pinned to a single permitted profile, so `route_to_profile` reaches the credential gate deterministically through the `default_profile` fallback instead of the tag heuristics.
+    fn flexible_manifest(default_profile: &str) -> AgentManifest {
+        AgentManifest {
+            name: "router-probe".to_string(),
+            model: ModelConfig {
+                mode: ModelMode::Flexible,
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                router_override: Some(AgentRouterOverride {
+                    fixed: false,
+                    allowed_profiles: std::collections::BTreeSet::from([
+                        default_profile.to_string()
+                    ]),
+                    cost_budget: None,
+                    default_profile: Some(default_profile.to_string()),
+                }),
+                ..ModelConfig::default()
+            },
+            ..AgentManifest::default()
+        }
+    }
+
+    /// The routing credential gate must consult the provider catalog's `api_key_env` — here `UNSLOTH_API_KEY` for the custom provider `unsloth-studio` — and not the convention-derived `UNSLOTH_STUDIO_API_KEY`.
+    #[test]
+    #[serial_test::serial(route_to_profile_env)]
+    fn route_to_profile_uses_catalog_api_key_env_for_custom_provider() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+
+        // Catalog entry for the custom provider, stored the same way the dashboard "Upload provider" flow stores one.
+        let providers = home.join("providers");
+        std::fs::create_dir_all(&providers).unwrap();
+        std::fs::write(
+            providers.join("unsloth-studio.toml"),
+            r#"
+[provider]
+id = "unsloth-studio"
+display_name = "Unsloth Studio"
+api_key_env = "UNSLOTH_API_KEY"
+base_url = "http://127.0.0.1:8888/v1"
+key_required = true
+"#,
+        )
+        .unwrap();
+
+        // A single profile routed onto the custom provider.
+        std::fs::write(
+            home.join("model_profiles.toml"),
+            r#"
+[[profiles]]
+name = "unsloth-coder"
+tags = ["code"]
+provider = "unsloth-studio"
+model = "unsloth/Llama-3.3-70B-Instruct"
+cost_tier = "medium"
+priority = 30
+max_complexity = 1.0
+description = "Custom-provider profile for the routing credential gate test"
+"#,
+        )
+        .unwrap();
+
+        let (kernel, config) = boot_kernel(home);
+        let manifest = flexible_manifest("unsloth-coder");
+        // No builtin tag is present, so selection is purely the `default_profile` fallback chain — the tag heuristics cannot hijack the assertion.
+        let message = "hello there";
+
+        // Phase 1: no key anywhere — the gate must refuse to route.
+        {
+            let _absent_key = unset_test_env("UNSLOTH_API_KEY");
+            let _absent_conv = unset_test_env("UNSLOTH_STUDIO_API_KEY");
+            assert!(
+                kernel
+                    .route_to_profile(&manifest, message, &config)
+                    .is_none(),
+                "the gate must block when the catalog-named key is absent"
+            );
+        }
+
+        // Phase 2: the convention-derived name alone must NOT satisfy the gate — the catalog value is authoritative.
+        {
+            let _conv = set_test_env("UNSLOTH_STUDIO_API_KEY", "x");
+            let _absent_key = unset_test_env("UNSLOTH_API_KEY");
+            assert!(
+                kernel
+                    .route_to_profile(&manifest, message, &config)
+                    .is_none(),
+                "the convention-derived env name must not satisfy the gate for a catalog provider"
+            );
+        }
+
+        // Phase 3: only the catalog-declared name present — routing must apply.
+        {
+            let _conv_absent = unset_test_env("UNSLOTH_STUDIO_API_KEY");
+            let _key = set_test_env("UNSLOTH_API_KEY", "test-key");
+            let routed = kernel.route_to_profile(&manifest, message, &config);
+            assert_eq!(
+                routed.as_ref().map(|p| p.provider.as_str()),
+                Some("unsloth-studio"),
+                "routing must consult the catalog api_key_env, not the convention name"
+            );
+            assert_eq!(
+                routed.as_ref().map(|p| p.name.as_str()),
+                Some("unsloth-coder")
+            );
+        }
+    }
+
+    /// A keyless local provider is exempt from the credential gate: routing onto it must succeed with no API key configured at all.
+    #[test]
+    #[serial_test::serial(route_to_profile_env)]
+    fn route_to_profile_routes_keyless_local_provider_without_api_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+
+        std::fs::write(
+            home.join("model_profiles.toml"),
+            r#"
+[[profiles]]
+name = "local-fast"
+tags = ["echo"]
+provider = "ollama"
+model = "llama3.2"
+cost_tier = "cheap"
+priority = 5
+max_complexity = 1.0
+description = "Local provider probe"
+"#,
+        )
+        .unwrap();
+
+        let (kernel, config) = boot_kernel(home);
+        let manifest = flexible_manifest("local-fast");
+
+        let _key_absent = unset_test_env("OLLAMA_API_KEY");
+        let routed = kernel.route_to_profile(&manifest, "say hi", &config);
+        assert_eq!(
+            routed.as_ref().map(|p| p.provider.as_str()),
+            Some("ollama"),
+            "a local provider must route with no API key configured"
+        );
+        assert_eq!(routed.as_ref().map(|p| p.name.as_str()), Some("local-fast"));
     }
 }
