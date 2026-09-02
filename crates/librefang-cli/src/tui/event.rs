@@ -3438,22 +3438,36 @@ pub fn spawn_fetch_auxiliary(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                     // hand-maintained in event.rs would go stale when a new
                     // `AuxTask` variant lands. The schema's `x-aux-tasks` is
                     // compile-guarded by the `AuxTask::ALL` completeness test.
-                    let known_tasks: Vec<String> = client
+                    // A failed or malformed schema fetch used to fall through to an
+                    // empty list in silence, leaving the operator looking at only the
+                    // tasks they had already configured with nothing to say a task is
+                    // missing rather than absent (same class of bug as #8144). Report
+                    // it and still render what the config document does carry.
+                    let known_tasks: Vec<String> = match client
                         .get(format!("{base_url}/api/config/schema"))
                         .send()
-                        .ok()
-                        .and_then(|r| r.json::<serde_json::Value>().ok())
-                        .and_then(|schema| {
-                            schema
-                                .get("x-aux-tasks")
-                                .and_then(|v| v.as_array())
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|v| v.as_str().map(String::from))
-                                        .collect()
-                                })
-                        })
-                        .unwrap_or_default();
+                        .and_then(|r| r.json::<serde_json::Value>())
+                    {
+                        Ok(schema) => match schema.get("x-aux-tasks").and_then(|v| v.as_array()) {
+                            Some(a) => a
+                                .iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect(),
+                            None => {
+                                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                                    "tui-event-aux-tasks-schema-missing",
+                                )));
+                                Vec::new()
+                            }
+                        },
+                        Err(e) => {
+                            let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                                "tui-event-aux-tasks-fetch-failed",
+                                &[("error", &e.to_string())],
+                            )));
+                            Vec::new()
+                        }
+                    };
                     let mut aux = std::collections::BTreeMap::new();
                     if let Some(obj) = body
                         .get("llm")
