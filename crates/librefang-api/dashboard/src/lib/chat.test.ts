@@ -380,4 +380,22 @@ describe("extractWorkflowJson", () => {
     const content = '```rust\n{"steps": ["recovered"]}\n```';
     expect(extractWorkflowJson(content)).toBe('{"steps": ["recovered"]}');
   });
+
+  it("retries the fallback past template placeholders that balance before the payload", () => {
+    // `{{name}}` balances at the first `}}`, and the old single-candidate fallback returned null on that rejected candidate instead of reaching the real payload after it.
+    const content = 'Use {{name}} in your prompt. Here is the workflow: {"steps": []}';
+    expect(extractWorkflowJson(content)).toBe('{"steps": []}');
+  });
+
+  it("keeps the fallback scanner inside a string that contains a brace-quote", () => {
+    // A `"}"` sequence inside a string must not close the string and end the scan early.
+    const content = '{"a": "}", "steps": ["kept"]}';
+    expect(extractWorkflowJson(content)).toBe('{"a": "}", "steps": ["kept"]}');
+  });
+
+  it("honors escaped quotes in the fallback scanner", () => {
+    // `\"` inside a string must not close it, so the `}` after it stays inside the string.
+    const content = '{"a": "x\\"}y", "steps": ["kept"]}';
+    expect(extractWorkflowJson(content)).toBe('{"a": "x\\"}y", "steps": ["kept"]}');
+  });
 });

@@ -223,37 +223,51 @@ export function extractWorkflowJson(content: string): string | null {
     return body;
   }
 
-  const start = content.indexOf("{");
-  if (start === -1) return null;
+  // The fallback starts at each `{` in turn: prose braces like the `{{name}}`
+  // placeholders workflow templates use can balance first, and returning null
+  // on the first balanced-but-rejected candidate would drop a real payload
+  // that follows it. A scan that runs off the end unbalanced still gives up —
+  // nothing after it can close an already-open brace.
+  let searchFrom = 0;
+  for (;;) {
+    const start = content.indexOf("{", searchFrom);
+    if (start === -1) return null;
 
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < content.length; i++) {
-    const ch = content[i];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === "\\") {
-        escaped = true;
-      } else if (ch === '"') {
-        inString = false;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let rejected = false;
+    for (let i = start; i < content.length; i++) {
+      const ch = content[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === "\\") {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
       }
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-    } else if (ch === "{") {
-      depth++;
-    } else if (ch === "}") {
-      depth--;
-      if (depth === 0) {
-        const candidate = content.slice(start, i + 1);
-        return candidate.includes('"steps"') ? candidate : null;
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === "{") {
+        depth++;
+      } else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          const candidate = content.slice(start, i + 1);
+          if (candidate.includes('"steps"')) {
+            return candidate;
+          }
+          rejected = true;
+          searchFrom = i + 1;
+          break;
+        }
       }
     }
+    if (!rejected) return null;
   }
-  return null;
 }
 
 export function applyForeignTerminalFrame<M extends TerminalRoutableMessage>(
