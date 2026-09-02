@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { type GoalItem, type GoalTemplate } from "../api";
+import { type GoalItem, type GoalRunState, type GoalTemplate } from "../api";
 import { useGoals, useGoalTemplates, useGoalRun } from "../lib/queries/goals";
 import {
   useCreateGoal,
@@ -121,6 +121,45 @@ function GoalStatusIcon({ status }: { status: string }) {
     return <Play className="h-4 w-4 text-warning" />;
   }
   return <Clock className="h-4 w-4 text-text-dim/40" />;
+}
+
+// `phase` is typed from the wire contract rather than `string` so a caller cannot pass a typo'd literal.
+// The `default` arm stays regardless: `phase` crosses the network, so an unrecognised value has to render as something.
+const goalRunPhaseBadge = (
+  phase?: GoalRunState["phase"],
+): { bg: string; text: string; dot: string } => {
+  switch (phase) {
+    case "running":                 return { bg: "bg-brand/10",   text: "text-brand",    dot: "bg-brand" };
+    case "finished":                return { bg: "bg-success/10", text: "text-success",  dot: "bg-success" };
+    case "stopped":                 return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
+    case "rate_limited":            return { bg: "bg-error/10",   text: "text-error",    dot: "bg-error" };
+    case "max_iterations_reached":  return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
+    default:                        return { bg: "bg-main",       text: "text-text-dim", dot: "bg-text-dim/40" };
+  }
+};
+
+function GoalRunInfo({ goal }: { goal: GoalItem }) {
+  const { t } = useTranslation();
+  const hasAgent = !!goal.agent_id;
+  const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
+  const run = runQuery.data?.run;
+  if (!run) return null;
+
+  const badge = goalRunPhaseBadge(run.phase);
+  const phaseLabel = t(`goals.run_phase_${run.phase}`, { defaultValue: run.phase.replace(/_/g, " ") });
+
+  return (
+    <div className="mt-2 ml-[calc(1rem+4px)] flex flex-wrap items-center gap-2 text-xs">
+      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full ${badge.bg} ${badge.text} font-medium`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${badge.dot} ${run.phase === "running" ? "animate-pulse" : ""}`} />
+        {phaseLabel}
+      </span>
+      <span className="text-text-dim font-mono">{run.iteration}/{run.max_iterations}</span>
+      {run.last_error && (
+        <span className="text-error truncate max-w-[200px]" title={run.last_error}>{run.last_error}</span>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -582,6 +621,10 @@ export function GoalsPage() {
                               </div>
                             </div>
                           )}
+                          {/* Run state — phase, iterations and last error, like workflow runs.
+                              Deliberately not gated on status: `GoalRunPhase::Finished` is documented as "the goal reached Completed/Cancelled", so a `status !== "completed"` gate made the `finished` badge — and its five translations — unreachable, and hid the outcome exactly when it is most worth reading (did the run finish on its own, or stop at the iteration cap?).
+                              `GoalRunInfo` already renders nothing when the goal has no run, so a completed goal that never ran stays as quiet as before. */}
+                          <GoalRunInfo goal={r.goal} />
                         </div>
                       )}
                     </div>

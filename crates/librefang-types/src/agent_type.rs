@@ -138,6 +138,8 @@ impl AgentTypeSpec {
             // spawns it, so it starts unset and is edited in the type's
             // `agent.toml` (#7744).
             owner: None,
+            // The type itself is not an instance spawned from a template.
+            source_template: None,
             module: "builtin:chat".to_string(),
             tags: Vec::new(),
             metadata: std::collections::HashMap::new(),

@@ -449,6 +449,7 @@ target = { type = "wandb", project = "rollouts", entity = "team", api_key_env = 
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let manifest = AgentManifest {
             name: format!("rl-export-test-agent-{unique}"),
+            source_template: None,
             description: "produces rollouts".to_string(),
             author: "test".to_string(),
             module: "builtin:chat".to_string(),

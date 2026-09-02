@@ -1428,7 +1428,9 @@ impl LibreFangKernel {
             max_backoff_secs: config.extensions.reconnect_max_backoff_secs,
             check_interval_secs: hc_interval,
         };
-        let mcp_health = librefang_extensions::health::HealthMonitor::new(health_config);
+        let mcp_health = Arc::new(librefang_extensions::health::HealthMonitor::new(
+            health_config,
+        ));
         // Register every configured MCP server for health monitoring.
         for srv in &all_mcp_servers {
             mcp_health.register(&srv.name);
@@ -2304,6 +2306,14 @@ impl LibreFangKernel {
                 .map(|e| (e.hand_id, e.config))
                 .collect()
         };
+
+        // Propagate the global default burst ratio to the scheduler so
+        // agents without a per-agent override use the config value instead
+        // of the compiled fallback (fixes #8115).
+        kernel
+            .agents
+            .scheduler
+            .set_default_burst_ratio(kernel.current_budget().default_burst_ratio);
 
         // Restore persisted agents from SQLite
         match kernel.memory.substrate.load_all_agents() {

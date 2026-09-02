@@ -27,6 +27,7 @@ async fn resolve_manifest(
     lang: &'static str,
 ) -> Result<ResolvedManifest, ManifestError> {
     // Resolve template name → manifest_toml
+    let mut used_template: Option<String> = None;
     let manifest_toml = if req.manifest_toml.trim().is_empty() {
         if let Some(ref tmpl_name) = req.template {
             let safe_name: String = tmpl_name
@@ -49,7 +50,10 @@ async fn resolve_manifest(
                 .join("agent.toml");
             // Use tokio::fs to avoid blocking in an async context
             match tokio::fs::read_to_string(&tmpl_path).await {
-                Ok(content) => content,
+                Ok(content) => {
+                    used_template = Some(safe_name.clone());
+                    content
+                }
                 Err(_) => {
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
@@ -121,6 +125,9 @@ async fn resolve_manifest(
         if !custom_name.trim().is_empty() {
             manifest.name = custom_name.trim().to_string();
         }
+    }
+    if used_template.is_some() {
+        manifest.source_template = used_template;
     }
 
     let name = manifest.name.clone();
@@ -1098,6 +1105,7 @@ pub async fn get_agent(
             },
             "system_prompt": entry.manifest.model.system_prompt,
             "description": entry.manifest.description,
+            "source_template": entry.manifest.source_template,
             "tags": entry.manifest.tags,
             "identity": {
                 "emoji": entry.identity.emoji,

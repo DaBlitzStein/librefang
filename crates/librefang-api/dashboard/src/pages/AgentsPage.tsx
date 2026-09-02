@@ -36,7 +36,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch } from "lucide-react";
 import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -121,6 +121,14 @@ type AgentView = AgentDetail & {
   last_active?: string;
   triggers?: AgentTriggerSummary[];
   cron_jobs?: AgentCronSummary[];
+  /** Lineage fields the backend only emits on `GET /api/agents` (the list
+   *  endpoint's `enrich_agent_json`), not on the per-agent detail fetch.
+   *  Carried over from the `AgentItem` row when opening the detail panel. */
+  parent_agent_id?: string | null;
+  /** Raw `AgentEntry` serde form of the same link, per `AgentItem`'s docs. */
+  parent?: string | null;
+  parent_unknown?: boolean;
+  children?: string[];
   capabilities?: Omit<NonNullable<AgentDetail["capabilities"]>, "tools" | "skills"> & {
     skills?: string[];
     tools?: string[];
@@ -423,6 +431,9 @@ export function AgentsPage() {
       e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }),
       "error",
     );
+  // Cancelling the agent's in-flight reads now lives in `useDeleteAgent`'s
+  // `onMutate` (see `lib/mutations/agents.ts`), which is both the right layer
+  // and the only place the cancel can be awaited before the DELETE is sent.
   const deleteMutation = {
     mutate: (agentId: string) =>
       rawDeleteMutation.mutate(agentId, {
@@ -438,6 +449,37 @@ export function AgentsPage() {
 
   function mergeHandFlag(agent: AgentDetail, fallback?: boolean) {
     return { ...agent, is_hand: agent.is_hand ?? fallback };
+  }
+
+  // The single-agent detail response omits lineage — only the list
+  // endpoint includes it — so origin fields are carried over from the
+  // list row or the previous detail state on refresh.
+  function mergeOriginFields<T extends AgentDetail>(
+    agent: T,
+    origin?: Pick<AgentView, "parent_agent_id" | "parent" | "parent_unknown" | "children">,
+  ): T {
+    if (!origin) return agent;
+    // `goToAgent` fabricates a stub row for an id the list does not hold, and
+    // `selectAgent`'s catch branch builds one too. Neither carries lineage, so
+    // overwriting with their `undefined`s would make the Origin panel report
+    // "Root agent" for an agent whose parent was simply never fetched — which
+    // is what `routes/agents/mod.rs:377` explicitly tells clients not to do
+    // ("a client must not render the latter as a root agent"). Carry lineage
+    // over only when the source actually has some.
+    const carriesLineage =
+      origin.parent_agent_id !== undefined ||
+      origin.parent !== undefined ||
+      origin.parent_unknown !== undefined ||
+      origin.children !== undefined;
+    if (!carriesLineage) return agent;
+    return {
+      ...agent,
+      // `AgentItem` documents `parent` as the raw `AgentEntry` serde form that
+      // endpoints serializing the struct directly emit, so accept either.
+      parent_agent_id: origin.parent_agent_id ?? origin.parent,
+      parent_unknown: origin.parent_unknown,
+      children: origin.children,
+    };
   }
 
   function startModelEdit() {
@@ -520,7 +562,7 @@ export function AgentsPage() {
     try {
       await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
       const d = await qc.fetchQuery(agentQueries.detail(agentId));
-      setDetailAgent(mergeHandFlag(d, fallback));
+      setDetailAgent(mergeOriginFields(mergeHandFlag(d, fallback), (detailAgent as AgentView) ?? undefined));
     } catch {
       // keep current state when refresh fails
     }
@@ -958,10 +1000,18 @@ export function AgentsPage() {
     setAgentTab("conversation");
     try {
       const d = await qc.fetchQuery(agentQueries.detail(agent.id));
-      setDetailAgent(mergeHandFlag(d, agent.is_hand));
+      setDetailAgent(mergeOriginFields(mergeHandFlag(d, agent.is_hand), agent));
     } catch {
-      setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail);
+      setDetailAgent(mergeOriginFields({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail, agent));
     }
+  };
+
+  /** Navigate the detail panel to a parent/child agent referenced by id.
+   *  Falls back to a bare stub when the id isn't in the current (paginated)
+   *  list — `selectAgent` still fetches the real detail from its own id. */
+  const goToAgent = (id: string) => {
+    const found = agents.find(a => a.id === id);
+    void selectAgent(found ?? ({ id, name: id, is_hand: false } as AgentItem));
   };
 
   // Auto-select the first agent on desktop so the detail panel isn't blank
@@ -1008,6 +1058,11 @@ export function AgentsPage() {
               {t("agents.hand_badge", { defaultValue: "HAND" })}
             </span>
           )}
+          {!!agent.children?.length && (
+            <span className="shrink-0 text-[10.5px] text-text-dim/80">
+              ({t("agents.children_count", { count: agent.children.length })})
+            </span>
+          )}
           <span className="font-mono text-[10.5px] text-text-dim/80 shrink-0 tabular-nums">
             {agent.last_active ? formatRelativeTime(agent.last_active) : "—"}
           </span>
@@ -1018,6 +1073,14 @@ export function AgentsPage() {
           <span className="truncate min-w-0">
             {agent.schedule || t("agents.schedule_manual", { defaultValue: "manual" })}
           </span>
+          {agent.source_template && (
+            <>
+              <span className="text-text-dim/60">·</span>
+              <span className="truncate min-w-0">
+                {t("agents.origin_template", { name: agent.source_template })}
+              </span>
+            </>
+          )}
           <span className="ml-auto shrink-0 tabular-nums">
             {stats.sessions24h} · ${stats.cost24h.toFixed(2)}
           </span>
@@ -2716,6 +2779,88 @@ export function AgentsPage() {
                   </div>
                 </section>
               )}
+
+              {/* Origin */}
+              <section>
+                <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                  <GitBranch className="w-3.5 h-3.5 text-brand" />
+                  {t("agents.origin", { defaultValue: "Origin" })}
+                </h4>
+                <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
+                  <DetailRow label={t("agents.parent", { defaultValue: "Parent Agent" })}>
+                    {(() => {
+                      const view = detailAgent as AgentView;
+                      const parentId = view.parent_agent_id ?? view.parent;
+                      // `enrich_agent_json` emits all three lineage fields
+                      // together, so none of them present means lineage was
+                      // never fetched for this agent — distinct from "it has
+                      // no parent", and it must not be shown as a root agent.
+                      if (
+                        parentId === undefined &&
+                        view.parent_unknown === undefined &&
+                        view.children === undefined
+                      ) {
+                        return (
+                          <span className="text-text-dim">
+                            {t("agents.origin_unloaded")}
+                          </span>
+                        );
+                      }
+                      if (parentId) {
+                        const parent = agents.find(a => a.id === parentId);
+                        const label = parent
+                          ? t(`agents.builtin.${parent.name}.name`, { defaultValue: parent.name })
+                          : truncateId(parentId, 16);
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => goToAgent(parentId)}
+                            className="font-mono text-brand hover:underline"
+                          >
+                            {label}
+                          </button>
+                        );
+                      }
+                      if (view.parent_unknown) {
+                        return (
+                          <span className="text-text-dim">
+                            {t("agents.origin_unknown")}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span className="text-text-dim">
+                          {t("agents.origin_root", { defaultValue: "Root agent" })}
+                        </span>
+                      );
+                    })()}
+                  </DetailRow>
+                  <DetailRow label={t("agents.children", { defaultValue: "Children" })}>
+                    {(detailAgent as AgentView).children?.length ? (
+                      <div className="flex flex-wrap justify-end gap-1.5">
+                        {(detailAgent as AgentView).children!.map(childId => {
+                          const child = agents.find(a => a.id === childId);
+                          const label = child
+                            ? t(`agents.builtin.${child.name}.name`, { defaultValue: child.name })
+                            : truncateId(childId, 16);
+                          return (
+                            <button
+                              key={childId}
+                              type="button"
+                              onClick={() => goToAgent(childId)}
+                              className="font-mono text-xs px-1.5 py-0.5 rounded bg-brand/10 text-brand hover:bg-brand/20"
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <span className="text-text-dim">{t("common.none")}</span>
+                    )}
+                  </DetailRow>
+                </div>
+              </section>
 
               {/* Web Search Augmentation */}
               <section>

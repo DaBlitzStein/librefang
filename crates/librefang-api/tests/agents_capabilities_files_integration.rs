@@ -105,6 +105,7 @@ async fn boot() -> Harness {
 fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
     let manifest = AgentManifest {
         name: name.to_string(),
+        source_template: None,
         ..AgentManifest::default()
     };
     state
@@ -122,6 +123,7 @@ fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
 fn manifest_toml(name: &str, tags: &[&str]) -> String {
     let manifest = AgentManifest {
         name: name.to_string(),
+        source_template: None,
         tags: tags.iter().map(|t| t.to_string()).collect(),
         ..AgentManifest::default()
     };
@@ -1457,6 +1459,7 @@ async fn test_manifest_toml_cannot_forge_or_drop_system_tags() {
     let h = boot().await;
     let manifest = AgentManifest {
         name: "hand-tagged".to_string(),
+        source_template: None,
         tags: vec![
             "hand:clipper".to_string(),
             "hand_role:editor".to_string(),
