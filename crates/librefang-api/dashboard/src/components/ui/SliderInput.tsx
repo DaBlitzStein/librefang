@@ -43,7 +43,7 @@ export function SliderInput({
   };
   // A row that is inheriting the catalog default is dimmed, but the dimming belongs on the values, never on the switch that overrides them (refs #7782).
   // While it sat on the row container it faded the toggle too, leaving the default state of every parameter with no visible way out of it.
-  const dimmed = enabled ? "" : " opacity-50";
+  const dimmed = enabled ? "" : " opacity-40";
 
   return (
     <div className="space-y-1.5">
@@ -67,15 +67,15 @@ export function SliderInput({
               type="button"
               role="switch"
               aria-checked={enabled}
-              aria-label={`${label} override`}
+              aria-label={label}
               onClick={() => onToggle(!enabled)}
-              className={`relative w-10 h-5 rounded-full transition-colors outline-none cursor-pointer focus-visible:ring-2 focus-visible:ring-brand ${
-                enabled ? "bg-brand" : "bg-text-dim/60 hover:bg-text-dim/80"
+              className={`relative w-8 h-[18px] rounded-full transition-colors outline-none focus-visible:ring-2 focus-visible:ring-brand ${
+                enabled ? "bg-brand" : "bg-text-dim"
               }`}
             >
               <span
-                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                  enabled ? "translate-x-5" : "translate-x-0"
+                className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${
+                  enabled ? "translate-x-4" : "translate-x-0.5"
                 }`}
               />
             </button>

@@ -267,7 +267,7 @@ export function AgentManifestForm({
             />
           </Field>
         </div>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.frequency_penalty", { defaultValue: "Freq. penalty" })}>
             <input
               type="number"
@@ -291,18 +291,6 @@ export function AgentManifestForm({
               placeholder="0"
               className={inputClass}
             />
-          </Field>
-          <Field label={t("agents.form.reasoning_effort", { defaultValue: "Reasoning" })}>
-            <select
-              value={value.model.reasoning_effort}
-              onChange={(e) => updateModel({ reasoning_effort: e.target.value })}
-              className={inputClass}
-            >
-              <option value="">—</option>
-              <option value="low">{t("models.effort_low", { defaultValue: "Low" })}</option>
-              <option value="medium">{t("models.effort_medium", { defaultValue: "Medium" })}</option>
-              <option value="high">{t("models.effort_high", { defaultValue: "High" })}</option>
-            </select>
           </Field>
         </div>
         <div className="grid grid-cols-2 gap-3">
