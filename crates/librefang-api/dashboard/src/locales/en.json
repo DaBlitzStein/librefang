@@ -2777,7 +2777,8 @@
     "auxiliary_task_session_summary": "Session summary",
     "auxiliary_chain_default": "Primary (default)",
     "auxiliary_chain_placeholder": "provider:model",
-    "auxiliary_chain_add": "Add model"
+    "auxiliary_chain_add": "Add model",
+    "auxiliary_chain_unknown_provider": "Unknown provider in \"{{bad}}\". Registered: {{known}}."
   },
   "chat": {
     "title": "Chat",

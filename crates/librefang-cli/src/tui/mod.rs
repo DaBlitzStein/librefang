@@ -733,22 +733,6 @@ impl App {
             AppEvent::SettingsAuxiliaryLoaded(aux) => {
                 self.settings.auxiliary = aux;
                 self.settings.aux_tasks = self.settings.auxiliary.keys().cloned().collect();
-                for task in [
-                    "browser_vision",
-                    "compression",
-                    "fold",
-                    "search",
-                    "session_summary",
-                    "skill_review",
-                    "skill_workshop_review",
-                    "title",
-                    "vision",
-                ] {
-                    if !self.settings.auxiliary.contains_key(task) {
-                        self.settings.aux_tasks.push(task.to_string());
-                        self.settings.auxiliary.insert(task.to_string(), Vec::new());
-                    }
-                }
                 self.settings.aux_tasks.sort();
                 if !self.settings.aux_tasks.is_empty()
                     && self.settings.aux_list.selected().is_none()

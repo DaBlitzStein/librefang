@@ -3433,6 +3433,27 @@ pub fn spawn_fetch_auxiliary(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/config")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
+                    // Enumerate the task list from the kernel (#8059 review): the
+                    // config document only carries configured tasks, so a list
+                    // hand-maintained in event.rs would go stale when a new
+                    // `AuxTask` variant lands. The schema's `x-aux-tasks` is
+                    // compile-guarded by the `AuxTask::ALL` completeness test.
+                    let known_tasks: Vec<String> = client
+                        .get(format!("{base_url}/api/config/schema"))
+                        .send()
+                        .ok()
+                        .and_then(|r| r.json::<serde_json::Value>().ok())
+                        .and_then(|schema| {
+                            schema
+                                .get("x-aux-tasks")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
+                        })
+                        .unwrap_or_default();
                     let mut aux = std::collections::BTreeMap::new();
                     if let Some(obj) = body
                         .get("llm")
@@ -3449,6 +3470,13 @@ pub fn spawn_fetch_auxiliary(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                             }
                         }
                     }
+                    // Serve the kernel's task list: fill in every task the
+                    // schema enumerates but the operator has not configured,
+                    // so a new AuxTask variant appears without a code change
+                    // here (#8059 review).
+                    for task in known_tasks {
+                        aux.entry(task).or_default();
+                    }
                     let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
                 }
             }
@@ -3458,6 +3486,11 @@ pub fn spawn_fetch_auxiliary(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             let config = kernel.config_ref();
             for (task, chain) in &config.llm.auxiliary.tasks {
                 aux.insert(task.as_str().to_string(), chain.clone());
+            }
+            // Same enumeration source as the daemon path
+            // (schema `x-aux-tasks`): compile-guarded `AuxTask::ALL`.
+            for task in librefang_types::config::AuxTask::ALL {
+                aux.entry(task.as_str().to_string()).or_default();
             }
             let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
         }
