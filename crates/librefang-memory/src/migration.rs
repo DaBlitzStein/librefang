@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 57;
+const SCHEMA_VERSION: u32 = 56;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -281,12 +281,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // prior configuration from the dashboard.
     run_step!(55, migrate_v55);
 
-    // v57: per-task claim TTL override on the Task Board. `[task_board]
+    // v56: per-task claim TTL override on the Task Board. `[task_board]
     // claim_ttl_secs` is one global number, so an installation that mixes a
     // 30-second health check with a two-hour import has to pick a TTL that is
     // wrong for one of them. NULL keeps the global, which is what every
     // existing row means.
-    run_step!(57, migrate_v57);
+    run_step!(56, migrate_v56);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1244,7 +1244,7 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// v57: per-task claim TTL override (`task_queue.timeout_secs`).
+/// v56: per-task claim TTL override (`task_queue.timeout_secs`).
 ///
 /// The stuck-task sweeper reclaims an `in_progress` row once it has been held
 /// longer than `[task_board] claim_ttl_secs`, a single global number.
@@ -1253,9 +1253,9 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// hours; tuned for the probe, the import is torn away from a worker that is
 /// still making progress.
 ///
-/// `NULL` means "use the global", which is exactly what every pre-v57 row
+/// `NULL` means "use the global", which is exactly what every pre-v56 row
 /// means, so the column needs no backfill.
-fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !try_column_exists(conn, "task_queue", "timeout_secs")? {
         conn.execute(
             "ALTER TABLE task_queue ADD COLUMN timeout_secs INTEGER DEFAULT NULL",
@@ -1264,7 +1264,7 @@ fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (57, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
+         VALUES (56, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
         [],
     )?;
     Ok(())
@@ -4286,14 +4286,14 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // v57: per-task claim TTL override (task_queue.timeout_secs)
+    // v56: per-task claim TTL override (task_queue.timeout_secs)
     // ---------------------------------------------------------------------
 
     /// The column has to arrive on a board that already holds tasks — a
     /// migration that only works on a fresh file has never run where it
-    /// matters. A pre-v57 row means "use the global TTL", which is `NULL`.
+    /// matters. A pre-v56 row means "use the global TTL", which is `NULL`.
     #[test]
-    fn migrate_v57_adds_timeout_column_to_an_existing_board() {
+    fn migrate_v56_adds_timeout_column_to_an_existing_board() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         conn.execute(
@@ -4305,7 +4305,7 @@ mod tests {
 
         assert!(
             column_exists(&conn, "task_queue", "timeout_secs"),
-            "v57 must add task_queue.timeout_secs"
+            "v56 must add task_queue.timeout_secs"
         );
         let timeout: Option<i64> = conn
             .query_row(
@@ -4321,11 +4321,11 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v57_is_idempotent() {
+    fn migrate_v56_is_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         // The runner can legitimately replay a step after an interrupted
         // upgrade, so a duplicate-column rerun must not fail.
-        migrate_v57(&conn).expect("v57 must survive a rerun");
+        migrate_v56(&conn).expect("v56 must survive a rerun");
     }
 }
