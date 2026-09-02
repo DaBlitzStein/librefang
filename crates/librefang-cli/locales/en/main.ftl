@@ -2176,7 +2176,10 @@ tui-workflows-hints-create-next =   [Enter] Next  [Esc] Back
 tui-workflows-title-run-input = Run: { $name }
 tui-workflows-label-run-input =   Input (JSON or text):
 tui-workflows-placeholder-run-input = enter workflow input...
-tui-workflows-hints-run-input =   [Enter] Run  [Esc] Cancel
+tui-workflows-param-required = { $name } is required
+tui-workflows-params-none = This workflow declares no parameters - input is sent as free text.
+tui-workflows-params-failed = Could not load the declared parameters - input is sent as free text.
+tui-workflows-hints-run-input =   [Enter] Run  [Tab/↑↓] Fields  [Esc] Cancel
 tui-workflows-title-run-result = Workflow Run Result
 tui-workflows-running = Running workflow...
 tui-workflows-result-complete = Complete
@@ -2506,3 +2509,9 @@ tui-event-channels-not-available-in-process = Channel management needs a running
 tui-event-channel-save-failed = Failed to save channel instance { $name }: { $error }
 tui-event-channel-delete-failed = Failed to delete channel instance { $name }: { $error }
 tui-event-channels-reload-failed = Failed to reload channels: { $error }
+
+# --- TUI fetch failures that used to be silent (#8141) ---
+tui-memory-config-requires-daemon = Memory settings come from the daemon API — not available when the TUI is attached in-process.
+tui-memory-config-fetch-failed = Could not read the memory settings: { $error }
+tui-goals-run-requires-daemon = Run state comes from the daemon API — not available when the TUI is attached in-process.
+tui-goals-run-fetch-failed = Could not read the run state for { $id }: { $error }

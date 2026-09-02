@@ -1232,7 +1232,10 @@ tui-workflows-hints-create-next =   [Enter] 下一步  [Esc] 返回
 tui-workflows-title-run-input = 运行: { $name }
 tui-workflows-label-run-input =   输入 (JSON 或文本):
 tui-workflows-placeholder-run-input = 输入工作流输入...
-tui-workflows-hints-run-input =   [Enter] 运行  [Esc] 取消
+tui-workflows-param-required = { $name } 为必填项
+tui-workflows-params-none = 此工作流未声明任何参数 - 输入将作为自由文本发送。
+tui-workflows-params-failed = 无法加载声明的参数 - 输入将作为自由文本发送。
+tui-workflows-hints-run-input =   [Enter] 运行  [Tab/↑↓] 字段  [Esc] 取消
 tui-workflows-title-run-result = 工作流运行结果
 tui-workflows-running = 正在运行工作流...
 tui-workflows-result-complete = 完成
@@ -2459,3 +2462,9 @@ tui-event-channels-not-available-in-process = 通道管理需要正在运行的�
 tui-event-channel-save-failed = 保存通道实例 { $name } 失败：{ $error }
 tui-event-channel-delete-failed = 删除通道实例 { $name } 失败：{ $error }
 tui-event-channels-reload-failed = 重载通道失败：{ $error }
+
+# --- TUI fetch failures that used to be silent (#8141) ---
+tui-memory-config-requires-daemon = 记忆设置来自守护进程 API —— TUI 以进程内方式接入时不可用。
+tui-memory-config-fetch-failed = 无法读取记忆设置：{ $error }
+tui-goals-run-requires-daemon = 运行状态来自守护进程 API —— TUI 以进程内方式接入时不可用。
+tui-goals-run-fetch-failed = 无法读取 { $id } 的运行状态：{ $error }

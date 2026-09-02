@@ -2175,7 +2175,10 @@ tui-workflows-hints-create-next =   [Enter] 다음  [Esc] 뒤로
 tui-workflows-title-run-input = 실행: { $name }
 tui-workflows-label-run-input =   입력 (JSON 또는 텍스트):
 tui-workflows-placeholder-run-input = 워크플로 입력을 입력하십시오...
-tui-workflows-hints-run-input =   [Enter] 실행  [Esc] 취소
+tui-workflows-param-required = { $name } 은(는) 필수입니다
+tui-workflows-params-none = 이 워크플로는 선언된 매개변수가 없습니다 - 입력이 자유 텍스트로 전송됩니다.
+tui-workflows-params-failed = 선언된 매개변수를 불러오지 못했습니다 - 입력이 자유 텍스트로 전송됩니다.
+tui-workflows-hints-run-input =   [Enter] 실행  [Tab/↑↓] 필드  [Esc] 취소
 tui-workflows-title-run-result = 워크플로 실행 결과
 tui-workflows-running = 워크플로 실행 중...
 tui-workflows-result-complete = 완료
@@ -2505,3 +2508,9 @@ tui-event-channels-not-available-in-process = 채널 관리에는 실행 중인 
 tui-event-channel-save-failed = 채널 인스턴스 { $name } 저장 실패: { $error }
 tui-event-channel-delete-failed = 채널 인스턴스 { $name } 삭제 실패: { $error }
 tui-event-channels-reload-failed = 채널 재로드 실패: { $error }
+
+# --- TUI fetch failures that used to be silent (#8141) ---
+tui-memory-config-requires-daemon = 메모리 설정은 데몬 API에서 가져옵니다 — TUI가 인프로세스로 연결된 경우 사용할 수 없습니다.
+tui-memory-config-fetch-failed = 메모리 설정을 읽을 수 없습니다: { $error }
+tui-goals-run-requires-daemon = 실행 상태는 데몬 API에서 가져옵니다 — TUI가 인프로세스로 연결된 경우 사용할 수 없습니다.
+tui-goals-run-fetch-failed = { $id }의 실행 상태를 읽을 수 없습니다: { $error }

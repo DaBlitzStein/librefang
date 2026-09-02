@@ -320,6 +320,21 @@ impl App {
                 self.workflows.status_msg = crate::i18n::t("tui-mod-workflow-created");
                 self.refresh_workflows();
             }
+            AppEvent::WorkflowParamsLoaded(fetch) => {
+                self.workflows.run_params = Vec::new();
+                self.workflows.param_cursor = 0;
+                match fetch {
+                    workflows::WorkflowParamsFetch::Loaded(params) => {
+                        self.workflows.run_params = params;
+                    }
+                    workflows::WorkflowParamsFetch::None => {
+                        self.workflows.status_msg = crate::i18n::t("tui-workflows-params-none");
+                    }
+                    workflows::WorkflowParamsFetch::Failed => {
+                        self.workflows.status_msg = crate::i18n::t("tui-workflows-params-failed");
+                    }
+                }
+            }
             AppEvent::ChannelListLoaded {
                 instances,
                 adapters,
@@ -538,6 +553,20 @@ impl App {
                 self.goals
                     .apply_run_state(&goal_id, phase, iteration, max_iterations);
             }
+            AppEvent::GoalRunFailed { goal_id, failure } => {
+                // Deliberately does NOT touch the cached run state: the last
+                // known phase is more useful than blanking it, and the status
+                // line is what says the reading is stale.
+                self.goals.status_msg = match failure {
+                    event::FetchFailure::RequiresDaemon => {
+                        crate::i18n::t("tui-goals-run-requires-daemon")
+                    }
+                    event::FetchFailure::Error(reason) => crate::i18n::t_args(
+                        "tui-goals-run-fetch-failed",
+                        &[("id", &goal_id), ("error", &reason)],
+                    ),
+                };
+            }
             AppEvent::GoalCreated(id) => {
                 self.goals.status_msg = crate::i18n::t_args("tui-goal-created", &[("id", &id)]);
                 self.refresh_goals();
@@ -578,6 +607,19 @@ impl App {
             AppEvent::MemoryConfigLoaded(config) => {
                 self.memory.config = Some(config);
                 self.memory.loading = false;
+            }
+            AppEvent::MemoryConfigFailed(failure) => {
+                // Clear `loading` on the failure path too, or the screen sits
+                // on its spinner forever and the message never gets read.
+                self.memory.loading = false;
+                self.memory.status_msg = match failure {
+                    event::FetchFailure::RequiresDaemon => {
+                        crate::i18n::t("tui-memory-config-requires-daemon")
+                    }
+                    event::FetchFailure::Error(reason) => {
+                        crate::i18n::t_args("tui-memory-config-fetch-failed", &[("error", &reason)])
+                    }
+                };
             }
             AppEvent::MemoryAgentsLoaded(agents) => {
                 self.memory.agents = agents;
@@ -1897,6 +1939,11 @@ impl App {
                         steps_json,
                         self.event_tx.clone(),
                     );
+                }
+            }
+            workflows::WorkflowAction::FetchWorkflowParams(wf_id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_workflow_params(backend, wf_id, self.event_tx.clone());
                 }
             }
             workflows::WorkflowAction::RunWorkflow { id, input } => {
