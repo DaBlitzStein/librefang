@@ -32,6 +32,7 @@ export const agentTypeKeys = {
   registryDiffs: () => [...agentTypeKeys.all, "registry-diff"] as const,
   registryDiff: (name: string) =>
     [...agentTypeKeys.registryDiffs(), name] as const,
+  history: (name: string) => [...agentTypeKeys.detail(name), "history"] as const,
 };
 
 export const agentKeys = {

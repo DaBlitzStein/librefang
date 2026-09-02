@@ -3,6 +3,7 @@ import {
   listAgentTemplates,
   getAgentType,
   getAgentTypeRegistryDiff,
+  getTemplateHistory,
 } from "../http/client";
 import { agentTypeKeys } from "./keys";
 import { withOverrides, QueryOverrides } from "./options";
@@ -31,6 +32,13 @@ export const agentTypeQueries = {
       queryFn: () => getAgentTypeRegistryDiff(name),
       staleTime: STALE_MS,
     }),
+  history: (name: string) =>
+    queryOptions({
+      queryKey: agentTypeKeys.history(name),
+      queryFn: () => getTemplateHistory(name),
+      enabled: !!name,
+      staleTime: STALE_MS,
+    }),
 };
 
 export function useAgentTypes(options: QueryOverrides = {}) {
@@ -46,4 +54,8 @@ export function useAgentTypeRegistryDiff(
   options: QueryOverrides = {},
 ) {
   return useQuery(withOverrides(agentTypeQueries.registryDiff(name), options));
+}
+
+export function useAgentTypeHistory(name: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentTypeQueries.history(name), options));
 }

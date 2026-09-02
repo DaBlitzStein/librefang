@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
-import { Edit2, LayoutTemplate, Lock, Play, Plus, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
+import { Edit2, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
 import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
-import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes } from "../lib/queries/agentTypes";
+import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
   useCreateAgentType,
   useDeleteAgentType,
   useRestoreAgentType,
+  useRestoreTemplateVersion,
   useSpawnEphemeral,
   useUpdateAgentType,
 } from "../lib/mutations/agentTypes";
@@ -616,6 +617,95 @@ function RestoreDiffModal({
   );
 }
 
+
+function TemplateHistoryModal({
+  name,
+  onClose,
+}: {
+  name: string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const history = useAgentTypeHistory(name, { enabled: true });
+  const restore = useRestoreTemplateVersion();
+  const [expanded, setExpanded] = useState<number | null>(null);
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      variant="panel-right"
+      size="lg"
+      title={t("agentTypes.history_title", { name, defaultValue: `History: ${name}` })}
+    >
+      {history.isLoading ? (
+        <ListSkeleton rows={4} />
+      ) : history.isError ? (
+        <ErrorState message={history.error?.message} onRetry={() => void history.refetch()} />
+      ) : (history.data?.versions ?? []).length === 0 ? (
+        <EmptyState
+          icon={<History className="h-5 w-5" />}
+          title={t("agentTypes.history_empty", { defaultValue: "No version history yet" })}
+          description={t("agentTypes.history_empty_desc", {
+            defaultValue: "Version snapshots are recorded when a template is created or edited.",
+          })}
+        />
+      ) : (
+        <div className="space-y-2">
+          {(history.data?.versions ?? []).map((v) => (
+            <div
+              key={v.id}
+              className="rounded-lg border border-border-subtle bg-surface-dim px-3 py-2"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="text-[12px] font-medium text-text-main">
+                    {new Date(v.timestamp + "Z").toLocaleString()}
+                  </span>
+                  <Badge variant="default" className="ml-2">{v.change_source}</Badge>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setExpanded(expanded === v.id ? null : v.id)}
+                    className="rounded-lg px-2 py-1 text-[11px] text-text-dim hover:bg-main/50 hover:text-text-main"
+                  >
+                    {expanded === v.id ? t("common.collapse", { defaultValue: "Collapse" }) : t("common.expand", { defaultValue: "Expand" })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await restore.mutateAsync({ name, versionId: v.id });
+                        addToast(t("agentTypes.restored", { defaultValue: "Version restored" }), "success");
+                        onClose();
+                      } catch (err) {
+                        addToast(toastErr(err, t("agentTypes.restore_failed", { defaultValue: "Restore failed" })), "error");
+                      }
+                    }}
+                    disabled={restore.isPending}
+                    className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-text-dim hover:bg-brand/10 hover:text-brand"
+                    title={t("agentTypes.restore", { defaultValue: "Restore this version" })}
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    {t("agentTypes.restore_btn", { defaultValue: "Restore" })}
+                  </button>
+                </div>
+              </div>
+              {expanded === v.id && (
+                <pre className="mt-2 max-h-64 overflow-auto rounded border border-border-subtle bg-surface p-2 text-[11px] text-text-dim">
+                  {v.manifest_toml}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function AgentTypeRow({
   type,
   onQuickRun,
@@ -623,6 +713,7 @@ function AgentTypeRow({
   onDelete,
   onPromote,
   onRestore,
+  onHistory,
 }: {
   type: AgentTemplate;
   onQuickRun: () => void;
@@ -630,6 +721,7 @@ function AgentTypeRow({
   onDelete: () => void;
   onPromote: () => void;
   onRestore: () => void;
+  onHistory: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -677,6 +769,15 @@ function AgentTypeRow({
             that cannot succeed — point at the surface that can instead (#7731). */}
         {type.editable ? (
           <>
+            <button
+              type="button"
+              onClick={onHistory}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-text-main"
+              aria-label={t("agentTypes.history", { defaultValue: "History" })}
+              title={t("agentTypes.history", { defaultValue: "History" })}
+            >
+              <History className="h-3.5 w-3.5" />
+            </button>
             <button
               type="button"
               onClick={onEdit}
@@ -731,6 +832,7 @@ export function AgentTypesPage() {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [promoting, setPromoting] = useState<string | null>(null);
   const [restoring, setRestoring] = useState<string | null>(null);
+  const [historyName, setHistoryName] = useState<string | null>(null);
 
   async function confirmDelete() {
     if (!pendingDelete) return;
@@ -784,6 +886,7 @@ export function AgentTypesPage() {
               onDelete={() => setPendingDelete(type.name)}
               onPromote={() => setPromoting(type.name)}
               onRestore={() => setRestoring(type.name)}
+              onHistory={() => setHistoryName(type.name)}
             />
           ))}
         </div>
@@ -800,6 +903,10 @@ export function AgentTypesPage() {
       )}
 
       {restoring && <RestoreDiffModal name={restoring} onClose={() => setRestoring(null)} />}
+
+      {historyName && (
+        <TemplateHistoryModal name={historyName} onClose={() => setHistoryName(null)} />
+      )}
 
       <ConfirmDialog
         isOpen={pendingDelete !== null}
