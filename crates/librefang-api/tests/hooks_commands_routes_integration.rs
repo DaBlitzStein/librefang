@@ -577,12 +577,18 @@ async fn commands_lists_builtins() {
     assert_eq!(status, StatusCode::OK, "{body:?}");
     let arr = body["commands"].as_array().expect("commands array");
     let names: Vec<&str> = arr.iter().filter_map(|v| v["cmd"].as_str()).collect();
-    for must_have in ["/help", "/new", "/reset", "/model", "/status"] {
+    for must_have in ["/help", "/new", "/reset", "/model"] {
         assert!(
             names.contains(&must_have),
             "expected `{must_have}` in commands list: {names:?}"
         );
     }
+    // `/status` deliberately has no dashboard execution path, so it must not
+    // be served here — see the registry comment in `librefang-channels`.
+    assert!(
+        !names.contains(&"/status"),
+        "`/status` has no dashboard path and must not be catalogued: {names:?}"
+    );
     // Each entry has both `cmd` and `desc` fields.
     for v in arr {
         assert!(v["cmd"].is_string(), "missing cmd: {v:?}");

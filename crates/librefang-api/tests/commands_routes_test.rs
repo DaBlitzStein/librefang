@@ -124,7 +124,7 @@ async fn catalog_still_serves_every_historical_builtin() {
 
     for cmd in [
         "/help", "/new", "/reset", "/reboot", "/compact", "/model", "/stop", "/usage", "/think",
-        "/context", "/verbose", "/queue", "/status", "/clear", "/exit",
+        "/context", "/verbose", "/queue", "/clear", "/exit",
     ] {
         assert!(
             served.contains(&cmd),
@@ -134,11 +134,13 @@ async fn catalog_still_serves_every_historical_builtin() {
         assert_eq!(status, StatusCode::OK, "{cmd} not resolvable by name");
     }
 
-    // Channel-only commands must not leak into the dashboard catalog.
-    for cmd in ["/btw", "/agent", "/approve", "/schedule"] {
+    // Commands without a dashboard execution path must not leak into the
+    // dashboard catalog; `/status` deliberately left it with the registry
+    // derivation (it has no client handler and no WebSocket command arm).
+    for cmd in ["/btw", "/agent", "/approve", "/schedule", "/status"] {
         assert!(
             !served.contains(&cmd),
-            "channel-only {cmd} leaked into the catalog"
+            "non-dashboard {cmd} leaked into the catalog"
         );
     }
 }

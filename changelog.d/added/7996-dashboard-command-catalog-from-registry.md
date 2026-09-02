@@ -1,0 +1,3 @@
+The dashboard slash menu now derives its catalog from the central command registry instead of a hand-written list, so a command registered with `Scope::DASHBOARD` shows up in the dashboard chat automatically (#7996).
+The menu gains `/goal`, `/agents`, `/budget`, `/peers`, `/a2a`, `/context`, `/queue`, `/verbose` and `/info`, which the hand-written catalog never offered.
+`/think` and `/exit` keep their dashboard execution paths (`Backend` and `Client`), and a registry guard now fails the build if any command carries `Scope::DASHBOARD` without a dashboard execution path, so a block-move in the registry can no longer silently drop a command from the menu (#7996) (@DaBlitzStein)

@@ -274,7 +274,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "[on|off]",
         subcommands: &[],
         telegram_menu: true,
-        dashboard_exec: None,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
     CommandDef {
         name: "verbose",
@@ -349,8 +349,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         name: "status",
         aliases: &[],
         category: Category::Info,
-        // Channels show system status; TUI shows connection / agent info.
-        scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
+        // Channels show system status; TUI shows connection / agent info. The
+        // dashboard has neither a client handler nor a WebSocket command arm
+        // for it, and a `Scope::DASHBOARD` entry without `dashboard_exec` is
+        // hidden from the slash menu by the SPA's exec filter — so it stays
+        // out of the dashboard catalog entirely.
+        scope: Scope::CHANNEL.union(Scope::CLI),
         description: "Show system status",
         args_hint: "",
         subcommands: &[],
@@ -590,11 +594,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
-        dashboard_exec: None,
+        dashboard_exec: Some(DashboardExec::Client),
     },
 ];
 
 impl CommandDef {
+    /// One-line usage hint, e.g. `Usage: /goal <description> [--loop-engineering]`.
     pub fn usage(&self) -> String {
         if self.args_hint.is_empty() {
             format!("Usage: /{}", self.name)
@@ -1052,7 +1057,7 @@ mod tests {
     fn dashboard_scope_covers_the_historical_builtin_catalog() {
         let historical: &[&str] = &[
             "help", "new", "reset", "reboot", "compact", "model", "stop", "usage", "think",
-            "context", "verbose", "queue", "status", "clear", "exit",
+            "context", "verbose", "queue", "clear", "exit",
         ];
         let actual: std::collections::BTreeSet<&str> =
             iter_for(Scope::DASHBOARD).map(|c| c.name).collect();
@@ -1066,10 +1071,10 @@ mod tests {
 
     #[test]
     fn dashboard_exec_matches_the_historical_chat_menu() {
-        let client: &[&str] = &["help", "clear", "agents", "info"];
+        let client: &[&str] = &["help", "clear", "agents", "info", "exit"];
         let backend: &[&str] = &[
-            "new", "compact", "reset", "reboot", "stop", "model", "usage", "context", "verbose",
-            "budget", "peers", "a2a", "queue",
+            "new", "compact", "reset", "reboot", "stop", "model", "usage", "think", "context",
+            "verbose", "budget", "peers", "a2a", "queue", "goal",
         ];
         for name in client {
             let def = lookup(name).unwrap_or_else(|| panic!("`/{name}` must be registered"));
@@ -1086,6 +1091,19 @@ mod tests {
                 Some(DashboardExec::Backend),
                 "`/{name}` must stay dispatched over the chat WebSocket"
             );
+        }
+    }
+
+    #[test]
+    fn dashboard_scope_implies_dashboard_exec() {
+        for c in COMMAND_REGISTRY {
+            if c.scope.contains(Scope::DASHBOARD) {
+                assert!(
+                    c.dashboard_exec.is_some(),
+                    "`/{}` carries Scope::DASHBOARD but no dashboard_exec, so the SPA will catalogue it and hide it from the menu",
+                    c.name
+                );
+            }
         }
     }
 
