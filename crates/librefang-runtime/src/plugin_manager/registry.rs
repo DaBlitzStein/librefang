@@ -693,10 +693,12 @@ async fn serve_stale_verified_index(
     let (bytes, age) = load_stale_registry_cache(cache_path)
         .ok_or_else(|| refuse("no cached index".to_string()))?;
 
+    let verify_disabled = std::env::var("LIBREFANG_REGISTRY_VERIFY").as_deref() == Ok("0");
+
     // Re-verify at read time. The cache file is daemon-user writable, so
     // membership in it is not a trust root by itself; the same Ed25519
     // verification that gates the remote path gates the stale path too.
-    if std::env::var("LIBREFANG_REGISTRY_VERIFY").as_deref() != Ok("0") {
+    if !verify_disabled {
         let sig_path = registry_cache_sig_path(cache_path);
         let sig_text = std::fs::read_to_string(&sig_path).map_err(|e| {
             refuse(format!(
@@ -713,10 +715,18 @@ async fn serve_stale_verified_index(
 
     let value = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)
         .map_err(|e| refuse(format!("cached index parse error: {e}")))?;
-    warn!(
-        registry,
-        age_secs = age,
-        "Remote registry index unreachable; serving stale signature-verified cache (re-verified at read time)"
-    );
+    if verify_disabled {
+        warn!(
+            registry,
+            age_secs = age,
+            "Remote registry index unreachable; serving stale cache without signature re-verification (LIBREFANG_REGISTRY_VERIFY=0)"
+        );
+    } else {
+        warn!(
+            registry,
+            age_secs = age,
+            "Remote registry index unreachable; serving stale signature-verified cache (re-verified at read time)"
+        );
+    }
     Ok(value)
 }
