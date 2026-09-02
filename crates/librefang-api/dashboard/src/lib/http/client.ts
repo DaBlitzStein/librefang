@@ -145,6 +145,7 @@ export {
   getAgentMcpServers,
   getAgentManifestHistory,
   getAgentTemplateToml,
+  getTemplateHistory,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -201,6 +202,7 @@ export {
   createAgentType,
   updateAgentType,
   deleteAgentType,
+  restoreTemplateVersion,
   spawnEphemeral,
   spawnAgent,
   cloneAgent,

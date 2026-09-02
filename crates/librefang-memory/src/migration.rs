@@ -276,11 +276,16 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
     run_step!(54, migrate_v54);
 
+    // v55: template (agent-type) version history so operators can see
+    // how an agent type's manifest changed over time and restore a
+    // prior configuration from the dashboard.
+    run_step!(55, migrate_v55);
+
     // v56: agent manifest version history so operators can see how an
     // agent's config changed over time and roll back to a prior state.
     // Purely additive: one new table, no existing row changes meaning.
-    // Numbered against #8047, which holds v55 (`template_versions`); the
-    // first schema PR to merge keeps 55 and the rest renumber on rebase.
+    // Stacks on top of #8047's v55 (`template_versions`), which landed
+    // first and kept the contended number.
     run_step!(56, migrate_v56);
 
     // Audit-trail consistency (#3538): user_version must match the count
@@ -1214,6 +1219,31 @@ fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (54, datetime('now'), 'Persist agent lineage: agents.parent_id + idx_agents_parent_id + agents.parent_recorded so a pre-v54 row reads as unknown rather than root (#7930)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v55: template (agent-type) version history.
+///
+/// Every write to an agent type's `agent.toml` records the full serialized
+/// manifest so an operator can see what changed and when, and restore a
+/// prior version from the dashboard.
+fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS template_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_name   TEXT NOT NULL,
+            timestamp       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown'
+        );
+        CREATE INDEX IF NOT EXISTS idx_template_versions_name
+            ON template_versions(template_name, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (55, datetime('now'), 'Template (agent-type) version history table')",
         [],
     )?;
     Ok(())
