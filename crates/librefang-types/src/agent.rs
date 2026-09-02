@@ -919,15 +919,19 @@ pub struct ModelConfig {
     ///
     /// A typed [`Self`] field rather than an `extra_params` entry so the
     /// same intent cannot be expressed two ways with different validation:
-    /// the form serializes it through one validated path and the drivers
-    /// merge it into the request body at one site. `None` (the default)
-    /// sends nothing, so providers without the parameter are unaffected.
+    /// the form serializes it through one validated path and the agent loop
+    /// merges it into `extra_body` at one site. Providers that flatten
+    /// `extra_body` (OpenAI-compatible, Ollama) receive it; typed-body drivers
+    /// such as Anthropic do not forward `extra_body` extensions, which is
+    /// correct there — current Claude generations reject sampling controls.
+    /// `None` (the default) sends nothing, so unaffected providers see no
+    /// extra parameter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
     /// Optional OpenAI-compatible `frequency_penalty`.
     ///
-    /// Not an Anthropic parameter — see the form hint before adding it to
-    /// an Anthropic agent. Same contract as [`Self::top_p`].
+    /// Not an Anthropic parameter — fill it only on providers that support it.
+    /// Same contract as [`Self::top_p`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f32>,
     /// Optional OpenAI-compatible `presence_penalty`.
