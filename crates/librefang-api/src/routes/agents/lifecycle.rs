@@ -40,23 +40,24 @@ async fn resolve_manifest(
                     message: t.t("api-error-template-invalid-name"),
                 });
             }
-            let home = &state.kernel.config_ref().home_dir;
-            let workspace_path = home
-                .join("workspaces")
-                .join("agents")
-                .join(&safe_name)
-                .join("agent.toml");
-            let agent_type_path = home.join("agent-types").join(format!("{safe_name}.toml"));
-            let content = match tokio::fs::read_to_string(&workspace_path).await {
-                Ok(c) => Ok(c),
-                Err(_) => tokio::fs::read_to_string(&agent_type_path).await,
-            };
-            match content {
-                Ok(content) => {
+            // Same precedence as the template catalog (`read_agent_type`):
+            // `agent-types/` wins a collision because it is the source the
+            // write verbs act on, so the editor and the spawn path can never
+            // disagree about which document an operator is acting on.
+            let home_dir = state.kernel.config_ref().home_dir.clone();
+            match crate::routes::agent_templates::read_agent_type_in(&home_dir, &safe_name).await {
+                Ok(Some((_, content))) => {
                     used_template = Some(safe_name.clone());
                     content
                 }
-                Err(_) => {
+                Ok(None) => {
+                    let t = ErrorTranslator::new(lang);
+                    return Err(ManifestError {
+                        message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(name = %safe_name, error = %e, "failed to read template manifest");
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
                         message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
