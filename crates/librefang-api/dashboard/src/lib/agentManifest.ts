@@ -522,6 +522,24 @@ const parseFloatish = (raw: string): number | null => {
   return n;
 };
 
+// Sampling penalties are signed: parseFloatish rejects negatives because
+// every other float field here is a cost/quota, but frequency/presence
+// penalty are OpenAI-compatible parameters whose valid range is [-2, 2].
+const parseFloatSigned = (raw: string): number | null => {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n)) return null;
+  return n;
+};
+
+// The number inputs declare min/max, but min/max does not stop pasted or
+// programmatic values on a non-submitted form — the serializer is the gate
+// the reviewer named (#8112 review, non-blocking): a Top P of 5 must never
+// reach the TOML.
+const clampRange = (value: number | null, min: number, max: number): number | null =>
+  value === null ? null : Math.min(Math.max(value, min), max);
+
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
   if (!value) return;
   lines.push(`${key} = ${escapeTomlString(value)}`);

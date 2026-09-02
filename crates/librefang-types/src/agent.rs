@@ -984,6 +984,26 @@ pub struct ModelConfig {
     /// the catalog default (e.g. a quantised checkpoint).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
+    /// Optional nucleus-sampling threshold (OpenAI-compatible `top_p`).
+    ///
+    /// A typed [`Self`] field rather than an `extra_params` entry so the
+    /// same intent cannot be expressed two ways with different validation:
+    /// the form serializes it through one validated path and the drivers
+    /// merge it into the request body at one site. `None` (the default)
+    /// sends nothing, so providers without the parameter are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Optional OpenAI-compatible `frequency_penalty`.
+    ///
+    /// Not an Anthropic parameter — see the form hint before adding it to
+    /// an Anthropic agent. Same contract as [`Self::top_p`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    /// Optional OpenAI-compatible `presence_penalty`.
+    ///
+    /// Same contract as [`Self::top_p`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
     /// Provider-specific extension parameters that are flattened directly
     /// into the API request body.
     ///
@@ -1017,6 +1037,9 @@ impl Default for ModelConfig {
             base_url: None,
             context_window: None,
             max_output_tokens: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
             extra_params: std::collections::BTreeMap::new(),
         }
     }
