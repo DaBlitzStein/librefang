@@ -1522,14 +1522,14 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
 
           <SliderInput
             label={t("models.context_window")}
-            value={state.contextWindowEnabled ? state.contextWindow : (model.context_window ?? 128000)}
+            value={state.contextWindowEnabled ? state.contextWindow : (model.context_window || 128000)}
             onChange={(v) => dispatch({ type: "SET_FIELD", field: "contextWindow", value: Math.round(v) })}
             min={1024} max={2097152} step={1024}
             enabled={state.contextWindowEnabled}
             onToggle={(v) => {
               dispatch({ type: "SET_FIELD", field: "contextWindowEnabled", value: v });
               if (v && state.contextWindow === settingsInitial.contextWindow) {
-                dispatch({ type: "SET_FIELD", field: "contextWindow", value: model.context_window ?? 128000 });
+                dispatch({ type: "SET_FIELD", field: "contextWindow", value: model.context_window || 128000 });
               }
             }}
             ticks={[32768, 131072, 524288, 1048576, 2097152]}
