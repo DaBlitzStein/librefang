@@ -59,8 +59,11 @@ async fn resolve_manifest(
                 Err(e) => {
                     tracing::warn!(name = %safe_name, error = %e, "failed to read template manifest");
                     let t = ErrorTranslator::new(lang);
+                    // Not "not found": the template may well exist and be unreadable
+                    // (permissions, I/O), and reporting that as a 404 sends the operator
+                    // looking for a missing file instead of at the error in the log.
                     return Err(ManifestError {
-                        message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                        message: t.t("api-error-template-read-failed"),
                     });
                 }
             }
@@ -203,6 +206,10 @@ async fn spawn_agent_inner(
                 (StatusCode::NOT_FOUND, "template_not_found")
             } else if e.message.contains("signature verification failed") {
                 (StatusCode::FORBIDDEN, "signature_invalid")
+            } else if e.message.contains("Failed to read template") {
+                // The template exists as far as we know; we could not read it.
+                // That is a server-side fault, not a malformed request.
+                (StatusCode::INTERNAL_SERVER_ERROR, "template_read_failed")
             } else {
                 (StatusCode::BAD_REQUEST, "invalid_manifest")
             };
