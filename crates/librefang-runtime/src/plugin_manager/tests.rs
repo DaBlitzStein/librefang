@@ -1,4 +1,4 @@
-use super::install::parse_plugin_i18n_blocks;
+use super::install::{parse_plugin_i18n_blocks, pip_in_venv, resolve_python_install};
 use super::registry::{
     is_valid_registry_pubkey_b64, registry_index_urls, registry_pubkey_cache_path,
     EMBEDDED_REGISTRY_PUBKEYS,
@@ -362,6 +362,99 @@ description = "Spanish description"
         i18n["es"].description.as_deref(),
         Some("Spanish description")
     );
+}
+
+// ── Shared python interpreter/args resolver (install.rs) ──
+
+/// `python3` exists and is preferred over `python`.
+#[tokio::test]
+async fn resolve_python_install_prefers_python3() {
+    let (interpreter, args) =
+        resolve_python_install(|name| std::future::ready(name == "python3"), false)
+            .await
+            .expect("python3 probe should hit");
+    assert_eq!(interpreter, "python3");
+    assert_eq!(args[..3], ["-m", "pip", "install"]);
+    assert!(args.contains(&"--user"));
+    assert!(args.contains(&"--break-system-packages"));
+}
+
+/// Only `python` exists — the resolver falls back to it.
+#[tokio::test]
+async fn resolve_python_install_falls_back_to_python() {
+    let (interpreter, args) =
+        resolve_python_install(|name| std::future::ready(name == "python"), false)
+            .await
+            .expect("python probe should hit");
+    assert_eq!(interpreter, "python");
+    assert_eq!(args[..3], ["-m", "pip", "install"]);
+    assert!(args.contains(&"--user"));
+    assert!(args.contains(&"--break-system-packages"));
+}
+
+/// Neither interpreter exists — clean error naming both candidates.
+#[tokio::test]
+async fn resolve_python_install_no_interpreter_is_clean_error() {
+    let err = resolve_python_install(|_| std::future::ready(false), false)
+        .await
+        .expect_err("no interpreter available — resolver must error");
+    assert!(err.contains("python3"), "error should name python3: {err}");
+    assert!(err.contains("python"), "error should name python: {err}");
+}
+
+/// Inside a virtualenv/Conda env, `--user` / `--break-system-packages`
+/// must be omitted (pip rejects `--user` there).
+#[tokio::test]
+async fn resolve_python_install_omits_user_flags_in_venv() {
+    let (interpreter, args) =
+        resolve_python_install(|name| std::future::ready(name == "python3"), true)
+            .await
+            .expect("python3 probe should hit");
+    assert_eq!(interpreter, "python3");
+    assert_eq!(args[..3], ["-m", "pip", "install"]);
+    assert!(!args.contains(&"--user"));
+    assert!(!args.contains(&"--break-system-packages"));
+}
+
+/// Outside a virtualenv, both flags must be present (PEP 668).
+#[tokio::test]
+async fn resolve_python_install_adds_user_flags_outside_venv() {
+    let (interpreter, args) =
+        resolve_python_install(|name| std::future::ready(name == "python3"), false)
+            .await
+            .expect("python3 probe should hit");
+    assert_eq!(interpreter, "python3");
+    assert!(args.contains(&"--user"));
+    assert!(args.contains(&"--break-system-packages"));
+}
+
+/// The venv detection mirrors the env vars pip itself honors.
+#[test]
+fn pip_in_venv_detects_virtualenv_and_conda() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let venv = std::env::var_os("VIRTUAL_ENV");
+    let conda = std::env::var_os("CONDA_PREFIX");
+    std::env::remove_var("VIRTUAL_ENV");
+    std::env::remove_var("CONDA_PREFIX");
+    assert!(!pip_in_venv(), "neither var set — not a venv");
+
+    std::env::set_var("VIRTUAL_ENV", "/tmp/fake-venv");
+    assert!(pip_in_venv(), "VIRTUAL_ENV set — venv");
+
+    std::env::remove_var("VIRTUAL_ENV");
+    std::env::set_var("CONDA_PREFIX", "/opt/fake-conda");
+    assert!(pip_in_venv(), "CONDA_PREFIX set — conda env");
+
+    // Restore the prior environment.
+    match venv {
+        Some(v) => std::env::set_var("VIRTUAL_ENV", v),
+        None => std::env::remove_var("VIRTUAL_ENV"),
+    }
+    match conda {
+        Some(c) => std::env::set_var("CONDA_PREFIX", c),
+        None => std::env::remove_var("CONDA_PREFIX"),
+    }
 }
 
 // ── #3805 — registry pubkey resolver (env > TOFU cache > worker fetch) ──
@@ -903,5 +996,92 @@ bootstrap = "hooks/bootstrap.py"
     assert_eq!(
         a, b,
         "pack output must be byte-identical for identical inputs"
+    );
+}
+
+// ── /api/plugins/doctor runtime probes (#8142) ─────────────────────────────
+
+/// The reported table covers every runtime `PluginRuntime::all()` declares, in that exact order.
+///
+/// Load-bearing because the probes now run concurrently: joining the handles out of order, or collecting from a `HashMap`, would make the endpoint's output vary between calls for an unchanged host — the #3298 problem, and also the thing that would make the `runtime` → availability index in `run_doctor` line up with the wrong entry.
+#[test]
+fn doctor_runtime_table_is_complete_and_in_declaration_order() {
+    use crate::plugin_runtime::PluginRuntime;
+
+    let report = run_doctor();
+    let expected: Vec<String> = PluginRuntime::all()
+        .iter()
+        .map(|r| r.label().to_string())
+        .collect();
+    let actual: Vec<String> = report.runtimes.iter().map(|s| s.runtime.clone()).collect();
+    assert_eq!(
+        actual, expected,
+        "the probe table must list every declared runtime in declaration order"
+    );
+}
+
+/// Two calls in a row must agree, and the second must be served from the cache rather than re-probing.
+///
+/// The timing assertion is deliberately loose — it only has to separate "did not spawn ~12 subprocesses" from "did".
+/// A cold call spawns one process per runtime (three for Python); the cached call does no I/O at all, so the gap is orders of magnitude rather than a few percent.
+#[test]
+fn doctor_runtime_probes_are_cached_between_calls() {
+    // Warm the cache and measure the cached read, not the cold one: another
+    // test in this binary may already have populated it, so timing the first
+    // call here would be measuring someone else's state.
+    let first = run_doctor();
+    let began = std::time::Instant::now();
+    let second = run_doctor();
+    let cached_elapsed = began.elapsed();
+
+    let names_first: Vec<_> = first.runtimes.iter().map(|s| &s.runtime).collect();
+    let names_second: Vec<_> = second.runtimes.iter().map(|s| &s.runtime).collect();
+    assert_eq!(
+        names_first, names_second,
+        "a cached read must return the same table"
+    );
+    assert!(
+        cached_elapsed < std::time::Duration::from_millis(500),
+        "a cached probe read must not spawn subprocesses; took {cached_elapsed:?}"
+    );
+}
+
+/// The plugin list is *not* cached alongside the probe table, so a plugin installed between two calls shows up immediately.
+///
+/// This is the half of the caching decision that could silently regress: it would be tempting to cache the whole `DoctorReport`, and nothing else in the suite would notice.
+#[test]
+fn doctor_reflects_a_newly_written_plugin_without_waiting_for_the_probe_ttl() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let prev_home = std::env::var_os("LIBREFANG_HOME");
+    std::env::set_var("LIBREFANG_HOME", tmp.path());
+
+    // Prime the probe cache while the plugins dir is empty.
+    let before = run_doctor();
+    let had = before
+        .plugins
+        .iter()
+        .any(|p| p.name == "doctor-cache-probe");
+    assert!(!had, "fixture name must not pre-exist");
+
+    let plugin_dir = plugins_dir().join("doctor-cache-probe");
+    std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        "name = \"doctor-cache-probe\"\nversion = \"0.1.0\"\ndescription = \"fixture\"\n",
+    )
+    .unwrap();
+
+    let after = run_doctor();
+    let now_listed = after.plugins.iter().any(|p| p.name == "doctor-cache-probe");
+
+    match prev_home {
+        Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+        None => std::env::remove_var("LIBREFANG_HOME"),
+    }
+
+    assert!(
+        now_listed,
+        "the plugin list must be re-read on every call, not cached with the probe table"
     );
 }

@@ -881,3 +881,226 @@ async fn the_tool_reports_the_defaults_it_resolved_rather_than_the_fields_it_was
 
     cleanup(name);
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/templates/{name}/promote (#8043)
+// ---------------------------------------------------------------------------
+
+/// Promoting a template that does not exist resolves the manifest before any
+/// token / network concern, so it must 404 regardless of GitHub credentials.
+/// This is the network-free contract we can assert deterministically in CI.
+#[tokio::test(flavor = "multi_thread")]
+async fn promote_unknown_template_returns_404() {
+    let _g = lock().lock().await;
+    let h = boot().await;
+
+    let (status, body) = post(&h, "/api/templates/at_promote_ghost/promote", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("not found"),
+        "error must mention 'not found': {body:?}"
+    );
+}
+
+/// When the template exists but no GitHub token is configured (env or
+/// vault), promoting returns 401. Guarded so it only runs when the test
+/// process genuinely has no `GITHUB_TOKEN`, since env state is shared
+/// across parallel test binaries and mutating it would be racy.
+#[tokio::test(flavor = "multi_thread")]
+async fn promote_without_token_returns_401() {
+    if std::env::var("GITHUB_TOKEN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let _g = lock().lock().await;
+    let name = "at_promote_no_token";
+    cleanup(name);
+    write_agent_type(name, &manifest_with_non_form_fields(name));
+
+    let h = boot().await;
+    let (status, body) = post(&h, &format!("/api/templates/{name}/promote"), json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("github"),
+        "error must mention GitHub: {body:?}"
+    );
+
+    cleanup(name);
+}
+
+// Template version history + restore (#8047)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_and_restore_round_trip() {
+    let _g = lock().lock().await;
+    let name = "at_history";
+    cleanup(name);
+
+    let h = boot().await;
+    let (status, created) = post(
+        &h,
+        "/api/templates",
+        json!({ "name": name, "description": "first version" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let (status, edited) = put(
+        &h,
+        &format!("/api/templates/{name}"),
+        json!({ "description": "second version" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+
+    // Two snapshots, newest first, each carrying the documented JSON keys.
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(versions.len(), 2, "{history}");
+    assert_eq!(versions[0]["template_name"], name);
+    assert_eq!(versions[0]["change_source"], "dashboard");
+    assert_eq!(versions[1]["change_source"], "create");
+    for v in versions {
+        assert!(v.get("id").is_some(), "missing id: {v}");
+        assert!(v.get("timestamp").is_some(), "missing timestamp: {v}");
+        assert!(
+            v.get("manifest_toml").is_some(),
+            "missing manifest_toml: {v}"
+        );
+    }
+
+    // Restore to the older snapshot and observe the description roll back.
+    let first_id = versions[1]["id"].as_i64().unwrap();
+    let (status, restored) = request(
+        &h,
+        "POST",
+        &format!("/api/templates/{name}/history/{first_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(
+        restored["spec"]["description"], "first version",
+        "{restored}"
+    );
+
+    cleanup(name);
+}
+
+/// The server-side privacy gate: a manifest whose system prompt still
+/// carries a personal-data literal (a field the sanitizer keeps) must be
+/// refused with 409 and the findings returned, not published.
+#[tokio::test(flavor = "multi_thread")]
+async fn promote_refuses_a_manifest_with_retained_private_details() {
+    let _g = lock().lock().await;
+    let name = "at_promote_pii";
+    cleanup(name);
+    write_agent_type(
+        name,
+        &format!(
+            r#"name = "{name}"
+description = "seeded"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "Escalate to priya.rao@acme.example when unsure."
+"#
+        ),
+    );
+
+    let h = boot().await;
+    let (status, body) = post(&h, &format!("/api/templates/{name}/promote"), json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body:?}");
+    assert_eq!(body["code"], "review_required", "{body:?}");
+    let findings = body["details"]["findings"]
+        .as_array()
+        .expect("findings must be an array");
+    assert!(
+        findings.iter().any(|f| f["removed_by_sanitizer"] == false),
+        "a retained finding must be present: {findings:#?}"
+    );
+
+    cleanup(name);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_rejects_foreign_versions_and_live_agents() {
+    let _g = lock().lock().await;
+    let name = "at_history_neg";
+    let other = "at_history_other";
+    let live = "at_history_live";
+    cleanup(name);
+    cleanup(other);
+    cleanup(live);
+
+    let h = boot().await;
+
+    post(
+        &h,
+        "/api/templates",
+        json!({ "name": name, "description": "a" }),
+    )
+    .await;
+    post(
+        &h,
+        "/api/templates",
+        json!({ "name": other, "description": "b" }),
+    )
+    .await;
+
+    // A version that belongs to a different template is refused, not silently applied.
+    let (_, history) = get(&h, &format!("/api/templates/{other}/history")).await;
+    let other_id = history["versions"][0]["id"].as_i64().unwrap();
+    let (status, body) = request(
+        &h,
+        "POST",
+        &format!("/api/templates/{name}/history/{other_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "version_mismatch", "{body}");
+
+    // A version id that does not exist is a 404, not a crash.
+    let (status, body) = request(
+        &h,
+        "POST",
+        &format!("/api/templates/{name}/history/999999/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "version_not_found", "{body}");
+
+    // A live agent's name is not editable through this route.
+    write_workspace_agent(live, &manifest_with_non_form_fields(live));
+    let (status, body) = request(
+        &h,
+        "POST",
+        &format!("/api/templates/{live}/history/1/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_not_editable", "{body}");
+
+    cleanup(name);
+    cleanup(other);
+    cleanup(live);
+}
