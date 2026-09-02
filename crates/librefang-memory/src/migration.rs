@@ -1338,10 +1338,13 @@ fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// v58: agent manifest version history.
 ///
 /// Every write to `agent.toml` (dashboard edits, model changes, skill
-/// allowlist updates, hot-reload from disk) records the full serialized
+/// allowlist updates) records the full serialized
 /// manifest so an operator can see what changed and when.
-/// `change_source` is a short tag: `"dashboard"`, `"api"`, `"file-watch"`,
-/// `"boot"`, or `"unknown"`.
+/// `change_source` is a short tag naming the write outcome: the kernel
+/// persist path writes `update` on success and `update-persist-failed`
+/// when the disk write failed after the in-memory manifest had already
+/// changed. The schema default `unknown` covers rows written by any
+/// future writer that does not classify its persist.
 ///
 /// Retention is per-agent, trimmed on insert by the store (not here).
 fn migrate_v58(conn: &Connection) -> Result<(), rusqlite::Error> {
