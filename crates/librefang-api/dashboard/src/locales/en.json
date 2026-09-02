@@ -474,6 +474,8 @@
       "folder_path": "Path",
       "add_folder": "Add folder",
       "remove_folder": "remove shared folder",
+      "duplicate_folder_name": "Folder names must be unique.",
+      "folder_path_invalid": "Path must be relative to workspaces_dir and cannot contain '..'.",
       "name_placeholder": "e.g. my-agent",
       "module_placeholder": "e.g. default",
       "model_id_placeholder": "e.g. gpt-4o",

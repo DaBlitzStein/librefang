@@ -474,6 +474,8 @@
       "folder_path": "Шлях",
       "add_folder": "Додати теку",
       "remove_folder": "видалити спільну теку",
+      "duplicate_folder_name": "Назви папок мають бути унікальними.",
+      "folder_path_invalid": "Шлях має бути відносним до workspaces_dir і не може містити '..'.",
       "name_placeholder": "наприклад, my-agent",
       "module_placeholder": "наприклад, default",
       "model_id_placeholder": "наприклад, gpt-4o",
