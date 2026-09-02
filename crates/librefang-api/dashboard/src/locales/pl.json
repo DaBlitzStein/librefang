@@ -477,6 +477,7 @@
       "context_window_placeholder": "Wartość domyślna katalogu",
       "top_p": "Top P",
       "top_p_placeholder": "Domyślnie (1.0)",
+      "sampling_provider_hint": "Tylko dostawcy zgodni z OpenAI oraz Ollama",
       "frequency_penalty": "Kara za częstotliwość",
       "presence_penalty": "Kara za obecność",
       "api_key_env_placeholder": "OPENAI_API_KEY",

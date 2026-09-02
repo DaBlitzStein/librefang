@@ -254,7 +254,12 @@ export function AgentManifestForm({
               className={inputClass}
             />
           </Field>
-          <Field label={t("agents.form.top_p", { defaultValue: "Top P" })}>
+          <Field
+            label={t("agents.form.top_p", { defaultValue: "Top P" })}
+            hint={t("agents.form.sampling_provider_hint", {
+              defaultValue: "OpenAI-compatible providers and Ollama only",
+            })}
+          >
             <input
               type="number"
               step="0.01"
@@ -268,7 +273,12 @@ export function AgentManifestForm({
           </Field>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.frequency_penalty", { defaultValue: "Freq. penalty" })}>
+          <Field
+            label={t("agents.form.frequency_penalty", { defaultValue: "Freq. penalty" })}
+            hint={t("agents.form.sampling_provider_hint", {
+              defaultValue: "OpenAI-compatible providers and Ollama only",
+            })}
+          >
             <input
               type="number"
               step="0.01"
@@ -280,7 +290,12 @@ export function AgentManifestForm({
               className={inputClass}
             />
           </Field>
-          <Field label={t("agents.form.presence_penalty", { defaultValue: "Pres. penalty" })}>
+          <Field
+            label={t("agents.form.presence_penalty", { defaultValue: "Pres. penalty" })}
+            hint={t("agents.form.sampling_provider_hint", {
+              defaultValue: "OpenAI-compatible providers and Ollama only",
+            })}
+          >
             <input
               type="number"
               step="0.01"
