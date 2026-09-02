@@ -2893,6 +2893,113 @@ fn test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy
     kernel.shutdown();
 }
 
+/// A spawn-resolved `exec_policy` must survive both manifest-replacement paths: `reload_agent_from_disk` and `update_manifest`.
+///
+/// `exec_policy` is materialized when the agent enters the registry and is not part of the `agent.toml` an operator maintains, so both paths parsed a policy-less manifest and assigned it verbatim, blanking the field.
+/// `None` does not mean "deny" to any consumer: `available_tools` strips `shell_exec` only on an explicit `Deny`, and the runtime's `shell_exec` dispatch gates the whole deny / allowlist check on `if let Some(policy)`.
+/// So a hot-reload — or any `PATCH /api/agents/{id}` with a `manifest_toml`, which routes through `update_manifest` — silently un-restricted the agent's shell until the next daemon restart re-stamped the policy.
+///
+/// The global policy here is `Allowlist` rather than the compiled default `Deny` so a blanked field cannot be mistaken for a correctly inherited one, and `allowed_commands` is asserted too: preserving only the mode would still drop the operator's command list.
+#[tokio::test(flavor = "multi_thread")]
+async fn resolved_exec_policy_survives_reload_and_update_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-exec-policy-restamp");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let global_policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        allowed_commands: vec!["git".to_string(), "ls".to_string()],
+        ..Default::default()
+    };
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        exec_policy: global_policy.clone(),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // The on-disk manifest carries no `[exec_policy]`, which is the normal case — the field is a resolved runtime value, not something an operator writes.
+    let toml_path = home_dir.join("agent-src").join("agent.toml");
+    std::fs::create_dir_all(toml_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &toml_path,
+        "name = \"exec-policy-agent\"\n\
+         description = \"agent that declares no exec_policy of its own\"\n\
+         author = \"test\"\n\
+         module = \"builtin:chat\"\n",
+    )
+    .unwrap();
+
+    let manifest = AgentManifest {
+        name: "exec-policy-agent".to_string(),
+        description: "agent that declares no exec_policy of its own".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        exec_policy: None,
+        ..Default::default()
+    };
+
+    let agent_id = kernel
+        .spawn_agent_with_source(manifest, Some(toml_path.clone()))
+        .expect("spawn should succeed");
+
+    let resolved_policy = |stage: &str| {
+        let entry = kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .unwrap_or_else(|| panic!("agent must still be registered {stage}"));
+        let policy = entry
+            .manifest
+            .exec_policy
+            .clone()
+            .unwrap_or_else(|| panic!("exec_policy must still be resolved {stage}"));
+        (policy.mode, policy.allowed_commands)
+    };
+
+    let expected = (
+        librefang_types::config::ExecSecurityMode::Allowlist,
+        vec!["git".to_string(), "ls".to_string()],
+    );
+
+    assert_eq!(
+        resolved_policy("after spawn"),
+        expected,
+        "spawn must materialize the global exec_policy onto a manifest that declares none"
+    );
+
+    kernel
+        .reload_agent_from_disk(agent_id)
+        .expect("hot-reload should succeed");
+    assert_eq!(
+        resolved_policy("after reload_agent_from_disk"),
+        expected,
+        "hot-reload must not drop the resolved exec_policy — None re-exposes shell_exec and skips the allowlist"
+    );
+
+    let mut replacement = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .clone();
+    replacement.exec_policy = None;
+    kernel
+        .update_manifest(agent_id, replacement)
+        .expect("manifest update should succeed");
+    assert_eq!(
+        resolved_policy("after update_manifest"),
+        expected,
+        "update_manifest must not drop the resolved exec_policy either"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_should_reuse_cached_route_for_brief_follow_up() {
     assert!(LibreFangKernel::should_reuse_cached_route("fix that"));
@@ -4323,6 +4430,75 @@ fn test_set_agent_skills_rejects_name_unknown_everywhere_as_invalid_input() {
         }
         other => panic!("expected InvalidInput, got: {other:?}"),
     }
+
+    kernel.shutdown();
+}
+
+/// #8093: with no `[llm.auxiliary]` entry, a side task must run on the agent's
+/// own driver, not on `AuxClient`'s primary.
+///
+/// Every kernel caller pairs the driver this returns with the *agent's* model.
+/// `AuxClient::primary` is the process-wide `default_driver`, so for an agent
+/// overriding provider/model the request went to the default provider carrying
+/// a model only the agent's provider can serve — a LiteLLM
+/// `403 team_model_access_denied` naming the agent's model, after which
+/// compaction silently degraded to its fallback stub.
+#[test]
+fn test_side_task_driver_prefers_the_agents_own_chain_over_aux_primary() {
+    use librefang_types::config::AuxTask;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = boot_kernel_at(&home_dir);
+
+    // A default config carries no `[llm.auxiliary]`, so the resolution reports
+    // `used_primary` — the branch this test pins.
+    let aux = kernel.llm.aux_client.load();
+    assert!(
+        aux.resolve(AuxTask::Compression).used_primary,
+        "test premise: an unconfigured Compression task resolves to the primary driver"
+    );
+    let aux_primary = aux.driver_for(AuxTask::Compression);
+    drop(aux);
+
+    // A *named, keyless* provider on purpose. A default manifest short-circuits
+    // to the driverless sentinel (#7743), which is the same object boot handed
+    // to `AuxClient` as its primary — so the identity check below would compare
+    // a stub against itself and report the fix as broken in any environment
+    // without provider credentials. `ollama` is local and needs no API key, so
+    // it builds regardless of the test environment (same reasoning as the
+    // allowlist tests in `llm_drivers.rs`).
+    let mut manifest = librefang_types::agent::AgentManifest {
+        name: "side-task-driver-agent".to_string(),
+        description: "side-task driver selection regression".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2:latest".to_string();
+    kernel
+        .spawn_agent_inner(manifest.clone(), None, None, None)
+        .expect("spawn");
+
+    // Precondition first: if the agent's own chain cannot be built,
+    // `side_task_driver` legitimately falls back to the aux primary and the
+    // identity assertion below would fail for a reason that has nothing to do
+    // with the fix. Fail here instead, where the message says so.
+    let own = kernel
+        .resolve_driver(&manifest)
+        .expect("the agent's own driver must build, or this test proves nothing");
+    assert!(
+        !std::sync::Arc::ptr_eq(&own, &aux_primary),
+        "test premise: a named keyless provider must not resolve to the same object as the aux primary"
+    );
+
+    let chosen = kernel.side_task_driver(&manifest, AuxTask::Compression);
+    assert!(
+        !std::sync::Arc::ptr_eq(&chosen, &aux_primary),
+        "an unconfigured side task must not run on AuxClient's primary — that is the driver \
+         that cannot serve the agent's model"
+    );
 
     kernel.shutdown();
 }
