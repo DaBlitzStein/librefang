@@ -39,6 +39,7 @@ struct Harness {
 fn manifest(name: &str) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
+        source_template: None,
         description: "test agent".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),

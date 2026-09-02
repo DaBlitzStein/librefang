@@ -82,6 +82,7 @@ async fn boot_at(home: &std::path::Path) -> Daemon {
 fn parent_manifest(name: &str) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
+        source_template: None,
         description: "lineage test parent".to_string(),
         capabilities: ManifestCapabilities {
             tools: vec!["file_read".to_string()],
@@ -94,6 +95,7 @@ fn parent_manifest(name: &str) -> AgentManifest {
 fn child_manifest(name: &str) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
+        source_template: None,
         description: "lineage test child".to_string(),
         ..AgentManifest::default()
     }

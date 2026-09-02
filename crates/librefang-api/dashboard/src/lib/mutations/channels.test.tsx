@@ -40,12 +40,39 @@ describe("useSaveSidecarConfig", () => {
       expect(result.current.isSuccess).toBe(true);
     });
 
-    expect(http.saveSidecarConfig).toHaveBeenCalledWith("telegram", {
-      TELEGRAM_BOT_TOKEN: "x",
-    });
+    expect(http.saveSidecarConfig).toHaveBeenCalledWith(
+      "telegram",
+      { TELEGRAM_BOT_TOKEN: "x" },
+      { instanceName: undefined, agent: undefined },
+    );
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: channelKeys.all,
     });
+  });
+
+  // Multi-instance support: a second (third, …) named instance of the same
+  // catalog type, plus its per-instance default agent, must reach the API
+  // layer as options rather than being silently dropped.
+  it("forwards instanceName and agent for a multi-instance save", async () => {
+    const { wrapper } = createQueryClientWrapper();
+    const { result } = renderHook(() => useSaveSidecarConfig(), { wrapper });
+
+    result.current.mutate({
+      name: "telegram",
+      values: { TELEGRAM_BOT_TOKEN: "x" },
+      instanceName: "telegram-support",
+      agent: "support-bot",
+    });
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+
+    expect(http.saveSidecarConfig).toHaveBeenCalledWith(
+      "telegram",
+      { TELEGRAM_BOT_TOKEN: "x" },
+      { instanceName: "telegram-support", agent: "support-bot" },
+    );
   });
 });
 

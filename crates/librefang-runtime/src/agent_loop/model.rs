@@ -213,6 +213,7 @@ mod session_model_override_tests {
 
     fn manifest_with(provider: &str, model: &str) -> AgentManifest {
         AgentManifest {
+            source_template: None,
             model: ModelConfig {
                 provider: provider.to_string(),
                 model: model.to_string(),

@@ -7,6 +7,8 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+- Agents spawned from a template now carry the template name forward as `source_template` on the manifest, and the dashboard agent list shows it next to the schedule so operators can trace provenance (#8018) (@DaBlitzStein)
+
 ## [2026.8.30] - 2026-08-30
 
 _554 PRs from 2 contributors since v2026.8.19._

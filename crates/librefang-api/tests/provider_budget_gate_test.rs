@@ -96,6 +96,7 @@ fn register_agent(kernel: &LibreFangKernel) -> AgentId {
     let id = AgentId::new();
     let mut manifest = AgentManifest {
         name: "budget-test".to_string(),
+        source_template: None,
         description: "test agent".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),

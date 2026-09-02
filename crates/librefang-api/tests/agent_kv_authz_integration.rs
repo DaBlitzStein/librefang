@@ -50,6 +50,7 @@ fn boot() -> Harness {
 fn spawn_owned_by(state: &Arc<AppState>, name: &str, author: &str) -> AgentId {
     let manifest = AgentManifest {
         name: name.to_string(),
+        source_template: None,
         author: author.to_string(),
         ..AgentManifest::default()
     };
