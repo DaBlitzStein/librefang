@@ -16,8 +16,9 @@ use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, ResetScope};
 use screens::{
-    agents, audit, chat, comms, dashboard, extensions, groups, hands, logs, memory, models, peers,
-    security, sessions, settings, skills, templates, triggers, usage, welcome, wizard, workflows,
+    agents, audit, channels, chat, comms, dashboard, extensions, goals, groups, hands, logs,
+    memory, models, peers, security, sessions, settings, skills, templates, triggers, usage,
+    welcome, wizard, workflows,
 };
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -50,6 +51,7 @@ enum Tab {
     Sessions,
     Workflows,
     Triggers,
+    Goals,
     Memory,
     Models,
     Skills,
@@ -59,6 +61,7 @@ enum Tab {
     Peers,
     Groups,
     Comms,
+    Channels,
     Security,
     Audit,
     Usage,
@@ -73,6 +76,7 @@ const TABS: &[Tab] = &[
     Tab::Sessions,
     Tab::Workflows,
     Tab::Triggers,
+    Tab::Goals,
     Tab::Memory,
     Tab::Models,
     Tab::Skills,
@@ -82,6 +86,7 @@ const TABS: &[Tab] = &[
     Tab::Peers,
     Tab::Groups,
     Tab::Comms,
+    Tab::Channels,
     Tab::Security,
     Tab::Audit,
     Tab::Usage,
@@ -98,6 +103,7 @@ impl Tab {
             Tab::Sessions => format!("{} {}", "\u{25c7}", crate::i18n::t("tui-tab-sessions")),
             Tab::Workflows => format!("{} {}", "\u{25b7}", crate::i18n::t("tui-tab-workflows")),
             Tab::Triggers => format!("{} {}", "\u{25c9}", crate::i18n::t("tui-tab-triggers")),
+            Tab::Goals => format!("{} {}", "\u{2316}", crate::i18n::t("tui-tab-goals")),
             Tab::Memory => format!("{} {}", "\u{25a1}", crate::i18n::t("tui-tab-memory")),
             Tab::Models => format!("{} {}", "\u{25a4}", crate::i18n::t("tui-tab-models")),
             Tab::Skills => format!("{} {}", "\u{2605}", crate::i18n::t("tui-tab-skills")),
@@ -107,6 +113,7 @@ impl Tab {
             Tab::Peers => format!("{} {}", "\u{25cc}", crate::i18n::t("tui-tab-peers")),
             Tab::Groups => format!("{} {}", "\u{2687}", crate::i18n::t("tui-tab-groups")),
             Tab::Comms => format!("{} {}", "\u{25ef}", crate::i18n::t("tui-tab-comms")),
+            Tab::Channels => format!("{} {}", "\u{25c8}", crate::i18n::t("tui-tab-channels")),
             Tab::Security => format!("{} {}", "\u{25c6}", crate::i18n::t("tui-tab-security")),
             Tab::Audit => format!("{} {}", "\u{25c8}", crate::i18n::t("tui-tab-audit")),
             Tab::Usage => format!("{} {}", "\u{25b4}", crate::i18n::t("tui-tab-usage")),
@@ -179,6 +186,7 @@ struct App {
     dashboard: dashboard::DashboardState,
     workflows: workflows::WorkflowState,
     triggers: triggers::TriggerState,
+    goals: goals::GoalsState,
     sessions: sessions::SessionsState,
     memory: memory::MemoryState,
     models: models::ModelsState,
@@ -193,6 +201,7 @@ struct App {
     peers: peers::PeersState,
     groups: groups::GroupsState,
     comms: comms::CommsState,
+    channels: channels::ChannelState,
     logs: logs::LogsState,
 
     kernel_booting: bool,
@@ -220,6 +229,7 @@ impl App {
             dashboard: dashboard::DashboardState::new(),
             workflows: workflows::WorkflowState::new(),
             triggers: triggers::TriggerState::new(),
+            goals: goals::GoalsState::new(),
             sessions: sessions::SessionsState::new(),
             memory: memory::MemoryState::new(),
             models: models::ModelsState::new(),
@@ -234,6 +244,7 @@ impl App {
             peers: peers::PeersState::new(),
             groups: groups::GroupsState::new(),
             comms: comms::CommsState::new(),
+            channels: channels::ChannelState::new(),
             logs: logs::LogsState::new(),
             kernel_booting: false,
             kernel_boot_error: None,
@@ -308,6 +319,70 @@ impl App {
             AppEvent::WorkflowCreated(_id) => {
                 self.workflows.status_msg = crate::i18n::t("tui-mod-workflow-created");
                 self.refresh_workflows();
+            }
+            AppEvent::WorkflowParamsLoaded(fetch) => {
+                self.workflows.run_params = Vec::new();
+                self.workflows.param_cursor = 0;
+                match fetch {
+                    workflows::WorkflowParamsFetch::Loaded(params) => {
+                        self.workflows.run_params = params;
+                    }
+                    workflows::WorkflowParamsFetch::None => {
+                        self.workflows.status_msg = crate::i18n::t("tui-workflows-params-none");
+                    }
+                    workflows::WorkflowParamsFetch::Failed => {
+                        self.workflows.status_msg = crate::i18n::t("tui-workflows-params-failed");
+                    }
+                }
+            }
+            AppEvent::ChannelListLoaded {
+                instances,
+                adapters,
+            } => {
+                self.channels.adapters = adapters;
+                self.channels.set_instances(instances);
+                self.channels.loading = false;
+            }
+            AppEvent::ChannelInstanceSaved {
+                instance_name,
+                restart_required,
+                shadowed_secrets,
+            } => {
+                // A save that needs a restart is not a failure, but it is not
+                // live either — say which one it was rather than a flat "saved".
+                // A shadowed secret outranks both: the write landed but the
+                // value will not be used, so it takes precedence in the one
+                // status line available. `librefang channel setup` already
+                // reports this, and the screen must not be quieter than the CLI.
+                self.channels.status_msg = if shadowed_secrets.is_empty() {
+                    let key = if restart_required {
+                        "tui-mod-channel-saved-restart-required"
+                    } else {
+                        "tui-mod-channel-saved"
+                    };
+                    crate::i18n::t_args(key, &[("name", &instance_name)])
+                } else {
+                    crate::i18n::t_args(
+                        "tui-mod-channel-saved-shadowed",
+                        &[
+                            ("name", &instance_name),
+                            ("keys", &shadowed_secrets.join(", ")),
+                        ],
+                    )
+                };
+                self.refresh_channels();
+            }
+            AppEvent::ChannelInstanceDeleted(name) => {
+                self.channels.status_msg =
+                    crate::i18n::t_args("tui-mod-channel-deleted", &[("name", &name)]);
+                self.refresh_channels();
+            }
+            AppEvent::ChannelsReloaded(started) => {
+                self.channels.status_msg = crate::i18n::t_args(
+                    "tui-mod-channels-reloaded",
+                    &[("started", &started.to_string())],
+                );
+                self.refresh_channels();
             }
             AppEvent::TriggerListLoaded(list) => {
                 self.triggers.triggers = list;
@@ -442,6 +517,7 @@ impl App {
                 match self.active_tab {
                     Tab::Workflows => self.workflows.status_msg = err,
                     Tab::Triggers => self.triggers.status_msg = err,
+                    Tab::Goals => self.goals.status_msg = err,
                     Tab::Sessions => self.sessions.status_msg = err,
                     Tab::Memory => self.memory.status_msg = err,
                     Tab::Models => self.models.status_msg = err,
@@ -450,8 +526,70 @@ impl App {
                     Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
                     Tab::Settings => self.settings.status_msg = err,
+                    Tab::Channels => {
+                        // `draw_list` renders its spinner unconditionally while
+                        // `loading` is set, so a failed fetch that only wrote a
+                        // status message would leave the tab showing nothing but
+                        // a spinner until some later fetch happened to succeed.
+                        self.channels.loading = false;
+                        self.channels.status_msg = err;
+                    }
                     _ => {}
                 }
+            }
+
+            // ── Goals events ──
+            AppEvent::GoalsLoaded(list) => {
+                self.goals.goals = list;
+                self.goals.refilter();
+                self.goals.loading = false;
+            }
+            AppEvent::GoalRunLoaded {
+                goal_id,
+                phase,
+                iteration,
+                max_iterations,
+            } => {
+                self.goals
+                    .apply_run_state(&goal_id, phase, iteration, max_iterations);
+            }
+            AppEvent::GoalRunFailed { goal_id, failure } => {
+                // Deliberately does NOT touch the cached run state: the last
+                // known phase is more useful than blanking it, and the status
+                // line is what says the reading is stale.
+                self.goals.status_msg = match failure {
+                    event::FetchFailure::RequiresDaemon => {
+                        crate::i18n::t("tui-goals-run-requires-daemon")
+                    }
+                    event::FetchFailure::Error(reason) => crate::i18n::t_args(
+                        "tui-goals-run-fetch-failed",
+                        &[("id", &goal_id), ("error", &reason)],
+                    ),
+                };
+            }
+            AppEvent::GoalCreated(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-created", &[("id", &id)]);
+                self.refresh_goals();
+            }
+            AppEvent::GoalDeleted(id) => {
+                self.goals.goals.retain(|g| g.id != id);
+                self.goals.refilter();
+                // The detail pane may have been showing the goal that just went
+                // away, and `selected_goal` is a positional index into a list
+                // that just shifted.
+                self.goals.detail_open = false;
+                self.goals.selected_goal = None;
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-deleted", &[("id", &id)]);
+            }
+            AppEvent::GoalRunStarted(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-started", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
+            }
+            AppEvent::GoalRunStopped(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-stopped", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
             }
 
             // ── New screen events ──
@@ -469,6 +607,19 @@ impl App {
             AppEvent::MemoryConfigLoaded(config) => {
                 self.memory.config = Some(config);
                 self.memory.loading = false;
+            }
+            AppEvent::MemoryConfigFailed(failure) => {
+                // Clear `loading` on the failure path too, or the screen sits
+                // on its spinner forever and the message never gets read.
+                self.memory.loading = false;
+                self.memory.status_msg = match failure {
+                    event::FetchFailure::RequiresDaemon => {
+                        crate::i18n::t("tui-memory-config-requires-daemon")
+                    }
+                    event::FetchFailure::Error(reason) => {
+                        crate::i18n::t_args("tui-memory-config-fetch-failed", &[("error", &reason)])
+                    }
+                };
             }
             AppEvent::MemoryAgentsLoaded(agents) => {
                 self.memory.agents = agents;
@@ -546,6 +697,18 @@ impl App {
                     self.templates.status_msg = crate::i18n::t_args(
                         "tui-templates-manifest-unavailable",
                         &[("name", &name)],
+                    );
+                }
+            },
+            AppEvent::AgentTypePromoted { name, result } => match result {
+                Ok(pr_url) => {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-promoted", &[("url", &pr_url)]);
+                }
+                Err(err) => {
+                    self.templates.status_msg = crate::i18n::t_args(
+                        "tui-templates-promote-failed",
+                        &[("name", &name), ("error", &err)],
                     );
                 }
             },
@@ -1020,6 +1183,15 @@ impl App {
                         self.switch_tab(Tab::Templates);
                         return;
                     }
+                    // Goals is the twentieth tab and every numeric slot is
+                    // taken: F(1)-F(12) and Alt+0-9 are all bound. Rather than
+                    // renumber existing bindings — which retrains every user
+                    // for the sake of one new screen — it takes the mnemonic
+                    // `Alt+G`. `Tab` still cycles through it like any other.
+                    KeyCode::Char('g') => {
+                        self.switch_tab(Tab::Goals);
+                        return;
+                    }
                     _ => {}
                 }
             }
@@ -1068,6 +1240,14 @@ impl App {
                 Tab::Triggers => {
                     let action = self.triggers.handle_key(key);
                     self.handle_trigger_action(action);
+                }
+                Tab::Goals => {
+                    let action = self.goals.handle_key(key);
+                    self.handle_goals_action(action);
+                }
+                Tab::Channels => {
+                    let action = self.channels.handle_key(key);
+                    self.handle_channel_action(action);
                 }
                 Tab::Sessions => {
                     let action = self.sessions.handle_key(key);
@@ -1144,6 +1324,7 @@ impl App {
         self.dashboard.tick();
         self.workflows.tick();
         self.triggers.tick();
+        self.goals.tick();
         self.sessions.tick();
         self.memory.tick();
         self.models.tick();
@@ -1158,6 +1339,7 @@ impl App {
         self.peers.tick();
         self.groups.tick();
         self.comms.tick();
+        self.channels.tick();
         self.logs.tick();
 
         // Auto-poll for active tabs
@@ -1204,6 +1386,8 @@ impl App {
             Tab::Agents => self.refresh_agents(),
             Tab::Workflows => self.refresh_workflows(),
             Tab::Triggers => self.refresh_triggers(),
+            Tab::Goals => self.refresh_goals(),
+            Tab::Channels => self.refresh_channels(),
             Tab::Sessions => self.refresh_sessions(),
             Tab::Memory => self.refresh_memory(),
             Tab::Models => self.refresh_models(),
@@ -1261,7 +1445,12 @@ impl App {
         }
     }
 
-    // `refresh_channels` retired with the Channels tab.
+    fn refresh_channels(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.channels.loading = true;
+            event::spawn_fetch_channels(backend, self.event_tx.clone());
+        }
+    }
 
     fn refresh_workflows(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
@@ -1274,6 +1463,24 @@ impl App {
         if let Some(backend) = self.backend.to_ref() {
             self.triggers.loading = true;
             event::spawn_fetch_triggers(backend, self.event_tx.clone());
+        }
+    }
+
+    fn refresh_goals(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.goals.loading = true;
+            event::spawn_fetch_goals(backend, self.event_tx.clone());
+        }
+    }
+
+    /// Re-fetch one goal's live run state.
+    ///
+    /// The list payload never carries run state, so the phase shown in the
+    /// detail pane — and the start/stop toggle that keys off it — would
+    /// otherwise stay stale until the pane is reopened.
+    fn refresh_goal_run(&mut self, goal_id: String) {
+        if let Some(backend) = self.backend.to_ref() {
+            event::spawn_fetch_goal_run(backend, goal_id, self.event_tx.clone());
         }
     }
 
@@ -1695,9 +1902,31 @@ impl App {
         }
     }
 
-    // `handle_channel_action` retired with the Channels tab — its
-    // SaveChannel / TestChannel arms hit the deleted
-    // `POST /api/channels/{name}/configure` and `.../test` endpoints.
+    fn handle_channel_action(&mut self, action: channels::ChannelAction) {
+        match action {
+            channels::ChannelAction::Continue => {}
+            channels::ChannelAction::Refresh => self.refresh_channels(),
+            channels::ChannelAction::SaveInstance(request) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_channel_instance(backend, request, self.event_tx.clone());
+                }
+            }
+            channels::ChannelAction::DeleteInstance { instance_name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_delete_channel_instance(
+                        backend,
+                        instance_name,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
+            channels::ChannelAction::ReloadChannels => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_reload_channels(backend, self.event_tx.clone());
+                }
+            }
+        }
+    }
 
     fn handle_workflow_action(&mut self, action: workflows::WorkflowAction) {
         match action {
@@ -1724,10 +1953,53 @@ impl App {
                     );
                 }
             }
+            workflows::WorkflowAction::FetchWorkflowParams(wf_id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_workflow_params(backend, wf_id, self.event_tx.clone());
+                }
+            }
             workflows::WorkflowAction::RunWorkflow { id, input } => {
                 if let Some(backend) = self.backend.to_ref() {
                     self.workflows.loading = true;
                     event::spawn_run_workflow(backend, id, input, self.event_tx.clone());
+                }
+            }
+        }
+    }
+
+    fn handle_goals_action(&mut self, action: goals::GoalsAction) {
+        match action {
+            goals::GoalsAction::Continue => {}
+            goals::GoalsAction::Refresh => self.refresh_goals(),
+            goals::GoalsAction::ShowDetail { goal_id } => self.refresh_goal_run(goal_id),
+            goals::GoalsAction::CreateGoal {
+                title,
+                description,
+                agent_id,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_create_goal(
+                        backend,
+                        title,
+                        description,
+                        agent_id,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
+            goals::GoalsAction::DeleteGoal { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_delete_goal(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::StartRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_start_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::StopRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_stop_goal_run(backend, goal_id, self.event_tx.clone());
                 }
             }
         }
@@ -1931,6 +2203,13 @@ impl App {
                     }
                 }
             },
+            templates::TemplatesAction::PromoteTemplate { name } => {
+                self.templates.status_msg =
+                    crate::i18n::t_args("tui-templates-promoting", &[("name", &name)]);
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_promote_agent_type(backend, name, self.event_tx.clone());
+                }
+            }
         }
     }
 
@@ -2696,6 +2975,7 @@ impl App {
                     Tab::Chat => chat::draw(frame, chunks[1], &mut self.chat),
                     Tab::Workflows => workflows::draw(frame, chunks[1], &mut self.workflows),
                     Tab::Triggers => triggers::draw(frame, chunks[1], &mut self.triggers),
+                    Tab::Goals => goals::draw(frame, chunks[1], &mut self.goals),
                     Tab::Sessions => sessions::draw(frame, chunks[1], &mut self.sessions),
                     Tab::Memory => memory::draw(frame, chunks[1], &mut self.memory),
                     Tab::Models => models::draw(frame, chunks[1], &mut self.models),
@@ -2710,6 +2990,7 @@ impl App {
                     Tab::Peers => peers::draw(frame, chunks[1], &mut self.peers),
                     Tab::Groups => groups::draw(frame, chunks[1], &mut self.groups),
                     Tab::Comms => comms::draw(frame, chunks[1], &mut self.comms),
+                    Tab::Channels => channels::draw(frame, chunks[1], &mut self.channels),
                     Tab::Logs => logs::draw(frame, chunks[1], &mut self.logs),
                 }
             }
