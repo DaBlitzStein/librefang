@@ -3025,7 +3025,15 @@
     "run_stop": "Zatrzymaj autonomiczne uruchomienie",
     "run_pause": "Wstrzymaj autonomiczne uruchomienie",
     "run_resume": "Wznów autonomiczne uruchomienie",
-    "run_phase_paused": "Wstrzymano"
+    "run_phase_paused": "Wstrzymano",
+    "loop_engineering": "Inżynieria pętli",
+    "loop_engineering_hint": "Agent weryfikujący ocenia każdą iterację, zanim zostanie ona zaliczona, a model oceniający decyduje, kiedy cel jest osiągnięty.",
+    "assigned_agent": "Przypisany agent",
+    "no_agent_selected": "Nie wybrano agenta",
+    "verifier_agent": "Agent weryfikujący",
+    "no_verifier_selected": "Bez weryfikatora (bez kontroli)",
+    "evaluator_model": "Model oceniający",
+    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)"
   },
   "sessions": {
     "title": "Sesje",

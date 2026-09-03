@@ -3019,7 +3019,15 @@
     "run_stop": "Stop autonomous run",
     "run_pause": "Pause autonomous run",
     "run_resume": "Resume autonomous run",
-    "run_phase_paused": "Paused"
+    "run_phase_paused": "Paused",
+    "loop_engineering": "Loop engineering",
+    "loop_engineering_hint": "A verifier agent judges each iteration before it counts, and an evaluator model decides when the goal is met.",
+    "assigned_agent": "Assigned agent",
+    "no_agent_selected": "No agent selected",
+    "verifier_agent": "Verifier agent",
+    "no_verifier_selected": "No verifier (run ungated)",
+    "evaluator_model": "Evaluator model",
+    "evaluator_model_placeholder": "Evaluator model (optional)"
   },
   "sessions": {
     "title": "Sessions",
