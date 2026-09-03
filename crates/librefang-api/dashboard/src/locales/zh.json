@@ -4386,9 +4386,9 @@
     "quick_run_task": "任务",
     "quick_run_task_placeholder": "总结本周的发布说明…",
     "quick_run_title": "快速运行 — {{name}}",
-    "restore": "Restore this version",
+    "restore": "恢复",
     "restore_btn": "Restore",
-    "restore_failed": "Restore failed",
+    "restore_failed": "无法从注册表恢复",
     "restored": "Version restored",
     "save_failed": "无法保存智能体类型",
     "saved": "已保存智能体类型",
@@ -4400,16 +4400,15 @@
     "promote_failed": "无法推广代理类型",
     "promote_success": "已在注册表中创建 pull request。审查后合并即可。",
     "view_pr": "查看 pull request",
-    "restore": "恢复",
     "restore_title": "从注册表恢复 — {{name}}",
     "restore_confirm": "用注册表版本覆盖本地智能体类型？此操作无法撤销。",
     "restore_identical": "此智能体类型与注册表版本完全一致。",
     "restore_no_registry": "注册表中不存在此智能体类型。",
     "restore_success": "已从注册表恢复智能体类型",
-    "restore_failed": "无法从注册表恢复",
     "restore_diff_field": "字段",
     "restore_diff_local": "本地",
     "restore_diff_registry": "注册表",
-    "restore_diff_more": "…另有 {{count}} 处未列出的差异"
+    "restore_diff_more": "…另有 {{count}} 处未列出的差异",
+    "restore_version_failed": "Restore failed"
   }
 }

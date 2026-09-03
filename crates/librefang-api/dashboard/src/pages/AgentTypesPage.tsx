@@ -639,7 +639,7 @@ function TemplateHistoryModal({
                         addToast(t("agentTypes.restored", { defaultValue: "Version restored" }), "success");
                         onClose();
                       } catch (err) {
-                        addToast(toastErr(err, t("agentTypes.restore_failed", { defaultValue: "Restore failed" })), "error");
+                        addToast(toastErr(err, t("agentTypes.restore_version_failed", { defaultValue: "Restore failed" })), "error");
                       }
                     }}
                     disabled={restore.isPending}
