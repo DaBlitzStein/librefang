@@ -675,25 +675,32 @@ impl App {
             },
             AppEvent::RegistryRestoreResult { name, ok, message } => {
                 self.templates.status_msg = if ok {
-                    format!("✓ {name}: {message}")
+                    crate::i18n::t_args(
+                        "tui-templates-restore-ok",
+                        &[("name", &name), ("message", &message)],
+                    )
                 } else {
-                    format!("✗ {name}: {message}")
+                    crate::i18n::t_args(
+                        "tui-templates-restore-fail",
+                        &[("name", &name), ("message", &message)],
+                    )
                 };
                 if ok {
                     self.refresh_templates();
                 }
             }
-            AppEvent::TemplateHistoryLoaded { name, versions } => {
+            AppEvent::TemplateHistoryLoaded { name, result } => {
                 self.templates.history_name = name;
-                self.templates.version_history = versions
-                    .iter()
-                    .filter_map(|v| {
-                        let id = v.get("id")?.to_string();
-                        let ts = v.get("created_at")?.as_str()?.to_string();
-                        let source = v.get("source")?.as_str().unwrap_or("unknown").to_string();
-                        Some((id, ts, source))
-                    })
-                    .collect();
+                self.templates.version_history.clear();
+                self.templates.history_error = None;
+                match result {
+                    Ok(rows) => {
+                        self.templates.version_history = rows;
+                    }
+                    Err(message) => {
+                        self.templates.history_error = Some(message);
+                    }
+                }
                 self.templates.showing_history = true;
                 self.templates.history_list = ratatui::widgets::ListState::default();
                 if !self.templates.version_history.is_empty() {
@@ -2194,15 +2201,21 @@ impl App {
             },
             templates::TemplatesAction::RestoreFromRegistry { name } => {
                 if let Some(backend) = self.backend.to_ref() {
-                    self.templates.status_msg = format!("Restoring {name} from registry…");
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-restoring", &[("name", &name)]);
                     event::spawn_restore_from_registry(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-restore-daemon-only");
                 }
             }
             templates::TemplatesAction::ShowVersionHistory { name } => {
-                self.templates.status_msg = format!("Loading history for {name}…");
-                self.templates.loading = true;
                 if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-history-loading", &[("name", &name)]);
+                    self.templates.loading = true;
                     event::spawn_fetch_template_history(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-history-daemon-only");
                 }
             }
         }
