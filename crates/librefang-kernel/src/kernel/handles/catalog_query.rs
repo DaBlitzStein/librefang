@@ -69,4 +69,49 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
             .proactive_memory
             .resolve_extraction_model(&cfg.proactive_memory)
     }
+
+    /// Look a profile up in the resolved catalog — the builtin asset with
+    /// `~/.librefang/model_profiles.toml` merged over it.
+    ///
+    /// Deliberately **not** gated on `[model_router] enabled`. That switch
+    /// governs the *automatic* per-turn router, which picks a model nobody
+    /// asked for; naming a profile on an `agent_spawn` call is an explicit
+    /// choice by the parent agent, and silently ignoring an explicit
+    /// parameter is the exact failure this lookup exists to remove. It also
+    /// keeps the subagent case usable — spawning a cheap verifier does not
+    /// require switching every agent onto automatic routing.
+    fn resolve_model_profile(
+        &self,
+        name: &str,
+    ) -> Option<librefang_types::model_profile::ModelProfile> {
+        let cfg = self.config.load();
+        crate::model_router::ProfileCatalog::load_cached(cfg.home_dir.as_path(), &cfg.model_router)
+            .get(name)
+            .cloned()
+    }
+
+    /// Ordered by construction: `ProfileCatalog` name-sorts at load (#3298).
+    fn model_profile_names(&self) -> Vec<String> {
+        let cfg = self.config.load();
+        crate::model_router::ProfileCatalog::load_cached(cfg.home_dir.as_path(), &cfg.model_router)
+            .names()
+    }
+
+    /// The parent's `[model.router_override]`, read from its manifest in the
+    /// registry (#7789 review).
+    ///
+    /// Same lookup shape as `proactive_memory_extraction_model_for` above: a
+    /// malformed UUID or an agent not in the registry returns `None`, which
+    /// callers treat as "no constraints". An agent that *has* an override
+    /// always resolves here — the registry is the same source the per-turn
+    /// router reads `manifest.model.router_override` from.
+    fn model_router_override_for(
+        &self,
+        agent_id: &str,
+    ) -> Option<librefang_types::model_profile::AgentRouterOverride> {
+        use std::str::FromStr;
+        let aid = librefang_types::agent::AgentId::from_str(agent_id).ok()?;
+        let entry = self.agents.registry.get_arc(aid)?;
+        entry.manifest.model.router_override.clone()
+    }
 }
