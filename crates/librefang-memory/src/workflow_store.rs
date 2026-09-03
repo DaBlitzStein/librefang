@@ -43,6 +43,11 @@ pub struct WorkflowRunRow {
     /// attribution apart. `None` for operator-initiated runs with no calling
     /// agent, and for every row written before schema v49.
     pub owner_agent_id: Option<String>,
+    /// Total number of steps in the workflow, copied at run creation so a
+    /// run recovered after a daemon restart still reports real progress
+    /// instead of "step X of 0". Runtime-only `current_step_index` is not
+    /// persisted — a reloaded run always starts at `None`.
+    pub total_steps: i64,
 }
 
 /// Persistent workflow run store backed by SQLite.
@@ -88,12 +93,12 @@ impl WorkflowStore {
                 id, workflow_id, workflow_name, state, input, output, error,
                 resume_token, pause_reason, paused_at, paused_step_index,
                 paused_variables, paused_current_input,
-                step_results, started_at, completed_at, owner_agent_id
+                step_results, total_steps, started_at, completed_at, owner_agent_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
                 ?12, ?13,
-                ?14, ?15, ?16, ?17
+                ?14, ?15, ?16, ?17, ?18
             ) ON CONFLICT(id) DO UPDATE SET
                 state = excluded.state,
                 input = excluded.input,
@@ -106,6 +111,7 @@ impl WorkflowStore {
                 paused_variables = excluded.paused_variables,
                 paused_current_input = excluded.paused_current_input,
                 step_results = excluded.step_results,
+                total_steps = excluded.total_steps,
                 completed_at = excluded.completed_at",
             rusqlite::params![
                 row.id,
@@ -122,6 +128,7 @@ impl WorkflowStore {
                 row.paused_variables,
                 row.paused_current_input,
                 row.step_results,
+                row.total_steps,
                 row.started_at,
                 row.completed_at,
                 row.owner_agent_id,
@@ -139,7 +146,7 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at,
+                        step_results, total_steps, started_at, completed_at, created_at,
                         owner_agent_id
                  FROM workflow_runs WHERE id = ?1",
             )
@@ -168,7 +175,7 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at,
+                        step_results, total_steps, started_at, completed_at, created_at,
                         owner_agent_id
                  FROM workflow_runs WHERE state = ?1 ORDER BY started_at DESC"
                     .to_string(),
@@ -178,7 +185,7 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at,
+                        step_results, total_steps, started_at, completed_at, created_at,
                         owner_agent_id
                  FROM workflow_runs ORDER BY started_at DESC"
                     .to_string(),
@@ -246,18 +253,19 @@ impl WorkflowStore {
                     id, workflow_id, workflow_name, state, input, output, error,
                     resume_token, pause_reason, paused_at, paused_step_index,
                     paused_variables, paused_current_input,
-                    step_results, started_at, completed_at, created_at,
+                    step_results, total_steps, started_at, completed_at, created_at,
                     owner_agent_id
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11,
                     ?12, ?13,
-                    ?14, ?15, ?16, ?17, ?18
+                    ?14, ?15, ?16, ?17, ?18, ?19
                 ) ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
                     output = excluded.output,
                     error = excluded.error,
                     step_results = excluded.step_results,
+                    total_steps = excluded.total_steps,
                     completed_at = excluded.completed_at",
                 rusqlite::params![
                     row.id,
@@ -274,6 +282,7 @@ impl WorkflowStore {
                     row.paused_variables,
                     row.paused_current_input,
                     row.step_results,
+                    row.total_steps,
                     row.started_at,
                     row.completed_at,
                     row.created_at,
@@ -324,10 +333,11 @@ fn row_from_sqlite(row: &rusqlite::Row<'_>) -> Result<WorkflowRunRow, rusqlite::
         paused_variables: row.get(11)?,
         paused_current_input: row.get(12)?,
         step_results: row.get(13)?,
-        started_at: row.get(14)?,
-        completed_at: row.get(15)?,
-        created_at: row.get(16)?,
-        owner_agent_id: row.get(17)?,
+        total_steps: row.get(14)?,
+        started_at: row.get(15)?,
+        completed_at: row.get(16)?,
+        created_at: row.get(17)?,
+        owner_agent_id: row.get(18)?,
     })
 }
 
@@ -364,6 +374,7 @@ mod tests {
             completed_at: None,
             created_at: "2026-05-06T00:00:00Z".to_string(),
             owner_agent_id: None,
+            total_steps: 0,
         }
     }
 
