@@ -3,6 +3,7 @@ import {
   createAgentType,
   updateAgentType,
   deleteAgentType,
+  promoteAgentType,
   restoreAgentTypeFromRegistry,
   restoreTemplateVersion,
   spawnEphemeral,
@@ -55,6 +56,19 @@ export function useRestoreAgentType() {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
     },
+  });
+}
+
+/**
+ * Promote an agent type to the public registry as a GitHub PR.
+ *
+ * Read-only with respect to local state — it forks the registry repo,
+ * pushes the sanitized manifest, and opens a PR. No local invalidation
+ * needed since the agent type itself is unchanged.
+ */
+export function usePromoteAgentType() {
+  return useMutation({
+    mutationFn: (name: string) => promoteAgentType(name),
   });
 }
 
