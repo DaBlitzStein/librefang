@@ -534,7 +534,13 @@
       "schema_name_placeholder": "mój_schemat",
       "remove_fallback": "usuń opcję awaryjną",
       "remove_context_injection": "usuń wstrzykiwanie kontekstu",
-      "name_locked_hint": "Zmień nazwę w nagłówku agenta — to pole jest tutaj zablokowane."
+      "name_locked_hint": "Zmień nazwę w nagłówku agenta — to pole jest tutaj zablokowane.",
+      "max_output_tokens": "Limit wyjścia",
+      "max_output_tokens_placeholder": "tokeny, które model może wygenerować",
+      "custom": "Własna wartość",
+      "preferences_hint": "Ustawienia tego agenta mają pierwszeństwo przed ustawieniami modelu. Pozostaw pole na „dziedzicz domyślne”, aby użyć ustawienia modelu.",
+      "limits_hint": "Limity opisują, co akceptuje ten endpoint. Wartość powyżej limitu modelu jest tu oznaczana, ale wysyłana bez zmian — decyduje dostawca.",
+      "over_limit_warning": "Powyżej limitu tego modelu ({{limit}}). Zapisano i wysłano tak, jak wpisano; dostawca może to odrzucić."
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",

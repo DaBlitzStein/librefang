@@ -534,7 +534,13 @@
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "移除 fallback",
       "remove_context_injection": "移除上下文注入",
-      "name_locked_hint": "请在智能体标题处重命名——此字段在此处已锁定。"
+      "name_locked_hint": "请在智能体标题处重命名——此字段在此处已锁定。",
+      "max_output_tokens": "输出上限",
+      "max_output_tokens_placeholder": "模型可生成的 token 数",
+      "custom": "自定义",
+      "preferences_hint": "该代理的设置优先于模型设置。保持“继承默认值”则使用模型的设置。",
+      "limits_hint": "限制描述该 endpoint 能接受的范围。超过模型限制会在此提示，但仍按原值发送 —— 由提供方决定是否接受。",
+      "over_limit_warning": "超过该模型的限制 {{limit}}。已按输入的值保存并发送；提供方可能会拒绝。"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",
