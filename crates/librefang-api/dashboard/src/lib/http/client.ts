@@ -204,6 +204,7 @@ export {
   createAgentType,
   updateAgentType,
   deleteAgentType,
+  promoteAgentType,
   restoreTemplateVersion,
   spawnEphemeral,
   spawnAgent,
