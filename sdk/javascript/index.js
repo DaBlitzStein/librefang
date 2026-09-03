@@ -272,6 +272,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
   }
 
+  async getAgentManifestToml(id) {
+    return this._c._request("GET", `/api/agents/${id}/manifest`);
+  }
+
   async listAgentManifestHistory(id, query) {
     return this._c._request("GET", `/api/agents/${id}/manifest-history`, undefined, query);
   }
