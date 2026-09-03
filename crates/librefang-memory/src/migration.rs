@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 57;
+const SCHEMA_VERSION: u32 = 58;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -293,6 +293,13 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // children, and deleting the parent cascades. NULL on every ordinary
     // session, which is almost all of them.
     run_step!(57, migrate_v57);
+
+    // v58 (#7974): per-task claim TTL override on the Task Board. `[task_board]
+    // claim_ttl_secs` is one global number, so an installation that mixes a
+    // 30-second health check with a two-hour import has to pick a TTL that is
+    // wrong for one of them. NULL keeps the global, which is what every
+    // existing row means.
+    run_step!(58, migrate_v58);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1300,6 +1307,32 @@ fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (57, datetime('now'), 'Add sessions.parent_session_id for sub-agent run lineage (#7752)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v58 (#7974): per-task claim TTL override (`task_queue.timeout_secs`).
+///
+/// The stuck-task sweeper reclaims an `in_progress` row once it has been held
+/// longer than `[task_board] claim_ttl_secs`, a single global number.
+/// A board that carries both a 30-second probe and a two-hour import cannot be
+/// served by one value: tuned for the import, a wedged probe sits claimed for
+/// hours; tuned for the probe, the import is torn away from a worker that is
+/// still making progress.
+///
+/// `NULL` means "use the global", which is exactly what every pre-v58 row
+/// means, so the column needs no backfill.
+fn migrate_v58(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "task_queue", "timeout_secs")? {
+        conn.execute(
+            "ALTER TABLE task_queue ADD COLUMN timeout_secs INTEGER DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (58, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
         [],
     )?;
     Ok(())
@@ -4286,6 +4319,17 @@ mod tests {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE task_queue (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                payload BLOB NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority INTEGER NOT NULL DEFAULT 0,
+                scheduled_at TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
             CREATE TABLE migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL,
@@ -4315,6 +4359,41 @@ mod tests {
         assert_eq!(
             parent_recorded, 0,
             "a pre-v54 row must read as UNKNOWN lineage, not as a root agent"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // v58: per-task claim TTL override (task_queue.timeout_secs)
+    // ---------------------------------------------------------------------
+
+    /// The column has to arrive on a board that already holds tasks — a
+    /// migration that only works on a fresh file has never run where it
+    /// matters. A pre-v58 row means "use the global TTL", which is `NULL`.
+    #[test]
+    fn migrate_v58_adds_timeout_column_to_an_existing_board() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO task_queue (id, agent_id, task_type, payload, status, created_at) \
+             VALUES ('existing', 'agent-1', 'work', x'00', 'in_progress', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+
+        assert!(
+            column_exists(&conn, "task_queue", "timeout_secs"),
+            "v58 must add task_queue.timeout_secs"
+        );
+        let timeout: Option<i64> = conn
+            .query_row(
+                "SELECT timeout_secs FROM task_queue WHERE id = 'existing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            timeout.is_none(),
+            "a pre-existing task must inherit the global TTL, not acquire one of its own"
         );
     }
 }
