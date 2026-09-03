@@ -4421,6 +4421,6 @@
     "restore_diff_local": "Lokalnie",
     "restore_diff_registry": "Rejestr",
     "restore_diff_more": "…oraz {{count}} innych różnic nieuwzględnionych",
-    "restore_version_failed": "Restore failed"
+    "restore_version_failed": "Nie udało się przywrócić"
   }
 }

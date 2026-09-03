@@ -4408,6 +4408,6 @@
     "restore_diff_local": "로컬",
     "restore_diff_registry": "레지스트리",
     "restore_diff_more": "…그 외 표시되지 않은 {{count}}개 차이점",
-    "restore_version_failed": "Restore failed"
+    "restore_version_failed": "복원하지 못했습니다."
   }
 }

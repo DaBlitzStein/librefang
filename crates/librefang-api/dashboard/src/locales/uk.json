@@ -4421,6 +4421,6 @@
     "restore_diff_local": "Локально",
     "restore_diff_registry": "Реєстр",
     "restore_diff_more": "…і ще {{count}} інших відмінностей не показано",
-    "restore_version_failed": "Restore failed"
+    "restore_version_failed": "Не вдалося відновити"
   }
 }

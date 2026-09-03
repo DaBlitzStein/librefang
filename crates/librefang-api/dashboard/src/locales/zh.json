@@ -4409,6 +4409,6 @@
     "restore_diff_local": "本地",
     "restore_diff_registry": "注册表",
     "restore_diff_more": "…另有 {{count}} 处未列出的差异",
-    "restore_version_failed": "Restore failed"
+    "restore_version_failed": "无法恢复"
   }
 }
