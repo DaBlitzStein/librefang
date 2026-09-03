@@ -471,8 +471,18 @@
       "name_placeholder": "наприклад, my-agent",
       "module_placeholder": "наприклад, default",
       "model_id_placeholder": "наприклад, gpt-4o",
-      "temperature_placeholder": "0.7",
       "max_tokens_placeholder": "4096",
+      "top_p": "Top-p",
+      "frequency_penalty": "Штраф за частоту",
+      "presence_penalty": "Штраф за присутність",
+      "context_window": "Вікно контексту",
+      "context_window_placeholder": "токени, які модель може прочитати",
+      "max_output_tokens": "Ліміт виводу",
+      "max_output_tokens_placeholder": "токени, які модель може згенерувати",
+      "custom": "Своє значення",
+      "preferences_hint": "Налаштування цього агента мають перевагу над налаштуваннями моделі. Залиште поле на «успадкувати типове», щоб застосувалося налаштування моделі.",
+      "limits_hint": "Ліміти описують, що приймає цей endpoint. Значення понад ліміт моделі позначається тут, але надсилається без змін — вирішує провайдер.",
+      "over_limit_warning": "Перевищує ліміт цієї моделі ({{limit}}). Збережено й надіслано як введено; провайдер може відхилити.",
       "api_key_env_placeholder": "OPENAI_API_KEY",
       "base_url_placeholder": "https://api.example.com/v1",
       "tool_calls_per_minute_placeholder": "60",
@@ -4294,6 +4304,12 @@
     "title": "Типи агентів",
     "tools": "Інструменти",
     "tools_hint": "Обираються зі списку інструментів цього демона; невідомі ідентифікатори можна ввести вручну.",
-    "tools_search": "Пошук інструментів…"
+    "tools_search": "Пошук інструментів…",
+    "promote": "Опублікувати в реєстрі",
+    "confirm_promote": "Опублікувати тип агента '{{name}}' в публічному реєстрі? Маніфест буде очищений для публікації і надісланий як pull request на GitHub.",
+    "promoted": "PR в реєстр створено",
+    "promote_failed": "Не вдалося опублікувати тип агента",
+    "promote_success": "Pull request створено в реєстрі. Перегляньте і злийте, коли буде готово.",
+    "view_pr": "Переглянути pull request"
   }
 }

@@ -1,9 +1,12 @@
 use super::install::{parse_plugin_i18n_blocks, pip_in_venv, resolve_python_install};
 use super::registry::{
-    is_valid_registry_pubkey_b64, registry_index_urls, registry_pubkey_cache_path,
-    EMBEDDED_REGISTRY_PUBKEYS,
+    fetch_verified_index_with_cache_path, is_valid_registry_pubkey_b64, registry_cache_sig_path,
+    registry_index_urls, registry_pubkey_cache_path, EMBEDDED_REGISTRY_PUBKEYS,
 };
 use super::*;
+
+use base64::Engine as _;
+use ed25519_dalek::Signer as _;
 
 // Crate-wide env lock — module-local statics don't exclude env-touching tests in other modules; see test_env.rs.
 use crate::test_env::ENV_LOCK;
@@ -996,5 +999,330 @@ bootstrap = "hooks/bootstrap.py"
     assert_eq!(
         a, b,
         "pack output must be byte-identical for identical inputs"
+    );
+}
+
+// ---- fetch_verified_index serve-stale fallback (#8121) ----
+//
+// The serve-stale path may serve the disk cache past its TTL when the remote
+// signed index is unreachable, but ONLY after re-verifying the cached bytes
+// against the cached `.sig` sidecar with the same Ed25519 trust root as the
+// remote path. The bad-signature and missing-signature cases are the ones
+// that must never silently regress (PR #8121 review, round 2).
+
+/// Env guard that restores the *previous* value of every variable it touched
+/// on drop, instead of erasing it (#8058 — an erasing helper disarmed
+/// `LIBREFANG_REGISTRY_OFFLINE` for a whole CI job).
+#[derive(Default)]
+struct RegistryEnvGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl RegistryEnvGuard {
+    fn set(&mut self, key: &'static str, value: Option<&str>) {
+        self.saved.push((key, std::env::var(key).ok()));
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
+impl Drop for RegistryEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: runs under the crate-wide ENV_LOCK held by the test.
+        unsafe {
+            while let Some((k, v)) = self.saved.pop() {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+}
+
+/// Deterministic Ed25519 signature over `bytes` from a fixed test seed,
+/// returning `(pubkey_b64, sig_b64)`.
+fn sign_with_test_key(bytes: &[u8]) -> (String, String) {
+    let seed: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(3));
+    let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let sig = sk.sign(bytes);
+    (
+        base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().as_bytes()),
+        base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
+    )
+}
+
+/// Backdate a cache file's mtime so the fresh-cache gate treats it as stale.
+fn backdate(path: &std::path::Path, secs_ago: u64) {
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open cache file for backdating");
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+    f.set_times(std::fs::FileTimes::new().set_modified(past))
+        .expect("backdate cache mtime");
+}
+
+fn serve_stale_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime")
+}
+
+#[test]
+fn registry_index_serve_stale_refuses_when_remote_fails_and_no_cache() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = RegistryEnvGuard::default();
+    let (pub_b64, _) = sign_with_test_key(b"");
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_URL",
+        Some("http://127.0.0.1:1/index.json"),
+    );
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_SIG_URL",
+        Some("http://127.0.0.1:1/index.json.sig"),
+    );
+    guard.set("LIBREFANG_REGISTRY_PUBKEY", Some(&pub_b64));
+    guard.set("LIBREFANG_REGISTRY_VERIFY", None);
+    guard.set("LIBREFANG_REGISTRY_NO_CACHE", None);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_path = tmp.path().join("index-cache.json");
+    let registry = "test/registry-serve-stale-no-cache";
+
+    let client = reqwest::Client::new();
+    let result = serve_stale_runtime().block_on(fetch_verified_index_with_cache_path(
+        &client,
+        registry,
+        &cache_path,
+    ));
+
+    let err = result.expect_err("remote fail + no cache must be an error");
+    assert!(
+        err.contains("no cached index"),
+        "unexpected error text: {err}"
+    );
+    assert!(!cache_path.exists(), "failing path must not create a cache");
+}
+
+#[test]
+fn registry_index_serve_stale_serves_verified_cache_when_remote_fails() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = RegistryEnvGuard::default();
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_path = tmp.path().join("index-cache.json");
+
+    let index_body = br#"[
+        {"name": "echo-memory"},
+        {"name": "other-plugin"}
+    ]"#;
+    std::fs::write(&cache_path, index_body).unwrap();
+    backdate(&cache_path, 2 * 3600);
+    let (pub_b64, sig_b64) = sign_with_test_key(index_body);
+    std::fs::write(registry_cache_sig_path(&cache_path), sig_b64).unwrap();
+
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_URL",
+        Some("http://127.0.0.1:1/index.json"),
+    );
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_SIG_URL",
+        Some("http://127.0.0.1:1/index.json.sig"),
+    );
+    guard.set("LIBREFANG_REGISTRY_PUBKEY", Some(&pub_b64));
+    guard.set("LIBREFANG_REGISTRY_VERIFY", None);
+    guard.set("LIBREFANG_REGISTRY_NO_CACHE", None);
+
+    let client = reqwest::Client::new();
+    let result = serve_stale_runtime().block_on(fetch_verified_index_with_cache_path(
+        &client,
+        "test/registry-serve-stale-hit",
+        &cache_path,
+    ));
+
+    let entries =
+        result.expect("stale verified cache should be served when the remote fetch fails");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.get("name").and_then(|v| v.as_str()) == Some("echo-memory")),
+        "expected the cached entry to be served, got: {entries:?}"
+    );
+}
+
+#[test]
+fn registry_index_serve_stale_refuses_cache_with_bad_signature() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = RegistryEnvGuard::default();
+    let (pub_b64, _sig_of_real_bytes) = sign_with_test_key(b"the real index bytes");
+    let index_body = br#"[{"name": "echo-memory"}]"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_path = tmp.path().join("index-cache.json");
+    std::fs::write(&cache_path, index_body).unwrap();
+    backdate(&cache_path, 2 * 3600);
+    // Signature over DIFFERENT bytes than what the cache holds — i.e. the
+    // cache file was tampered with after being written.
+    let (_pub_b64, bad_sig) = sign_with_test_key(b"not the index bytes");
+    std::fs::write(registry_cache_sig_path(&cache_path), bad_sig).unwrap();
+
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_URL",
+        Some("http://127.0.0.1:3/index.json"),
+    );
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_SIG_URL",
+        Some("http://127.0.0.1:3/index.json.sig"),
+    );
+    guard.set("LIBREFANG_REGISTRY_PUBKEY", Some(&pub_b64));
+    guard.set("LIBREFANG_REGISTRY_VERIFY", None);
+    guard.set("LIBREFANG_REGISTRY_NO_CACHE", None);
+
+    let client = reqwest::Client::new();
+    let result = serve_stale_runtime().block_on(fetch_verified_index_with_cache_path(
+        &client,
+        "test/registry-serve-stale-bad-sig",
+        &cache_path,
+    ));
+
+    let err = result.expect_err("tampered cached index must not be served");
+    assert!(
+        err.contains("cached index signature verification failed"),
+        "unexpected error text: {err}"
+    );
+}
+
+#[test]
+fn registry_index_serve_stale_refuses_cache_without_signature_sidecar() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = RegistryEnvGuard::default();
+    let (pub_b64, _) = sign_with_test_key(b"");
+    let index_body = br#"[{"name": "echo-memory"}]"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_path = tmp.path().join("index-cache.json");
+    std::fs::write(&cache_path, index_body).unwrap();
+    backdate(&cache_path, 2 * 3600);
+    // Deliberately NO `.sig` sidecar next to the cache: a cache written by a
+    // daemon whose verify step was disabled (or a pre-sidecar daemon) must
+    // not be servable stale once verification is back on — the bytes on disk
+    // were never proven to be signature-verified.
+    assert!(!registry_cache_sig_path(&cache_path).exists());
+
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_URL",
+        Some("http://127.0.0.1:1/index.json"),
+    );
+    guard.set(
+        "LIBREFANG_REGISTRY_INDEX_SIG_URL",
+        Some("http://127.0.0.1:1/index.json.sig"),
+    );
+    guard.set("LIBREFANG_REGISTRY_PUBKEY", Some(&pub_b64));
+    guard.set("LIBREFANG_REGISTRY_VERIFY", None);
+    guard.set("LIBREFANG_REGISTRY_NO_CACHE", None);
+
+    let client = reqwest::Client::new();
+    let result = serve_stale_runtime().block_on(fetch_verified_index_with_cache_path(
+        &client,
+        "test/registry-serve-stale-no-sig",
+        &cache_path,
+    ));
+
+    let err = result.expect_err("cache without a verified signature must not be served stale");
+    assert!(
+        err.contains("cached signature"),
+        "unexpected error text: {err}"
+    );
+    assert!(
+        err.contains("missing or unreadable"),
+        "unexpected error text: {err}"
+    );
+}
+
+// ── /api/plugins/doctor runtime probes (#8142) ─────────────────────────────
+
+/// The reported table covers every runtime `PluginRuntime::all()` declares, in that exact order.
+///
+/// Load-bearing because the probes now run concurrently: joining the handles out of order, or collecting from a `HashMap`, would make the endpoint's output vary between calls for an unchanged host — the #3298 problem, and also the thing that would make the `runtime` → availability index in `run_doctor` line up with the wrong entry.
+#[test]
+fn doctor_runtime_table_is_complete_and_in_declaration_order() {
+    use crate::plugin_runtime::PluginRuntime;
+
+    let report = run_doctor();
+    let expected: Vec<String> = PluginRuntime::all()
+        .iter()
+        .map(|r| r.label().to_string())
+        .collect();
+    let actual: Vec<String> = report.runtimes.iter().map(|s| s.runtime.clone()).collect();
+    assert_eq!(
+        actual, expected,
+        "the probe table must list every declared runtime in declaration order"
+    );
+}
+
+/// Two calls in a row must agree, and the second must be served from the cache rather than re-probing.
+///
+/// The timing assertion is deliberately loose — it only has to separate "did not spawn ~12 subprocesses" from "did".
+/// A cold call spawns one process per runtime (three for Python); the cached call does no I/O at all, so the gap is orders of magnitude rather than a few percent.
+#[test]
+fn doctor_runtime_probes_are_cached_between_calls() {
+    // Warm the cache and measure the cached read, not the cold one: another
+    // test in this binary may already have populated it, so timing the first
+    // call here would be measuring someone else's state.
+    let first = run_doctor();
+    let began = std::time::Instant::now();
+    let second = run_doctor();
+    let cached_elapsed = began.elapsed();
+
+    let names_first: Vec<_> = first.runtimes.iter().map(|s| &s.runtime).collect();
+    let names_second: Vec<_> = second.runtimes.iter().map(|s| &s.runtime).collect();
+    assert_eq!(
+        names_first, names_second,
+        "a cached read must return the same table"
+    );
+    assert!(
+        cached_elapsed < std::time::Duration::from_millis(500),
+        "a cached probe read must not spawn subprocesses; took {cached_elapsed:?}"
+    );
+}
+
+/// The plugin list is *not* cached alongside the probe table, so a plugin installed between two calls shows up immediately.
+///
+/// This is the half of the caching decision that could silently regress: it would be tempting to cache the whole `DoctorReport`, and nothing else in the suite would notice.
+#[test]
+fn doctor_reflects_a_newly_written_plugin_without_waiting_for_the_probe_ttl() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let prev_home = std::env::var_os("LIBREFANG_HOME");
+    std::env::set_var("LIBREFANG_HOME", tmp.path());
+
+    // Prime the probe cache while the plugins dir is empty.
+    let before = run_doctor();
+    let had = before
+        .plugins
+        .iter()
+        .any(|p| p.name == "doctor-cache-probe");
+    assert!(!had, "fixture name must not pre-exist");
+
+    let plugin_dir = plugins_dir().join("doctor-cache-probe");
+    std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        "name = \"doctor-cache-probe\"\nversion = \"0.1.0\"\ndescription = \"fixture\"\n",
+    )
+    .unwrap();
+
+    let after = run_doctor();
+    let now_listed = after.plugins.iter().any(|p| p.name == "doctor-cache-probe");
+
+    match prev_home {
+        Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+        None => std::env::remove_var("LIBREFANG_HOME"),
+    }
+
+    assert!(
+        now_listed,
+        "the plugin list must be re-read on every call, not cached with the probe table"
     );
 }

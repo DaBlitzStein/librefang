@@ -471,8 +471,18 @@
       "name_placeholder": "np. mój-agent",
       "module_placeholder": "np. default",
       "model_id_placeholder": "np. gpt-4o",
-      "temperature_placeholder": "0.7",
       "max_tokens_placeholder": "4096",
+      "top_p": "Top-p",
+      "frequency_penalty": "Kara za częstotliwość",
+      "presence_penalty": "Kara za obecność",
+      "context_window": "Okno kontekstu",
+      "context_window_placeholder": "tokeny, które model może odczytać",
+      "max_output_tokens": "Limit wyjścia",
+      "max_output_tokens_placeholder": "tokeny, które model może wygenerować",
+      "custom": "Własna wartość",
+      "preferences_hint": "Ustawienia tego agenta mają pierwszeństwo przed ustawieniami modelu. Pozostaw pole na „dziedzicz domyślne”, aby użyć ustawienia modelu.",
+      "limits_hint": "Limity opisują, co akceptuje ten endpoint. Wartość powyżej limitu modelu jest tu oznaczana, ale wysyłana bez zmian — decyduje dostawca.",
+      "over_limit_warning": "Powyżej limitu tego modelu ({{limit}}). Zapisano i wysłano tak, jak wpisano; dostawca może to odrzucić.",
       "api_key_env_placeholder": "OPENAI_API_KEY",
       "base_url_placeholder": "https://api.example.com/v1",
       "tool_calls_per_minute_placeholder": "60",
@@ -4294,6 +4304,12 @@
     "title": "Typy agentów",
     "tools": "Narzędzia",
     "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
-    "tools_search": "Szukaj narzędzi…"
+    "tools_search": "Szukaj narzędzi…",
+    "promote": "Opublikuj w rejestrze",
+    "confirm_promote": "Opublikować typ agenta '{{name}}' w publicznym rejestrze? Manifest zostanie oczyszczony i przesłany jako pull request na GitHubie.",
+    "promoted": "PR w rejestrze utworzony",
+    "promote_failed": "Nie udało się opublikować typu agenta",
+    "promote_success": "Pull request został utworzony w rejestrze. Sprawdź i scal, gdy będzie gotowy.",
+    "view_pr": "Zobacz pull request"
   }
 }
