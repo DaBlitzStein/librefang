@@ -983,6 +983,12 @@ export interface ModelPerformanceItem {
   avg_latency_ms?: number;
   min_latency_ms?: number;
   max_latency_ms?: number;
+  /**
+   * Nearest-rank 95th-percentile latency for the window (#8062).
+   *
+   * The percentile an SLO is written against — `avg_latency_ms` hides the tail and `max_latency_ms` is a single outlier.
+   */
+  p95_latency_ms?: number;
   cost_per_call?: number;
   avg_latency_per_call?: number;
 }
@@ -993,6 +999,19 @@ export interface UsageByAgentItem {
   total_tokens?: number;
   tool_calls?: number;
   cost?: number;
+  /**
+   * Prompt / completion split, so a chatty agent is distinguishable from an expensive one.
+   * Both are served by `GET /api/usage`.
+   */
+  input_tokens?: number;
+  output_tokens?: number;
+  /** Same value as `cost`; the handler emits both names. */
+  total_cost_usd?: number;
+  call_count?: number;
+  /**
+   * `true` for a hand rather than a top-level agent. A hand's spend is real money, so the page labels these rows instead of dropping them.
+   */
+  is_hand?: boolean;
 }
 
 export interface UsageDailyItem {
@@ -1005,7 +1024,45 @@ export interface UsageDailyItem {
 export interface UsageDailyResponse {
   days?: UsageDailyItem[];
   today_cost_usd?: number;
+  /**
+   * Timestamp of the oldest stored usage event, or `null` when the table is empty.
+   * Deliberately NOT filtered by the selected range — it answers "how far back does the stored data go".
+   *
+   * Despite the `_date` suffix this is `MIN(timestamp)`, so it carries a full RFC 3339 instant rather than a bare `YYYY-MM-DD`.
+   * Render the first 10 characters for a day.
+   */
   first_event_date?: string | null;
+  /**
+   * `usage.retention_days` from `config.toml` (#8062). `0` means the retention sweep is disabled and the table grows without bound.
+   *
+   * Paired with `first_event_date` this distinguishes "this deployment is young" from "the sweep already pruned the rest", which a cost report needs before anyone reads a total as complete.
+   */
+  retention_days?: number;
+}
+
+/**
+ * Inclusive reporting window accepted by every `/api/usage*` endpoint (#7891).
+ *
+ * Both bounds are `YYYY-MM-DD` **UTC calendar days** — see `lib/usageRange.ts` for why the dashboard resolves its presets in UTC rather than local time.
+ * An omitted bound means unbounded on that side; a malformed one is a `400`, so callers normalize before passing values in.
+ */
+export interface UsageRangeParams {
+  start_date?: string;
+  end_date?: string;
+}
+
+function usageRangeQuery(
+  range: UsageRangeParams = {},
+  extra: Record<string, string | number | undefined> = {},
+): string {
+  const params = new URLSearchParams();
+  if (range.start_date) params.set("start_date", range.start_date);
+  if (range.end_date) params.set("end_date", range.end_date);
+  for (const [key, value] of Object.entries(extra)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
 }
 
 export interface CommsNode {
@@ -1346,8 +1403,19 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
 export interface AgentModelDetail {
   provider?: string;
   model?: string;
-  max_tokens?: number;
-  temperature?: number;
+  /**
+   * Tri-state on the wire. `null` is the inherit state — the agent has no
+   * opinion, so the per-model override supplies the value and, failing that,
+   * the system default. It is not zero and not "the default happens to be N".
+   */
+  max_tokens?: number | null;
+  temperature?: number | null;
+  top_p?: number | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  /** Endpoint limits rather than sampling preferences. */
+  context_window?: number | null;
+  max_output_tokens?: number | null;
 }
 
 export interface AgentDetail {
@@ -1450,13 +1518,28 @@ export async function listAgentEvents(
   return data.events ?? [];
 }
 
+/**
+ * PATCH /api/agents/{id}/config.
+ *
+ * The numeric knobs are tri-state: omit a key to leave it unchanged, send
+ * `null` to hand the field back to inherit, send a number to pin it for this
+ * agent. A pinned value wins over the per-model override.
+ *
+ * An over-limit value is reported in `warnings` and stored as sent — never
+ * clamped. See `librefang_types::inference_params`.
+ */
 export async function patchAgentConfig(
   agentId: string,
   config: {
-    max_tokens?: number;
+    max_tokens?: number | null;
     model?: string;
     provider?: string;
-    temperature?: number;
+    temperature?: number | null;
+    top_p?: number | null;
+    frequency_penalty?: number | null;
+    presence_penalty?: number | null;
+    context_window?: number | null;
+    max_output_tokens?: number | null;
     web_search_augmentation?: "off" | "auto" | "always";
   },
 ): Promise<ApiActionResponse> {
@@ -1480,10 +1563,10 @@ function trimOptionalHandRuntimeString(value: string | undefined): string | unde
  * do not silently inherit those semantics.
  */
 function serializeHandAgentRuntimeConfigPatch(config: {
-  max_tokens?: number;
+  max_tokens?: number | null;
   model?: string;
   provider?: string;
-  temperature?: number;
+  temperature?: number | null;
   api_key_env?: string;
   base_url?: string;
   web_search_augmentation?: "off" | "auto" | "always";
@@ -1498,6 +1581,13 @@ function serializeHandAgentRuntimeConfigPatch(config: {
 } {
   return {
     ...config,
+    // A hand override has no per-field clear: `DELETE /hand-runtime-config`
+    // drops the whole thing. Dropping the key is therefore the honest
+    // translation of `null` here — sending it would read as "leave unchanged"
+    // on the backend anyway, and omitting it says the same thing without
+    // implying the endpoint supports a clear it does not.
+    max_tokens: config.max_tokens ?? undefined,
+    temperature: config.temperature ?? undefined,
     api_key_env: trimOptionalHandRuntimeString(config.api_key_env),
     base_url: trimOptionalHandRuntimeString(config.base_url),
   };
@@ -1511,10 +1601,10 @@ function serializeHandAgentRuntimeConfigPatch(config: {
 export async function patchHandAgentRuntimeConfig(
   agentId: string,
   config: {
-    max_tokens?: number;
+    max_tokens?: number | null;
     model?: string;
     provider?: string;
-    temperature?: number;
+    temperature?: number | null;
     api_key_env?: string;
     base_url?: string;
     web_search_augmentation?: "off" | "auto" | "always";
@@ -1767,6 +1857,22 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
+/** Result of promoting an agent type to the public registry as a PR. */
+export interface PromoteAgentTypeResult {
+  pr_url: string;
+  repo: string;
+  branch: string;
+}
+
+/**
+ * Promote an agent type to the configured registry repo as a GitHub PR.
+ * Sanitizes the manifest for publication, pushes it to `agent-types/<name>/agent.toml`,
+ * and opens a pull request. Requires `GITHUB_TOKEN` on the daemon side.
+ */
+export async function promoteAgentType(name: string): Promise<PromoteAgentTypeResult> {
+  return post<PromoteAgentTypeResult>(`/api/templates/${encodeURIComponent(name)}/promote`, {});
+}
+
 // ---------------------------------------------------------------------------
 // Template version history
 // ---------------------------------------------------------------------------
@@ -1986,6 +2092,13 @@ export interface ModelItem {
   // sentinel — never a limit. Refs #7774.
   context_window?: number;
   max_output_tokens?: number;
+  /**
+   * Whether the two capacities above were actually sourced.
+   * `false` marks them as discovery placeholders rather than measurements (#7780) — the daemon has
+   * to put *some* number in for compaction and budget math, but nothing may present it as measured.
+   * Absent on older daemons, where the field did not exist; treat that as `true`.
+   */
+  limits_known?: boolean;
   input_cost_per_m?: number;
   output_cost_per_m?: number;
   pricing_known?: boolean;
@@ -4003,27 +4116,55 @@ export async function decayMemories(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/memory/decay", {});
 }
 
-export async function listUsageByAgent(): Promise<UsageByAgentItem[]> {
-  const data = await get<PaginatedResponse<UsageByAgentItem>>("/api/usage");
+export async function listUsageByAgent(
+  range: UsageRangeParams = {},
+): Promise<UsageByAgentItem[]> {
+  const data = await get<PaginatedResponse<UsageByAgentItem>>(
+    `/api/usage${usageRangeQuery(range)}`,
+  );
   return data.items ?? [];
 }
 
-export async function getUsageSummary(): Promise<UsageSummaryResponse> {
-  return get<UsageSummaryResponse>("/api/usage/summary");
+export async function getUsageSummary(
+  range: UsageRangeParams = {},
+): Promise<UsageSummaryResponse> {
+  return get<UsageSummaryResponse>(`/api/usage/summary${usageRangeQuery(range)}`);
 }
 
-export async function listUsageByModel(): Promise<UsageByModelItem[]> {
-  const data = await get<{ models?: UsageByModelItem[] }>("/api/usage/by-model");
+export async function listUsageByModel(
+  range: UsageRangeParams = {},
+): Promise<UsageByModelItem[]> {
+  const data = await get<{ models?: UsageByModelItem[] }>(
+    `/api/usage/by-model${usageRangeQuery(range)}`,
+  );
   return data.models ?? [];
 }
 
-export async function getUsageByModelPerformance(): Promise<ModelPerformanceItem[]> {
-  const data = await get<{ models?: ModelPerformanceItem[] }>("/api/usage/by-model/performance");
+export async function getUsageByModelPerformance(
+  range: UsageRangeParams = {},
+): Promise<ModelPerformanceItem[]> {
+  const data = await get<{ models?: ModelPerformanceItem[] }>(
+    `/api/usage/by-model/performance${usageRangeQuery(range)}`,
+  );
   return data.models ?? [];
 }
 
-export async function getUsageDaily(): Promise<UsageDailyResponse> {
-  return get<UsageDailyResponse>("/api/usage/daily");
+/**
+ * Daily breakdown for the window.
+ *
+ * `days` and an explicit range are mutually exclusive server-side (combining
+ * them is a `400`), so a bounded window passes dates only and `days` is used
+ * solely for the unbounded case. `dailyDaysFor` in `lib/usageRange.ts` picks
+ * between them.
+ */
+export async function getUsageDaily(
+  range: UsageRangeParams = {},
+  days?: number,
+): Promise<UsageDailyResponse> {
+  const bounded = Boolean(range.start_date || range.end_date);
+  return get<UsageDailyResponse>(
+    `/api/usage/daily${usageRangeQuery(range, bounded ? {} : { days })}`,
+  );
 }
 
 // Mirrors the kernel-side `BudgetStatus` (crates/librefang-kernel-metering)
