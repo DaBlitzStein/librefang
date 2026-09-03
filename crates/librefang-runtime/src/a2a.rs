@@ -1142,6 +1142,7 @@ mod tests {
     fn test_agent_card_from_manifest() {
         let manifest = AgentManifest {
             name: "test-agent".to_string(),
+            source_template: None,
             description: "A test agent".to_string(),
             ..Default::default()
         };

@@ -109,6 +109,7 @@ fn register_agent_with_filters_and_author(
     let id = AgentId::new();
     let manifest = AgentManifest {
         name: "mcp-test".to_string(),
+        source_template: None,
         description: "agent for /mcp tools/list filter regression".to_string(),
         author: author.to_string(),
         module: "builtin:chat".to_string(),
