@@ -2089,21 +2089,39 @@ pub fn spawn_fetch_agent_token_usage(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            let mut usage = crate::tui::screens::agents::AgentTokenUsage::default();
-            if let Ok(body) = client
+        let BackendRef::Daemon { base_url, api_key } = backend else {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-agents-token-usage-daemon-only",
+            )));
+            return;
+        };
+        let client = make_daemon_client(api_key.as_deref());
+        let mut usage = crate::tui::screens::agents::AgentTokenUsage::default();
+        match daemon_response(
+            client
                 .get(format!("{base_url}/api/agents/{agent_id}"))
-                .send()
-                .and_then(|r| r.json::<serde_json::Value>())
-            {
+                .send(),
+            || crate::i18n::t("tui-agents-token-usage-failed"),
+        )
+        .and_then(|r| r.json::<serde_json::Value>().map_err(|e| e.to_string()))
+        {
+            Ok(body) => {
                 usage.total_tokens = body["injected_footprint_tokens"].as_u64().unwrap_or(0);
             }
-            if let Ok(body) = client
+            Err(message) => {
+                let _ = tx.send(AppEvent::FetchError(message));
+                return;
+            }
+        }
+        match daemon_response(
+            client
                 .get(format!("{base_url}/api/agents/{agent_id}/events?limit=5"))
-                .send()
-                .and_then(|r| r.json::<serde_json::Value>())
-            {
+                .send(),
+            || crate::i18n::t("tui-agents-token-usage-failed"),
+        )
+        .and_then(|r| r.json::<serde_json::Value>().map_err(|e| e.to_string()))
+        {
+            Ok(body) => {
                 usage.recent = body["events"]
                     .as_array()
                     .map(|a| {
@@ -2120,8 +2138,12 @@ pub fn spawn_fetch_agent_token_usage(
                     })
                     .unwrap_or_default();
             }
-            let _ = tx.send(AppEvent::AgentTokenUsageLoaded(usage));
+            Err(message) => {
+                let _ = tx.send(AppEvent::FetchError(message));
+                return;
+            }
         }
+        let _ = tx.send(AppEvent::AgentTokenUsageLoaded(usage));
     });
 }
 

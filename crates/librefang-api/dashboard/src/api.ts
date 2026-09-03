@@ -1453,7 +1453,9 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
+  /** Template this agent was spawned from, if any (#8018). */
   source_template?: string;
+  /** Tokens the daemon injects into every request for this agent — identity, tools, skills (#7976). */
   injected_footprint_tokens?: number;
 }
 

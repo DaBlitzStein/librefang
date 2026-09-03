@@ -1392,13 +1392,7 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 )));
                 for (model, input, output, cost) in usage.recent.iter().take(5) {
                     lines.push(Line::from(Span::styled(
-                        format!(
-                            "    {model:<20} {input}/{output}  ${cost:.4}",
-                            model = model,
-                            input = input,
-                            output = output,
-                            cost = cost
-                        ),
+                        format!("    {model:<20} {input}/{output}  ${cost:.4}"),
                         Style::default().fg(theme::TEXT_TERTIARY),
                     )));
                 }
@@ -1703,5 +1697,23 @@ mod tests {
             !toml.contains("max_llm_tokens_per_hour = 200000"),
             "template must not re-introduce the 200000 hourly cap"
         );
+    }
+
+    #[test]
+    fn dollar_key_requests_the_footprint_for_the_open_agent_only() {
+        let mut state = AgentSelectState::new();
+        // No detail open: the key must not fire a request against nothing.
+        assert!(matches!(
+            state.handle_detail(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)),
+            AgentAction::Continue
+        ));
+        state.detail = Some(AgentDetail {
+            id: "agent-7".to_string(),
+            ..AgentDetail::default()
+        });
+        match state.handle_detail(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)) {
+            AgentAction::FetchAgentTokenUsage(id) => assert_eq!(id, "agent-7"),
+            _ => panic!("the open agent's id must be the one fetched"),
+        }
     }
 }
