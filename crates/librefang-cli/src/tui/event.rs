@@ -352,6 +352,8 @@ pub enum AppEvent {
     },
     /// Agent channel allowlist updated.
     AgentChannelsUpdated(String),
+    /// Agent token usage loaded.
+    AgentTokenUsageLoaded(crate::tui::screens::agents::AgentTokenUsage),
     /// The agent's current inference parameters, plus the model's own limits so
     /// the editor's ladders can stop where the endpoint does. A `null` in
     /// `model` is the inherit state and stays `null` here.
@@ -2251,6 +2253,70 @@ pub fn spawn_update_agent_channels(
                 }
             }
         }
+    });
+}
+
+pub fn spawn_fetch_agent_token_usage(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let BackendRef::Daemon { base_url, api_key } = backend else {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-agents-token-usage-daemon-only",
+            )));
+            return;
+        };
+        let client = make_daemon_client(api_key.as_deref());
+        let mut usage = crate::tui::screens::agents::AgentTokenUsage::default();
+        match daemon_response(
+            client
+                .get(format!("{base_url}/api/agents/{agent_id}"))
+                .send(),
+            || crate::i18n::t("tui-agents-token-usage-failed"),
+        )
+        .and_then(|r| r.json::<serde_json::Value>().map_err(|e| e.to_string()))
+        {
+            Ok(body) => {
+                usage.total_tokens = body["injected_footprint_tokens"].as_u64().unwrap_or(0);
+            }
+            Err(message) => {
+                let _ = tx.send(AppEvent::FetchError(message));
+                return;
+            }
+        }
+        match daemon_response(
+            client
+                .get(format!("{base_url}/api/agents/{agent_id}/events?limit=5"))
+                .send(),
+            || crate::i18n::t("tui-agents-token-usage-failed"),
+        )
+        .and_then(|r| r.json::<serde_json::Value>().map_err(|e| e.to_string()))
+        {
+            Ok(body) => {
+                usage.recent = body["events"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| {
+                                Some((
+                                    c["model"].as_str()?.to_string(),
+                                    c["input_tokens"].as_u64().unwrap_or(0),
+                                    c["output_tokens"].as_u64().unwrap_or(0),
+                                    c["cost_usd"].as_f64().unwrap_or(0.0),
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            Err(message) => {
+                let _ = tx.send(AppEvent::FetchError(message));
+                return;
+            }
+        }
+        let _ = tx.send(AppEvent::AgentTokenUsageLoaded(usage));
     });
 }
 

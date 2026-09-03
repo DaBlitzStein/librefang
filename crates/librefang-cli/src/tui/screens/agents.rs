@@ -105,6 +105,7 @@ pub struct AgentSelectState {
     pub available_channels: Vec<(String, bool)>,
     pub channel_cursor: usize,
 
+    pub token_usage: Option<AgentTokenUsage>,
     // Inference-parameter editor (detail view)
     pub model_params: super::model_params::ModelParamsEditor,
 
@@ -152,6 +153,12 @@ pub struct AgentDetail {
     pub channels_mode: String,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct AgentTokenUsage {
+    pub total_tokens: u64,
+    pub recent: Vec<(String, u64, u64, f64)>,
+}
+
 /// What the agent screen decided.
 pub enum AgentAction {
     /// No action yet, keep rendering.
@@ -161,15 +168,27 @@ pub enum AgentAction {
     /// User pressed Esc from the top-level list.
     Back,
     /// User wants to chat with a specific agent (from detail view).
-    ChatWithAgent { id: String, name: String },
+    ChatWithAgent {
+        id: String,
+        name: String,
+    },
     /// User wants to kill an agent (from detail view).
     KillAgent(String),
     /// Update skills for an agent.
-    UpdateSkills { id: String, skills: Vec<String> },
+    UpdateSkills {
+        id: String,
+        skills: Vec<String>,
+    },
     /// Update MCP servers for an agent.
-    UpdateMcpServers { id: String, servers: Vec<String> },
+    UpdateMcpServers {
+        id: String,
+        servers: Vec<String>,
+    },
     /// Update the channel allowlist for an agent.
-    UpdateChannels { id: String, channels: Vec<String> },
+    UpdateChannels {
+        id: String,
+        channels: Vec<String>,
+    },
     /// Fetch skills/mcp data for an agent.
     FetchAgentSkills(String),
     /// Fetch MCP data for an agent.
@@ -182,6 +201,7 @@ pub enum AgentAction {
     /// `Default::default()`, because nothing ever wrote them: every agent read as "all skills"
     /// and "no MCP servers" no matter what its manifest said.
     LoadAgentDetail(String),
+    FetchAgentTokenUsage(String),
     /// Fetch the agent's current inference parameters before editing them.
     FetchAgentModelParams(String),
     /// Persist edited inference parameters. `None` in a pair clears the agent's
@@ -218,6 +238,7 @@ impl AgentSelectState {
             available_channels: Vec::new(),
             channel_cursor: 0,
             mcp_cursor: 0,
+            token_usage: None,
             spawned_toml: None,
             status_msg: String::new(),
         }
@@ -547,6 +568,11 @@ impl AgentSelectState {
                     let id = detail.id.clone();
                     self.sub = AgentSubScreen::EditChannels;
                     return AgentAction::FetchAgentChannels(id);
+                }
+            }
+            KeyCode::Char('$') => {
+                if let Some(ref detail) = self.detail {
+                    return AgentAction::FetchAgentTokenUsage(detail.id.clone());
                 }
             }
             KeyCode::Char('p') => {
@@ -1426,6 +1452,30 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 ]));
             }
 
+            if let Some(usage) = &state.token_usage {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    crate::i18n::t("tui-agents-detail-tokens"),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {} {}",
+                        crate::i18n::t("tui-agents-detail-tokens-injected"),
+                        usage.total_tokens
+                    ),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                )));
+                for (model, input, output, cost) in usage.recent.iter().take(5) {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {model:<20} {input}/{output}  ${cost:.4}"),
+                        Style::default().fg(theme::TEXT_TERTIARY),
+                    )));
+                }
+            }
+
             f.render_widget(Paragraph::new(lines), chunks[0]);
         }
         None => {
@@ -1820,5 +1870,23 @@ mod tests {
             !toml.contains("max_llm_tokens_per_hour = 200000"),
             "template must not re-introduce the 200000 hourly cap"
         );
+    }
+
+    #[test]
+    fn dollar_key_requests_the_footprint_for_the_open_agent_only() {
+        let mut state = AgentSelectState::new();
+        // No detail open: the key must not fire a request against nothing.
+        assert!(matches!(
+            state.handle_detail(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)),
+            AgentAction::Continue
+        ));
+        state.detail = Some(AgentDetail {
+            id: "agent-7".to_string(),
+            ..AgentDetail::default()
+        });
+        match state.handle_detail(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)) {
+            AgentAction::FetchAgentTokenUsage(id) => assert_eq!(id, "agent-7"),
+            _ => panic!("the open agent's id must be the one fetched"),
+        }
     }
 }
