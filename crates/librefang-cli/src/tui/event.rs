@@ -174,6 +174,7 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
+    MemoryConfigSaved(bool),
     /// The memory config could not be read — see [`FetchFailure`].
     ///
     /// Sent instead of staying silent: without it the Memory screen keeps
@@ -2511,6 +2512,34 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                 == Some("inherited_default"),
         };
         let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
+    });
+}
+
+pub fn spawn_save_memory_config(
+    backend: BackendRef,
+    auto_memorize: bool,
+    auto_retrieve: bool,
+    extraction_model: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = serde_json::json!({
+                "proactive_memory": {
+                    "auto_memorize": auto_memorize,
+                    "auto_retrieve": auto_retrieve,
+                    "extraction_model": extraction_model,
+                }
+            });
+            let ok = client
+                .patch(format!("{base_url}/api/memory/config"))
+                .json(&body)
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            let _ = tx.send(AppEvent::MemoryConfigSaved(ok));
+        }
     });
 }
 
