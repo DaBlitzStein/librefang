@@ -320,6 +320,21 @@ impl App {
                 self.workflows.status_msg = crate::i18n::t("tui-mod-workflow-created");
                 self.refresh_workflows();
             }
+            AppEvent::WorkflowParamsLoaded(fetch) => {
+                self.workflows.run_params = Vec::new();
+                self.workflows.param_cursor = 0;
+                match fetch {
+                    workflows::WorkflowParamsFetch::Loaded(params) => {
+                        self.workflows.run_params = params;
+                    }
+                    workflows::WorkflowParamsFetch::None => {
+                        self.workflows.status_msg = crate::i18n::t("tui-workflows-params-none");
+                    }
+                    workflows::WorkflowParamsFetch::Failed => {
+                        self.workflows.status_msg = crate::i18n::t("tui-workflows-params-failed");
+                    }
+                }
+            }
             AppEvent::ChannelListLoaded {
                 instances,
                 adapters,
@@ -538,6 +553,20 @@ impl App {
                 self.goals
                     .apply_run_state(&goal_id, phase, iteration, max_iterations);
             }
+            AppEvent::GoalRunFailed { goal_id, failure } => {
+                // Deliberately does NOT touch the cached run state: the last
+                // known phase is more useful than blanking it, and the status
+                // line is what says the reading is stale.
+                self.goals.status_msg = match failure {
+                    event::FetchFailure::RequiresDaemon => {
+                        crate::i18n::t("tui-goals-run-requires-daemon")
+                    }
+                    event::FetchFailure::Error(reason) => crate::i18n::t_args(
+                        "tui-goals-run-fetch-failed",
+                        &[("id", &goal_id), ("error", &reason)],
+                    ),
+                };
+            }
             AppEvent::GoalCreated(id) => {
                 self.goals.status_msg = crate::i18n::t_args("tui-goal-created", &[("id", &id)]);
                 self.refresh_goals();
@@ -584,6 +613,19 @@ impl App {
                     crate::i18n::t("tui-memory-config-on")
                 } else {
                     crate::i18n::t("tui-memory-config-save-failed")
+                };
+            }
+            AppEvent::MemoryConfigFailed(failure) => {
+                // Clear `loading` on the failure path too, or the screen sits
+                // on its spinner forever and the message never gets read.
+                self.memory.loading = false;
+                self.memory.status_msg = match failure {
+                    event::FetchFailure::RequiresDaemon => {
+                        crate::i18n::t("tui-memory-config-requires-daemon")
+                    }
+                    event::FetchFailure::Error(reason) => {
+                        crate::i18n::t_args("tui-memory-config-fetch-failed", &[("error", &reason)])
+                    }
                 };
             }
             AppEvent::MemoryAgentsLoaded(agents) => {
@@ -662,6 +704,18 @@ impl App {
                     self.templates.status_msg = crate::i18n::t_args(
                         "tui-templates-manifest-unavailable",
                         &[("name", &name)],
+                    );
+                }
+            },
+            AppEvent::AgentTypePromoted { name, result } => match result {
+                Ok(pr_url) => {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-promoted", &[("url", &pr_url)]);
+                }
+                Err(err) => {
+                    self.templates.status_msg = crate::i18n::t_args(
+                        "tui-templates-promote-failed",
+                        &[("name", &name), ("error", &err)],
                     );
                 }
             },
@@ -1906,6 +1960,11 @@ impl App {
                     );
                 }
             }
+            workflows::WorkflowAction::FetchWorkflowParams(wf_id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_workflow_params(backend, wf_id, self.event_tx.clone());
+                }
+            }
             workflows::WorkflowAction::RunWorkflow { id, input } => {
                 if let Some(backend) = self.backend.to_ref() {
                     self.workflows.loading = true;
@@ -2166,6 +2225,13 @@ impl App {
                     }
                 }
             },
+            templates::TemplatesAction::PromoteTemplate { name } => {
+                self.templates.status_msg =
+                    crate::i18n::t_args("tui-templates-promoting", &[("name", &name)]);
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_promote_agent_type(backend, name, self.event_tx.clone());
+                }
+            }
         }
     }
 
