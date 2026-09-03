@@ -1,0 +1,3 @@
+Fixed a greedy regex that could break "Save as Workflow" on an otherwise valid chat message.
+The raw-JSON fallback pattern (`/\{[\s\S]*"steps"[\s\S]*\}/`) was greedy on both sides, matching from the first `{` to the very last `}` in the entire message — so any trailing prose containing a brace (e.g. a smiley `{🙂}`, or unrelated code in the same reply) captured past the real JSON and broke `JSON.parse`, surfacing as "invalid JSON" even though the message held a perfectly valid workflow.
+Replaced with a new `extractWorkflowJson` helper (`lib/chat.ts`) that still prefers a fenced ` ```json ` code block, then falls back to a depth-tracked, quote/escape-aware brace scan that finds the JSON object's actual matching close (#6943) (@DaBlitzStein)
