@@ -1113,7 +1113,8 @@
     "default_agent_label": "Default agent",
     "default_agent_none": "No default (first available agent)",
     "default_agent_none_short": "None",
-    "default_agent_hint": "Inbound messages on this instance with no more specific binding route to this agent."
+    "default_agent_hint": "Inbound messages on this instance with no more specific binding route to this agent.",
+    "all_configured": "All channels configured"
   },
   "skills": {
     "title": "Skills",
@@ -1836,7 +1837,10 @@
     "step_executing": "Step {{current}}/{{total}} executing…",
     "step_output": "Output",
     "step_pending": "Pending…",
-    "variables": "Variables"
+    "variables": "Variables",
+    "rerun": "Re-run with same parameters",
+    "rerun_started": "Re-run started with the same parameters",
+    "rerun_failed": "Re-run failed"
   },
   "scheduler": {
     "title": "Scheduler",
@@ -2974,7 +2978,11 @@
     "run_phase_max_iterations_reached": "Max Iterations",
     "help": "Goals is the strategic-planning surface — a tree of objectives the agent (or you) is working towards, with progress, status, and parent / child relationships. Templates seed common goal shapes; the tree view shows hierarchy and roll-up progress.\n\nHow to use this page:\n\n1. Create. \"Create goal\" opens a form for title, description, parent goal, and status. Or \"Pick template\" to apply a pre-built goal tree (e.g. \"ship a feature\", \"research a topic\").\n\n2. Track. Each node shows pending / in-progress / completed. Parent progress aggregates from children. Edit a node inline to flip its state or refine its description.\n\n3. Prune. \"Clear all\" wipes the tree (with a confirm) — useful when starting a new initiative.\n\nWhen to use it (vs. Scheduler / Workflows):\n\n  · Goals — what we want. Long-lived intentions, often agent-readable.\n  · Scheduler / Workflows — how it gets done. Concrete fires and steps.\n\nTypical scenarios:\n\n  · Giving an agent a long-term direction it can refer back to during planning.\n  · Tracking a multi-week project as a tree the human and the agent both see.\n\nThings to know:\n\n  · Templates are starting points — feel free to edit the tree after applying.\n  · Deleting a parent deletes its children. Confirm before \"Clear all\".",
     "progress": "Progress",
-    "status": "Status"
+    "status": "Status",
+    "run_stop": "Stop autonomous run",
+    "run_pause": "Pause autonomous run",
+    "run_resume": "Resume autonomous run",
+    "run_phase_paused": "Paused"
   },
   "sessions": {
     "title": "Sessions",
@@ -4307,7 +4315,7 @@
     "name_placeholder": "customer-support",
     "new": "New agent type",
     "preserved_note": "Saving rewrites only the fields above. Anything else in this type's agent.toml — triggers, compaction, MCP allowlists, session mode — is preserved.",
-    "promote": "Promote",
+    "promote": "Promote to registry",
     "promote_copied": "Copied the sanitized TOML",
     "promote_copy": "Copy TOML",
     "promote_copy_failed": "Could not copy the TOML",
@@ -4350,7 +4358,6 @@
     "tools": "Tools",
     "tools_hint": "Picked from the tools this daemon exposes; unknown identifiers can still be typed.",
     "tools_search": "Search tools…",
-    "promote": "Promote to registry",
     "confirm_promote": "Promote the agent type '{{name}}' to the public registry? The manifest will be sanitized for publication and submitted as a GitHub pull request.",
     "promoted": "Registry PR opened",
     "promote_failed": "Could not promote the agent type",

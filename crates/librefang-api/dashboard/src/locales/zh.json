@@ -1113,7 +1113,8 @@
     "default_agent_label": "默认代理",
     "default_agent_none": "无默认值（第一个可用代理）",
     "default_agent_none_short": "无",
-    "default_agent_hint": "此实例上没有更具体绑定的入站消息将路由到此代理。"
+    "default_agent_hint": "此实例上没有更具体绑定的入站消息将路由到此代理。",
+    "all_configured": "已配置全部通道"
   },
   "skills": {
     "title": "技能",
@@ -1836,7 +1837,10 @@
     "step_executing": "步骤 {{current}}/{{total}} 执行中…",
     "step_output": "输出",
     "step_pending": "等待中…",
-    "variables": "变量"
+    "variables": "变量",
+    "rerun": "用相同参数重跑",
+    "rerun_started": "已用相同参数重新运行",
+    "rerun_failed": "重跑失败"
   },
   "scheduler": {
     "title": "调度器",
@@ -2940,7 +2944,11 @@
     "run_phase_max_iterations_reached": "最大迭代",
     "help": "Goals 是战略规划面——一棵 agent（或你）正在追的目标树，含进度、状态和父子关系。模板播种常见目标形状；树视图展示层级和向上汇总的进度。\n\n使用步骤：\n\n1. 创建。\"Create goal\" 打开表单填标题、描述、父目标、状态。或 \"Pick template\" 一次性铺开预置目标树（如 \"ship a feature\"、\"research a topic\"）。\n\n2. 跟踪。每个节点显示 pending / in-progress / completed。父节点进度由子节点汇总。点节点可内联编辑状态或描述。\n\n3. 清理。\"Clear all\" 整棵清空（带二次确认）——开新阶段时常用。\n\n跟 Scheduler / Workflows 的区别：\n\n  · Goals —— 想做什么。长期意图，可被 agent 读取。\n  · Scheduler / Workflows —— 怎么做。具体的触发与步骤。\n\n典型场景：\n\n  · 给 agent 一个长期方向，规划时可以参考。\n  · 跟踪一个跨周项目，人和 agent 都看同一棵树。\n\n注意事项：\n\n  · 模板是起点，应用后随便改。\n  · 删父节点会带走子节点，\"Clear all\" 前请确认。",
     "progress": "进度",
-    "status": "状态"
+    "status": "状态",
+    "run_stop": "停止自主执行",
+    "run_pause": "暂停自主执行",
+    "run_resume": "恢复自主执行",
+    "run_phase_paused": "已暂停"
   },
   "sessions": {
     "title": "会话",
@@ -4307,7 +4315,7 @@
     "name_placeholder": "customer-support",
     "new": "新建智能体类型",
     "preserved_note": "保存只会重写以上字段。该类型 agent.toml 中的其他内容——触发器、压缩配置、MCP 允许列表、会话模式——都会原样保留。",
-    "promote": "提升",
+    "promote": "推广到注册表",
     "promote_copied": "已复制脱敏后的 TOML",
     "promote_copy": "复制 TOML",
     "promote_copy_failed": "无法复制 TOML",
@@ -4350,7 +4358,6 @@
     "tools": "工具",
     "tools_hint": "从本守护进程提供的工具中选择，也可手动输入目录之外的标识符。",
     "tools_search": "搜索工具…",
-    "promote": "推广到注册表",
     "confirm_promote": "将代理类型 '{{name}}' 推广到公共注册表？清单将被清理后作为 GitHub pull request 提交。",
     "promoted": "注册表 PR 已创建",
     "promote_failed": "无法推广代理类型",
