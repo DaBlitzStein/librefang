@@ -180,6 +180,7 @@ pub enum AppEvent {
     /// whatever it had (usually nothing) and the operator cannot tell a 5xx
     /// from an empty config from a request that never went out (#8141).
     MemoryConfigFailed(FetchFailure),
+    MemoryConfigSaved(bool),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -2431,6 +2432,34 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                 == Some("inherited_default"),
         };
         let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
+    });
+}
+
+pub fn spawn_save_memory_config(
+    backend: BackendRef,
+    auto_memorize: bool,
+    auto_retrieve: bool,
+    extraction_model: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = serde_json::json!({
+                "proactive_memory": {
+                    "auto_memorize": auto_memorize,
+                    "auto_retrieve": auto_retrieve,
+                    "extraction_model": extraction_model,
+                }
+            });
+            let ok = client
+                .patch(format!("{base_url}/api/memory/config"))
+                .json(&body)
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            let _ = tx.send(AppEvent::MemoryConfigSaved(ok));
+        }
     });
 }
 
