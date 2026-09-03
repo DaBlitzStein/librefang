@@ -90,6 +90,8 @@ export const agentKeys = {
   // configured on this instance".
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
+  manifestHistory: (agentId: string) =>
+    [...agentKeys.all, "manifestHistory", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview

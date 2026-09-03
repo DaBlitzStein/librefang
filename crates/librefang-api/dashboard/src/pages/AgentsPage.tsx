@@ -37,7 +37,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, ChevronRight, Check, Save, Library, GitBranch, Radio, Route } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, ChevronRight, Check, Save, Library, GitBranch, Radio, Route, History } from "lucide-react";
 import { buildModelConfigPatch } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -77,6 +77,7 @@ import {
   useAgentMcpServers,
   useAgentManifest,
   useAgentChannels,
+  useAgentManifestHistory,
   usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
@@ -569,7 +570,7 @@ export function AgentsPage() {
   // the PUT — leaving the tab discards the draft (the "change your mind" path).
   const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs"
+    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs" | "history"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -916,6 +917,11 @@ export function AgentsPage() {
     enabled: !!detailAgent && agentTab === "skills",
   });
   const setAgentSkillsMutation = useSetAgentSkills();
+
+  // Manifest version history — fetched only when the History tab is active.
+  const manifestHistoryQuery = useAgentManifestHistory(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "history",
+  });
 
   useEffect(() => {
     if (agentTab !== "tools") {
@@ -1414,6 +1420,7 @@ export function AgentsPage() {
       { id: "routing",      label: t("agents.tab.routing",      { defaultValue: "Routing" }),      Icon: Route },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
+      { id: "history",      label: t("agents.tab.history",      { defaultValue: "History" }),      Icon: History },
     ];
 
     const live = agentStatsQuery.data;
@@ -1663,6 +1670,7 @@ export function AgentsPage() {
       case "routing":           return renderRoutingTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
+      case "history":           return renderHistoryTab(agent);
     }
   };
 
@@ -2761,6 +2769,51 @@ export function AgentsPage() {
                   {formatLine(e)}
                 </span>
               </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------- History tab — manifest version timeline
+  const renderHistoryTab = (_agent: AgentDetail) => {
+    const versions = manifestHistoryQuery.data ?? [];
+    const fmtTs = (s?: string): string => {
+      if (!s) return "—";
+      try {
+        return new Date(s + "Z").toLocaleString();
+      } catch {
+        return s;
+      }
+    };
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+          {t("agents.detail.manifest_history", { defaultValue: "Manifest history" })} · {versions.length}
+        </div>
+        {manifestHistoryQuery.isLoading ? (
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
+        ) : versions.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_history", { defaultValue: "No config changes recorded yet." })}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {versions.map((v) => (
+              <details
+                key={v.id}
+                className="rounded-md border border-border-subtle bg-main/40 group"
+              >
+                <summary className="px-3 py-2 cursor-pointer text-[12px] flex items-center gap-2 select-none">
+                  <History className="w-3.5 h-3.5 text-text-dim shrink-0" />
+                  <span className="font-medium">{fmtTs(v.timestamp)}</span>
+                  <span className="text-text-dim">· {v.change_source}</span>
+                </summary>
+                <pre className="px-3 pb-3 text-[11px] font-mono leading-[1.6] max-h-60 overflow-auto whitespace-pre-wrap break-all text-text-dim">
+                  {v.manifest_toml}
+                </pre>
+              </details>
             ))}
           </div>
         )}

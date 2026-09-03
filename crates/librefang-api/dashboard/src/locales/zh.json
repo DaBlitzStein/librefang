@@ -902,6 +902,8 @@
       "proactive_conditions": "条件（以逗号分隔）",
       "proactive_conditions_placeholder": "例如 agent.tags contains 'urgent'",
       "proactive_conditions_hint": "这将替换整个条件列表——它不会预先填充当前值。请使用完整清单编辑器查看当前生效的内容。",
+      "manifest_history": "清单历史",
+      "no_history": "尚未记录配置更改。",
       "proactive_conditions": "条件（逗号分隔）",
       "proactive_conditions_hint": "这将替换完整的条件列表——不会预填当前内容。使用完整的清单编辑器查看当前生效的内容。",
       "proactive_conditions_placeholder": "例如 agent.tags contains 'urgent'",
@@ -915,7 +917,8 @@
       "tools": "工具",
       "schedule": "计划",
       "logs": "日志",
-      "routing": "路由"
+      "routing": "路由",
+      "history": "历史"
     },
     "configure": "配置",
     "select_an_agent": "选择智能体",

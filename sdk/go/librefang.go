@@ -414,6 +414,10 @@ func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", id), nil, nil)
 }
 
+func (r *AgentsResource) ListAgentManifestHistory(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest-history", id), nil, query)
+}
+
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil, nil)
 }
