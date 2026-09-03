@@ -253,8 +253,16 @@ pub(super) async fn call_with_retry(
                 );
             }
             Err(e) => {
-                let (is_billing, err) = build_user_facing_llm_error(&e, "LLM error classified");
-                if should_count_against_circuit_breaker(&e) {
+                let counts_against_breaker = should_count_against_circuit_breaker(&e);
+                let (is_billing, err) = build_user_facing_llm_error(
+                    &e,
+                    if counts_against_breaker {
+                        "LLM error classified"
+                    } else {
+                        "LLM error classified (unsupported-parameter rejection, not counted against circuit breaker)"
+                    },
+                );
+                if counts_against_breaker {
                     record_retry_failure(provider, cooldown, is_billing);
                 }
                 return Err(err);
@@ -529,9 +537,16 @@ pub(super) async fn stream_with_retry(
                     .await;
                     continue;
                 }
-                let (is_billing, err) =
-                    build_user_facing_llm_error(&e, "LLM stream error classified");
-                if should_count_against_circuit_breaker(&e) {
+                let counts_against_breaker = should_count_against_circuit_breaker(&e);
+                let (is_billing, err) = build_user_facing_llm_error(
+                    &e,
+                    if counts_against_breaker {
+                        "LLM stream error classified"
+                    } else {
+                        "LLM stream error classified (unsupported-parameter rejection, not counted against circuit breaker)"
+                    },
+                );
+                if counts_against_breaker {
                     record_retry_failure(provider, cooldown, is_billing);
                 }
                 return Err(err);
