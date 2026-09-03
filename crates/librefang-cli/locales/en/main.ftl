@@ -2160,6 +2160,7 @@ tui-agents-hints-skills =     [↑↓] Navigate  [Space] Toggle  [Enter] Next  [
 tui-agents-hints-mcp =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
 tui-agents-hints-save =     [↑↓] Navigate  [Space] Toggle  [Enter] Save  [Esc] Cancel
 
+
 tui-agents-placeholder-name = my-agent
 tui-agents-placeholder-desc = A custom agent
 tui-agents-placeholder-prompt = You are a helpful agent.
@@ -2399,6 +2400,19 @@ tui-wizard-status-saved = Config saved — { $provider } / { $model }
 tui-wizard-status-save-fail = Failed to save config: { $error }
 tui-wizard-status-continuing = Continuing...
 
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = Model Routing
+tui-agents-label-routing-fixed = fixed — always use this agent's own model
+tui-agents-label-routing-flexible = flexible — let the router pick per task
+tui-agents-hint-routing-mode = [Tab] switch mode
+tui-agents-label-routing-fixed-explainer = This agent always uses the model in its own manifest. Press Tab to let the router choose per task.
+tui-agents-label-no-router-profiles = No model profiles available. Add them to ~/.librefang/model_profiles.toml.
+tui-agents-label-routing-any-profile = any
+tui-agents-hints-model-routing = [Tab] Mode  [↑↓] Navigate  [Space] Toggle profile  [+/-] Cost budget  [Enter] Save  [Esc] Cancel
+tui-event-model-routing-fetch-failed = Failed to fetch model routing
+tui-event-model-routing-update-failed = Failed to update model routing
+tui-mod-agent-model-routing-updated = Model routing updated for agent { $id }.
+
 # --- Goals screen (TUI) ---
 tui-goals-title = ⌖ Goals
 tui-goals-count = { $count } goals
@@ -2470,7 +2484,6 @@ cmd-goal-error = error: { $error }
 cmd-goal-unknown-error = unknown error
 cmd-goal-watch-poll-error = Could not read the run state ({ $count }/{ $max }); retrying…
 cmd-goal-watch-poll-gave-up = Gave up observing the run after { $count } failed polls — the outcome is unknown and the run may still be executing.
-
 
 
 
@@ -2577,3 +2590,20 @@ tui-memory-config-requires-daemon = Memory settings come from the daemon API —
 tui-memory-config-fetch-failed = Could not read the memory settings: { $error }
 tui-goals-run-requires-daemon = Run state comes from the daemon API — not available when the TUI is attached in-process.
 tui-goals-run-fetch-failed = Could not read the run state for { $id }: { $error }
+# Model routing CLI commands
+agent-routing-label-mode = Mode
+agent-routing-label-allowed = Allowed profiles
+agent-routing-label-budget = Cost budget
+agent-routing-label-default = Default profile
+agent-routing-any-profile = any
+agent-routing-no-cap = no cap
+agent-routing-fixed-explainer = This agent always uses the model in its own manifest.
+agent-routing-updated = Model routing for agent { $id } set to { $mode }.
+agent-routing-failed = Failed to update model routing: { $error }
+agent-routing-profiles-header = Model router profiles (router is { $enabled }):
+tui-agents-line-routing-mode =   Mode: { $mode }
+tui-agents-line-routing-summary =   Cost budget: { $budget }    Allowed profiles: { $allowed }
+tui-agents-label-routing-no-cap = no cap
+tui-agents-label-routing-cheap = cheap
+tui-agents-label-routing-medium = medium
+tui-agents-label-routing-expensive = expensive

@@ -2390,6 +2390,19 @@ tui-wizard-status-saved = 구성 저장됨 — { $provider } / { $model }
 tui-wizard-status-save-fail = 구성 저장에 실패: { $error }
 tui-wizard-status-continuing = 계속하는 중...
 
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = 모델 라우팅
+tui-agents-label-routing-fixed = 고정 — 항상 이 에이전트의 자체 모델 사용
+tui-agents-label-routing-flexible = 유연 — 작업별로 라우터가 선택
+tui-agents-hint-routing-mode = [Tab] 모드 전환
+tui-agents-label-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다. Tab을 눌러 작업별로 라우터가 선택하도록 하세요.
+tui-agents-label-no-router-profiles = 사용 가능한 모델 프로필이 없습니다. ~/.librefang/model_profiles.toml에 추가하세요.
+tui-agents-label-routing-any-profile = 전체
+tui-agents-hints-model-routing = [Tab] 모드  [↑↓] 탐색  [Space] 프로필 전환  [+/-] 비용 예산  [Enter] 저장  [Esc] 취소
+tui-event-model-routing-fetch-failed = 모델 라우팅을 가져오지 못했습니다
+tui-event-model-routing-update-failed = 모델 라우팅을 업데이트하지 못했습니다
+tui-mod-agent-model-routing-updated = 에이전트 { $id }의 모델 라우팅이 업데이트되었습니다.
+
 # --- Goals screen (TUI) ---
 tui-goals-title = ⌖ 목표
 tui-goals-count = 목표 { $count }개
@@ -2461,7 +2474,6 @@ cmd-goal-error = 오류: { $error }
 cmd-goal-unknown-error = 알 수 없는 오류
 cmd-goal-watch-poll-error = 실행 상태를 읽을 수 없습니다({ $count }/{ $max }); 다시 시도하는 중…
 cmd-goal-watch-poll-gave-up = { $count }회 연속 폴링 실패 후 관찰을 중단했습니다 — 결과를 알 수 없으며 실행은 계속 진행 중일 수 있습니다.
-
 
 
 
@@ -2568,3 +2580,20 @@ tui-memory-config-requires-daemon = 메모리 설정은 데몬 API에서 가져�
 tui-memory-config-fetch-failed = 메모리 설정을 읽을 수 없습니다: { $error }
 tui-goals-run-requires-daemon = 실행 상태는 데몬 API에서 가져옵니다 — TUI가 인프로세스로 연결된 경우 사용할 수 없습니다.
 tui-goals-run-fetch-failed = { $id }의 실행 상태를 읽을 수 없습니다: { $error }
+# Model routing CLI commands
+agent-routing-label-mode = 모드
+agent-routing-label-allowed = 허용된 프로필
+agent-routing-label-budget = 비용 예산
+agent-routing-label-default = 기본 프로필
+agent-routing-any-profile = 전체
+agent-routing-no-cap = 제한 없음
+agent-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다.
+agent-routing-updated = 에이전트 { $id }의 모델 라우팅이 { $mode }(으)로 설정되었습니다.
+agent-routing-failed = 모델 라우팅 업데이트 실패: { $error }
+agent-routing-profiles-header = 모델 라우터 프로필 (라우터: { $enabled }):
+tui-agents-line-routing-mode =   모드: { $mode }
+tui-agents-line-routing-summary =   비용 예산: { $budget }    허용된 프로필: { $allowed }
+tui-agents-label-routing-no-cap = 제한 없음
+tui-agents-label-routing-cheap = 저비용
+tui-agents-label-routing-medium = 중간
+tui-agents-label-routing-expensive = 고비용

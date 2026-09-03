@@ -118,6 +118,8 @@ impl AgentTypeSpec {
                 frequency_penalty: None,
                 presence_penalty: None,
                 extra_params: model_defaults.extra_params,
+                mode: model_defaults.mode,
+                router_override: model_defaults.router_override,
             },
             skills: self.skills.unwrap_or_default(),
             capabilities: ManifestCapabilities {

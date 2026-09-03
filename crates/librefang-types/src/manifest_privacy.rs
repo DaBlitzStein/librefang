@@ -422,6 +422,8 @@ fn reduce_model(model: ModelConfig) -> ModelConfig {
         frequency_penalty: _,
         presence_penalty: _,
         extra_params: _,
+        mode,
+        router_override,
     } = model;
 
     ModelConfig {
@@ -438,6 +440,8 @@ fn reduce_model(model: ModelConfig) -> ModelConfig {
         frequency_penalty: None,
         presence_penalty: None,
         extra_params: BTreeMap::new(),
+        mode,
+        router_override,
     }
 }
 

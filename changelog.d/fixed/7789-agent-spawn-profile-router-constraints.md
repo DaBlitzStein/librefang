@@ -1,0 +1,3 @@
+`agent_spawn { profile }` now checks the requested profile against the spawning agent's own `[model.router_override]`.
+The same `allowed_profiles` and `cost_budget` the per-turn router applies now also bind a named profile at spawn time, and a parent pinned with `fixed = true` is refused outright — delegation was otherwise a way around every per-agent constraint the profile layer introduces, letting an agent budgeted at `cheap` spawn a helper on the most expensive profile in the catalog, billed to the same operator, with the parent's cap never applied.
+The refusal lists the profiles the spawning agent is permitted to use, so the calling agent can retry with a name that passes instead of guessing (#7789) (@DaBlitzStein)

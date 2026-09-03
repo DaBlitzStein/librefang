@@ -176,12 +176,25 @@ pub(super) async fn tool_agent_send(
 }
 
 /// Build agent manifest TOML from parsed parameters.
+///
+/// `profile` is the already-resolved model-router profile the spawned agent
+/// should run on, or `None` to leave the model unset so the child inherits the
+/// kernel default exactly as it did before profiles existed.
+///
+/// A profile pins `provider` and `model` outright rather than setting
+/// `mode = "flexible"`. Naming a profile at spawn time is a request for *that*
+/// model — a verifier asked to run on `quick` should stay on `quick`, not be
+/// handed to the per-turn router which could move it back onto an expensive
+/// model on the next turn. It also means the parameter works with
+/// `[model_router] enabled = false`, which is the common case for an operator
+/// who wants cheap subagents without automatic routing everywhere.
 pub(super) fn build_agent_manifest_toml(
     name: &str,
     system_prompt: &str,
     tools: Vec<String>,
     shell: Vec<String>,
     network: bool,
+    profile: Option<&librefang_types::model_profile::ModelProfile>,
 ) -> Result<String, String> {
     let mut tools = tools;
     let has_shell = !shell.is_empty();
@@ -201,15 +214,97 @@ pub(super) fn build_agent_manifest_toml(
         capabilities["shell"] = serde_json::json!(shell);
     }
 
+    let mut model_json = serde_json::json!({
+        "system_prompt": system_prompt,
+    });
+    if let Some(profile) = profile {
+        model_json["provider"] = serde_json::json!(profile.provider);
+        model_json["model"] = serde_json::json!(profile.model);
+        // Only carried when the profile actually states one, so a profile
+        // without an explicit window keeps the runtime's own resolution
+        // (registry, persisted cache, live `/v1/models` probe) rather than
+        // pinning a value the profile author never chose.
+        if let Some(context_window) = profile.context_window {
+            model_json["context_window"] = serde_json::json!(context_window);
+        }
+    }
+
     let manifest_json = serde_json::json!({
         "name": name,
-        "model": {
-            "system_prompt": system_prompt,
-        },
+        "model": model_json,
         "capabilities": capabilities,
     });
 
     toml::to_string(&manifest_json).map_err(|e| format!("Failed to serialize to TOML: {}", e))
+}
+
+/// Error for an `agent_spawn` naming a profile that is not in the catalog.
+///
+/// Lists what *is* available, because the caller is usually an LLM: an error
+/// that only says "unknown" invites a second guess, while one that enumerates
+/// the catalog lets the next attempt succeed. `available` is already ordered
+/// by the catalog (#3298), so the message is stable across retries.
+pub(super) fn unknown_profile_error(name: &str, available: &[String]) -> ToolError {
+    if available.is_empty() {
+        return ToolError::upstream_msg(format!(
+            "Unknown model profile '{name}'. No model profiles are configured — \
+             add them to ~/.librefang/model_profiles.toml."
+        ));
+    }
+    ToolError::upstream_msg(format!(
+        "Unknown model profile '{name}'. Available profiles: {}.",
+        available.join(", ")
+    ))
+}
+
+/// Refusal for an `agent_spawn { profile }` the spawning agent's own
+/// `[model.router_override]` does not permit (#7789 review).
+///
+/// Same shape as [`unknown_profile_error`]: name what was asked for, then
+/// list what *is* permitted, so the caller — usually an LLM — can retry
+/// correctly instead of guessing. `permitted` is ordered by the catalog
+/// (#3298), so the message is stable across retries.
+pub(super) fn check_profile_against_parent(
+    profile: &librefang_types::model_profile::ModelProfile,
+    override_: &librefang_types::model_profile::AgentRouterOverride,
+    permitted: &[String],
+) -> Result<(), ToolError> {
+    if override_.fixed {
+        return Err(ToolError::upstream_msg(format!(
+            "Model profile '{name}' cannot be used here: the spawning agent is pinned with \
+             `[model.router_override] fixed = true`, which opts out of every profile — for its \
+             own turns and for the agents it spawns. Spawn without a profile, or ask the \
+             operator to relax the pin.",
+            name = profile.name,
+        )));
+    }
+    if !override_.permits(profile) {
+        return Err(ToolError::upstream_msg(format!(
+            "Model profile '{name}' is not permitted for this agent by its \
+             `[model.router_override]`. Permitted profiles: {permitted}.",
+            name = profile.name,
+            permitted = permitted.join(", "),
+        )));
+    }
+    Ok(())
+}
+
+/// The parent's permitted profile names, ordered by the catalog (#3298).
+///
+/// Filters the full catalog through the parent's override with the same
+/// `AgentRouterOverride::permits` predicate the per-turn router uses, so a
+/// refusal enumerates exactly what a correct retry can name.
+fn permitted_profile_names(
+    kh: &Arc<dyn KernelHandle>,
+    override_: &librefang_types::model_profile::AgentRouterOverride,
+) -> Vec<String> {
+    kh.model_profile_names()
+        .into_iter()
+        .filter(|name| {
+            kh.resolve_model_profile(name)
+                .is_some_and(|p| override_.permits(&p))
+        })
+        .collect()
 }
 
 /// Expand a list of tool names into full `Capability` grants for the parent.
@@ -337,8 +432,36 @@ pub(super) async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
-    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)
-        .map_err(ToolError::upstream_msg)?;
+    // Resolve the profile name before spawning so an unknown name fails loudly
+    // here instead of silently producing an agent on the wrong model.
+    //
+    // The request is then checked against the *spawning agent's* own
+    // `[model.router_override]` (#7789 review): the same `allowed_profiles`
+    // and `cost_budget` the per-turn router applies, plus a hard refusal when
+    // the parent is `fixed`. Without this, delegation is a way around every
+    // per-agent constraint the profile layer introduces — an agent budgeted at
+    // `cheap` could spawn a helper on the most expensive profile in the
+    // catalog, billed to the same operator, with the parent's cap never
+    // applied.
+    let profile = match input["profile"].as_str() {
+        Some(profile_name) => {
+            let profile = kh
+                .resolve_model_profile(profile_name)
+                .ok_or_else(|| unknown_profile_error(profile_name, &kh.model_profile_names()))?;
+            if let Some(parent) = parent_id {
+                if let Some(override_) = kh.model_router_override_for(parent) {
+                    let permitted = permitted_profile_names(kh, &override_);
+                    check_profile_against_parent(&profile, &override_, &permitted)?;
+                }
+            }
+            Some(profile)
+        }
+        None => None,
+    };
+
+    let manifest_toml =
+        build_agent_manifest_toml(name, system_prompt, tools, shell, network, profile.as_ref())
+            .map_err(ToolError::upstream_msg)?;
     // Build parent capabilities from the parent's allowed tools list.
     // This prevents a sub-agent from escalating privileges beyond what
     // its parent is permitted to use (capability inheritance enforcement).
