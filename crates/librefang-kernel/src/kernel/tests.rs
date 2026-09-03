@@ -16,6 +16,7 @@ use std::pin::Pin;
 struct RecordingChannelAdapter {
     name: String,
     channel_type: ChannelType,
+    account_id: Option<String>,
     sent: Arc<std::sync::Mutex<Vec<String>>>,
     overrides: Option<librefang_types::config::ChannelOverrides>,
 }
@@ -25,8 +26,20 @@ impl RecordingChannelAdapter {
         Self {
             name: channel_type.to_string(),
             channel_type: ChannelType::Custom(channel_type.to_string()),
+            account_id: None,
             sent: Arc::new(std::sync::Mutex::new(Vec::new())),
             overrides: None,
+        }
+    }
+
+    /// A **named instance** of a channel type — the shape `[[sidecar_channels]]` produces as soon as `name` and `channel_type` differ (#8046 / #8055).
+    ///
+    /// The `account_id` mirrors the bridge exactly: `channel_bridge.rs` pushes `Some(sidecar_config.name.clone())` alongside each adapter, so a named instance's account id *is* its instance name.
+    fn named_instance(name: &str, channel_type: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            account_id: Some(name.to_string()),
+            ..Self::new(channel_type)
         }
     }
 
@@ -50,6 +63,10 @@ impl ChannelAdapter for RecordingChannelAdapter {
 
     fn channel_type(&self) -> ChannelType {
         self.channel_type.clone()
+    }
+
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
     }
 
     fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
@@ -484,6 +501,238 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
         1,
         "bare-account reply must NOT reach the account-qualified adapter (still only the case-1 send)"
     );
+
+    // Case 3 (#8055 guard): an account the registry does not know must NOT fall back to the bare key.
+    // That fallback would deliver one tenant's reply into another tenant's chat — the leak the approval listener in `librefang_channels::bridge` documents.
+    // The #8055 channel-type scan added a second path into this resolution, so pin the behaviour explicitly.
+    let err = kernel
+        .send_channel_message(
+            "whatsapp",
+            "dm-2",
+            "approved — wrong account",
+            None,
+            Some("acct-unknown"),
+        )
+        .await
+        .expect_err("an unknown account_id must not resolve to any adapter");
+    assert!(
+        err.to_string().contains("acct-unknown"),
+        "the error must name the account that failed to resolve: {err}"
+    );
+    assert_eq!(
+        bare_sent.lock().unwrap().len(),
+        1,
+        "an unknown account_id must NOT fall back to the bare adapter (cross-tenant leak)"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_channel_message_resolves_named_instance_by_channel_type_8055() {
+    // #8055: a sidecar channel whose `name` differs from its `channel_type` was unreachable from every outbound send.
+    //
+    // The channel bridge registers each adapter under `adapter.name()` and `"<name>:<account_id>"`, where `account_id` is that same name — so a `[[sidecar_channels]]` entry `name = "slack-hr", channel_type = "slack"` produces exactly the two keys the bug report shows, `["slack-hr", "slack-hr:slack-hr"]`.
+    // Inbound turns, however, are stamped with the *channel type*, so the post-approval wake path called `send_channel_message("slack", …, Some("slack-hr"))` and missed both keys.
+    // The agent's reply was produced and persisted, and silently never delivered.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hr = Arc::new(RecordingChannelAdapter::named_instance("slack-hr", "slack"));
+    let hr_sent = hr.sent.clone();
+    // Register exactly as `channel_bridge::start_channel_bridge_with_config` does — both keys built from the instance name, neither from the type.
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr".to_string(), hr.clone());
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr:slack-hr".to_string(), hr);
+
+    // The failing call from the bug report, verbatim.
+    kernel
+        .send_channel_message(
+            "slack",
+            "C0BN6UAQ75M",
+            "approved — file uploaded",
+            None,
+            Some("slack-hr"),
+        )
+        .await
+        .expect("a named instance must be reachable by its channel type + account_id");
+    assert_eq!(
+        hr_sent.lock().unwrap().clone(),
+        vec!["C0BN6UAQ75M:approved — file uploaded".to_string()],
+        "the post-approval reply must reach the 'slack-hr' instance the turn arrived on"
+    );
+
+    // The instance name itself keeps working — that is how an explicit `channel_send({channel: "slack-hr"})` and the per-instance status reads in `routes/channels.rs` address the adapter.
+    kernel
+        .send_channel_message("slack-hr", "C0BN6UAQ75M", "by name", None, None)
+        .await
+        .expect("the instance name must remain a valid channel key");
+
+    // With a single instance of the type registered, a bare channel type is unambiguous and resolves too.
+    // This is what an out-of-band caller with no account context (`notify_owner`, a cron target written as `slack`) hands in.
+    kernel
+        .send_channel_message("slack", "C0BN6UAQ75M", "by bare type", None, None)
+        .await
+        .expect("a lone instance of a channel type must resolve from the bare type");
+    assert_eq!(
+        hr_sent.lock().unwrap().len(),
+        3,
+        "all three addressing forms must land on the same single instance"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_interactive_approval_notification_reaches_a_named_instance_8055() {
+    // The interactive approval notification is the *other* half of #8055, and it fails in a way no error surfaces.
+    // `NotificationTarget.channel_type` is documented as a channel type ("telegram", "slack", "email") and that is what an operator writes in `[notification] approval_channels`, but the channel bridge keys the adapter registry by `[[sidecar_channels]] name`.
+    // A bare `channel_adapters.get(&target.channel_type)` therefore missed on every named instance and dropped silently to the plain-text fallback, so the approver got the escalation text with no Approve / Reject buttons — on the one notification whose entire purpose is those buttons — while the fallback's own `send_channel_message` resolved the same pair fine.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hr = Arc::new(RecordingChannelAdapter::named_instance("slack-hr", "slack"));
+    let hr_sent = hr.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr".to_string(), hr.clone());
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr:slack-hr".to_string(), hr);
+
+    kernel
+        .push_approval_interactive(
+            &NotificationTarget {
+                // A channel TYPE, exactly as the field's own doc comment and every config example write it.
+                channel_type: "slack".to_string(),
+                recipient: "C0BN6UAQ75M".to_string(),
+                thread_id: None,
+            },
+            "agent wants to run `file_write`",
+            "abcdef1234",
+        )
+        .await;
+
+    // `ChannelAdapter::send_interactive`'s default renders each button label as `[Label]` and forwards to `send`, so the recorded text is what distinguishes the interactive path from the plain-text fallback.
+    let sent = hr_sent.lock().unwrap().clone();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the notification must reach the named instance exactly once: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("[Approve]") && sent[0].contains("[Reject]"),
+        "the interactive path must be taken, not the buttonless plain-text fallback: {sent:?}"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_channel_type_resolution_refuses_to_guess_between_tenants_8055() {
+    // The #8055 channel-type scan must never widen cross-tenant reach.
+    // Two named instances of one channel type are two different customers, so the scan resolves only when the `account_id` singles one out — and a bare channel type with two instances registered stays an error rather than picking whichever adapter `DashMap` iteration happened to yield first.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hr = Arc::new(RecordingChannelAdapter::named_instance("slack-hr", "slack"));
+    let hr_sent = hr.sent.clone();
+    let eng = Arc::new(RecordingChannelAdapter::named_instance(
+        "slack-eng",
+        "slack",
+    ));
+    let eng_sent = eng.sent.clone();
+    for (name, adapter) in [
+        ("slack-hr", hr.clone() as Arc<dyn ChannelAdapter>),
+        ("slack-eng", eng.clone() as Arc<dyn ChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    // Each account reaches its own instance and only its own instance.
+    kernel
+        .send_channel_message("slack", "C-HR", "hr only", None, Some("slack-hr"))
+        .await
+        .expect("account_id must single out the hr instance");
+    kernel
+        .send_channel_message("slack", "C-ENG", "eng only", None, Some("slack-eng"))
+        .await
+        .expect("account_id must single out the eng instance");
+    assert_eq!(
+        hr_sent.lock().unwrap().clone(),
+        vec!["C-HR:hr only".to_string()]
+    );
+    assert_eq!(
+        eng_sent.lock().unwrap().clone(),
+        vec!["C-ENG:eng only".to_string()]
+    );
+
+    // An account that matches no instance is an error, not a guess.
+    let err = kernel
+        .send_channel_message("slack", "C-HR", "nobody", None, Some("slack-legal"))
+        .await
+        .expect_err("an unregistered account must not resolve");
+    assert!(
+        err.to_string().contains("slack-legal"),
+        "the error must name the unresolved account: {err}"
+    );
+
+    // A bare channel type with two instances is ambiguous; the error says so, and lists the registered keys in sorted order so two operator reports of the same daemon are comparable.
+    let err = kernel
+        .send_channel_message("slack", "C-HR", "which tenant?", None, None)
+        .await
+        .expect_err("a bare channel type must not pick a tenant at random");
+    let err = err.to_string();
+    assert!(
+        err.contains("ambiguous"),
+        "an ambiguous bare channel type must say so: {err}"
+    );
+    assert!(
+        err.contains(r#"["slack-eng", "slack-eng:slack-eng", "slack-hr", "slack-hr:slack-hr"]"#),
+        "the available-key list must be sorted for comparability: {err}"
+    );
+
+    assert_eq!(
+        hr_sent.lock().unwrap().len(),
+        1,
+        "neither the unresolved account nor the ambiguous type may deliver anything"
+    );
+    assert_eq!(eng_sent.lock().unwrap().len(), 1);
 
     kernel.shutdown();
 }
@@ -2650,6 +2899,113 @@ fn test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy
     kernel.shutdown();
 }
 
+/// A spawn-resolved `exec_policy` must survive both manifest-replacement paths: `reload_agent_from_disk` and `update_manifest`.
+///
+/// `exec_policy` is materialized when the agent enters the registry and is not part of the `agent.toml` an operator maintains, so both paths parsed a policy-less manifest and assigned it verbatim, blanking the field.
+/// `None` does not mean "deny" to any consumer: `available_tools` strips `shell_exec` only on an explicit `Deny`, and the runtime's `shell_exec` dispatch gates the whole deny / allowlist check on `if let Some(policy)`.
+/// So a hot-reload — or any `PATCH /api/agents/{id}` with a `manifest_toml`, which routes through `update_manifest` — silently un-restricted the agent's shell until the next daemon restart re-stamped the policy.
+///
+/// The global policy here is `Allowlist` rather than the compiled default `Deny` so a blanked field cannot be mistaken for a correctly inherited one, and `allowed_commands` is asserted too: preserving only the mode would still drop the operator's command list.
+#[tokio::test(flavor = "multi_thread")]
+async fn resolved_exec_policy_survives_reload_and_update_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-exec-policy-restamp");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let global_policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        allowed_commands: vec!["git".to_string(), "ls".to_string()],
+        ..Default::default()
+    };
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        exec_policy: global_policy.clone(),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // The on-disk manifest carries no `[exec_policy]`, which is the normal case — the field is a resolved runtime value, not something an operator writes.
+    let toml_path = home_dir.join("agent-src").join("agent.toml");
+    std::fs::create_dir_all(toml_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &toml_path,
+        "name = \"exec-policy-agent\"\n\
+         description = \"agent that declares no exec_policy of its own\"\n\
+         author = \"test\"\n\
+         module = \"builtin:chat\"\n",
+    )
+    .unwrap();
+
+    let manifest = AgentManifest {
+        name: "exec-policy-agent".to_string(),
+        description: "agent that declares no exec_policy of its own".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        exec_policy: None,
+        ..Default::default()
+    };
+
+    let agent_id = kernel
+        .spawn_agent_with_source(manifest, Some(toml_path.clone()))
+        .expect("spawn should succeed");
+
+    let resolved_policy = |stage: &str| {
+        let entry = kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .unwrap_or_else(|| panic!("agent must still be registered {stage}"));
+        let policy = entry
+            .manifest
+            .exec_policy
+            .clone()
+            .unwrap_or_else(|| panic!("exec_policy must still be resolved {stage}"));
+        (policy.mode, policy.allowed_commands)
+    };
+
+    let expected = (
+        librefang_types::config::ExecSecurityMode::Allowlist,
+        vec!["git".to_string(), "ls".to_string()],
+    );
+
+    assert_eq!(
+        resolved_policy("after spawn"),
+        expected,
+        "spawn must materialize the global exec_policy onto a manifest that declares none"
+    );
+
+    kernel
+        .reload_agent_from_disk(agent_id)
+        .expect("hot-reload should succeed");
+    assert_eq!(
+        resolved_policy("after reload_agent_from_disk"),
+        expected,
+        "hot-reload must not drop the resolved exec_policy — None re-exposes shell_exec and skips the allowlist"
+    );
+
+    let mut replacement = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .clone();
+    replacement.exec_policy = None;
+    kernel
+        .update_manifest(agent_id, replacement)
+        .expect("manifest update should succeed");
+    assert_eq!(
+        resolved_policy("after update_manifest"),
+        expected,
+        "update_manifest must not drop the resolved exec_policy either"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_should_reuse_cached_route_for_brief_follow_up() {
     assert!(LibreFangKernel::should_reuse_cached_route("fix that"));
@@ -3132,10 +3488,14 @@ fn test_apply_thinking_override_none_leaves_manifest_untouched() {
         thinking: Some(librefang_types::config::ThinkingConfig {
             budget_tokens: 4242,
             stream_thinking: true,
+            ..Default::default()
         }),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, None);
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Inherit,
+    );
     let cfg = manifest.thinking.as_ref().expect("thinking preserved");
     assert_eq!(cfg.budget_tokens, 4242);
     assert!(cfg.stream_thinking);
@@ -3148,7 +3508,10 @@ fn test_apply_thinking_override_force_off_clears_thinking() {
         thinking: Some(librefang_types::config::ThinkingConfig::default()),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, Some(false));
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Disable,
+    );
     assert!(manifest.thinking.is_none());
 }
 
@@ -3156,7 +3519,10 @@ fn test_apply_thinking_override_force_off_clears_thinking() {
 fn test_apply_thinking_override_force_on_inserts_default() {
     let mut manifest = librefang_types::agent::AgentManifest::default();
     assert!(manifest.thinking.is_none());
-    apply_thinking_override(&mut manifest, Some(true));
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Enable,
+    );
     let cfg = manifest.thinking.as_ref().expect("thinking inserted");
     assert_eq!(
         cfg.budget_tokens,
@@ -3171,12 +3537,220 @@ fn test_apply_thinking_override_force_on_keeps_existing_budget() {
         thinking: Some(librefang_types::config::ThinkingConfig {
             budget_tokens: 1234,
             stream_thinking: false,
+            ..Default::default()
         }),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, Some(true));
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Enable,
+    );
     let cfg = manifest.thinking.as_ref().expect("thinking preserved");
     assert_eq!(cfg.budget_tokens, 1234);
+}
+
+// ── Reasoning-mode resolution order (#7946) ────────────────────────
+//
+// Documented order: per-call > per-agent > global > compiled default.
+// The first two rungs are applied by `apply_thinking_override`; the third is
+// the global-backfill assignment in `messaging.rs` / `agent_execution.rs`,
+// which these tests reproduce literally (`if manifest.thinking.is_none() {
+// manifest.thinking = cfg.thinking.clone() }`) so a change to that line's
+// direction shows up here rather than in production.
+
+/// Rung 3: an agent that declares no `[thinking]` table inherits the global
+/// `reasoning_mode`.
+#[test]
+fn test_reasoning_mode_global_reaches_an_agent_that_declares_nothing() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+    let global = ThinkingConfig {
+        reasoning_mode: Some(ReasoningMode::High),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    assert!(manifest.thinking.is_none());
+
+    // The global backfill, as the kernel performs it.
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+
+    assert_eq!(
+        manifest.thinking.expect("backfilled").reasoning_mode,
+        Some(ReasoningMode::High),
+    );
+}
+
+/// Rung 2 beats rung 3: a per-agent `[thinking]` table suppresses the global
+/// backfill entirely, so its `reasoning_mode` wins.
+#[test]
+fn test_reasoning_mode_per_agent_beats_global() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+    let global = ThinkingConfig {
+        reasoning_mode: Some(ReasoningMode::High),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig {
+            reasoning_mode: Some(ReasoningMode::Low),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+
+    assert_eq!(
+        manifest.thinking.expect("per-agent kept").reasoning_mode,
+        Some(ReasoningMode::Low),
+        "the per-agent table must not be overwritten by the global backfill",
+    );
+}
+
+/// Rung 1 beats both: the per-call override is stamped on last.
+#[test]
+fn test_reasoning_mode_per_call_beats_per_agent_beats_global() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+    let global = ThinkingConfig {
+        reasoning_mode: Some(ReasoningMode::High),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig {
+            budget_tokens: 7777,
+            reasoning_mode: Some(ReasoningMode::Low),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::Max));
+
+    let cfg = manifest.thinking.expect("thinking present");
+    assert_eq!(cfg.reasoning_mode, Some(ReasoningMode::Max));
+    assert_eq!(
+        cfg.budget_tokens, 7777,
+        "a mode override must not disturb the agent's configured budget",
+    );
+}
+
+/// A per-call mode on an agent with no `[thinking]` table at all must still
+/// land. Creating the config lazily is the difference between the feature
+/// working and silently doing nothing.
+#[test]
+fn test_reasoning_mode_per_call_creates_thinking_config_when_absent() {
+    use librefang_types::config::{ReasoningMode, ThinkingOverride};
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    assert!(manifest.thinking.is_none());
+
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::None));
+
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("thinking config created for the mode")
+            .reasoning_mode,
+        Some(ReasoningMode::None),
+    );
+}
+
+/// The legacy boolean documents itself as "force thinking on even if the
+/// manifest has it off". A manifest (or backfilled global) `reasoning_mode =
+/// "none"` is exactly that off-state, so `thinking: true` has to clear it —
+/// otherwise the override deserializes, resolves to `Enable`, reaches the
+/// manifest, and the driver still sends the provider's non-think toggle.
+#[test]
+fn test_enable_clears_an_inherited_non_think_mode() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            budget_tokens: 7777,
+            reasoning_mode: Some(ReasoningMode::None),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+
+    let cfg = manifest
+        .thinking
+        .expect("Enable must keep a thinking config");
+    assert_eq!(
+        cfg.reasoning_mode, None,
+        "`thinking: true` must not be silently overruled by an inherited non-think mode",
+    );
+    assert_eq!(
+        cfg.budget_tokens, 7777,
+        "Enable still keeps the configured budget",
+    );
+}
+
+/// Enable must not disturb a *graded* mode — the caller asked for reasoning,
+/// not for a particular amount of it, so an agent pinned to `max` stays at
+/// `max`.
+#[test]
+fn test_enable_leaves_a_graded_mode_alone() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    for mode in [ReasoningMode::Low, ReasoningMode::High, ReasoningMode::Max] {
+        let mut manifest = librefang_types::agent::AgentManifest {
+            thinking: Some(ThinkingConfig {
+                reasoning_mode: Some(mode),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+        assert_eq!(
+            manifest.thinking.expect("kept").reasoning_mode,
+            Some(mode),
+            "Enable must not downgrade a graded mode",
+        );
+    }
+}
+
+/// `Mode(None)` and `Disable` are deliberately different. `Disable` clears the
+/// thinking config, which only *omits* the reasoning opt-in — a model that
+/// reasons by default keeps reasoning. `Mode(None)` keeps a config carrying the
+/// mode, which is what lets the driver send the provider's explicit non-think
+/// toggle. Collapsing the two would re-open exactly the gap #7946 closes.
+#[test]
+fn test_disable_and_mode_none_are_not_the_same_thing() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let base = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig::default()),
+        ..Default::default()
+    };
+
+    let mut disabled = base.clone();
+    apply_thinking_override(&mut disabled, ThinkingOverride::Disable);
+    assert!(
+        disabled.thinking.is_none(),
+        "Disable keeps its pre-#7946 meaning: drop the thinking config",
+    );
+
+    let mut non_think = base.clone();
+    apply_thinking_override(&mut non_think, ThinkingOverride::Mode(ReasoningMode::None));
+    assert_eq!(
+        non_think
+            .thinking
+            .expect("Mode(None) must keep a thinking config to carry the mode")
+            .reasoning_mode,
+        Some(ReasoningMode::None),
+    );
 }
 
 // ── JSON extraction tests ──────────────────────────────────────────
@@ -3866,6 +4440,75 @@ fn test_set_agent_skills_rejects_name_unknown_everywhere_as_invalid_input() {
     kernel.shutdown();
 }
 
+/// #8093: with no `[llm.auxiliary]` entry, a side task must run on the agent's
+/// own driver, not on `AuxClient`'s primary.
+///
+/// Every kernel caller pairs the driver this returns with the *agent's* model.
+/// `AuxClient::primary` is the process-wide `default_driver`, so for an agent
+/// overriding provider/model the request went to the default provider carrying
+/// a model only the agent's provider can serve — a LiteLLM
+/// `403 team_model_access_denied` naming the agent's model, after which
+/// compaction silently degraded to its fallback stub.
+#[test]
+fn test_side_task_driver_prefers_the_agents_own_chain_over_aux_primary() {
+    use librefang_types::config::AuxTask;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = boot_kernel_at(&home_dir);
+
+    // A default config carries no `[llm.auxiliary]`, so the resolution reports
+    // `used_primary` — the branch this test pins.
+    let aux = kernel.llm.aux_client.load();
+    assert!(
+        aux.resolve(AuxTask::Compression).used_primary,
+        "test premise: an unconfigured Compression task resolves to the primary driver"
+    );
+    let aux_primary = aux.driver_for(AuxTask::Compression);
+    drop(aux);
+
+    // A *named, keyless* provider on purpose. A default manifest short-circuits
+    // to the driverless sentinel (#7743), which is the same object boot handed
+    // to `AuxClient` as its primary — so the identity check below would compare
+    // a stub against itself and report the fix as broken in any environment
+    // without provider credentials. `ollama` is local and needs no API key, so
+    // it builds regardless of the test environment (same reasoning as the
+    // allowlist tests in `llm_drivers.rs`).
+    let mut manifest = librefang_types::agent::AgentManifest {
+        name: "side-task-driver-agent".to_string(),
+        description: "side-task driver selection regression".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2:latest".to_string();
+    kernel
+        .spawn_agent_inner(manifest.clone(), None, None, None)
+        .expect("spawn");
+
+    // Precondition first: if the agent's own chain cannot be built,
+    // `side_task_driver` legitimately falls back to the aux primary and the
+    // identity assertion below would fail for a reason that has nothing to do
+    // with the fix. Fail here instead, where the message says so.
+    let own = kernel
+        .resolve_driver(&manifest)
+        .expect("the agent's own driver must build, or this test proves nothing");
+    assert!(
+        !std::sync::Arc::ptr_eq(&own, &aux_primary),
+        "test premise: a named keyless provider must not resolve to the same object as the aux primary"
+    );
+
+    let chosen = kernel.side_task_driver(&manifest, AuxTask::Compression);
+    assert!(
+        !std::sync::Arc::ptr_eq(&chosen, &aux_primary),
+        "an unconfigured side task must not run on AuxClient's primary — that is the driver \
+         that cannot serve the agent's model"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_set_agent_mcp_servers_accepts_catalog_only_pending_name() {
     // The reported bug: `fetch` is in the local MCP catalog but was never configured, so it never connected, so the old accept-set (built from connected tools) rejected it.
@@ -3903,6 +4546,76 @@ fn test_set_agent_mcp_servers_accepts_catalog_only_pending_name() {
         "fetch must not have been added to the effective server list"
     );
     drop(after);
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_grandfathers_a_name_the_agent_already_stores() {
+    // #8095: uninstall an MCP server and every agent still naming it became
+    // uneditable. The dashboard editor round-trips the current allowlist, so
+    // the now-unknown name comes back in on every save — including the save
+    // that would have removed it. The operator could not add a server, remove
+    // the stale one, or repair the agent from any surface.
+    //
+    // The pre-existing state is seeded through the registry rather than by
+    // deleting a catalog file, because that is literally what an uninstall
+    // leaves behind: the manifest keeps the name and nothing rewrites it.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = boot_kernel_at(&home_dir);
+    register_mcp_server(&kernel, "still-installed");
+
+    let agent_id = spawn_allowlist_test_agent(&kernel, "stale-declaration-agent");
+    kernel
+        .agents
+        .registry
+        .update_mcp_servers(agent_id, vec!["uninstalled-mcp".to_string()])
+        .expect("seed the post-uninstall state");
+
+    // Re-submitting the stale name unchanged must not be refused: it is
+    // already on disk, so rejecting it protects nothing.
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["uninstalled-mcp".to_string()])
+        .expect("a name the agent already stores must stay saveable");
+
+    // The edit the operator actually wants: add a real server alongside it.
+    kernel
+        .set_agent_mcp_servers(
+            agent_id,
+            vec!["uninstalled-mcp".to_string(), "still-installed".to_string()],
+        )
+        .expect("a stale declaration must not block adding a working server");
+
+    // And the repair: drop the stale name entirely.
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["still-installed".to_string()])
+        .expect("removing the stale declaration must be possible");
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent exists")
+            .manifest
+            .mcp_servers,
+        vec!["still-installed".to_string()],
+        "the stale name is gone once the operator removes it"
+    );
+
+    // Grandfathering is scoped to names already present: a newly introduced
+    // unknown name is still a typo and still refused. This is the assertion
+    // that keeps the fix from becoming "stop validating".
+    let err = kernel
+        .set_agent_mcp_servers(
+            agent_id,
+            vec!["still-installed".to_string(), "uninstalled-mcp".to_string()],
+        )
+        .expect_err("a name that is no longer stored is new again, and unknown");
+    assert!(
+        err.to_string().contains("uninstalled-mcp"),
+        "the rejection must name the offending server, got: {err}"
+    );
 
     kernel.shutdown();
 }
@@ -16332,6 +17045,38 @@ async fn step_agent_by_type_spawns_from_template_when_unregistered() {
     // type keeps its id and session history across daemon restarts.
     assert_eq!(id, AgentId::from_name("researcher"));
     assert!(kernel.agents.registry.find_by_name("researcher").is_some());
+    kernel.shutdown();
+}
+
+/// A step agent spawned from a type came from a template, so it must carry the
+/// same `source_template` stamp `POST /api/agents` applies (#8018). Without it
+/// the dashboard's origin column is blank, which reads as "not created from a
+/// template" rather than "we did not record it".
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_records_the_template_it_came_from() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-provenance");
+    seed_agent_template(
+        &kernel,
+        "researcher",
+        "name = \"researcher\"\ndescription = \"finds things out\"\n",
+    );
+
+    kernel
+        .resolve_step_agent(&StepAgent::ByType {
+            template: "researcher".to_string(),
+        })
+        .expect("type should resolve by spawning the template");
+
+    let entry = kernel
+        .agents
+        .registry
+        .find_by_name("researcher")
+        .expect("spawned agent is registered");
+    assert_eq!(
+        entry.manifest.source_template.as_deref(),
+        Some("researcher"),
+        "a step agent spawned from a type must record the type it came from"
+    );
     kernel.shutdown();
 }
 

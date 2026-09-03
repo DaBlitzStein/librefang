@@ -101,10 +101,15 @@ use crate::types::ApiErrorResponse;
 /// are still channels — surface the configured ones here so the
 /// operator view stays consistent regardless of whether an adapter
 /// runs in-process or as a sidecar. These rows are config.toml-managed
-/// (`[[sidecar_channels]]`, also under Config -> Sidecar Channels), so
-/// they carry no editable `fields`; the page renders them as
-/// configured/online cards (it conditionally hides empty
-/// `fields`/`setup_steps`).
+/// (`[[sidecar_channels]]`, also under Config -> Sidecar Channels) and are
+/// also editable in place: each one carries the `fields` its adapter's
+/// cached `--describe` schema declares, merged with this instance's stored
+/// values (see `configured_instance_fields`), plus the same
+/// `schema_error` / `sdk_version` provenance a discovery row carries so the
+/// dashboard can explain an empty `fields` list instead of rendering a
+/// drawer with a dead Save button (#8063). The page renders them as
+/// configured/online cards and conditionally hides an empty
+/// `fields`/`setup_steps`.
 ///
 /// # Liveness (#6606)
 ///
@@ -137,6 +142,12 @@ fn sidecar_channel_rows(
     }
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut rows = Vec::new();
+    // Both describe caches are read once for the whole loop rather than per
+    // row. `std::sync::RwLock` gives no re-entrancy guarantee, so taking a
+    // second read guard inside the loop while one is already held here can
+    // deadlock against a waiting writer.
+    let schema_guard = read_cache_recover(schema_cache(), "schema");
+    let schema_err_guard = read_cache_recover(schema_error_cache(), "schema error");
     for sc in sidecar {
         let name = sc.name.as_str();
         // One card per distinct sidecar name.
@@ -144,6 +155,7 @@ fn sidecar_channel_rows(
             continue;
         }
         let channel_type = sc.channel_type.as_deref().unwrap_or(name);
+        let schema = schema_guard.get(channel_type);
         let mut row = serde_json::json!({
             "name": name,
             "display_name": name,
@@ -167,7 +179,7 @@ fn sidecar_channel_rows(
             // `configured_instance_fields`. Empty only when no schema is
             // cached for `channel_type` (SDK missing and no static
             // fallback), same as an unconfigured discovery row.
-            "fields": configured_instance_fields(channel_type, sc, secrets_env_keys),
+            "fields": configured_instance_fields(schema, channel_type, sc, secrets_env_keys),
             "setup_steps": [
                 "Runs as an out-of-process sidecar adapter",
                 "Configured via [[sidecar_channels]] in config.toml \
@@ -184,6 +196,19 @@ fn sidecar_channel_rows(
             // `null` when this instance has no default agent configured.
             "agent": sc.agent,
         });
+        // The two schema-provenance keys a discovery row has always carried.
+        // A configured row omitted both, and the missing `schema_error` is the
+        // whole of #8063: with no cached schema `fields` is empty, so the gear
+        // icon opened a drawer with nothing to edit, no explanation of why, and
+        // a live Save button whose request could only ever 503. The dashboard
+        // can only distinguish "this adapter has no form" from "this adapter's
+        // form could not be loaded, here is the fix" if the row says so.
+        if let Some(version) = schema.and_then(|s| s.sdk_version.as_deref()) {
+            row["sdk_version"] = serde_json::json!(version);
+        }
+        if let Some(reason) = schema_err_guard.get(channel_type) {
+            row["schema_error"] = serde_json::json!(reason);
+        }
         // Per-instance liveness from the sidecar supervisor.
         // Adapters are registered under the instance `name` (the qualified `name:account_id` alias points at the same adapter), which is the same key this loop iterates, so the lookup is per-bot.
         // `json!` of an `Option` yields `null` for `None`, so the three nullable fields keep a stable shape whether or not an adapter is registered — a consumer never has to distinguish "absent" from "unknown".
@@ -233,16 +258,21 @@ fn sidecar_channel_rows(
 /// global one, mirroring the precedence `write_sidecar_configuration` writes
 /// under and `librefang_channels::sidecar::build_spawn_env` reads back.
 ///
-/// Returns an empty vec when no schema is cached for `channel_type` — same
-/// "nothing to render" outcome as an unconfigured discovery row with no
-/// schema and no static fallback.
+/// `schema` is the caller's already-held lookup of `channel_type` in
+/// [`schema_cache`] — the lock is taken once for the whole row loop rather
+/// than re-entered here, because `std::sync::RwLock` promises nothing about a
+/// nested read guard.
+///
+/// Returns an empty vec when no schema is cached for `channel_type`. The row
+/// then carries `schema_error` instead, which is what lets the dashboard
+/// explain the empty form rather than rendering a dead one (#8063).
 fn configured_instance_fields(
+    schema: Option<&SidecarSchema>,
     channel_type: &str,
     sc: &librefang_types::config::SidecarChannelConfig,
     secrets_env_keys: &std::collections::HashSet<String>,
 ) -> Vec<serde_json::Value> {
-    let cache_guard = read_cache_recover(schema_cache(), "schema");
-    let Some(schema) = cache_guard.get(channel_type) else {
+    let Some(schema) = schema else {
         return Vec::new();
     };
     let namespace = if sc.name == channel_type {
@@ -720,6 +750,80 @@ fn write_cache_recover<'a, T>(
     })
 }
 
+/// How many `--describe` probes may be in flight at once.
+///
+/// The catalog is 20-plus adapters and every probe spawns a `python3` interpreter, so this is a subprocess-count cap rather than a throughput knob: unbounded fan-out would start one interpreter per catalog entry simultaneously, which on the small ARM boards LibreFang is deployed to (the report in #8094 came from an Orange Pi 5 Plus) trades a slow boot for a thrashing one.
+///
+/// Derived from the host's parallelism and clamped: at least 2, so a single-core container still overlaps process spawn with interpreter startup, and at most 8, because the work is dominated by Python's import time rather than by anything that scales past a handful of cores.
+fn sidecar_probe_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(2, 8)
+}
+
+/// Record one adapter's probe outcome in the schema / schema-error caches.
+///
+/// Split out of [`populate_sidecar_schema_cache`] so the probes can run concurrently while every cache write stays synchronous and short — no lock is ever held across an `.await` — and so the three outcomes are unit testable without a working Python installation.
+fn apply_sidecar_probe_outcome(
+    entry: &'static SidecarCatalogEntry,
+    result: Result<SidecarSchema, super::sidecar_describe::DescribeSidecarError>,
+) {
+    match result {
+        Ok(schema) => {
+            tracing::info!(
+                adapter = entry.name,
+                fields = schema.fields.len(),
+                sdk_version = schema.sdk_version.as_deref().unwrap_or("unreported"),
+                "sidecar schema cached"
+            );
+            write_cache_recover(schema_cache(), "schema").insert(entry.name, schema);
+        }
+        Err(e) => {
+            if let Some(static_fields) = entry.static_fields {
+                // Use the compile-time fallback so the configure form is
+                // usable even without a working Python SDK installation.
+                let fallback = SidecarSchema {
+                    name: entry.name.to_string(),
+                    display_name: entry.display_name.to_string(),
+                    description: entry.description.to_string(),
+                    fields: static_fields
+                        .iter()
+                        .map(|f| SidecarSchemaField {
+                            key: f.key.to_string(),
+                            label: f.label.to_string(),
+                            field_type: f.field_type.to_string(),
+                            required: f.required,
+                            placeholder: f.placeholder.to_string(),
+                            advanced: f.advanced,
+                            options: None,
+                        })
+                        .collect(),
+                    // The fallback exists precisely because `--describe`
+                    // failed, so no adapter reported a version here.
+                    sdk_version: None,
+                };
+                tracing::warn!(
+                    adapter = entry.name,
+                    error = %e,
+                    fields = fallback.fields.len(),
+                    "sidecar --describe failed; using compile-time fallback schema"
+                );
+                write_cache_recover(schema_cache(), "schema").insert(entry.name, fallback);
+            } else {
+                tracing::warn!(
+                    adapter = entry.name,
+                    error = %e,
+                    "sidecar --describe failed; channel cards will have no form fields"
+                );
+                // Stash the failure reason so every row for this adapter — the discovery card and each configured `[[sidecar_channels]]` instance of the type (#8063) — can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
+                write_cache_recover(schema_error_cache(), "schema error")
+                    .insert(entry.name, e.to_string());
+            }
+        }
+    }
+}
+
 /// Spawn `<command> <args> --describe` for every catalog entry and cache
 /// the resulting schemas. Called once at daemon boot from
 /// `server::build_router`. `describe_sidecar` injects the binary-embedded
@@ -732,63 +836,27 @@ fn write_cache_recover<'a, T>(
 /// compile-time fields seed the form instead of leaving an empty `fields[]`.
 /// `home_dir` must be the kernel's `KernelConfig.home_dir`
 /// (`KernelApi::home_dir()`); it locates the embedded-SDK extraction dir.
+///
+/// The probes run concurrently, capped at [`sidecar_probe_concurrency`].
+/// They used to run one at a time, and because this is awaited from `server::build_router` *before* the listener binds, every adapter's Python startup was paid serially on the boot path — 20-plus sequential interpreter spawns, which is the 30-second cold start reported in #8094.
+///
+/// Order is not load-bearing: both caches are keyed by `SidecarCatalogEntry::name`, so the completed set is identical whatever order the probes finish in.
+/// The `adapter=` log lines interleave now, which is the one observable difference.
 pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
-    for entry in SIDECAR_CATALOG {
+    use futures::StreamExt;
+
+    futures::stream::iter(SIDECAR_CATALOG.iter().map(|entry| async move {
         let args: Vec<String> = entry.args.iter().map(|s| s.to_string()).collect();
-        match describe_sidecar(entry.command, &args, home_dir).await {
-            Ok(schema) => {
-                tracing::info!(
-                    adapter = entry.name,
-                    fields = schema.fields.len(),
-                    sdk_version = schema.sdk_version.as_deref().unwrap_or("unreported"),
-                    "sidecar schema cached"
-                );
-                write_cache_recover(schema_cache(), "schema").insert(entry.name, schema);
-            }
-            Err(e) => {
-                if let Some(static_fields) = entry.static_fields {
-                    // Use the compile-time fallback so the configure form is
-                    // usable even without a working Python SDK installation.
-                    let fallback = SidecarSchema {
-                        name: entry.name.to_string(),
-                        display_name: entry.display_name.to_string(),
-                        description: entry.description.to_string(),
-                        fields: static_fields
-                            .iter()
-                            .map(|f| SidecarSchemaField {
-                                key: f.key.to_string(),
-                                label: f.label.to_string(),
-                                field_type: f.field_type.to_string(),
-                                required: f.required,
-                                placeholder: f.placeholder.to_string(),
-                                advanced: f.advanced,
-                                options: None,
-                            })
-                            .collect(),
-                        // The fallback exists precisely because `--describe`
-                        // failed, so no adapter reported a version here.
-                        sdk_version: None,
-                    };
-                    tracing::warn!(
-                        adapter = entry.name,
-                        error = %e,
-                        fields = fallback.fields.len(),
-                        "sidecar --describe failed; using compile-time fallback schema"
-                    );
-                    write_cache_recover(schema_cache(), "schema").insert(entry.name, fallback);
-                } else {
-                    tracing::warn!(
-                        adapter = entry.name,
-                        error = %e,
-                        "sidecar --describe failed; discovery card will have no form fields"
-                    );
-                    // Stash the failure reason so the discovery row can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
-                    write_cache_recover(schema_error_cache(), "schema error")
-                        .insert(entry.name, e.to_string());
-                }
-            }
-        }
-    }
+        (
+            entry,
+            describe_sidecar(entry.command, &args, home_dir).await,
+        )
+    }))
+    .buffer_unordered(sidecar_probe_concurrency())
+    .for_each(|(entry, result)| async move {
+        apply_sidecar_probe_outcome(entry, result);
+    })
+    .await;
 }
 
 /// Test-only seeder for the sidecar schema cache. Wipes any existing
@@ -1058,6 +1126,48 @@ enum ConfigureSidecarWriteError {
     /// not a conflict — it is the update path (`upsert_sidecar_block`
     /// matches by name and edits in place).
     NameConflict(String),
+    /// A `required` secret field carries no value: the payload omitted it (or
+    /// sent whitespace) and this instance has no non-empty value stored for it
+    /// either (a bare `KEY=` line in secrets.env is a key, not a value).
+    /// Carries the field key so the 400 body can name it. Checked inside the
+    /// write step rather than in the handler because deciding it needs the
+    /// same `secrets.env` snapshot the write uses — reading it earlier, outside
+    /// `config_write_lock`, would be a TOCTOU against a concurrent save.
+    MissingRequiredSecret(String),
+    /// `instance_name` normalizes to the same `<PREFIX>__` secret namespace as one or more already-configured instances, so saving it would overwrite their secrets.
+    /// Carries the shared prefix and the colliding names.
+    SecretPrefixConflict {
+        prefix: String,
+        names: Vec<String>,
+    },
+}
+
+/// Names of the configured `[[sidecar_channels]]` entries that keep their secrets in a `<PREFIX>__` namespace — that is, every entry whose `name` differs from its `channel_type`.
+/// The instance sharing the catalog's own name writes bare keys and so cannot collide through the prefix.
+fn namespaced_instance_names(config_content: &str) -> Result<Vec<String>, String> {
+    if config_content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let document: toml_edit::DocumentMut = config_content
+        .parse()
+        .map_err(|error| format!("parse config.toml: {error}"))?;
+    let Some(array) = document
+        .get("sidecar_channels")
+        .and_then(|item| item.as_array_of_tables())
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(array
+        .iter()
+        .filter_map(|table| {
+            let name = table.get("name").and_then(|item| item.as_str())?;
+            let channel_type = table
+                .get("channel_type")
+                .and_then(|item| item.as_str())
+                .unwrap_or(name);
+            (name != channel_type).then(|| name.to_string())
+        })
+        .collect())
 }
 
 /// Look for an existing `[[sidecar_channels]]` entry named `instance_name`
@@ -1234,6 +1344,25 @@ fn write_sidecar_configuration(
         return Err(ConfigureSidecarWriteError::NameConflict(conflicting_type));
     }
 
+    // `instance_secret_prefix` uppercases and maps every non-alphanumeric character to `_`, so it is many-to-one: `bot-1`, `bot.1` and `BOT+1` all land on `BOT_1`.
+    // Two instances that collapse together share one `<PREFIX>__KEY` namespace in secrets.env, and the second save silently overwrites the first one's token — the opposite of the isolation this endpoint exists to provide.
+    //
+    // `warn_secret_prefix_collisions` reports that from the boot / reload loop, which was enough while a second instance meant hand-editing config.toml in front of the existing entries.
+    // It is not enough for a two-field form: by the time the WARN appears the token is already gone. Refuse here, on the same "fail before the first mutation" contract as the checks above.
+    //
+    // Only namespaced instances can collide this way — the one sharing the catalog's own name writes bare keys — so a default-named save skips it.
+    if instance_name != entry.name {
+        let existing = namespaced_instance_names(original_config.as_deref().unwrap_or_default())
+            .map_err(ConfigureSidecarWriteError::Write)?;
+        let names = librefang_channels::sidecar::secret_prefix_conflict(&existing, instance_name);
+        if !names.is_empty() {
+            return Err(ConfigureSidecarWriteError::SecretPrefixConflict {
+                prefix: librefang_channels::sidecar::instance_secret_prefix(instance_name),
+                names,
+            });
+        }
+    }
+
     // A second (third, …) named instance of the same catalog type must not
     // share the first instance's secret — `TELEGRAM_BOT_TOKEN` can only ever
     // hold one value. `librefang_channels::sidecar::build_spawn_env` already
@@ -1255,13 +1384,77 @@ fn write_sidecar_configuration(
         None => field_key.to_string(),
     };
 
-    let secrets_env_keys: std::collections::HashSet<String> =
-        librefang_channels::sidecar::parse_secrets_env_contents(
-            original_secrets.as_deref().unwrap_or_default(),
-        )
+    let secrets_env_entries = librefang_channels::sidecar::parse_secrets_env_contents(
+        original_secrets.as_deref().unwrap_or_default(),
+    );
+    // Every key present in the file, regardless of whether it holds a value —
+    // what the shadow-warning check below wants ("was this key already in
+    // secrets.env before this save?").
+    let secrets_env_keys: std::collections::HashSet<String> = secrets_env_entries
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect();
+    // Keys that actually hold a value. This is the set the required-secret
+    // check below reads, and it applies the same filter `read_secrets_env_keys`
+    // applies when it computes the row's `has_value` — so a save is accepted on
+    // exactly the secrets the drawer showed as set, and a hand-edited `KEY=`
+    // line (a key with no value) cannot satisfy a required field.
+    let secrets_env_values: std::collections::HashSet<String> = secrets_env_entries
         .into_iter()
+        .filter(|(_, value)| !value.is_empty())
         .map(|(key, _)| key)
         .collect();
+
+    // Required-secret validation, deliberately "has a value after this save"
+    // rather than "is present in this payload" (#8063).
+    //
+    // The configure drawer never echoes a stored secret back as plaintext, so
+    // editing one non-secret field on a configured instance submits a payload
+    // with no token in it — and the write path below already treats that as
+    // "leave the stored secret alone" (an absent key never reaches
+    // `upsert_secret`). Rejecting it here anyway made every edit of a
+    // configured Slack instance 400 with `required field SLACK_APP_TOKEN is
+    // missing or empty` unless the operator re-pasted both workspace tokens
+    // from scratch, which is the failure the issue reproduced.
+    //
+    // The guarantee the check exists for is unchanged: after a successful save
+    // the instance has a value for every required secret. Accepted sources, in
+    // the order `librefang_channels::sidecar::build_spawn_env` resolves them —
+    // this request's payload, then this instance's `secrets.env` key
+    // (namespaced `<INSTANCE>__<KEY>` for a secondary instance, bare for the
+    // one named after its catalog type), then the daemon's own environment.
+    //
+    // The daemon-environment source is deliberately accepted for the bare-key
+    // path only, and that is narrower than what the child actually sees: the
+    // supervisor never calls `Command::env_clear` (see the precedence notes on
+    // `build_spawn_env`), so an exported bare key is inherited by *every*
+    // sidecar child, namespaced instances included. Widening it here would
+    // undo the point of per-instance namespacing — a second instance would be
+    // allowed to save with no secret of its own and silently run on the first
+    // one's token — so a namespaced instance must name its own secret.
+    //
+    // Required non-secret fields stay strict in the handler's earlier pass:
+    // their current values *are* echoed into the form, so the form always
+    // resubmits them, and `write_form_managed` deletes a managed env key that
+    // a save omits. Accepting an omission here would green-light a save that
+    // then removes the very key it was told was satisfied.
+    for field in &schema.fields {
+        if !field.required || field.field_type != "secret" {
+            continue;
+        }
+        let submitted = values
+            .get(&field.key)
+            .is_some_and(|value| !value.trim().is_empty());
+        let stored = secrets_env_values.contains(&secret_key(&field.key));
+        let inherited = secret_namespace.is_none()
+            && std::env::var(&field.key).is_ok_and(|value| !value.trim().is_empty());
+        if !submitted && !stored && !inherited {
+            return Err(ConfigureSidecarWriteError::MissingRequiredSecret(
+                field.key.clone(),
+            ));
+        }
+    }
+
     // Namespaced per-instance secrets always win over the parent process env
     // (`build_spawn_env` never consults it for them), so the shadow warning
     // — "a shell-exported var will out-rank what this save just wrote" — is
@@ -1404,9 +1597,18 @@ pub async fn configure_sidecar_channel(
             .into_json_tuple()
         })?;
 
-    // 3. Validate required fields: present in payload AND non-empty after trim.
+    // 3. Validate required NON-SECRET fields: present in payload AND non-empty
+    //    after trim. The form renders these with their current values, so a
+    //    save always resubmits them, and `write_form_managed` removes a managed
+    //    env key that a save omits — an omission here really is a request to
+    //    end up with no value.
+    //
+    //    Required *secret* fields are validated in `write_sidecar_configuration`
+    //    instead, against the `secrets.env` snapshot the write itself uses: a
+    //    stored secret is never echoed into the form, so "absent from the
+    //    payload" means "keep what is stored", not "clear it" (#8063).
     for f in &schema.fields {
-        if f.required {
+        if f.required && f.field_type != "secret" {
             let v = body.values.get(&f.key).map(|s| s.trim()).unwrap_or("");
             if v.is_empty() {
                 return Err(ApiErrorResponse::bad_request(format!(
@@ -1491,6 +1693,24 @@ pub async fn configure_sidecar_channel(
                 ApiErrorResponse::conflict(format!(
                     "instance name `{instance_name}` is already used by a configured `{conflicting_type}` channel. Pick a different instance name."
                 ))
+                .into_json_tuple()
+            }
+            ConfigureSidecarWriteError::MissingRequiredSecret(key) => {
+                ApiErrorResponse::bad_request(format!(
+                    "required field `{key}` is missing or empty"
+                ))
+                .into_json_tuple()
+            }
+            ConfigureSidecarWriteError::SecretPrefixConflict { prefix, names } => {
+                ApiErrorResponse::conflict(format!(
+                    "instance name `{instance_name}` normalizes to the same secret namespace `{prefix}__` as the configured instance(s) {}. Saving it would overwrite their `{prefix}__<KEY>` secrets in secrets.env. Pick a name that differs by more than punctuation or case.",
+                    names
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .with_code("sidecar_secret_prefix_conflict")
                 .into_json_tuple()
             }
             ConfigureSidecarWriteError::Write(error) => {
@@ -2225,6 +2445,80 @@ mod sidecar_configuration_write_tests {
         assert!(!config.contains("TEST_TOKEN"));
     }
 
+    /// An omitted required secret is satisfied by a *stored value*, not by a
+    /// bare key sitting in secrets.env.
+    ///
+    /// `parse_secrets_env_contents` yields `("TEST_TOKEN", "")` for a
+    /// hand-edited `TEST_TOKEN=` line, and `read_secrets_env_keys` — the GET
+    /// path that computes the row's `has_value` — filters exactly that out. If
+    /// the required-secret check keyed on key presence instead, the drawer would
+    /// show the field as empty and required while the save it rejects came back
+    /// 200, and the adapter would then spawn with an empty token.
+    #[test]
+    fn empty_stored_secret_does_not_satisfy_a_required_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        std::fs::write(&secrets_path, "TEST_TOKEN=\nKEEP_ME=unchanged\n").unwrap();
+        let values = HashMap::from([("ROOM".to_string(), "alerts".to_string())]);
+
+        let result = write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            TEST_ENTRY.name,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            None,
+        );
+
+        assert!(
+            matches!(
+                &result,
+                Err(ConfigureSidecarWriteError::MissingRequiredSecret(key)) if key == "TEST_TOKEN"
+            ),
+            "{result:?}"
+        );
+        // Rejected before the first mutation, same contract as every other
+        // pre-write refusal in this function.
+        assert!(!config_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&secrets_path).unwrap(),
+            "TEST_TOKEN=\nKEEP_ME=unchanged\n"
+        );
+    }
+
+    /// The other half: a required secret that really is stored needs no
+    /// re-paste, which is the #8063 relaxation itself.
+    #[test]
+    fn stored_secret_satisfies_an_omitted_required_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        std::fs::write(&secrets_path, "TEST_TOKEN=already-stored\n").unwrap();
+        let values = HashMap::from([("ROOM".to_string(), "alerts".to_string())]);
+
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            TEST_ENTRY.name,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            None,
+        )
+        .expect("an omitted-but-stored required secret must not block the save");
+
+        assert_eq!(
+            std::fs::read_to_string(&secrets_path).unwrap(),
+            "TEST_TOKEN=already-stored\n",
+            "the omitted secret must be left exactly as it was"
+        );
+        assert!(std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("ROOM = \"alerts\""));
+    }
+
     #[test]
     fn included_sidecar_conflict_prevents_all_writes() {
         let dir = tempfile::tempdir().unwrap();
@@ -2514,5 +2808,104 @@ mod sidecar_configuration_write_tests {
             "update in place, not a second block: {config}"
         );
         assert!(config.contains("ROOM = \"updated\""));
+    }
+}
+
+#[cfg(test)]
+mod sidecar_probe_outcome_tests {
+    use super::{
+        __test_seed_sidecar_schema_cache, __test_seed_sidecar_schema_error_cache,
+        apply_sidecar_probe_outcome, read_cache_recover, schema_cache, schema_error_cache,
+        sidecar_probe_concurrency, SidecarSchema, SIDECAR_CATALOG,
+    };
+    use crate::routes::sidecar_describe::DescribeSidecarError;
+
+    fn entry(name: &str) -> &'static super::SidecarCatalogEntry {
+        SIDECAR_CATALOG
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("catalog must contain `{name}`"))
+    }
+
+    /// The cap is a subprocess-count bound, so what matters is that it never degenerates to 1 (which is the serial boot #8094 reports) and never grows with core count past the point where Python startup dominates.
+    #[test]
+    fn probe_concurrency_stays_within_its_bounds() {
+        let n = sidecar_probe_concurrency();
+        assert!(
+            (2..=8).contains(&n),
+            "concurrency must stay in 2..=8 so a big host cannot fan out one interpreter per adapter, got {n}"
+        );
+    }
+
+    // All three outcomes in ONE test: the schema / error caches are process-wide and the seeders clear-then-set, so splitting these into parallel tests would race on the shared maps — same reason `schema_error_discovery_tests` keeps its halves together.
+    #[test]
+    fn each_probe_outcome_lands_in_exactly_one_cache() {
+        __test_seed_sidecar_schema_cache(&[]);
+        __test_seed_sidecar_schema_error_cache(&[]);
+
+        // --- describe succeeded: the live schema is cached verbatim ---
+        let live = SidecarSchema {
+            name: "gotify".to_string(),
+            display_name: "Gotify".to_string(),
+            description: "probed".to_string(),
+            fields: vec![],
+            sdk_version: Some("9.9.9".to_string()),
+        };
+        apply_sidecar_probe_outcome(entry("gotify"), Ok(live));
+
+        // --- describe failed WITH a compile-time fallback: schema cache gets the static fields, and no version, because nothing reported one ---
+        apply_sidecar_probe_outcome(
+            entry("telegram"),
+            Err(DescribeSidecarError::SdkMissing(
+                "no sdk (test)".to_string(),
+            )),
+        );
+
+        // --- describe failed WITHOUT a fallback: the reason is cached so the row can explain the empty form instead of just being empty ---
+        apply_sidecar_probe_outcome(
+            entry("ntfy"),
+            Err(DescribeSidecarError::SdkMissing(
+                "no sdk (test)".to_string(),
+            )),
+        );
+
+        let schemas = read_cache_recover(schema_cache(), "schema");
+        let errors = read_cache_recover(schema_error_cache(), "schema error");
+
+        assert_eq!(
+            schemas.get("gotify").and_then(|s| s.sdk_version.as_deref()),
+            Some("9.9.9"),
+            "a successful probe must cache the adapter's own reported version"
+        );
+        assert!(
+            !errors.contains_key("gotify"),
+            "a success must not also leave an error behind"
+        );
+
+        let telegram = schemas
+            .get("telegram")
+            .expect("an entry with static_fields must fall back into the schema cache");
+        assert!(
+            !telegram.fields.is_empty(),
+            "the compile-time fallback must seed the form"
+        );
+        assert_eq!(
+            telegram.sdk_version, None,
+            "the fallback exists because --describe failed, so no version was reported"
+        );
+        assert!(
+            !errors.contains_key("telegram"),
+            "a usable fallback is not a schema error the operator needs to see"
+        );
+
+        assert!(
+            !schemas.contains_key("ntfy"),
+            "no fallback means no schema — the form is genuinely empty"
+        );
+        assert_eq!(
+            errors.get("ntfy").map(String::as_str),
+            Some("no sdk (test)"),
+            "the failure reason must reach the row so the empty form is explained"
+        );
     }
 }

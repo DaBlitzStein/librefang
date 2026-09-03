@@ -12566,6 +12566,154 @@
         }
       }
     },
+    "/api/templates/{name}/history": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates/{name}/history — how this template's config changed over time.",
+        "operationId": "list_template_history",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template version history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid template name"
+          },
+          "404": {
+            "description": "Template not found"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/history/{version_id}/restore": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/{name}/history/{version_id}/restore — restore a template to a prior version.",
+        "operationId": "restore_template_version",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_id",
+            "in": "path",
+            "description": "Version row id to restore",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid template name or version id"
+          },
+          "404": {
+            "description": "Template or version not found"
+          },
+          "409": {
+            "description": "Template belongs to a live agent"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/promote": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/:name/promote — open a PR contributing this agent\ntype to the configured public registry.",
+        "description": "Runs the privacy scan first and refuses to publish when a finding sits\ninside a field the sanitiser keeps (`removed_by_sanitizer == false`),\nso a credential or private endpoint pasted into free text cannot reach\na public git history. Then it sanitizes the manifest (stripping private\nfields), renders it as TOML, forks the registry repo, pushes the file to\n`agent-types/<name>/agent.toml`, and opens a pull request.\nRequires `GITHUB_TOKEN` (env or vault).",
+        "operationId": "promote_agent_type",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PR opened against the registry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid manifest or name"
+          },
+          "401": {
+            "description": "No GitHub token configured"
+          },
+          "404": {
+            "description": "Agent type not found"
+          },
+          "409": {
+            "description": "Manifest still contains private details that require review"
+          },
+          "502": {
+            "description": "GitHub request failed"
+          }
+        }
+      }
+    },
     "/api/templates/{name}/toml": {
       "get": {
         "tags": [
@@ -15511,6 +15659,14 @@
           "message": {
             "type": "string"
           },
+          "reasoning_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Per-task reasoning mode: `\"none\"` | `\"low\"` | `\"high\"` | `\"max\"` (#7946).\n\nTop rung of the resolution order — per-call > per-agent (`agent.toml`\n`[thinking] reasoning_mode`) > global (`config.toml` `[thinking]\nreasoning_mode`) > compiled default (the `budget_tokens` bucket).\n\nAdded alongside [`Self::thinking`] rather than widening it, because the\nboolean is in the wire contract of every existing client and a JSON\n`true` cannot grow a third value without breaking them. The two are not\nredundant either: `thinking: false` merely omits the reasoning opt-in,\nwhile `reasoning_mode: \"none\"` sends the provider's explicit non-think\ntoggle — the difference between \"we did not ask it to think\" and \"we\nasked it not to\", which is the whole point on a model that reasons by\ndefault.",
+            "example": "high"
+          },
           "sender_id": {
             "type": [
               "string",
@@ -15544,7 +15700,7 @@
               "boolean",
               "null"
             ],
-            "description": "Per-call deep-thinking override.\n\n- `Some(true)`: force thinking on (even if the manifest has it off)\n- `Some(false)`: force thinking off (even if the manifest has it on)\n- `None`: use the manifest/global default"
+            "description": "Per-call deep-thinking override.\n\n- `Some(true)`: force thinking on (even if the manifest has it off)\n- `Some(false)`: force thinking off (even if the manifest has it on)\n- `None`: use the manifest/global default\n\nKept as a boolean for backward compatibility. Prefer\n[`Self::reasoning_mode`], which is strictly more expressive and wins\nwhen both are present (#7946)."
           },
           "was_mentioned": {
             "type": "boolean",
