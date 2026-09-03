@@ -498,20 +498,6 @@ const isPositiveUnsignedTomlInteger = (raw: string): boolean => {
   return value !== null && BigInt(value) > 0n;
 };
 
-/**
- * Parse a float that may legitimately be negative.
- *
- * `parseFloatish` refuses negatives because every field it was written for is a
- * cost or a quota. `frequency_penalty` and `presence_penalty` range -2.0..2.0,
- * so routing them through it silently dropped every negative value the operator
- * typed — the field accepted the input and the TOML came out without the key.
- */
-const parseSignedFloat = (raw: string): number | null => {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const n = Number(trimmed);
-  return Number.isFinite(n) ? n : null;
-};
 
 const parseFloatish = (raw: string): number | null => {
   const trimmed = raw.trim();

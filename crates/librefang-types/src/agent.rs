@@ -939,15 +939,6 @@ pub struct ModelConfig {
     /// Sampling temperature. `None` = inherit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    /// Top-p / nucleus sampling (0.0–1.0). `None` = inherit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-    /// Frequency penalty (-2.0–2.0). `None` = inherit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frequency_penalty: Option<f32>,
-    /// Presence penalty (-2.0–2.0). `None` = inherit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presence_penalty: Option<f32>,
     /// System prompt for the agent.
     pub system_prompt: String,
     /// Optional API key environment variable name.
@@ -1026,9 +1017,6 @@ impl Default for ModelConfig {
             base_url: None,
             context_window: None,
             max_output_tokens: None,
-            top_p: None,
-            frequency_penalty: None,
-            presence_penalty: None,
             extra_params: std::collections::BTreeMap::new(),
         }
     }

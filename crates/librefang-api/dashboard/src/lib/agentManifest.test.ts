@@ -971,9 +971,11 @@ prompt_template = "on push"
     expect(reparsed.form.tool_allowlist).toEqual(["file_read"]);
     expect(reparsed.extras.topLevel["future_field"]).toBe("unknown to this daemon");
     expect(reparsed.extras.topLevel["compaction"]).toEqual({ threshold_messages: 7 });
-    expect(reparsed.extras.topLevel["workspaces"]).toEqual({
-      notes: { path: "notes", mode: "rw" },
-    });
+    // #8013 promoted `[workspaces]` from an unmodelled extra to a form field,
+    // so the round-trip preserves it on the form rather than in `extras`.
+    expect(
+      reparsed.form.workspaces.map(({ _uid: _ignored, ...ws }) => ws),
+    ).toEqual([{ name: "notes", path: "notes", mode: "rw" }]);
     expect(reparsed.extras.topLevel["triggers"]).toEqual([
       { pattern: "git.push", prompt_template: "on push" },
     ]);
