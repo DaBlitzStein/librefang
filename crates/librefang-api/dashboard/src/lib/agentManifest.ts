@@ -36,6 +36,10 @@ export interface ManifestFormState {
     system_prompt: string;
     temperature: string;
     max_tokens: string;
+    context_window: string;
+    top_p: string;
+    frequency_penalty: string;
+    presence_penalty: string;
     api_key_env: string;
     base_url: string;
   };
@@ -171,6 +175,10 @@ export const emptyManifestForm = (): ManifestFormState => ({
     system_prompt: "",
     temperature: "",
     max_tokens: "",
+    context_window: "",
+    top_p: "",
+    frequency_penalty: "",
+    presence_penalty: "",
     api_key_env: "",
     base_url: "",
   },
@@ -273,6 +281,10 @@ const FORM_MODEL_KEYS = new Set([
   "system_prompt",
   "temperature",
   "max_tokens",
+  "context_window",
+  "top_p",
+  "frequency_penalty",
+  "presence_penalty",
   "api_key_env",
   "base_url",
 ]);
@@ -397,6 +409,24 @@ const parseFloatish = (raw: string): number | null => {
   return n;
 };
 
+// Sampling penalties are signed: parseFloatish rejects negatives because
+// every other float field here is a cost/quota, but frequency/presence
+// penalty are OpenAI-compatible parameters whose valid range is [-2, 2].
+const parseFloatSigned = (raw: string): number | null => {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n)) return null;
+  return n;
+};
+
+// The number inputs declare min/max, but min/max does not stop pasted or
+// programmatic values on a non-submitted form — the serializer is the gate
+// the reviewer named (#8112 review, non-blocking): a Top P of 5 must never
+// reach the TOML.
+const clampRange = (value: number | null, min: number, max: number): number | null =>
+  value === null ? null : Math.min(Math.max(value, min), max);
+
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
   if (!value) return;
   lines.push(`${key} = ${escapeTomlString(value)}`);
@@ -509,6 +539,10 @@ export const serializeManifestForm = (
   writeStringScalar(modelBody, "system_prompt", form.model.system_prompt);
   writeNumberScalar(modelBody, "temperature", parseFloatish(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
+  writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
+  writeNumberScalar(modelBody, "top_p", clampRange(parseFloatish(form.model.top_p), 0, 1));
+  writeNumberScalar(modelBody, "frequency_penalty", clampRange(parseFloatSigned(form.model.frequency_penalty), -2, 2));
+  writeNumberScalar(modelBody, "presence_penalty", clampRange(parseFloatSigned(form.model.presence_penalty), -2, 2));
   writeStringScalar(modelBody, "api_key_env", form.model.api_key_env.trim());
   writeStringScalar(modelBody, "base_url", form.model.base_url.trim());
   const modelExtras = renderExtraScalars(safeModelExtras);
@@ -967,6 +1001,10 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.model.system_prompt = asString(modelTable.system_prompt);
   form.model.temperature = asNumberString(modelTable.temperature);
   form.model.max_tokens = asNumberString(modelTable.max_tokens);
+  form.model.context_window = asNumberString(modelTable.context_window);
+  form.model.top_p = asNumberString(modelTable.top_p);
+  form.model.frequency_penalty = asNumberString(modelTable.frequency_penalty);
+  form.model.presence_penalty = asNumberString(modelTable.presence_penalty);
   form.model.api_key_env = asString(modelTable.api_key_env);
   form.model.base_url = asString(modelTable.base_url);
   extras.model = stripKnown(modelTable, FORM_MODEL_KEYS);

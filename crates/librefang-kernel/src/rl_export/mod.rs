@@ -463,6 +463,9 @@ target = { type = "wandb", project = "rollouts", entity = "team", api_key_env = 
                 base_url: None,
                 context_window: None,
                 max_output_tokens: None,
+                top_p: None,
+                frequency_penalty: None,
+                presence_penalty: None,
                 extra_params: std::collections::BTreeMap::new(),
             },
             rl_export: librefang_types::agent::RlExportOverride {

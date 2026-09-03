@@ -1001,6 +1001,9 @@ fn test_spawn_agent_applies_local_default_model_override() {
                     base_url: None,
                     context_window: None,
                     max_output_tokens: None,
+                    top_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
                     extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
@@ -1485,6 +1488,9 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                     base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
                     context_window: None,
                     max_output_tokens: None,
+                    top_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
                     extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
@@ -14769,6 +14775,9 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                     base_url: None,
                     context_window: None,
                     max_output_tokens: None,
+                    top_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
                     extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
@@ -14797,6 +14806,9 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                     base_url: None,
                     context_window: None,
                     max_output_tokens: None,
+                    top_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
                     extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
@@ -15105,6 +15117,9 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                     base_url: None,
                     context_window: None,
                     max_output_tokens: None,
+                    top_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
                     extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
@@ -15134,6 +15149,9 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                     base_url: None,
                     context_window: None,
                     max_output_tokens: None,
+                    top_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
                     extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
