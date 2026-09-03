@@ -737,7 +737,12 @@ fn strip_matching_outer_quotes(s: &str) -> &str {
 /// `Command::env_clear` not being called.
 /// Uppercase + non-alphanumeric→`_` form of a sidecar instance `name`, used as the
 /// `<PREFIX>__<KEY>` namespace for per-instance secrets in `secrets.env` (#6169).
-fn instance_secret_prefix(name: &str) -> String {
+///
+/// `pub` so the dashboard's sidecar-configure handler
+/// (`librefang-api::routes::channels`) can write a second (third, …) named
+/// instance's secrets under its own namespace instead of clobbering the
+/// first instance's bare key — see `configure_sidecar_channel`.
+pub fn instance_secret_prefix(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -776,6 +781,28 @@ fn secret_prefix_collisions(names: &[String]) -> Vec<(String, Vec<String>)> {
         .filter(|(_, group)| group.len() > 1)
         .map(|(prefix, group)| (prefix, group.into_iter().collect()))
         .collect()
+}
+
+/// Which of `existing` would share `candidate`'s per-instance secret namespace.
+///
+/// [`warn_secret_prefix_collisions`] reports this after the fact, from the boot and config-reload loop, which is the right place for a config an operator hand-edited.
+/// It is the wrong place for a config the dashboard just wrote: by the time the WARN appears the save has already happened, the first instance's `<PREFIX>__KEY` has already been overwritten with the second one's token, and the only signal is a log line on the next boot.
+///
+/// This is the same normalization asked as a question instead of an observation, so a writing surface can refuse before it clobbers anything.
+/// An exact name match is excluded: that is the same instance being reconfigured, which `upsert_sidecar_block` edits in place.
+///
+/// Returns the colliding names sorted, so a caller's error message is deterministic.
+pub fn secret_prefix_conflict(existing: &[String], candidate: &str) -> Vec<String> {
+    let wanted = instance_secret_prefix(candidate);
+    let mut hits: Vec<String> = existing
+        .iter()
+        .filter(|name| name.as_str() != candidate)
+        .filter(|name| instance_secret_prefix(name) == wanted)
+        .cloned()
+        .collect();
+    hits.sort();
+    hits.dedup();
+    hits
 }
 
 /// Emit a targeted WARN for each set of sidecar instance names that collapse
@@ -4212,6 +4239,33 @@ mod tests {
             "a repeated identical name is not a prefix collision"
         );
         assert_eq!(warn_secret_prefix_collisions(&names), 0);
+    }
+
+    #[test]
+    fn secret_prefix_conflict_reports_names_that_would_share_the_namespace() {
+        let existing = vec![
+            "bot-1".to_string(),
+            "BOT+1".to_string(),
+            "telegram".to_string(),
+        ];
+        // `bot.1` normalizes to `BOT_1`, which is where `bot-1` and `BOT+1` already keep their `<PREFIX>__KEY` secrets.
+        assert_eq!(
+            secret_prefix_conflict(&existing, "bot.1"),
+            vec!["BOT+1".to_string(), "bot-1".to_string()],
+            "every name collapsing to the candidate's prefix must be reported, sorted"
+        );
+        // A name that normalizes somewhere else is not a conflict.
+        assert!(secret_prefix_conflict(&existing, "bot-2").is_empty());
+    }
+
+    #[test]
+    fn secret_prefix_conflict_excludes_the_instance_being_reconfigured() {
+        // Saving `bot-1` again is `upsert_sidecar_block` editing it in place, not a second instance moving into its namespace.
+        let existing = vec!["bot-1".to_string(), "telegram".to_string()];
+        assert!(
+            secret_prefix_conflict(&existing, "bot-1").is_empty(),
+            "an exact name match is the update path, not a collision"
+        );
     }
 
     /// Find python3 or python on PATH.

@@ -1110,6 +1110,9 @@ pub struct AgentManifest {
     /// A malformed spec is reported as a `WARN` once at resolution and treated as absent rather than failing the turn, because an unparseable owner must not take an agent down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// Template this agent was created from, if any (#8018).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_template: Option<String>,
     /// Path to the agent module (WASM or Python file).
     pub module: String,
     /// Scheduling mode.
@@ -1669,6 +1672,7 @@ impl Default for AgentManifest {
             description: String::new(),
             author: String::new(),
             owner: None,
+            source_template: None,
             module: "builtin:chat".to_string(),
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),
@@ -2459,6 +2463,7 @@ mod tests {
     #[test]
     fn test_manifest_with_routing_and_autonomous() {
         let manifest = AgentManifest {
+            source_template: None,
             routing: Some(ModelRoutingConfig::default()),
             autonomous: Some(AutonomousConfig::default()),
             pinned_model: Some("sonnet".into()),
@@ -2475,6 +2480,7 @@ mod tests {
     fn test_agent_manifest_serialization() {
         let manifest = AgentManifest {
             name: "test-agent".to_string(),
+            source_template: None,
             description: "A test agent".to_string(),
             author: "test".to_string(),
             module: "test.wasm".to_string(),
@@ -2814,6 +2820,7 @@ mod tests {
     #[test]
     fn test_manifest_with_new_fields() {
         let manifest = AgentManifest {
+            source_template: None,
             profile: Some(ToolProfile::Coding),
             fallback_models: Some(vec![FallbackModel {
                 provider: "groq".to_string(),
@@ -3238,6 +3245,7 @@ model = "llama-3.3-70b-versatile"
     #[test]
     fn test_manifest_allowed_plugins_roundtrip_json() {
         let manifest = AgentManifest {
+            source_template: None,
             allowed_plugins: vec!["qdrant-recall".to_string(), "web-search".to_string()],
             ..Default::default()
         };
@@ -3258,9 +3266,11 @@ model = "llama-3.3-70b-versatile"
     #[test]
     fn test_manifest_thinking_config_roundtrip_json() {
         let manifest = AgentManifest {
+            source_template: None,
             thinking: Some(crate::config::ThinkingConfig {
                 budget_tokens: 5000,
                 stream_thinking: true,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -3271,15 +3281,56 @@ model = "llama-3.3-70b-versatile"
         assert!(tc.stream_thinking);
     }
 
+    /// Per-agent knobs live in `agent.toml`, not `config.toml` (CLAUDE.md #5476),
+    /// so `reasoning_mode` has to survive a manifest TOML round trip inside the
+    /// existing `[thinking]` table (#7946).
+    #[test]
+    fn test_manifest_thinking_reasoning_mode_round_trips_through_toml() {
+        let toml_str = r#"
+            name = "researcher"
+            [thinking]
+            budget_tokens = 4096
+            reasoning_mode = "max"
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).expect("parse agent.toml");
+        let tc = manifest.thinking.as_ref().expect("thinking table parsed");
+        assert_eq!(tc.reasoning_mode, Some(crate::config::ReasoningMode::Max));
+        assert_eq!(tc.budget_tokens, 4096);
+
+        // And back out again, so an API round trip (PATCH → agent.toml → boot
+        // reconciliation) cannot drop it.
+        let back: AgentManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(
+            back.thinking.unwrap().reasoning_mode,
+            Some(crate::config::ReasoningMode::Max),
+        );
+    }
+
+    /// An agent that omits `reasoning_mode` keeps the pre-#7946 shape: absent,
+    /// not defaulted to a mode.
+    #[test]
+    fn test_manifest_thinking_without_reasoning_mode_stays_absent() {
+        let toml_str = r#"
+            name = "plain"
+            [thinking]
+            budget_tokens = 4096
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).expect("parse agent.toml");
+        assert_eq!(manifest.thinking.unwrap().reasoning_mode, None);
+    }
+
     #[test]
     fn test_per_agent_thinking_overrides_global() {
         let global = crate::config::ThinkingConfig {
             budget_tokens: 10_000,
             stream_thinking: false,
+            ..Default::default()
         };
         let per_agent = crate::config::ThinkingConfig {
             budget_tokens: 5_000,
             stream_thinking: true,
+            ..Default::default()
         };
 
         let mut manifest = AgentManifest::default();
@@ -3745,6 +3796,7 @@ model = "claude-3-haiku-20240307"
     #[test]
     fn mcp_disabled_json_roundtrip() {
         let manifest = AgentManifest {
+            source_template: None,
             mcp_disabled: true,
             mcp_servers: vec!["foo".to_string()],
             ..Default::default()
@@ -4008,6 +4060,7 @@ model = "claude-3-haiku-20240307"
         // declarative-trigger field must survive the round-trip.
         let manifest = AgentManifest {
             name: "rt".to_string(),
+            source_template: None,
             reconcile_orphans: OrphanPolicy::Warn,
             triggers: vec![ManifestTrigger {
                 // `task_posted` is a struct variant that accepts the empty

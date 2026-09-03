@@ -213,6 +213,11 @@ export interface ChannelItem {
    *  **Sticky**: never cleared, not even by the successful respawn that follows.
    *  A connected channel carrying one is degraded, not dead. */
   last_error?: string | null;
+  /** Per-instance default agent (`[[sidecar_channels]].agent`) — inbound
+   *  messages on this instance with no more specific binding route here.
+   *  `null` / absent when this instance has no default agent configured.
+   *  Only present on configured rows; a discovery (catalog) row never has one. */
+  agent?: string | null;
 }
 
 export interface SkillItem {
@@ -355,6 +360,8 @@ export interface AgentItem {
   supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
   /** Human-readable schedule summary: "manual" for reactive agents,
    *  the cron expression for periodic agents, "proactive", or
    *  "continuous · Ns" for continuous agents. */
@@ -976,6 +983,12 @@ export interface ModelPerformanceItem {
   avg_latency_ms?: number;
   min_latency_ms?: number;
   max_latency_ms?: number;
+  /**
+   * Nearest-rank 95th-percentile latency for the window (#8062).
+   *
+   * The percentile an SLO is written against — `avg_latency_ms` hides the tail and `max_latency_ms` is a single outlier.
+   */
+  p95_latency_ms?: number;
   cost_per_call?: number;
   avg_latency_per_call?: number;
 }
@@ -986,6 +999,19 @@ export interface UsageByAgentItem {
   total_tokens?: number;
   tool_calls?: number;
   cost?: number;
+  /**
+   * Prompt / completion split, so a chatty agent is distinguishable from an expensive one.
+   * Both are served by `GET /api/usage`.
+   */
+  input_tokens?: number;
+  output_tokens?: number;
+  /** Same value as `cost`; the handler emits both names. */
+  total_cost_usd?: number;
+  call_count?: number;
+  /**
+   * `true` for a hand rather than a top-level agent. A hand's spend is real money, so the page labels these rows instead of dropping them.
+   */
+  is_hand?: boolean;
 }
 
 export interface UsageDailyItem {
@@ -998,7 +1024,45 @@ export interface UsageDailyItem {
 export interface UsageDailyResponse {
   days?: UsageDailyItem[];
   today_cost_usd?: number;
+  /**
+   * Timestamp of the oldest stored usage event, or `null` when the table is empty.
+   * Deliberately NOT filtered by the selected range — it answers "how far back does the stored data go".
+   *
+   * Despite the `_date` suffix this is `MIN(timestamp)`, so it carries a full RFC 3339 instant rather than a bare `YYYY-MM-DD`.
+   * Render the first 10 characters for a day.
+   */
   first_event_date?: string | null;
+  /**
+   * `usage.retention_days` from `config.toml` (#8062). `0` means the retention sweep is disabled and the table grows without bound.
+   *
+   * Paired with `first_event_date` this distinguishes "this deployment is young" from "the sweep already pruned the rest", which a cost report needs before anyone reads a total as complete.
+   */
+  retention_days?: number;
+}
+
+/**
+ * Inclusive reporting window accepted by every `/api/usage*` endpoint (#7891).
+ *
+ * Both bounds are `YYYY-MM-DD` **UTC calendar days** — see `lib/usageRange.ts` for why the dashboard resolves its presets in UTC rather than local time.
+ * An omitted bound means unbounded on that side; a malformed one is a `400`, so callers normalize before passing values in.
+ */
+export interface UsageRangeParams {
+  start_date?: string;
+  end_date?: string;
+}
+
+function usageRangeQuery(
+  range: UsageRangeParams = {},
+  extra: Record<string, string | number | undefined> = {},
+): string {
+  const params = new URLSearchParams();
+  if (range.start_date) params.set("start_date", range.start_date);
+  if (range.end_date) params.set("end_date", range.end_date);
+  for (const [key, value] of Object.entries(extra)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
 }
 
 export interface CommsNode {
@@ -1389,6 +1453,8 @@ export interface AgentDetail {
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
   auto_evolve?: boolean;
+  /** Template this agent was spawned from, if any (#8018). */
+  source_template?: string;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
@@ -1699,11 +1765,34 @@ export interface AgentTypeSpec {
   skills?: string[];
 }
 
+/**
+ * One privacy risk the promotion preview found in a manifest (mirrors
+ * `librefang_types::manifest_privacy::Finding`).
+ *
+ * `removed_by_sanitizer: true` means the published copy already drops the
+ * value; `false` means it sits inside a field worth keeping and the operator
+ * has to edit it by hand before publishing.
+ */
+export interface PromotionFinding {
+  field: string;
+  category: string;
+  preview: string;
+  removed_by_sanitizer: boolean;
+}
+
+/** Read-only privacy pass over a manifest, ahead of promoting it to a shared registry (#7771). */
+export interface PromotionPreview {
+  requires_review: boolean;
+  findings: PromotionFinding[];
+  manifest_toml: string | null;
+}
+
 export interface AgentTypeDetail {
   name: string;
   source: AgentTypeSource;
   editable: boolean;
   spec: AgentTypeSpec;
+  promotion_preview?: PromotionPreview;
   manifest_toml: string;
 }
 
@@ -1733,6 +1822,51 @@ export async function updateAgentType(
 
 export async function deleteAgentType(name: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
+}
+
+/** Result of promoting an agent type to the public registry as a PR. */
+export interface PromoteAgentTypeResult {
+  pr_url: string;
+  repo: string;
+  branch: string;
+}
+
+/**
+ * Promote an agent type to the configured registry repo as a GitHub PR.
+ * Sanitizes the manifest for publication, pushes it to `agent-types/<name>/agent.toml`,
+ * and opens a pull request. Requires `GITHUB_TOKEN` on the daemon side.
+ */
+export async function promoteAgentType(name: string): Promise<PromoteAgentTypeResult> {
+  return post<PromoteAgentTypeResult>(`/api/templates/${encodeURIComponent(name)}/promote`, {});
+}
+
+// ---------------------------------------------------------------------------
+// Template version history
+// ---------------------------------------------------------------------------
+
+export interface TemplateVersionEntry {
+  id: number;
+  template_name: string;
+  timestamp: string;
+  manifest_toml: string;
+  change_source: string;
+}
+
+export async function getTemplateHistory(
+  name: string,
+  limit = 30,
+): Promise<{ versions: TemplateVersionEntry[] }> {
+  return get(`/api/templates/${encodeURIComponent(name)}/history?limit=${limit}`);
+}
+
+export async function restoreTemplateVersion(
+  name: string,
+  versionId: number,
+): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>(
+    `/api/templates/${encodeURIComponent(name)}/history/${versionId}/restore`,
+    {},
+  );
 }
 
 /**
@@ -1933,6 +2067,12 @@ export interface ModelItem {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Provenance of `supports_vision`, resolved through any operator override. Refs #7957.
+  // "supported" / "unsupported" mean a source declared it; "unknown" means the boolean above was
+  // inferred from the model's name, and the agent loop then keeps sending images rather than
+  // stripping them on a guess. Surface it wherever a text-only model is presented as a fact, so an
+  // operator can tell "this model cannot see" from "nobody has told us".
+  vision_support?: "supported" | "unsupported" | "unknown";
   // Raw catalog defaults — use for "Auto = revert target" in override editors.
   capabilities_catalog?: {
     supports_tools?: boolean;
@@ -2155,13 +2295,26 @@ export interface SidecarSaveResult {
 // else + the `[[sidecar_channels]]` boilerplate) on the server. Triggers
 // hot-reload of the channels registry; whether the sidecar child needs an
 // out-of-band restart is reported via `restart_required`.
+//
+// `channelType` is always the `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …)
+// — it picks the adapter's schema/command/args and never changes across a
+// rename. `instanceName` is the `[[sidecar_channels]].name` actually
+// written; omit it (or pass the same value as `channelType`) to save the
+// type's default single instance, exactly as before multi-instance support.
+// Pass a distinct `instanceName` to configure a second (third, …) instance
+// of the same catalog type — e.g. two Telegram bots.
 export async function saveSidecarConfig(
-  name: string,
+  channelType: string,
   values: Record<string, string>,
+  options: { instanceName?: string; agent?: string | null } = {},
 ): Promise<SidecarSaveResult> {
   return post<SidecarSaveResult>(
-    `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
-    { values },
+    `/api/channels/sidecar/${encodeURIComponent(channelType)}/configure`,
+    {
+      values,
+      instance_name: options.instanceName,
+      agent: options.agent,
+    },
   );
 }
 
@@ -3266,6 +3419,83 @@ export async function getConfigStatus(): Promise<ConfigStatus> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Media model endpoints (refs #8038, #8011)                          */
+/* ------------------------------------------------------------------ */
+/* Custom / self-hosted media endpoints are plain `GET /api/config`    */
+/* sub-tables, not entries in the model catalogue:                    */
+/* `[media.custom_stt]`, `[media.custom_image]`, `[media.custom_video]`*/
+/* and `[tts.custom]`. The types below describe that existing shape so */
+/* the Models tab can render them next to LLM models — the config file */
+/* layout is deliberately unchanged.                                   */
+
+/** Modality of one row in the unified Models tab. `llm` covers the model catalogue. */
+export type ModelEntryKind = "llm" | "tts" | "stt" | "image" | "video";
+
+/** Modality of a custom media endpoint — `ModelEntryKind` minus the catalogue. */
+export type MediaModelKind = Exclude<ModelEntryKind, "llm">;
+
+/**
+ * One custom media endpoint table as `GET /api/config` returns it.
+ *
+ * `api_key_env` is the *name* of an environment variable, never a key — the
+ * secret itself never enters config.toml and never reaches the dashboard.
+ * `model` is `Option<String>` on the Rust side for STT / image / video and a
+ * plain `String` for TTS, so it is optional here; `voice` and `format` exist
+ * on `CustomTtsConfig` only.
+ */
+export interface MediaModelEndpointConfig {
+  base_url?: string;
+  api_key_env?: string;
+  key_required?: boolean;
+  model?: string | null;
+  /** TTS only. */
+  voice?: string;
+  /** TTS only. */
+  format?: string;
+}
+
+/** The subset of a media endpoint the dashboard lets an operator edit. */
+export interface MediaModelEndpointDraft {
+  base_url: string;
+  key_required: boolean;
+  model: string;
+  /** TTS only — ignored for the other kinds. */
+  voice?: string;
+  /** TTS only — ignored for the other kinds. */
+  format?: string;
+}
+
+/** A custom media endpoint projected into a Models-tab row. */
+export interface MediaModelEndpoint {
+  kind: MediaModelKind;
+  /** Dotted `POST /api/config/set` path of the endpoint table, e.g. `media.custom_stt`. */
+  config_path: string;
+  /** Dotted path of the scalar that selects this endpoint, e.g. `media.audio_provider`. */
+  provider_path: string;
+  /** Provider name currently selected for this modality, or `""` when unset. */
+  provider: string;
+  config: MediaModelEndpointConfig;
+  /** Whether a base URL is set — an endpoint without one is never consulted. */
+  configured: boolean;
+  /**
+   * Whether the modality's master switch is on (`[media] audio_transcription`,
+   * `[tts] enabled`, …). A fully filled-in endpoint whose modality is off is
+   * never reached at runtime, so the tab has to say so.
+   */
+  modality_enabled: boolean;
+  /** Dotted path of that master switch, for the warning text. */
+  modality_enabled_path: string;
+  /**
+   * Value of the `[media]` scalar that takes precedence over this table's
+   * `model` (`audio_model` / `image_model` / `video_model`), or `null` when it
+   * is unset or the modality has no such scalar. TTS has none.
+   */
+  model_override: string | null;
+  /** Dotted path of that scalar, or `null` when the modality has none. */
+  model_override_path: string | null;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Config schema (draft-07)                                           */
 /* ------------------------------------------------------------------ */
 /* The backend now emits a draft-07 JSON Schema generated from the   */
@@ -3846,27 +4076,55 @@ export async function decayMemories(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/memory/decay", {});
 }
 
-export async function listUsageByAgent(): Promise<UsageByAgentItem[]> {
-  const data = await get<PaginatedResponse<UsageByAgentItem>>("/api/usage");
+export async function listUsageByAgent(
+  range: UsageRangeParams = {},
+): Promise<UsageByAgentItem[]> {
+  const data = await get<PaginatedResponse<UsageByAgentItem>>(
+    `/api/usage${usageRangeQuery(range)}`,
+  );
   return data.items ?? [];
 }
 
-export async function getUsageSummary(): Promise<UsageSummaryResponse> {
-  return get<UsageSummaryResponse>("/api/usage/summary");
+export async function getUsageSummary(
+  range: UsageRangeParams = {},
+): Promise<UsageSummaryResponse> {
+  return get<UsageSummaryResponse>(`/api/usage/summary${usageRangeQuery(range)}`);
 }
 
-export async function listUsageByModel(): Promise<UsageByModelItem[]> {
-  const data = await get<{ models?: UsageByModelItem[] }>("/api/usage/by-model");
+export async function listUsageByModel(
+  range: UsageRangeParams = {},
+): Promise<UsageByModelItem[]> {
+  const data = await get<{ models?: UsageByModelItem[] }>(
+    `/api/usage/by-model${usageRangeQuery(range)}`,
+  );
   return data.models ?? [];
 }
 
-export async function getUsageByModelPerformance(): Promise<ModelPerformanceItem[]> {
-  const data = await get<{ models?: ModelPerformanceItem[] }>("/api/usage/by-model/performance");
+export async function getUsageByModelPerformance(
+  range: UsageRangeParams = {},
+): Promise<ModelPerformanceItem[]> {
+  const data = await get<{ models?: ModelPerformanceItem[] }>(
+    `/api/usage/by-model/performance${usageRangeQuery(range)}`,
+  );
   return data.models ?? [];
 }
 
-export async function getUsageDaily(): Promise<UsageDailyResponse> {
-  return get<UsageDailyResponse>("/api/usage/daily");
+/**
+ * Daily breakdown for the window.
+ *
+ * `days` and an explicit range are mutually exclusive server-side (combining
+ * them is a `400`), so a bounded window passes dates only and `days` is used
+ * solely for the unbounded case. `dailyDaysFor` in `lib/usageRange.ts` picks
+ * between them.
+ */
+export async function getUsageDaily(
+  range: UsageRangeParams = {},
+  days?: number,
+): Promise<UsageDailyResponse> {
+  const bounded = Boolean(range.start_date || range.end_date);
+  return get<UsageDailyResponse>(
+    `/api/usage/daily${usageRangeQuery(range, bounded ? {} : { days })}`,
+  );
 }
 
 // Mirrors the kernel-side `BudgetStatus` (crates/librefang-kernel-metering)
