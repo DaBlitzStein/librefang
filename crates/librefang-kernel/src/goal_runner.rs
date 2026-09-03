@@ -2576,6 +2576,7 @@ mod tests {
             true,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
         )
@@ -2635,6 +2636,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -2712,6 +2714,7 @@ mod tests {
             true,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
         )
@@ -2758,6 +2761,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -2812,6 +2816,7 @@ mod tests {
             false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
         )
@@ -2862,6 +2867,7 @@ mod tests {
             evaluate,
             true,
             state.clone(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -2915,6 +2921,7 @@ mod tests {
             true,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
         )
@@ -2951,6 +2958,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -2999,6 +3007,7 @@ mod tests {
             false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
         )
@@ -3045,6 +3054,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -3094,7 +3104,19 @@ mod tests {
             }
         };
 
-        assert!(runner.start(goal_id, agent_id, 100, substrate.clone(), send));
+        assert!(runner.start(
+            goal_id,
+            agent_id,
+            100,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            None,
+            None,
+            None
+        ));
 
         // Wait for at least one tick to land, then pause.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -3127,7 +3149,19 @@ mod tests {
         let send_pending = |_a: AgentId, _m: String| async move {
             std::future::pending::<Result<String, String>>().await
         };
-        assert!(runner.start(goal_id, agent_id, 100, substrate.clone(), send_pending));
+        assert!(runner.start(
+            goal_id,
+            agent_id,
+            100,
+            substrate.clone(),
+            send_pending,
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            None,
+            None,
+            None
+        ));
         let resumed = runner.state(goal_id).unwrap();
         assert_eq!(resumed.phase, GoalRunPhase::Running);
         assert_eq!(resumed.iteration, paused_iteration);
@@ -3167,6 +3201,9 @@ mod tests {
                 max_iterations: 25,
                 last_progress: 65,
                 last_error: None,
+                verify_agent_id: None,
+                verify_max_retries: 0,
+                evaluator_model: None,
                 started_at: Utc::now(),
                 updated_at: Utc::now(),
             },
