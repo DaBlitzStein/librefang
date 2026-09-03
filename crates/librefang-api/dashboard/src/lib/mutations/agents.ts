@@ -174,8 +174,8 @@ export function useResumeAgent() {
  * Manifest-level partial update: name, description, system_prompt,
  * mcp_servers, model, schedule — or, via `manifest_toml`, a full-manifest
  * replacement (#7742: the dashboard's full manifest editor). Distinct from
- * `usePatchAgentConfig` which targets `/agents/{id}/config` (model-tuning
- * only).
+ * `usePatchAgentRuntimeConfig`, which targets the role-appropriate
+ * model-tuning endpoint.
  *
  * `manifest_toml` can touch nearly every manifest field in one request, so
  * its invalidation fan-out is broader than the other partial fields:
