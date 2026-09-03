@@ -12772,6 +12772,54 @@
         }
       }
     },
+    "/api/templates/{name}/promote": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/:name/promote — open a PR contributing this agent\ntype to the configured public registry.",
+        "description": "Runs the privacy scan first and refuses to publish when a finding sits\ninside a field the sanitiser keeps (`removed_by_sanitizer == false`),\nso a credential or private endpoint pasted into free text cannot reach\na public git history. Then it sanitizes the manifest (stripping private\nfields), renders it as TOML, forks the registry repo, pushes the file to\n`agent-types/<name>/agent.toml`, and opens a pull request.\nRequires `GITHUB_TOKEN` (env or vault).",
+        "operationId": "promote_agent_type",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PR opened against the registry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid manifest or name"
+          },
+          "401": {
+            "description": "No GitHub token configured"
+          },
+          "404": {
+            "description": "Agent type not found"
+          },
+          "409": {
+            "description": "Manifest still contains private details that require review"
+          },
+          "502": {
+            "description": "GitHub request failed"
+          }
+        }
+      }
+    },
     "/api/templates/{name}/toml": {
       "get": {
         "tags": [
@@ -15938,6 +15986,15 @@
               "null"
             ]
           },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Context-window override in tokens — a limit, not a preference.\nSame tri-state as [`Self::max_tokens`]; `null` returns resolution to\nthe registry / probe chain.",
+            "minimum": 0
+          },
           "description": {
             "type": [
               "string",
@@ -15957,11 +16014,28 @@
             ],
             "items": {}
           },
+          "frequency_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Frequency penalty (-2.0–2.0). Same tri-state as [`Self::max_tokens`]."
+          },
           "greeting_style": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "max_output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Maximum-output-tokens override for this endpoint — a limit, not a\npreference. Same tri-state as [`Self::context_window`].",
+            "minimum": 0
           },
           "max_tokens": {
             "type": [
@@ -15969,7 +16043,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Maximum tokens for LLM response. Controls conversation window size.",
+            "description": "Maximum tokens to request for the LLM response.\n\nTri-state: omit the key to leave it unchanged, send `null` to hand the\nfield back to \"inherit\" (the per-model override, then the system\ndefault, supplies it), or send a number to pin it for this agent.",
             "minimum": 0
           },
           "model": {
@@ -15983,6 +16057,14 @@
               "string",
               "null"
             ]
+          },
+          "presence_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Presence penalty (-2.0–2.0). Same tri-state as [`Self::max_tokens`]."
           },
           "provider": {
             "type": [
@@ -16002,7 +16084,15 @@
               "null"
             ],
             "format": "float",
-            "description": "Sampling temperature (0.0–2.0). Lower values are more deterministic."
+            "description": "Sampling temperature (0.0–2.0). Lower values are more deterministic.\nSame tri-state as [`Self::max_tokens`]."
+          },
+          "top_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Top-p / nucleus sampling (0.0–1.0). Same tri-state as [`Self::max_tokens`]."
           },
           "vibe": {
             "type": [
