@@ -71,6 +71,12 @@ vi.mock("motion/react", () => ({
 // Asserting on the rendered English is what ties this file to #8166: a locale
 // that declares `agentTypes.promote` twice again, with the other copy winning,
 // changes these strings and fails here.
+// Deliberately narrower than i18next: it interpolates only `{{name}}` with no
+// inner spaces, does not do CLDR plural selection, and `useTranslation()` returns
+// `t` without the `i18n` object.
+// None of that reaches this page — it uses no `count` key and destructures only
+// `{ t }` — but a future test rendering a component that calls `t(key, { count })`
+// or reads `i18n.language` will fail here in a confusing way. Widen the mock then.
 vi.mock("react-i18next", async () => {
   const actual = await vi.importActual<typeof import("react-i18next")>("react-i18next");
   const en = (await import("../locales/en.json")).default as Record<string, unknown>;
