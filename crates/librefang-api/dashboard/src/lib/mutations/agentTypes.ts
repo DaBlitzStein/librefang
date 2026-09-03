@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   createAgentType,
   deleteAgentType,
+  promoteAgentType,
   restoreTemplateVersion,
   spawnEphemeral,
   putAgentTemplateToml,
@@ -34,6 +35,19 @@ export function useDeleteAgentType() {
   return useMutation({
     mutationFn: (name: string) => deleteAgentType(name),
     onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
+  });
+}
+
+/**
+ * Promote an agent type to the public registry as a GitHub PR.
+ *
+ * Read-only with respect to local state — it forks the registry repo,
+ * pushes the sanitized manifest, and opens a PR. No local invalidation
+ * needed since the agent type itself is unchanged.
+ */
+export function usePromoteAgentType() {
+  return useMutation({
+    mutationFn: (name: string) => promoteAgentType(name),
   });
 }
 
