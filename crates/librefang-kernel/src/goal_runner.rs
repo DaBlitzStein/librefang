@@ -663,6 +663,13 @@ impl GoalRunner {
             max_iterations: checkpoint.max_iterations,
             last_progress: checkpoint.last_progress,
             last_error: None,
+            // A pause checkpoint records progress, not loop-engineering
+            // configuration: the verifier and evaluator are read from the goal
+            // document at every start, so a paused run reports none rather
+            // than a stale copy of what the last run happened to use.
+            verify_agent_id: None,
+            verify_max_retries: 0,
+            evaluator_model: None,
             started_at: now,
             updated_at: now,
         })

@@ -334,9 +334,15 @@ async fn start_or_resume(
         .map(|n| n as u32);
 
     let started = if require_paused {
-        state
-            .kernel
-            .resume_goal_run(goal_id, agent_id, max_iterations)
+        state.kernel.resume_goal_run(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
     } else {
         state.kernel.start_goal_run(
             goal_id,
