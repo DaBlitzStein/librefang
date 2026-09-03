@@ -971,9 +971,13 @@ prompt_template = "on push"
     expect(reparsed.form.tool_allowlist).toEqual(["file_read"]);
     expect(reparsed.extras.topLevel["future_field"]).toBe("unknown to this daemon");
     expect(reparsed.extras.topLevel["compaction"]).toEqual({ threshold_messages: 7 });
-    expect(reparsed.extras.topLevel["workspaces"]).toEqual({
-      notes: { path: "notes", mode: "rw" },
-    });
+    // `[workspaces]` is a first-class form field since #7835/#8013, so a
+    // well-formed row round-trips through `form.workspaces` rather than through
+    // extras. Only rows the editor cannot represent stay in extras.
+    expect(
+      reparsed.form.workspaces.map(({ name, path, mode }) => ({ name, path, mode })),
+    ).toEqual([{ name: "notes", path: "notes", mode: "rw" }]);
+    expect(reparsed.extras.topLevel["workspaces"]).toBeUndefined();
     expect(reparsed.extras.topLevel["triggers"]).toEqual([
       { pattern: "git.push", prompt_template: "on push" },
     ]);

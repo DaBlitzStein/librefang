@@ -12,7 +12,7 @@ import {
   usePromoteAgentType,
   useRestoreTemplateVersion,
   useSpawnEphemeral,
-  useUpdateAgentType,
+  useUpdateAgentTypeToml,
 } from "../lib/mutations/agentTypes";
 import { ApiError } from "../lib/http/errors";
 import { useUIStore } from "../lib/store";
@@ -43,7 +43,7 @@ vi.mock("../lib/mutations/agentTypes", () => ({
   usePromoteAgentType: vi.fn(),
   useRestoreTemplateVersion: vi.fn(),
   useSpawnEphemeral: vi.fn(),
-  useUpdateAgentType: vi.fn(),
+  useUpdateAgentTypeToml: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -164,7 +164,7 @@ function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending:
     useDeleteAgentType,
     useRestoreTemplateVersion,
     useSpawnEphemeral,
-    useUpdateAgentType,
+    useUpdateAgentTypeToml,
   ]) {
     (hook as unknown as ReturnType<typeof vi.fn>).mockReturnValue(idle);
   }
