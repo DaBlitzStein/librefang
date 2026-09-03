@@ -30,16 +30,23 @@ export interface ManifestFormState {
     | { mode: "proactive"; conditions: string[] }
     | { mode: "continuous"; check_interval_secs: string };
 
+  // Every numeric field here is tri-state, and `""` is the third state.
+  // It means "this agent has no opinion", which the kernel reads as inherit:
+  // the per-model override supplies the value, and failing that the system default.
+  // It is emphatically not zero, and it is not the same as a number that happens to match the default.
   model: {
     provider: string;
     model: string;
     system_prompt: string;
     temperature: string;
     max_tokens: string;
-    context_window: string;
     top_p: string;
     frequency_penalty: string;
     presence_penalty: string;
+    // Endpoint limits rather than sampling preferences: what the model can
+    // read and emit, not how it should sound.
+    context_window: string;
+    max_output_tokens: string;
     api_key_env: string;
     base_url: string;
   };
@@ -175,10 +182,11 @@ export const emptyManifestForm = (): ManifestFormState => ({
     system_prompt: "",
     temperature: "",
     max_tokens: "",
-    context_window: "",
     top_p: "",
     frequency_penalty: "",
     presence_penalty: "",
+    context_window: "",
+    max_output_tokens: "",
     api_key_env: "",
     base_url: "",
   },
@@ -281,10 +289,11 @@ const FORM_MODEL_KEYS = new Set([
   "system_prompt",
   "temperature",
   "max_tokens",
-  "context_window",
   "top_p",
   "frequency_penalty",
   "presence_penalty",
+  "context_window",
+  "max_output_tokens",
   "api_key_env",
   "base_url",
 ]);
@@ -400,23 +409,27 @@ const isPositiveUnsignedTomlInteger = (raw: string): boolean => {
   return value !== null && BigInt(value) > 0n;
 };
 
+/**
+ * Parse a float that may legitimately be negative.
+ *
+ * `parseFloatish` refuses negatives because every field it was written for is a
+ * cost or a quota. `frequency_penalty` and `presence_penalty` range -2.0..2.0,
+ * so routing them through it silently dropped every negative value the operator
+ * typed — the field accepted the input and the TOML came out without the key.
+ */
+const parseSignedFloat = (raw: string): number | null => {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+};
+
 const parseFloatish = (raw: string): number | null => {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const n = Number(trimmed);
   if (!Number.isFinite(n)) return null;
   if (n < 0) return null; // all our float fields are cost/quota — never negative
-  return n;
-};
-
-// Sampling penalties are signed: parseFloatish rejects negatives because
-// every other float field here is a cost/quota, but frequency/presence
-// penalty are OpenAI-compatible parameters whose valid range is [-2, 2].
-const parseFloatSigned = (raw: string): number | null => {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const n = Number(trimmed);
-  if (!Number.isFinite(n)) return null;
   return n;
 };
 
@@ -539,10 +552,11 @@ export const serializeManifestForm = (
   writeStringScalar(modelBody, "system_prompt", form.model.system_prompt);
   writeNumberScalar(modelBody, "temperature", parseFloatish(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
-  writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
   writeNumberScalar(modelBody, "top_p", clampRange(parseFloatish(form.model.top_p), 0, 1));
-  writeNumberScalar(modelBody, "frequency_penalty", clampRange(parseFloatSigned(form.model.frequency_penalty), -2, 2));
-  writeNumberScalar(modelBody, "presence_penalty", clampRange(parseFloatSigned(form.model.presence_penalty), -2, 2));
+  writeNumberScalar(modelBody, "frequency_penalty", clampRange(parseSignedFloat(form.model.frequency_penalty), -2, 2));
+  writeNumberScalar(modelBody, "presence_penalty", clampRange(parseSignedFloat(form.model.presence_penalty), -2, 2));
+  writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
+  writeNumberScalar(modelBody, "max_output_tokens", parseInteger(form.model.max_output_tokens));
   writeStringScalar(modelBody, "api_key_env", form.model.api_key_env.trim());
   writeStringScalar(modelBody, "base_url", form.model.base_url.trim());
   const modelExtras = renderExtraScalars(safeModelExtras);
@@ -1001,10 +1015,11 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.model.system_prompt = asString(modelTable.system_prompt);
   form.model.temperature = asNumberString(modelTable.temperature);
   form.model.max_tokens = asNumberString(modelTable.max_tokens);
-  form.model.context_window = asNumberString(modelTable.context_window);
   form.model.top_p = asNumberString(modelTable.top_p);
   form.model.frequency_penalty = asNumberString(modelTable.frequency_penalty);
   form.model.presence_penalty = asNumberString(modelTable.presence_penalty);
+  form.model.context_window = asNumberString(modelTable.context_window);
+  form.model.max_output_tokens = asNumberString(modelTable.max_output_tokens);
   form.model.api_key_env = asString(modelTable.api_key_env);
   form.model.base_url = asString(modelTable.base_url);
   extras.model = stripKnown(modelTable, FORM_MODEL_KEYS);
