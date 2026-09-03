@@ -42,7 +42,7 @@ impl LibreFangKernel {
     /// stored in the model catalog but NOT in `self.config.provider_urls` (which is
     /// the boot-time snapshot). This helper checks both sources so that custom
     /// providers work immediately without a daemon restart.
-    fn lookup_provider_url(&self, provider: &str) -> Option<String> {
+    pub(crate) fn lookup_provider_url(&self, provider: &str) -> Option<String> {
         let cfg = self.config.load();
         // 1. Boot-time config (from config.toml [provider_urls])
         if let Some(url) = cfg.provider_urls.get(provider) {
@@ -1181,5 +1181,27 @@ key_required = true
             "the boot default_driver fallback loop must gate each slot via \
              is_provider_allowed (#6484)"
         );
+    }
+
+    #[test]
+    fn model_default_resolves_to_configured_default_model() {
+        let (provider, model) =
+            resolve_fallback_target("groq", "default", "anthropic", "claude-sonnet-4-5");
+        assert_eq!(model, "claude-sonnet-4-5");
+        assert_ne!(
+            model, "default",
+            "the literal sentinel must never survive resolution"
+        );
+        assert_eq!(
+            provider, "groq",
+            "an explicit provider must not be replaced by the default"
+        );
+    }
+
+    #[test]
+    fn model_empty_inherits_default() {
+        let (provider, model) = resolve_fallback_target("", "", "anthropic", "claude-sonnet-4-5");
+        assert_eq!(model, "claude-sonnet-4-5");
+        assert_eq!(provider, "anthropic");
     }
 }
