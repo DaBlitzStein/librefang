@@ -636,6 +636,17 @@ impl App {
                     crate::i18n::t("tui-memory-config-save-failed")
                 };
             }
+            AppEvent::AgentWorkspacesLoaded(id, entries) => {
+                if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id) {
+                    self.agents.workspaces = entries;
+                    if !self.agents.workspaces.is_empty() {
+                        self.agents.ws_cursor = 0;
+                    }
+                }
+            }
+            AppEvent::AgentWorkspacesUpdated(_id) => {
+                // The detail view reloads on the next agent refresh.
+            }
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits
                 // on its spinner forever and the message never gets read.
@@ -1875,6 +1886,21 @@ impl App {
 
     fn handle_agent_action(&mut self, action: agents::AgentAction) {
         match action {
+            agents::AgentAction::FetchAgentWorkspaces(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_workspaces(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateWorkspaces { id, workspaces } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_workspaces(
+                        backend,
+                        id,
+                        workspaces,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
             agents::AgentAction::Continue => {}
             agents::AgentAction::Back => {
                 // In Main phase, Esc from agents just stays on the tab
