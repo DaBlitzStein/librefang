@@ -1582,11 +1582,15 @@ mod tests {
         std::env::set_var("LIBREFANG_VAULT_KEY", base64_key());
         std::env::remove_var("GITHUB_TOKEN");
         std::env::remove_var("GH_TOKEN");
-        seed_vault_with_token(&vault_path, "vault-token");
+        // Underscore, not `vault-token`: `tests/i18n_checks.rs` treats any
+        // lowercase hyphenated literal whose first segment matches a locale key
+        // prefix as a message id, and `vault-` is one, so the hyphenated
+        // spelling would demand a `vault-token` entry in every locale.
+        seed_vault_with_token(&vault_path, "vault_token");
 
         assert_eq!(
             resolve_github_token(&vault_path).as_deref(),
-            Some("vault-token")
+            Some("vault_token")
         );
         std::env::remove_var("LIBREFANG_VAULT_KEY");
     }
@@ -1601,7 +1605,7 @@ mod tests {
 
         std::env::set_var("LIBREFANG_VAULT_KEY", base64_key());
         std::env::remove_var("GH_TOKEN");
-        seed_vault_with_token(&vault_path, "vault-token");
+        seed_vault_with_token(&vault_path, "vault_token");
 
         std::env::set_var("GITHUB_TOKEN", "env-token");
         assert_eq!(
