@@ -10894,6 +10894,7 @@ prompt_template = "do {{x}}"
                 output_tokens: 20,
                 duration_ms: 100,
                 error: None,
+                variables: BTreeMap::new(),
             }],
             output: Some("final output".to_string()),
             error: None,

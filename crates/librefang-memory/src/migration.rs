@@ -369,6 +369,23 @@ fn try_column_exists(
     Ok(false)
 }
 
+/// Whether `table` exists at all.
+///
+/// [`try_column_exists`] cannot answer this: `PRAGMA table_info` on a missing
+/// table yields zero rows, so an absent table and an absent column are
+/// indistinguishable through it — and a migration that reads `false` as "add
+/// the column" then fails the `ALTER` outright. A migration whose target table
+/// was created below the schema version a database is stamped at (so its
+/// `CREATE TABLE` step never ran) needs this distinction.
+fn try_table_exists(conn: &Connection, table: &str) -> Result<bool, rusqlite::Error> {
+    let found: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(found > 0)
+}
+
 #[cfg(test)]
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     try_column_exists(conn, table, column).expect("test schema inspection must succeed")
@@ -1249,7 +1266,14 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// dashboard. Store the actual value so progress survives a restart.
 /// `try_column_exists` keeps the ADD COLUMN idempotent.
 fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !try_column_exists(conn, "workflow_runs", "total_steps")? {
+    // A database stamped at or above v37 without ever running v37's DDL has no
+    // `workflow_runs` table to alter. It has no runs to lose progress on either,
+    // so skipping is correct — and unlike v49, which has the same shape, this
+    // migration sits above the version such databases are stamped at, so it is
+    // the first one that would actually hit the missing table.
+    if try_table_exists(conn, "workflow_runs")?
+        && !try_column_exists(conn, "workflow_runs", "total_steps")?
+    {
         conn.execute(
             "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
             [],
