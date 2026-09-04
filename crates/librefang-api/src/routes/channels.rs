@@ -978,21 +978,21 @@ fn sidecar_discovery_rows() -> Vec<serde_json::Value> {
 /// channel named X" for a channel that was running at that very moment.
 ///
 /// Root first, so a shadowing root entry (which is what the live config
-/// resolves to) is the one that goes. `false` still means "declared
-/// nowhere", which is the only case that deserves a 404.
+/// resolves to) is the one that goes — but the walk does not stop there: a
+/// name can be declared in the root AND an included file at once, and leaving
+/// either behind means the reload re-merges the survivor and the delete
+/// reports `removed` while the channel comes back. Every file that declares
+/// the name is stripped; `false` still means "declared nowhere", which is the
+/// only case that deserves a 404.
 fn remove_sidecar_block_anywhere(
     config_path: &std::path::Path,
     name: &str,
 ) -> Result<bool, String> {
-    if super::sidecar_toml::remove_sidecar_block(config_path, name)? {
-        return Ok(true);
-    }
+    let mut removed = super::sidecar_toml::remove_sidecar_block(config_path, name)?;
     for included in included_files_with_sidecars_blocking(config_path)? {
-        if super::sidecar_toml::remove_sidecar_block(&included, name)? {
-            return Ok(true);
-        }
+        removed |= super::sidecar_toml::remove_sidecar_block(&included, name)?;
     }
-    Ok(false)
+    Ok(removed)
 }
 
 /// Request body for `POST /api/channels/sidecar/{name}/configure`.
@@ -1844,14 +1844,14 @@ pub async fn delete_sidecar_channel(
     // 404 there tells the operator the channel does not exist while its
     // sidecar is delivering messages. Reconcile instead: fall through to the
     // reload, which drops the row and stops the orphaned child.
-    let live = !removed
-        && (state
-            .kernel
-            .config_ref()
-            .sidecar_channels
-            .iter()
-            .any(|sc| sc.name == name)
-            || state.kernel.channel_adapters_ref().contains_key(&name));
+    let in_live_config = state
+        .kernel
+        .config_ref()
+        .sidecar_channels
+        .iter()
+        .any(|sc| sc.name == name);
+    let has_adapter = state.kernel.channel_adapters_ref().contains_key(&name);
+    let live = !removed && (in_live_config || has_adapter);
     if !removed && !live {
         return Err(ApiErrorResponse::not_found(format!(
             "no configured sidecar channel named `{name}`"
@@ -1859,8 +1859,13 @@ pub async fn delete_sidecar_channel(
         .into_json_tuple());
     }
     if live {
+        // Two genuinely different reconciliation states; naming which one
+        // tripped makes the next rodela-style incident diagnosable from the
+        // log alone.
         tracing::warn!(
             channel = %name,
+            in_live_config = in_live_config,
+            has_orphan_adapter = has_adapter,
             "sidecar delete: no config block on disk but the channel is live — \
              reconciling the running daemon with config.toml"
         );
@@ -1887,7 +1892,7 @@ pub async fn delete_sidecar_channel(
             // the config) but not the raw error chain — the full `e` is already
             // logged above.
             return Err(ApiErrorResponse::internal(if live {
-                "config.toml had no block to remove and the bridge restart failed — the sidecar is still running"
+                "config.toml had no block to remove and the bridge restart failed — the sidecar is still running; a daemon restart will drop it"
             } else {
                 "removed from config.toml but bridge restart failed"
             })

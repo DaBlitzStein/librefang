@@ -217,3 +217,48 @@ async fn delete_unknown_sidecar_404s() {
     let (status, _) = send(h.app.clone(), auth_delete("/api/channels/sidecar/nope")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// A name declared in the root config.toml AND an included file at once: the
+/// early-returning walk this test replaces stripped only the root block,
+/// reported `removed`, and the reload re-merged the survivor from the include,
+/// so the channel came back — a fresh version of the bug this handler fixes.
+/// Both blocks must go in one delete, and a repeat delete must be a real 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_strips_a_sidecar_declared_in_root_and_include_at_once() {
+    let h = boot_router().await;
+    let config_path = h.home.join("config.toml");
+    let included_path = h.home.join("channels.toml");
+    // `include` must precede the first table header: written after
+    // TELEGRAM_BLOCK it lands under `[sidecar_channels.env]`, not at the
+    // document root, and the included file is never scanned.
+    std::fs::write(
+        &config_path,
+        format!("include = [\"channels.toml\"]\n{TELEGRAM_BLOCK}"),
+    )
+    .expect("seed config.toml");
+    std::fs::write(&included_path, TELEGRAM_BLOCK).expect("seed channels.toml");
+
+    let (status, body) = send(h.app.clone(), auth_delete("/api/channels/sidecar/telegram")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "removed");
+
+    let root = std::fs::read_to_string(&config_path).expect("root config still present");
+    let included = std::fs::read_to_string(&included_path).expect("included file still present");
+    assert!(
+        !root.contains("[[sidecar_channels]]") && !root.contains("name = \"telegram\""),
+        "block must be gone from the root config: {root}"
+    );
+    assert!(
+        !included.contains("[[sidecar_channels]]") && !included.contains("name = \"telegram\""),
+        "block must be gone from the included file: {included}"
+    );
+
+    let (status, _) = send(h.app.clone(), auth_delete("/api/channels/sidecar/telegram")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "second delete must 404");
+}
