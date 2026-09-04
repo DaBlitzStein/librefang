@@ -379,6 +379,38 @@ mod tests {
     }
 
     #[test]
+    fn total_steps_round_trips_instead_of_coming_back_as_zero() {
+        // #6504: the run detail used to report "step X of 0" after a restart,
+        // because the total lived only on the in-memory run and the row was
+        // rebuilt with a hardcoded zero. Every other test here leaves
+        // `total_steps` at 0, so a regression that dropped the column on the
+        // way in or out would not change a single assertion.
+        let store = in_memory_store();
+        let mut row = sample_row("run-total", "pending");
+        row.total_steps = 3;
+        store.upsert_run(&row).unwrap();
+
+        let loaded = store.get_run("run-total").unwrap().expect("row must exist");
+        assert_eq!(
+            loaded.total_steps, 3,
+            "total_steps must survive the write and the read, not come back as 0"
+        );
+
+        // The state transitions that follow go through the same ON CONFLICT
+        // path, which is where a missing `excluded.total_steps` would silently
+        // reset it.
+        let mut running = loaded;
+        running.state = "running".to_string();
+        store.upsert_run(&running).unwrap();
+
+        let reloaded = store.get_run("run-total").unwrap().expect("row must exist");
+        assert_eq!(
+            reloaded.total_steps, 3,
+            "total_steps must survive a later update too"
+        );
+    }
+
+    #[test]
     fn owner_agent_id_round_trips_and_survives_updates() {
         // #7714: the owner is stamped once when the run is created and must
         // still be there after the state transitions that follow, because
