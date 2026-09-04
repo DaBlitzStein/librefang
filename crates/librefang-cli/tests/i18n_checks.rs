@@ -456,7 +456,7 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
             let remaining = &content[idx..];
             if remaining.starts_with("r\"") {
                 chars.next(); // consume '"'
-                while let Some((_, rc)) = chars.next() {
+                for (_, rc) in chars.by_ref() {
                     if rc == '\n' {
                         line_number += 1;
                     }
@@ -467,8 +467,8 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
                 continue;
             } else if remaining.starts_with("r#") {
                 let mut hashes = 0;
-                let mut temp_chars = chars.clone();
-                while let Some((_, hc)) = temp_chars.next() {
+                let temp_chars = chars.clone();
+                for (_, hc) in temp_chars {
                     if hc == '#' {
                         hashes += 1;
                     } else if hc == '"' {
