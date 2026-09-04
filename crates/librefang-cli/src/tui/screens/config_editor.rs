@@ -830,6 +830,26 @@ mod tests {
         );
     }
 
+    /// The parser test above pins the mapping in isolation, which leaves the
+    /// editor free to stop routing through it. Submitting the prompt without
+    /// typing is how an operator actually asks for the default back, so drive
+    /// that path end to end.
+    #[test]
+    fn submitting_an_untouched_prompt_posts_null_through_the_editor() {
+        let mut state = loaded();
+        focus(&mut state, "skills.registry_repo");
+        state.handle_key(key(KeyCode::Enter));
+        assert!(state.is_editing(), "Enter must open the value prompt");
+        match state.handle_key(key(KeyCode::Enter)) {
+            SettingsAction::SaveConfigValue { path, value } => {
+                assert_eq!(path, "skills.registry_repo");
+                assert_eq!(value, serde_json::Value::Null);
+            }
+            _ => panic!("submitting an empty prompt must post the removal"),
+        }
+        assert!(!state.is_editing(), "submitting must close the prompt");
+    }
+
     #[test]
     fn a_boolean_field_toggles_without_opening_a_prompt() {
         let mut state = loaded();
