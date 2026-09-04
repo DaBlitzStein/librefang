@@ -131,6 +131,87 @@ async fn upload_over_the_upload_cap_gets_a_413_naming_the_cap() {
     );
 }
 
+/// The global cap has to stay OUTSIDE the JSON depth guard, not just outside the upload router.
+///
+/// The guard buffers an `application/json` body whole under its own 8 MiB `HARD_CEILING_BYTES` before anything downstream sees it, so a limit nested inside it lets an authenticated caller stage 8 MiB against a 1 KiB cap and only then get refused.
+/// The status cannot tell the two orderings apart — the guard answers 413 as well (`middleware.rs`, `to_bytes` error arm) — so the assertion is on *whose* refusal it is: the guard names itself in the body, and reaching that message means it buffered the 9 MiB the cap was supposed to have cut.
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_json_is_cut_by_the_cap_not_staged_by_the_depth_guard() {
+    let harness = boot().await;
+
+    let over_the_guard_ceiling = 9 * 1024 * 1024;
+    let mut body = Vec::with_capacity(over_the_guard_ceiling);
+    body.extend_from_slice(b"[\"");
+    body.resize(over_the_guard_ceiling - 2, b'a');
+    body.extend_from_slice(b"\"]");
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{TEST_AGENT_ID}/message"))
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("content-type", "application/json")
+                .header("content-length", body.len().to_string())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("router responds");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "max_request_body_bytes ({GLOBAL_BODY_CAP}) must refuse this body"
+    );
+
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("error body");
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(
+        !body.contains("depth guard"),
+        "the refusal must come from the body-size cap, not from the JSON depth guard: reaching the guard's message means it buffered 9 MiB before a {GLOBAL_BODY_CAP}-byte cap ran, which is the staging this ordering exists to prevent. Body: {body}"
+    );
+}
+
+/// Uploads are outside the depth guard, which is the point of merging them after it.
+///
+/// `application/json` is an allowed upload type (`EXTRA_ALLOWED_UPLOAD_TYPES`), and the guard's ceiling was a third undeclared cap on those uploads — the same class of override as the global limit this issue is about.
+/// A tiny deeply-nested body separates the two arrangements without needing a large one: inside the guard it is a 400, outside it is stored like any other bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn deeply_nested_json_upload_is_stored_rather_than_parsed() {
+    let harness = boot().await;
+
+    // 60 levels comfortably exceeds MAX_JSON_BODY_DEPTH (32).
+    let body = format!("{}0{}", "[".repeat(60), "]".repeat(60));
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{TEST_AGENT_ID}/upload"))
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("content-type", "application/json")
+                .header("x-filename", "payload.json")
+                .header("content-length", body.len().to_string())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("router responds");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "the upload handler writes bytes to disk and never parses them, so the JSON depth guard must not sit in front of it"
+    );
+}
+
 /// The control for the fix: moving the global limit off `app` must not remove it from the routes it was protecting.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_global_cap_still_applies_off_the_upload_path() {
