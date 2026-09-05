@@ -881,6 +881,21 @@ fn test_channel_send_hint_suppressed_for_webui() {
 }
 
 #[test]
+fn test_channel_send_hint_webui_match_is_case_insensitive() {
+    let tools = vec!["channel_send".to_string()];
+    let section =
+        build_channel_section("WebUI", Some("Alice"), Some("user-1"), false, false, &tools);
+    assert!(
+        section.contains("web interface"),
+        "a mixed-case webui is still the web interface — `is_reserved_system_channel` matches case-insensitively, so the inner branch must too"
+    );
+    assert!(
+        !section.contains("background run"),
+        "a live web session must not be told there is no live user watching this response"
+    );
+}
+
+#[test]
 fn test_channel_send_hint_suppressed_for_cron_and_autonomous() {
     let tools = vec!["channel_send".to_string()];
     for channel in ["cron", "autonomous"] {
