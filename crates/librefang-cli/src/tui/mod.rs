@@ -512,8 +512,8 @@ impl App {
                     };
                 }
             }
-            AppEvent::AgentTokenUsageLoaded(usage) => {
-                self.agents.token_usage = Some(usage);
+            AppEvent::AgentTokenUsageLoaded { agent_id, usage } => {
+                self.agents.apply_token_usage(&agent_id, usage);
             }
             AppEvent::AgentModelParamsLoaded {
                 model,

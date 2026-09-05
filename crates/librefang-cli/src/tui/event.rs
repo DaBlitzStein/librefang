@@ -339,7 +339,15 @@ pub enum AppEvent {
     /// Agent channel allowlist updated.
     AgentChannelsUpdated(String),
     /// Agent token usage loaded.
-    AgentTokenUsageLoaded(crate::tui::screens::agents::AgentTokenUsage),
+    ///
+    /// Carries the id it was fetched for: the two HTTP calls behind it are
+    /// sequential, so a selection change can land between the request and the
+    /// answer, and figures with no id on them paint under whatever name is on
+    /// screen when they arrive.
+    AgentTokenUsageLoaded {
+        agent_id: String,
+        usage: crate::tui::screens::agents::AgentTokenUsage,
+    },
     /// The agent's current inference parameters, plus the model's own limits so
     /// the editor's ladders can stop where the endpoint does. A `null` in
     /// `model` is the inherit state and stays `null` here.
@@ -2302,7 +2310,7 @@ pub fn spawn_fetch_agent_token_usage(
                 return;
             }
         }
-        let _ = tx.send(AppEvent::AgentTokenUsageLoaded(usage));
+        let _ = tx.send(AppEvent::AgentTokenUsageLoaded { agent_id, usage });
     });
 }
 

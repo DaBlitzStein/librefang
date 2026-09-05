@@ -266,6 +266,18 @@ impl AgentSelectState {
         self.search_query.clear();
         self.filtered_indices.clear();
         self.detail = None;
+        self.token_usage = None;
+    }
+
+    /// Fold a token-usage payload in, if it is still the one being looked at.
+    ///
+    /// The fetch is two sequential HTTP calls; a selection change in between
+    /// leaves the answer describing an agent nobody is looking at any more,
+    /// and the panel has nothing on it saying whose numbers these are.
+    pub fn apply_token_usage(&mut self, agent_id: &str, usage: AgentTokenUsage) {
+        if self.detail.as_ref().is_some_and(|d| d.id == agent_id) {
+            self.token_usage = Some(usage);
+        }
     }
 
     /// Load daemon agents from the daemon API.
@@ -508,6 +520,11 @@ impl AgentSelectState {
                                     self.detail = Some(self.build_detail_inprocess(local));
                                 }
                             }
+                            // The figures on screen belong to the agent that
+                            // was open; leaving them up shows one agent's
+                            // token count and cost under another's name until
+                            // this one's own fetch returns.
+                            self.token_usage = None;
                             self.sub = AgentSubScreen::AgentDetail;
                             if let Some(ref detail) = self.detail {
                                 return AgentAction::LoadAgentDetail(detail.id.clone());
@@ -1888,5 +1905,78 @@ mod tests {
             AgentAction::FetchAgentTokenUsage(id) => assert_eq!(id, "agent-7"),
             _ => panic!("the open agent's id must be the one fetched"),
         }
+    }
+
+    fn usage(total: u64) -> AgentTokenUsage {
+        AgentTokenUsage {
+            total_tokens: total,
+            recent: Vec::new(),
+        }
+    }
+
+    /// Two sequential HTTP calls back one `$`, so a selection change lands
+    /// between the request and the answer whenever the daemon is slow.
+    #[test]
+    fn a_footprint_for_another_agent_is_ignored() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-2".to_string(),
+            ..AgentDetail::default()
+        });
+
+        state.apply_token_usage("agent-1", usage(9_999));
+
+        assert!(
+            state.token_usage.is_none(),
+            "agent A's figures must not render under agent B's name"
+        );
+
+        state.apply_token_usage("agent-2", usage(42));
+
+        assert_eq!(
+            state.token_usage.as_ref().map(|u| u.total_tokens),
+            Some(42),
+            "the open agent's own answer must still land"
+        );
+    }
+
+    /// Without this the previous agent's numbers stay on screen until this
+    /// agent's own fetch returns — on every selection change, race or no race.
+    #[test]
+    fn opening_another_agent_drops_the_previous_footprint() {
+        let mut state = AgentSelectState::new();
+        state.daemon_agents = vec![
+            DaemonAgent {
+                id: "agent-1".to_string(),
+                name: "a".to_string(),
+                state: "running".to_string(),
+                provider: String::new(),
+                model: String::new(),
+            },
+            DaemonAgent {
+                id: "agent-2".to_string(),
+                name: "b".to_string(),
+                state: "running".to_string(),
+                provider: String::new(),
+                model: String::new(),
+            },
+        ];
+        state.list.select(Some(0));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        state.apply_token_usage("agent-1", usage(1_234));
+        assert!(state.token_usage.is_some());
+
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        state.list.select(Some(1));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            state.detail.as_ref().map(|d| d.id.as_str()),
+            Some("agent-2")
+        );
+        assert!(
+            state.token_usage.is_none(),
+            "the panel must not show agent A's figures for agent B"
+        );
     }
 }
