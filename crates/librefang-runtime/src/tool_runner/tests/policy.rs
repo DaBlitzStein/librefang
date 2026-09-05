@@ -778,6 +778,7 @@ fn test_agent_spawn_manifest_all_cases() {
         vec![],
         false,
         None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("name = \"test-agent\""));
@@ -794,6 +795,7 @@ fn test_agent_spawn_manifest_all_cases() {
         vec![],
         false,
         None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("tools = [\"file_read\", \"file_write\"]"));
@@ -806,6 +808,7 @@ fn test_agent_spawn_manifest_all_cases() {
         vec!["web_fetch".to_string()],
         vec![],
         true,
+        None,
         None,
     )
     .unwrap();
@@ -820,6 +823,7 @@ fn test_agent_spawn_manifest_all_cases() {
         vec!["uv *".to_string()],
         false,
         None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("shell = [\"uv *\"]"));
@@ -832,6 +836,7 @@ fn test_agent_spawn_manifest_all_cases() {
         vec!["shell_exec".to_string(), "git".to_string()],
         vec!["uv *".to_string(), "cargo *".to_string()],
         false,
+        None,
         None,
     )
     .unwrap();
@@ -848,6 +853,7 @@ fn test_agent_spawn_manifest_all_cases() {
         vec![],
         false,
         None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("agent-with\"quotes"));
@@ -859,6 +865,7 @@ fn test_agent_spawn_manifest_all_cases() {
         vec!["web_fetch".to_string(), "git".to_string()],
         vec!["ls *".to_string()],
         true,
+        None,
         None,
     )
     .unwrap();
@@ -906,6 +913,7 @@ fn agent_spawn_profile_pins_provider_and_model() {
         vec![],
         false,
         Some(&profile),
+        None,
     )
     .unwrap();
 
@@ -932,6 +940,7 @@ fn agent_spawn_profile_manifest_round_trips() {
         vec![],
         false,
         Some(&profile),
+        None,
     )
     .unwrap();
 
@@ -960,6 +969,7 @@ fn agent_spawn_profile_without_context_window_leaves_it_unset() {
         vec![],
         false,
         Some(&profile),
+        None,
     )
     .unwrap();
 
@@ -979,6 +989,7 @@ fn agent_spawn_without_profile_is_unchanged() {
         vec!["file_read".to_string()],
         vec![],
         false,
+        None,
         None,
     )
     .unwrap();
@@ -1102,6 +1113,248 @@ fn agent_spawn_profile_allowed_when_parent_override_permits() {
         default_profile: None,
     };
     assert!(check_profile_against_parent(&profile, &allowlisted, &[]).is_ok());
+}
+
+/// A budgeted parent's cap must survive the hop into the agent it spawns.
+///
+/// The child is handed `agent_spawn` — the exact shape of the escape: check
+/// the first hop only and the parent spends its budget on a permitted child,
+/// which then spawns on the most expensive profile in the catalog with nothing
+/// to stop it. The assertion is on the manifest the kernel was actually
+/// handed, and then on what that manifest permits the child in turn.
+#[tokio::test]
+async fn agent_spawn_propagates_parent_cost_budget_to_the_child() {
+    let quick = spawn_test_profile("quick", "cheapo", "cheap-model", None);
+    let mut architect = spawn_test_profile("architect", "anthropic", "claude-opus-4-1", None);
+    architect.cost_tier = librefang_types::model_profile::CostTier::Expensive;
+    let parent_override = librefang_types::model_profile::AgentRouterOverride {
+        fixed: false,
+        allowed_profiles: Default::default(),
+        cost_budget: Some(librefang_types::model_profile::CostTier::Cheap),
+        default_profile: None,
+    };
+
+    let stub = Arc::new(SpawnCheckKernel {
+        parent_override: Ok(Some(parent_override.clone())),
+        profiles: vec![architect.clone(), quick],
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "helper",
+            "system_prompt": "You help.",
+            "tools": ["agent_spawn"],
+            "profile": "quick"
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some("parent-agent-id"),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+    assert!(
+        !result.is_error,
+        "a within-budget profile must spawn, got: {}",
+        result.content
+    );
+
+    let child = stub.spawned_manifest();
+    let child_override = child
+        .model
+        .router_override
+        .expect("the child must inherit the parent's router override, not be born unconstrained");
+    assert_eq!(
+        child_override, parent_override,
+        "the child must be capped at most as loosely as its parent"
+    );
+
+    // The second hop, which is where the escape used to be: the child's own
+    // `agent_spawn { profile: "architect" }` is now checked against the
+    // override it inherited, and refused.
+    let err = check_profile_against_parent(&architect, &child_override, &["quick".to_string()])
+        .expect_err("the inherited budget must refuse the expensive profile at the next hop")
+        .to_string();
+    assert!(
+        err.contains("architect"),
+        "must name the refused profile: {err}"
+    );
+}
+
+/// `fixed = true` binds the subtree, not just the pinned agent's own turns.
+///
+/// A fixed parent already refuses to spawn *with* a profile, so the escape it
+/// left was the plain spawn: an unpinned child that routes freely.
+#[tokio::test]
+async fn agent_spawn_propagates_parent_fixed_pin_to_the_child() {
+    let architect = {
+        let mut p = spawn_test_profile("architect", "anthropic", "claude-opus-4-1", None);
+        p.cost_tier = librefang_types::model_profile::CostTier::Expensive;
+        p
+    };
+    let stub = Arc::new(SpawnCheckKernel {
+        parent_override: Ok(Some(librefang_types::model_profile::AgentRouterOverride {
+            fixed: true,
+            ..Default::default()
+        })),
+        profiles: vec![architect.clone()],
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "unpinned-helper",
+            "system_prompt": "You help.",
+            "tools": ["agent_spawn"]
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some("parent-agent-id"),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+    assert!(
+        !result.is_error,
+        "spawning without a profile stays allowed, got: {}",
+        result.content
+    );
+
+    let child = stub.spawned_manifest();
+    let child_override = child
+        .model
+        .router_override
+        .expect("a fixed parent must not produce an unpinned child");
+    assert!(
+        child_override.fixed,
+        "the pin must reach the child, got: {child_override:?}"
+    );
+
+    let err = check_profile_against_parent(&architect, &child_override, &[])
+        .expect_err("an inherited pin must refuse profiles at the next hop")
+        .to_string();
+    assert!(err.contains("fixed = true"), "must explain the pin: {err}");
+}
+
+/// The lookup fails closed. A live agent taking a turn always resolves, so a
+/// miss means something is wrong — and reading it as "unconstrained" would
+/// make an unresolvable agent id the cheapest way past every cap here.
+#[tokio::test]
+async fn agent_spawn_refused_when_the_parent_override_cannot_be_looked_up() {
+    let stub = Arc::new(SpawnCheckKernel {
+        parent_override: Err("agent 'ghost' is not in the registry".to_string()),
+        profiles: vec![spawn_test_profile("quick", "cheapo", "cheap-model", None)],
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "helper",
+            "system_prompt": "You help.",
+            "tools": [],
+            "profile": "quick"
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some("ghost"),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "an unresolvable parent must not yield an unconstrained child, got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("not in the registry"),
+        "must report why the lookup failed: {}",
+        result.content
+    );
+    assert!(
+        stub.captured_manifest.lock().unwrap().is_none(),
+        "the spawn must be refused before it reaches the kernel"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1262,6 +1515,7 @@ async fn test_agent_spawn_capability_escalation_denied() {
     // Parent only has file_read, but child requests shell_exec.
     let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
         should_fail_escalation: true,
+        ..Default::default()
     });
     let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
     let result = execute_tool(
@@ -1318,6 +1572,7 @@ async fn test_agent_spawn_subset_capabilities_allowed() {
     // Sub-agent requests only capabilities the parent has — should succeed.
     let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
         should_fail_escalation: false,
+        ..Default::default()
     });
     let parent_allowed = vec![
         "file_read".to_string(),
@@ -1817,6 +2072,39 @@ fn test_goal_update_invalid_status() {
 /// Mock kernel that validates capability inheritance in spawn_agent_checked.
 struct SpawnCheckKernel {
     should_fail_escalation: bool,
+    /// What `model_router_override_for` reports for the spawning agent — the
+    /// three-way answer the real kernel gives, including the `Err` that means
+    /// "could not look the agent up" (#7789 review).
+    parent_override: Result<Option<librefang_types::model_profile::AgentRouterOverride>, String>,
+    /// Catalog `resolve_model_profile` / `model_profile_names` answer from.
+    profiles: Vec<librefang_types::model_profile::ModelProfile>,
+    /// The manifest TOML the last `spawn_agent_checked` was handed, so a test
+    /// can assert what the child was actually born with.
+    captured_manifest: std::sync::Mutex<Option<String>>,
+}
+
+impl Default for SpawnCheckKernel {
+    fn default() -> Self {
+        Self {
+            should_fail_escalation: false,
+            parent_override: Ok(None),
+            profiles: Vec::new(),
+            captured_manifest: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl SpawnCheckKernel {
+    /// The child manifest from the last spawn, parsed.
+    fn spawned_manifest(&self) -> librefang_types::agent::AgentManifest {
+        let toml_src = self
+            .captured_manifest
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a spawn must have reached the kernel");
+        toml::from_str(&toml_src).expect("spawned manifest must deserialize")
+    }
 }
 
 // ---- BEGIN role-trait impls (split from former `impl KernelHandle for SpawnCheckKernel`, #3746) ----
@@ -1837,6 +2125,7 @@ impl AgentControl for SpawnCheckKernel {
         _parent_id: Option<&str>,
         parent_caps: &[librefang_types::capability::Capability],
     ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
+        *self.captured_manifest.lock().unwrap() = Some(manifest_toml.to_string());
         if self.should_fail_escalation {
             // Parse child manifest to extract capabilities, mimicking real kernel behavior
             let manifest: librefang_types::agent::AgentManifest = toml::from_str(manifest_toml)
@@ -2023,7 +2312,25 @@ impl PromptStore for SpawnCheckKernel {}
 impl WorkflowRunner for SpawnCheckKernel {}
 impl GoalControl for SpawnCheckKernel {}
 impl ToolPolicy for SpawnCheckKernel {}
-impl librefang_kernel_handle::CatalogQuery for SpawnCheckKernel {}
+impl librefang_kernel_handle::CatalogQuery for SpawnCheckKernel {
+    fn resolve_model_profile(
+        &self,
+        name: &str,
+    ) -> Option<librefang_types::model_profile::ModelProfile> {
+        self.profiles.iter().find(|p| p.name == name).cloned()
+    }
+
+    fn model_profile_names(&self) -> Vec<String> {
+        self.profiles.iter().map(|p| p.name.clone()).collect()
+    }
+
+    fn model_router_override_for(
+        &self,
+        _agent_id: &str,
+    ) -> Result<Option<librefang_types::model_profile::AgentRouterOverride>, String> {
+        self.parent_override.clone()
+    }
+}
 impl ApiAuth for SpawnCheckKernel {
     fn auth_snapshot(&self) -> ApiAuthSnapshot {
         ApiAuthSnapshot::default()

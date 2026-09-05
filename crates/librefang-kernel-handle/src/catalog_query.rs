@@ -95,13 +95,26 @@ pub trait CatalogQuery: Send + Sync {
     /// would not bind the agents it spawns either.
     ///
     /// `agent_id` is the UUID string of the agent whose manifest should be
-    /// consulted. Default impl returns `None` (no constraints) so existing
-    /// stubs and tooling keep treating every profile as permitted; the real
-    /// kernel impl reads the agent's manifest from the registry.
+    /// consulted.
+    ///
+    /// The three outcomes are deliberately distinct, because this gates a
+    /// spend cap and the two "no" answers mean opposite things:
+    ///
+    /// - `Ok(None)` — the agent resolved and declares no override, so it is
+    ///   genuinely unconstrained.
+    /// - `Ok(Some(_))` — the agent's constraints, to be enforced and passed on.
+    /// - `Err(reason)` — the agent could **not** be looked up. A live agent
+    ///   taking a turn always resolves, so this means something is wrong
+    ///   rather than that the agent is unconstrained. Callers must fail closed:
+    ///   the cost of guessing wrong is spend an operator had capped.
+    ///
+    /// Default impl returns `Ok(None)` so existing stubs and tooling keep
+    /// treating every profile as permitted; the real kernel impl reads the
+    /// agent's manifest from the registry.
     fn model_router_override_for(
         &self,
         _agent_id: &str,
-    ) -> Option<librefang_types::model_profile::AgentRouterOverride> {
-        None
+    ) -> Result<Option<librefang_types::model_profile::AgentRouterOverride>, String> {
+        Ok(None)
     }
 }
