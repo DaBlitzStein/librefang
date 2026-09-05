@@ -8,6 +8,12 @@
 use super::retry::stream_with_retry;
 use super::*;
 
+/// The note left in session history when a non-timeout provider failure kills a turn.
+///
+/// Deliberately opaque, for the same reason `IMAGE_DESCRIPTION_UNAVAILABLE` is on the media path: the driver error's `Display` carries endpoint URLs, model ids and upstream response bodies, and `build_user_facing_llm_error` appends that raw string verbatim for the `Format` category — which is also where an unrecognised provider error lands by default.
+/// The raw error goes to the `warn!` at the push site and nowhere else.
+const PROVIDER_FAILURE_NOTE: &str = "[System: the model provider failed and the task could not be completed. No response was produced; the provider error is recorded in the daemon log.]";
+
 /// Run the agent execution loop with streaming support.
 ///
 /// Like `run_agent_loop`, but sends `StreamEvent`s to the provided channel
@@ -922,12 +928,16 @@ async fn run_agent_loop_streaming_inner(
                     // This is the failure mode observed live: the circuit
                     // breaker opened after a stream error, the turn ended,
                     // and neither the chat nor the history explained it.
-                    let note = format!(
-                        "[System: the model provider failed and the task could not \
-                         be completed ({}). No response was produced.]",
-                        err_str
+                    //
+                    // The note is `Role::System`, not `Role::Assistant`, because the failure is a fact about the daemon and an assistant-role note is replayed on the next turn as the model's own prior output, in its own voice.
+                    // That is the role the kernel's context injections already use for system facts written into session history.
+                    warn!(
+                        event = "provider_failure_note",
+                        agent = %manifest.name,
+                        error = %err_str,
+                        "Provider failed on the streaming path — the session gets an opaque note, and this line is the only place the raw provider error appears"
                     );
-                    session.push_message(Message::assistant(note));
+                    session.push_message(Message::system(PROVIDER_FAILURE_NOTE));
                     repair_session_before_save(
                         session,
                         agent_id_str.as_str(),
