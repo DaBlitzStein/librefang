@@ -188,6 +188,17 @@ pub(super) async fn tool_agent_send(
 /// model on the next turn. It also means the parameter works with
 /// `[model_router] enabled = false`, which is the common case for an operator
 /// who wants cheap subagents without automatic routing everywhere.
+///
+/// `parent_override` is the spawning agent's own `[model.router_override]`,
+/// copied verbatim into the child's manifest when it has one (#7789 review).
+/// Checking the requested profile against the parent only constrains the first
+/// hop: a parent budgeted at `cheap` could spawn a permitted child, hand it
+/// `agent_spawn`, and have *that* child — born with no override, which every
+/// caller reads as unconstrained — spawn on the most expensive profile in the
+/// catalog, billed to the same operator. Propagating the override means a
+/// child is capped at most as loosely as its parent however many hops down the
+/// chain it sits. It also makes `fixed = true` bind the subtree rather than
+/// only refusing the parent a profile of its own.
 pub(super) fn build_agent_manifest_toml(
     name: &str,
     system_prompt: &str,
@@ -195,6 +206,7 @@ pub(super) fn build_agent_manifest_toml(
     shell: Vec<String>,
     network: bool,
     profile: Option<&librefang_types::model_profile::ModelProfile>,
+    parent_override: Option<&librefang_types::model_profile::AgentRouterOverride>,
 ) -> Result<String, String> {
     let mut tools = tools;
     let has_shell = !shell.is_empty();
@@ -227,6 +239,10 @@ pub(super) fn build_agent_manifest_toml(
         if let Some(context_window) = profile.context_window {
             model_json["context_window"] = serde_json::json!(context_window);
         }
+    }
+    if let Some(parent_override) = parent_override {
+        model_json["router_override"] = serde_json::to_value(parent_override)
+            .map_err(|e| format!("Failed to serialize parent router_override: {e}"))?;
     }
 
     let manifest_json = serde_json::json!({
@@ -432,36 +448,60 @@ pub(super) async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
+    // The spawning agent's own `[model.router_override]`, looked up once
+    // (#7789 review). It does two jobs below: it gates the profile this call
+    // asks for, and it is copied onto the child so the cap survives the hop.
+    //
+    // An `Err` is a failed *lookup*, not an absent override, and it fails the
+    // spawn closed. A live agent mid-turn always resolves, so the only way
+    // here is an id that names no agent — including one handed in by the REST
+    // tool endpoint, where `agent_id` is caller-supplied. Treating that as
+    // "unconstrained" would make an unresolvable id the cheapest way around
+    // every cap in this file.
+    let parent_override = match parent_id {
+        Some(parent) => kh.model_router_override_for(parent).map_err(|reason| {
+            ToolError::upstream_msg(format!(
+                "Cannot verify the spawning agent's model-router constraints, so the spawn is \
+                 refused rather than granting an unconstrained child: {reason}."
+            ))
+        })?,
+        None => None,
+    };
+
     // Resolve the profile name before spawning so an unknown name fails loudly
     // here instead of silently producing an agent on the wrong model.
     //
-    // The request is then checked against the *spawning agent's* own
-    // `[model.router_override]` (#7789 review): the same `allowed_profiles`
-    // and `cost_budget` the per-turn router applies, plus a hard refusal when
-    // the parent is `fixed`. Without this, delegation is a way around every
-    // per-agent constraint the profile layer introduces — an agent budgeted at
-    // `cheap` could spawn a helper on the most expensive profile in the
-    // catalog, billed to the same operator, with the parent's cap never
-    // applied.
+    // The request is then checked against the parent's override: the same
+    // `allowed_profiles` and `cost_budget` the per-turn router applies, plus a
+    // hard refusal when the parent is `fixed`. Without this, delegation is a
+    // way around every per-agent constraint the profile layer introduces — an
+    // agent budgeted at `cheap` could spawn a helper on the most expensive
+    // profile in the catalog, billed to the same operator, with the parent's
+    // cap never applied.
     let profile = match input["profile"].as_str() {
         Some(profile_name) => {
             let profile = kh
                 .resolve_model_profile(profile_name)
                 .ok_or_else(|| unknown_profile_error(profile_name, &kh.model_profile_names()))?;
-            if let Some(parent) = parent_id {
-                if let Some(override_) = kh.model_router_override_for(parent) {
-                    let permitted = permitted_profile_names(kh, &override_);
-                    check_profile_against_parent(&profile, &override_, &permitted)?;
-                }
+            if let Some(override_) = parent_override.as_ref() {
+                let permitted = permitted_profile_names(kh, override_);
+                check_profile_against_parent(&profile, override_, &permitted)?;
             }
             Some(profile)
         }
         None => None,
     };
 
-    let manifest_toml =
-        build_agent_manifest_toml(name, system_prompt, tools, shell, network, profile.as_ref())
-            .map_err(ToolError::upstream_msg)?;
+    let manifest_toml = build_agent_manifest_toml(
+        name,
+        system_prompt,
+        tools,
+        shell,
+        network,
+        profile.as_ref(),
+        parent_override.as_ref(),
+    )
+    .map_err(ToolError::upstream_msg)?;
     // Build parent capabilities from the parent's allowed tools list.
     // This prevents a sub-agent from escalating privileges beyond what
     // its parent is permitted to use (capability inheritance enforcement).
