@@ -100,18 +100,27 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
     /// The parent's `[model.router_override]`, read from its manifest in the
     /// registry (#7789 review).
     ///
-    /// Same lookup shape as `proactive_memory_extraction_model_for` above: a
-    /// malformed UUID or an agent not in the registry returns `None`, which
-    /// callers treat as "no constraints". An agent that *has* an override
-    /// always resolves here — the registry is the same source the per-turn
-    /// router reads `manifest.model.router_override` from.
+    /// Reads the same `manifest.model.router_override` the per-turn router
+    /// reads, from the same registry.
+    ///
+    /// Unlike `proactive_memory_extraction_model_for` above, a malformed UUID
+    /// or an agent missing from the registry is an `Err`, not a `None`: an
+    /// agent that is live enough to be calling `agent_spawn` always resolves
+    /// here, so a miss is a fault rather than evidence that the agent is
+    /// unconstrained. Reporting it as "no constraints" would fail open on a
+    /// spend cap.
     fn model_router_override_for(
         &self,
         agent_id: &str,
-    ) -> Option<librefang_types::model_profile::AgentRouterOverride> {
+    ) -> Result<Option<librefang_types::model_profile::AgentRouterOverride>, String> {
         use std::str::FromStr;
-        let aid = librefang_types::agent::AgentId::from_str(agent_id).ok()?;
-        let entry = self.agents.registry.get_arc(aid)?;
-        entry.manifest.model.router_override.clone()
+        let aid = librefang_types::agent::AgentId::from_str(agent_id)
+            .map_err(|e| format!("agent id '{agent_id}' is not a valid agent UUID: {e}"))?;
+        let entry = self
+            .agents
+            .registry
+            .get_arc(aid)
+            .ok_or_else(|| format!("agent '{agent_id}' is not in the registry"))?;
+        Ok(entry.manifest.model.router_override.clone())
     }
 }
