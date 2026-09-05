@@ -2364,9 +2364,11 @@ purge-removed-roster-entry =   - 名册条目、会话、记忆和 KV 行
 purge-removed-orphaned-data =   - 孤立会话、记忆和 KV 行（名册条目已消失）
 purge-removed-identity-record =   - agent_identities.toml 中的规范 UUID 记录
 purge-removed-workspace =   - 工作区目录
+purge-workspace-unresolved =   - 注意：无法定位工作区目录。该代理的清单已不存在，因此无法找到自定义的工作区路径；请自行检查工作区目录。
 purge-removed-agent-type =   - 代理类型模板
 purge-failure-line =   - 失败：{ $error }
-purge-confirm-warning = 即将永久清除 '{ $agent }'：名册条目、残留的会话/记忆/KV 行、规范 UUID 记录、工作区目录以及同名代理类型。此操作无法撤销。
+purge-confirm-header = 即将永久清除 '{ $agent }'：
+purge-confirm-warning = 此操作无法撤销。
 purge-dry-run-header = 试运行 — 未更改任何内容。将清除 '{ $agent }'：
 
 # --- Goals screen (TUI) ---

@@ -2506,9 +2506,11 @@ purge-removed-roster-entry =   - roster entry, sessions, memories and KV rows
 purge-removed-orphaned-data =   - orphaned sessions, memories and KV rows (roster entry was already gone)
 purge-removed-identity-record =   - canonical UUID record in agent_identities.toml
 purge-removed-workspace =   - workspace directory
+purge-workspace-unresolved =   - NOTE: the workspace directory could not be located. No manifest survives for this agent, so a custom workspace path would not have been found; check the workspaces directory yourself.
 purge-removed-agent-type =   - agent-type template
 purge-failure-line =   - FAILED: { $error }
-purge-confirm-warning = About to permanently purge '{ $agent }': roster entry, any orphaned sessions/memories/KV rows, the canonical UUID record, the workspace directory and any agent-type of the same name. This cannot be undone.
+purge-confirm-header = About to permanently purge '{ $agent }':
+purge-confirm-warning = This cannot be undone.
 purge-dry-run-header = Dry run — nothing was changed. Would purge '{ $agent }':
 
 # --- Channels screen (#8044) ---

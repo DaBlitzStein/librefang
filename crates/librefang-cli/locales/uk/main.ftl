@@ -2456,9 +2456,11 @@ purge-removed-roster-entry =   - запис у реєстрі, сесії, сп�
 purge-removed-orphaned-data =   - осиротілі сесії, спогади та рядки KV (запис у реєстрі вже зник)
 purge-removed-identity-record =   - запис канонічного UUID у agent_identities.toml
 purge-removed-workspace =   - каталог робочого простору
+purge-workspace-unresolved =   - ПРИМІТКА: не вдалося визначити каталог робочого простору. Маніфест цього агента не зберігся, тому власний шлях робочого простору знайти неможливо; перевірте каталог робочих просторів самостійно.
 purge-removed-agent-type =   - шаблон типу агента
 purge-failure-line =   - НЕ ВДАЛОСЯ: { $error }
-purge-confirm-warning = Зараз буде остаточно видалено '{ $agent }': запис у реєстрі, осиротілі сесії/спогади/рядки KV, запис канонічного UUID, каталог робочого простору та шаблон типу агента з такою назвою. Це незворотно.
+purge-confirm-header = Зараз буде остаточно видалено '{ $agent }':
+purge-confirm-warning = Це незворотно.
 purge-dry-run-header = Пробний запуск — нічого не змінено. Буде очищено '{ $agent }':
 
 # --- Goals screen (TUI) ---
