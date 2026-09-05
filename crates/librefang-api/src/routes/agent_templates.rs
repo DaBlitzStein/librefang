@@ -1115,6 +1115,9 @@ pub async fn get_registry_diff(
 }
 
 /// POST /api/templates/:name/restore — Overwrite local agent type with the registry version.
+///
+/// Snapshots the result into the version history like every other write path, because this one destroys the local copy by design.
+/// A manifest whose current content came from a hand-edit of the file has no snapshot anywhere, so without the record here a restore leaves nothing to go back to, and `GET /api/templates/{name}/history` keeps reporting the previous dashboard save as current while the file on disk is the registry copy.
 #[utoipa::path(
     post,
     path = "/api/templates/{name}/restore",
@@ -1128,6 +1131,7 @@ pub async fn get_registry_diff(
     )
 )]
 pub async fn restore_from_registry(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1190,15 +1194,18 @@ pub async fn restore_from_registry(
 
     // Write via the shared persist path (atomic rename).
     match persist_agent_type(&name, &manifest) {
-        Ok(rendered) => (
-            StatusCode::OK,
-            Json(agent_type_detail(
-                &name,
-                TemplateSource::AgentType,
-                &manifest,
-                &rendered,
-            )),
-        ),
+        Ok(rendered) => {
+            record_template_version(&state, &name, &rendered, "registry-restore");
+            (
+                StatusCode::OK,
+                Json(agent_type_detail(
+                    &name,
+                    TemplateSource::AgentType,
+                    &manifest,
+                    &rendered,
+                )),
+            )
+        }
         Err(e) => {
             tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
