@@ -1551,6 +1551,7 @@ tui-mod-agent-kill-failed = Не вдалося примусово зупини�
 tui-mod-agent-skills-updated = Скіли оновлено для агента { $id }.
 tui-mod-agent-mcp-updated = Сервери MCP оновлено для агента { $id }.
 tui-mod-agent-channels-updated = Канали оновлено для агента { $id }.
+tui-mod-agent-workspaces-updated = Спільні папки оновлено для агента { $id }.
 tui-mod-ready = Готово
 tui-mod-setup = Налаштування
 tui-mod-workflow-created = Воркфлоу створено!

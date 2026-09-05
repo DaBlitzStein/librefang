@@ -605,6 +605,7 @@ tui-mod-agent-kill-failed = 终止失败: { $error }
 tui-mod-agent-skills-updated = 已更新智能体 { $id } 的技能。
 tui-mod-agent-mcp-updated = 已更新智能体 { $id } 的 MCP 服务端。
 tui-mod-agent-channels-updated = 已更新智能体 { $id } 的频道。
+tui-mod-agent-workspaces-updated = 已更新智能体 { $id } 的共享文件夹。
 tui-mod-ready = 准备就绪
 tui-mod-setup = 待设置
 tui-mod-workflow-created = 工作流已创建！
