@@ -454,6 +454,11 @@ pub async fn create_goal(
             return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
         }
     }
+    // Deliberately NOT validated the way the verifier id is: a model id has no
+    // checkable shape, and whether it resolves depends on the provider config
+    // at call time, not at save time. An unresolvable id degrades — the runner
+    // warns per iteration and falls back to the agent's own marker. See the
+    // field doc on `librefang_types::goal::Goal::evaluator_model`.
     let evaluator_model_str: Option<String> = req
         .get("evaluator_model")
         .and_then(|v| v.as_str())
