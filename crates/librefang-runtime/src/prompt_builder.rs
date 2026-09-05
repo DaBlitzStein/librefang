@@ -1355,11 +1355,12 @@ fn build_channel_section(
         .any(|t| t == "channel_send" || t == "*");
     if has_channel_send {
         if librefang_channels::types::is_reserved_system_channel(channel) {
-            if channel == "webui" {
+            if channel.trim().eq_ignore_ascii_case("webui") {
                 section.push_str(
                     "\n\nYou are on the LibreFang web interface. Files, images, and media you \
                      generate are shown to the user automatically in your response — do NOT use \
-                     `channel_send`.",
+                     `channel_send` to reply here. Use it only to reach someone on a different \
+                     channel (email, telegram, …), naming that channel and recipient explicitly.",
                 );
             } else {
                 section.push_str(
