@@ -1540,6 +1540,7 @@ tui-mod-agent-kill-failed = Kill failed: { $error }
 tui-mod-agent-skills-updated = Skills updated for agent { $id }.
 tui-mod-agent-mcp-updated = MCP servers updated for agent { $id }.
 tui-mod-agent-channels-updated = Channels updated for agent { $id }.
+tui-mod-agent-workspaces-updated = Shared folders updated for agent { $id }.
 tui-mod-agent-model-params-updated = Model parameters updated for agent { $id }.
 tui-mod-ready = Ready
 tui-mod-setup = Setup

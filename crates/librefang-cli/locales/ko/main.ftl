@@ -1537,6 +1537,7 @@ tui-mod-agent-kill-failed = 종료 실패: { $error }
 tui-mod-agent-skills-updated = 에이전트 { $id }의 스킬이 업데이트됨.
 tui-mod-agent-mcp-updated = 에이전트 { $id }의 MCP 서버가 업데이트되었습니다.
 tui-mod-agent-channels-updated = 에이전트 { $id }의 채널이 업데이트되었습니다.
+tui-mod-agent-workspaces-updated = 에이전트 { $id }의 공유 폴더가 업데이트되었습니다.
 tui-mod-ready = 준비됨
 tui-mod-setup = 설정
 tui-mod-workflow-created = 워크플로가 생성되었습니다!

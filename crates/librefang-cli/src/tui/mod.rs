@@ -634,8 +634,10 @@ impl App {
                     }
                 }
             }
-            AppEvent::AgentWorkspacesUpdated(_id) => {
-                // The detail view reloads on the next agent refresh.
+            AppEvent::AgentWorkspacesUpdated(id) => {
+                self.agents.status_msg =
+                    crate::i18n::t_args("tui-mod-agent-workspaces-updated", &[("id", &id)]);
+                self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits
@@ -3241,4 +3243,31 @@ pub fn run(config: Option<PathBuf>) {
         ratatui::crossterm::event::DisableBracketedPaste
     );
     ratatui::restore();
+}
+
+#[cfg(test)]
+mod agent_workspaces_event_tests {
+    use super::*;
+
+    /// The four `workspaces_tests` live in `screens/agents.rs` and exercise the key
+    /// handler, which deliberately leaves `sub` alone; only the event arm here can
+    /// take the operator out of the editor once the PATCH lands.
+    #[test]
+    fn workspaces_updated_event_returns_to_detail_with_status() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::AgentDetail),
+            "a successful save must return the operator to the detail view"
+        );
+        assert!(
+            app.agents.status_msg.contains("agent-1"),
+            "status message should name the saved agent, got {:?}",
+            app.agents.status_msg
+        );
+    }
 }
