@@ -185,6 +185,11 @@ const isPausedRunState = (state: unknown): boolean => {
 // runs in the list fall through `isRunState` as `undefined` and render
 // with the neutral grey "unknown" badge instead of the warning hue, even
 // though the page already knows how to colour them (#5257 round-2).
+// Run states a run never leaves. `WorkflowRunState::Paused` is absent on
+// purpose: it means "paused mid-execution, waiting for an external signal",
+// so a paused run resumes and must keep being polled (#7997).
+const TERMINAL_RUN_STATES = new Set(["completed", "failed", "cancelled"]);
+
 const runStateKind = (state: unknown): string | undefined => {
   if (typeof state === "string") return state;
   if (state !== null && typeof state === "object") {
@@ -374,30 +379,20 @@ export function WorkflowsPage() {
   const workflowDetailQuery = useWorkflowDetail(selectedWorkflowId);
   const runsQuery = useWorkflowRuns(selectedWorkflowId);
 
-  // Poll run detail every 3s while the selected run is executing.
-  // Start polling immediately when a run is selected; disable once we
-  // see a terminal state (completed/failed/cancelled/paused).
-  const [runDetailPollMs, setRunDetailPollMs] = useState<number | false>(false);
+  // Poll run detail every 3s until the run reaches a terminal state.
+  // Derived from the data the query already holds rather than mirrored into
+  // a `useState`, so there is no render where the two disagree: mirroring it
+  // left the interval running forever when the operator switched between two
+  // runs already in the same state, because the effect watching the state
+  // string saw no change to stop it again (#7997).
+  // `paused` is deliberately NOT terminal — a paused run is waiting on an
+  // external signal (an operator approval, a human-supplied input) and
+  // resumes once it arrives, which is precisely when the timeline is worth
+  // watching. A run whose state has not loaded yet polls.
   const runDetailQuery = useWorkflowRunDetail(selectedRunId ?? "", {
-    refetchInterval: runDetailPollMs,
-    enabled: !!selectedRunId && selectedRunId !== "",
+    refetchInterval: (query) =>
+      TERMINAL_RUN_STATES.has(query.state.data?.state ?? "") ? false : 3000,
   });
-  // Start polling when a run is selected, stop on terminal state.
-  useEffect(() => {
-    if (!selectedRunId || selectedRunId === "") {
-      setRunDetailPollMs(false);
-      return;
-    }
-    // Begin polling immediately while we wait for the first fetch.
-    setRunDetailPollMs(3000);
-  }, [selectedRunId]);
-  // Once we know the state, stop polling for terminal runs.
-  useEffect(() => {
-    const state = runDetailQuery.data?.state;
-    if (state && state !== "running" && state !== "pending") {
-      setRunDetailPollMs(false);
-    }
-  }, [runDetailQuery.data?.state]);
 
   // Run history is paginated to the most recent 10 in the UI, but the
   // pending-operator-reviews banner can select a paused run from anywhere
