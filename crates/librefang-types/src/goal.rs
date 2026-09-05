@@ -124,6 +124,19 @@ pub struct Goal {
     /// yes/no read of the goal against the latest output.
     /// When unset there is no evaluator and the agent's marker stands on its
     /// own, still subject to the verifier gate.
+    ///
+    /// The id is stored as written and **not** validated at save time, unlike
+    /// [`Self::verify_agent_id`].
+    /// A verifier id has a checkable shape (a UUID) and no correct value that
+    /// fails the check; a model id has neither — whether one resolves depends
+    /// on the provider configuration at the moment of the call, so a save-time
+    /// 400 would reject a model the operator is about to configure and would
+    /// still not guarantee the id resolves when the run reaches it.
+    /// An unresolvable id therefore degrades rather than fails: the runner logs
+    /// a `WARN` per iteration ("evaluator call failed; falling back to the
+    /// agent's marker") and the run behaves as if no evaluator were set.
+    /// Evaluator failures do not count toward the run's consecutive-failure
+    /// circuit breaker, because the tick itself succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluator_model: Option<String>,
     /// When the goal was created.
