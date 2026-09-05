@@ -988,6 +988,41 @@ async fn toml_put_round_trips_every_section_the_flat_editor_cannot_express() {
     cleanup(name);
 }
 
+/// The raw-TOML tab is a write path like create and the flat `PUT`, so it snapshots like one.
+/// Without the record, `GET /api/templates/{name}/history` reports the previous save as current while the file on disk is what this handler just wrote — a history that is silently incomplete rather than absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_records_a_version_snapshot() {
+    let _g = lock().lock().await;
+    let name = "at_toml_history";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = toml_tab_document(name);
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        1,
+        "the raw-TOML save must record exactly one snapshot: {history}"
+    );
+    assert_eq!(versions[0]["template_name"], name, "{history}");
+    assert_eq!(versions[0]["change_source"], "toml", "{history}");
+    assert!(
+        versions[0]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("raw toml save"),
+        "the snapshot must carry the content the save wrote: {history}"
+    );
+
+    cleanup(name);
+}
+
 /// A key the manifest does not recognize is reported in the response and dropped from
 /// the file — the report is what keeps that drop from happening in silence.
 #[tokio::test(flavor = "multi_thread")]
