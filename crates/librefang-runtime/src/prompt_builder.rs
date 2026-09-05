@@ -1350,11 +1350,12 @@ fn build_channel_section(
     // Tell the agent it can send rich media via channel_send when the tool is available and the channel has a real messaging adapter behind it.
     // The kernel-internal system channels have no external client, so a `channel_send` aimed at them fails (no adapter) and pushes the agent to fall back to some other channel on its own.
     // System channels deliver files and media through the normal response stream instead.
+    let is_system_channel = crate::channel_registry::is_system_channel(channel);
     let has_channel_send = granted_tools
         .iter()
         .any(|t| t == "channel_send" || t == "*");
     if has_channel_send {
-        if librefang_channels::types::is_reserved_system_channel(channel) {
+        if is_system_channel {
             if channel.trim().eq_ignore_ascii_case("webui") {
                 section.push_str(
                     "\n\nYou are on the LibreFang web interface. Files, images, and media you \
