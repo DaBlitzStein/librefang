@@ -562,15 +562,18 @@ pub async fn get_agent_template_toml(
 /// Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.
 /// This is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.
 ///
-/// Two contracts worth stating before touching this handler:
+/// Three contracts worth stating before touching this handler:
 ///
 /// - **Identity is pinned to the URL.** The document's `name` key is overwritten with the path segment, so an operator who edits `name = "…"` in the raw-TOML tab gets a 200 whose response carries the URL's name — the same deliberate pin the flat `PUT /templates/{name}` makes.
 ///   It is asserted by `toml_put_pins_the_name_to_the_url_rather_than_the_body`.
 /// - **Keys the manifest does not recognize are reported, not dropped in silence.**
 ///   `AgentManifest` is `#[serde(default)]` without `deny_unknown_fields` (forward compatibility with manifests written by a newer daemon), so a typo like `sesion_mode` would otherwise parse cleanly, persist, and vanish from the file.
 ///   The handler round-trips the submitted document through `AgentManifest` and reports any top-level key that did not survive as `unknown_keys` in the 200 response, with a `WARN` log naming the template.
+/// - **Every save is snapshotted into the version history**, with the change source `"toml"`, the same way create and the flat `PUT` snapshot theirs.
+///   A write path that skips the snapshot makes `GET /api/templates/{name}/history` report the previous save as current while the file on disk is something else, and a history that is silently incomplete is worse than none because nothing distinguishes the two.
 #[utoipa::path(put, path = "/api/templates/{name}/toml", tag = "system", operation_id = "put_agent_template_toml", params(("name" = String, Path, description = "Template name")), request_body(content = String, content_type = "text/plain"), responses((status = 200, description = "Template updated", body = crate::types::JsonObject), (status = 400, description = "Invalid TOML"), (status = 404, description = "No such agent type"), (status = 409, description = "Name belongs to a live agent")))]
 pub async fn put_agent_template_toml(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     body: String,
@@ -652,6 +655,7 @@ pub async fn put_agent_template_toml(
 
     match persist_agent_type(&name, &manifest) {
         Ok(rendered) => {
+            record_template_version(&state, &name, &rendered, "toml");
             let mut detail =
                 agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
             if !unknown_keys.is_empty() {
