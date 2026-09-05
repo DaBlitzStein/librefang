@@ -1,7 +1,4 @@
-Add write operations (POST/PUT/DELETE) to the /api/templates surface, allowing dashboard users to create, update, and delete named agent templates stored under `~/.librefang/templates/`. (@DaBlitzStein)
-
-The existing GET /api/templates listing now returns entries from both `~/.librefang/workspaces/agents/` (source = "agent") and `~/.librefang/templates/` (source = "template"). (@DaBlitzStein)
-
-New dashboard page: Agent Types (card grid with create/edit/delete plus Quick Run for ephemeral spawn). (@DaBlitzStein)
-
-Installed marketplace skills now show a link to the original marketplace (ClawHub, Skillhub, FangHub) so users can see comments, ratings, and full details at the source. (@DaBlitzStein)
+Add write operations (POST/PUT/DELETE) to the `/api/templates` surface, so an operator can create, update and delete named agent types from the dashboard instead of hand-editing TOML on the daemon host.
+The listing is deliberately dual-source: an operator-authored agent type under `~/.librefang/agent-types/` is a standalone document that this API owns, while a live agent's own `agent.toml` has always been spawnable-from and is listed alongside it.
+Only the first is writable, so every row carries an `editable` flag and a write aimed at the second is refused rather than silently creating a shadowing copy — a client can then render "managed via Agents" instead of offering a control that cannot work.
+New dashboard page: Agent Types, a card grid with create / edit / delete plus Quick Run for an ephemeral spawn (#7859) (@DaBlitzStein)
