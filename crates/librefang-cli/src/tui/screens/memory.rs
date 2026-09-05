@@ -232,7 +232,8 @@ impl MemoryState {
                         auto_retrieve: cfg.auto_retrieve,
                         extraction_model: cfg.effective_extraction_model.clone(),
                     };
-                    self.config_dirty = false;
+                    // `config_dirty` stays set until the daemon confirms the
+                    // write — see `apply_save_result`.
                     self.status_msg = crate::i18n::t("tui-memory-config-saving");
                     return action;
                 }
@@ -245,6 +246,27 @@ impl MemoryState {
             _ => {}
         }
         MemoryUIAction::Continue
+    }
+
+    /// Fold the outcome of a config save back into the panel.
+    ///
+    /// The unsaved-changes marker is cleared here and nowhere else: it is the
+    /// only thing telling the operator their edits are still pending, so
+    /// dropping it on the keypress turns a failed PATCH into "everything is
+    /// saved" with a transient error beside it.
+    pub fn apply_save_result(&mut self, result: Result<(), crate::tui::event::FetchFailure>) {
+        self.status_msg = match result {
+            Ok(()) => {
+                self.config_dirty = false;
+                crate::i18n::t("tui-memory-config-saved")
+            }
+            Err(crate::tui::event::FetchFailure::RequiresDaemon) => {
+                crate::i18n::t("tui-memory-config-requires-daemon")
+            }
+            Err(crate::tui::event::FetchFailure::Error(reason)) => {
+                crate::i18n::t_args("tui-memory-config-save-failed", &[("error", &reason)])
+            }
+        };
     }
 
     fn handle_agent_select(&mut self, key: KeyEvent) -> MemoryUIAction {
@@ -1004,7 +1026,72 @@ mod tests {
             }
             other => panic!("expected a save, got {other:?}"),
         }
-        assert!(!state.config_dirty, "a save clears the unsaved marker");
+        assert!(
+            state.config_dirty,
+            "the keypress only asks for a save; the marker is what says the edits are still pending"
+        );
+    }
+
+    #[test]
+    fn a_successful_save_clears_the_unsaved_marker() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' ')));
+        let _ = state.handle_key(key(KeyCode::Char('s')));
+
+        state.apply_save_result(Ok(()));
+
+        assert!(
+            !state.config_dirty,
+            "a successful save clears the unsaved marker"
+        );
+        assert_eq!(
+            state.status_msg,
+            crate::i18n::t("tui-memory-config-saved"),
+            "a saved panel must say it saved, not repeat a row label"
+        );
+    }
+
+    /// A failed PATCH used to read as "everything is saved" with a transient
+    /// error beside it, because the marker was gone before the daemon answered.
+    #[test]
+    fn a_failed_save_keeps_the_unsaved_marker() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' ')));
+        let _ = state.handle_key(key(KeyCode::Char('s')));
+
+        state.apply_save_result(Err(crate::tui::event::FetchFailure::Error(
+            "500 Internal Server Error".to_string(),
+        )));
+
+        assert!(
+            state.config_dirty,
+            "edits the daemon refused are still unsaved"
+        );
+        assert!(
+            state.status_msg.contains("500"),
+            "the panel must carry why it failed, got {:?}",
+            state.status_msg
+        );
+    }
+
+    /// In-process there is no HTTP surface to PATCH, so nothing ever answered
+    /// and the panel sat on "Saving..." with no way out.
+    #[test]
+    fn a_save_without_a_daemon_says_so_instead_of_hanging() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' ')));
+        let _ = state.handle_key(key(KeyCode::Char('s')));
+
+        state.apply_save_result(Err(crate::tui::event::FetchFailure::RequiresDaemon));
+
+        assert_eq!(
+            state.status_msg,
+            crate::i18n::t("tui-memory-config-requires-daemon")
+        );
+        assert!(
+            state.config_dirty,
+            "nothing was written, so nothing is safe"
+        );
     }
 
     #[test]
