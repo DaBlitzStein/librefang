@@ -203,11 +203,15 @@ pub async fn start_goal_run(
 /// Differs from [`start_goal_run`] only in refusing when there is nothing to
 /// resume: without that guard "resume" on a goal with no checkpoint would
 /// silently restart it from iteration 0.
+///
+/// Optional body: `{ "max_iterations": <u32> }`, which **re-budgets** the resumed run — an operator extending a run that is about to hit its cap has no other way to say so.
+/// Omitting it restores the cap the paused run was already under rather than substituting the default, which is what this route did before: with the iteration count restored from the same checkpoint, a smaller default ends the resumed run at the top of its first loop, and that exit clears the checkpoint, so the progress the resume was asked to continue is gone.
 pub async fn resume_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    body: Option<Json<serde_json::Value>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    start_or_resume(state, id, None, true).await
+    start_or_resume(state, id, body, true).await
 }
 
 /// Shared body of [`start_goal_run`] and [`resume_goal_run`].
@@ -215,6 +219,9 @@ pub async fn resume_goal_run(
 /// `require_paused` is the only difference between the two: the kernel
 /// resumes from a persisted checkpoint automatically when one exists, so
 /// `/resume` is `/start` plus a precondition.
+///
+/// `max_iterations` is passed down as the `Option` it arrived as.
+/// Resolving it here would erase the distinction between "the operator asked for 25" and "the operator said nothing", and only the runner — which holds the checkpoint — can tell what the second one should mean.
 async fn start_or_resume(
     state: Arc<AppState>,
     id: String,
