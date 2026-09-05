@@ -988,8 +988,10 @@ fn remove_sidecar_block_anywhere(
     config_path: &std::path::Path,
     name: &str,
 ) -> Result<bool, String> {
+    // Scan the includes before the first write: an unreadable include file then fails the whole delete, instead of leaving the root block already stripped behind a 500 the operator cannot retry out of.
+    let included_files = included_files_with_sidecars_blocking(config_path)?;
     let mut removed = super::sidecar_toml::remove_sidecar_block(config_path, name)?;
-    for included in included_files_with_sidecars_blocking(config_path)? {
+    for included in included_files {
         removed |= super::sidecar_toml::remove_sidecar_block(&included, name)?;
     }
     Ok(removed)
