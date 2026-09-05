@@ -36,21 +36,33 @@ It is not a transactionally consistent SQLite snapshot, so for the cleanest arti
 ## The sanctioned rollback procedure
 
 The recovery needs a backup taken before the upgrade — while the old binary still runs.
-If you have one:
+Do it offline, with every daemon process stopped: the restore replaces the SQLite files, and no process may be holding them open while that happens.
 
 1. Do not force the older binary onto the migrated database; the guard will keep refusing, and that is correct.
-2. Boot the **newer** binary once more — it accepts the database at its own version and gives you the API again.
-3. Restore the pre-upgrade archive: `POST /api/restore` with `{"filename": "librefang_backup_<timestamp>.zip"}` (`backup.rs:1023-1041`), or the Backups tab's Restore control.
-   Omitting `components` restores everything; `keep_config` (default `false`) means the archive's `config.toml` is applied too — set it `true` to keep the target's own instead.
-   The restore overwrites home-directory state including the `data/` databases, which returns `user_version` to the pre-upgrade value.
-4. Stop the daemon and start the **older** binary.
+2. Stop every daemon process. Nothing starts again until step 4.
+3. Unzip the pre-upgrade archive over the home directory.
+   The archive is home-relative, so this writes back `config.toml`, `skills/`, `workflows/` and the whole `data/` tree in place — which returns `user_version` to the pre-upgrade value.
+   Two corrections the restore endpoint applies and `unzip` does not:
+   - The archive's `agents/` tree has to end up in the agent workspaces directory — `<home_dir>/workspaces/agents/`, or `<workspaces_dir>/agents/` when `workspaces_dir` is set — because that is where `create_backup` read it from and where `restore_root` (`backup.rs:172-181`) writes it back.
+     Left at `<home_dir>/agents/` it sits in the pre-unification legacy layout, which the kernel only relocates when the canonical destination does not already exist; on a rollback it does, so the archived workspaces are silently stranded.
+   - Delete any `-shm` file the extraction leaves behind, as the endpoint does (`backup.rs:949`); SQLite rebuilds the index from the database and its `-wal`.
+
+   To keep the target's own `config.toml` instead of the archive's — the manual equivalent of the endpoint's `keep_config: true` — restore everything else and leave that one file alone.
+4. Start the **older** binary.
    The guard now passes, because the database is back at the version that binary shipped with.
 
-The restore endpoint's own contract warns that a restore overwrites existing state files and that the daemon must be restarted afterwards (`backup.rs:1023-1041`) — step 4 is that restart, with the older binary in place.
 Anything the newer binary wrote between the backup and the downgrade is gone; that is the price of the rollback.
 
-If the daemon is down and cannot be brought up, the same result is available by hand: stop every daemon process, and unzip the archive over the home directory.
-That is the same write the endpoint performs, minus the `-shm` filtering — delete any `-shm` file it leaves behind (the endpoint does, `backup.rs:949`; SQLite rebuilds it).
+### Why not `POST /api/restore` for this
+
+The endpoint (`backup.rs:1023-1041`, or the Backups tab's Restore control) is the obvious first reach: boot the newer binary, which accepts the database at its own version, restore, then swap binaries.
+It is the wrong tool here, and the reason is the same one this page exists for.
+
+The endpoint runs inside a live daemon holding an open connection pool on `data/librefang.db`, and the archive carries that database's `-wal` alongside it — `is_sqlite_shared_memory_index` (`backup.rs:191`) excludes the `-shm` and nothing else.
+So the restore replaces the database file *and* its write-ahead log underneath connections that are still mapped to them, and until the daemon is stopped it can checkpoint its own stale WAL over what was just restored.
+The endpoint's own contract frames the restart as a matter of "all changes to take effect", which reads as a freshness caveat; in this procedure it is a data-integrity one.
+
+If there is no shell on the host and the endpoint is the only way in, stop the daemon the instant the call returns and issue no other API call in between.
 
 ## If there is no backup
 
