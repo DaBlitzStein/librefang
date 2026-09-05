@@ -664,12 +664,8 @@ impl App {
                 self.memory.config = Some(config);
                 self.memory.loading = false;
             }
-            AppEvent::MemoryConfigSaved(ok) => {
-                self.memory.status_msg = if ok {
-                    crate::i18n::t("tui-memory-config-on")
-                } else {
-                    crate::i18n::t("tui-memory-config-save-failed")
-                };
+            AppEvent::MemoryConfigSaved(result) => {
+                self.memory.apply_save_result(result);
             }
             AppEvent::AgentWorkspacesLoaded(id, entries) => {
                 if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id) {

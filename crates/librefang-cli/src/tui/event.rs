@@ -175,7 +175,13 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
-    MemoryConfigSaved(bool),
+    /// The result of a `PATCH /api/memory/config`.
+    ///
+    /// Carries the failure reason rather than a bare `false`: a connection
+    /// error, a 400 and a 500 need different operator responses, and "Save
+    /// failed" with no detail is the report that arrives as a bug with nothing
+    /// to act on.
+    MemoryConfigSaved(Result<(), FetchFailure>),
     /// The agent's `[workspaces]` table, as `(name, path, mode)` rows.
     AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
     /// The shared-folders write came back 2xx.
@@ -2995,23 +3001,48 @@ pub fn spawn_save_memory_config(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            let body = serde_json::json!({
-                "proactive_memory": {
-                    "auto_memorize": auto_memorize,
-                    "auto_retrieve": auto_retrieve,
-                    "extraction_model": extraction_model,
+        let BackendRef::Daemon { base_url, api_key } = backend else {
+            // Without this the panel sits on "Saving..." forever: nothing is
+            // spawned, no event arrives, and the operator has no way to tell
+            // the save is never going to happen.
+            let _ = tx.send(AppEvent::MemoryConfigSaved(Err(
+                FetchFailure::RequiresDaemon,
+            )));
+            return;
+        };
+        let client = make_daemon_client(api_key.as_deref());
+        let body = serde_json::json!({
+            "proactive_memory": {
+                "auto_memorize": auto_memorize,
+                "auto_retrieve": auto_retrieve,
+                "extraction_model": extraction_model,
+            }
+        });
+        let result = match client
+            .patch(format!("{base_url}/api/memory/config"))
+            .json(&body)
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    Ok(())
+                } else {
+                    // The body is where the API explains a 400; a status line
+                    // reading "400 Bad Request" alone does not say which field.
+                    let body = resp.text().unwrap_or_default();
+                    let detail = body.trim();
+                    let mut reason = status.to_string();
+                    if !detail.is_empty() {
+                        reason.push_str(": ");
+                        reason.push_str(detail);
+                    }
+                    Err(FetchFailure::Error(reason))
                 }
-            });
-            let ok = client
-                .patch(format!("{base_url}/api/memory/config"))
-                .json(&body)
-                .send()
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            let _ = tx.send(AppEvent::MemoryConfigSaved(ok));
-        }
+            }
+            Err(e) => Err(FetchFailure::Error(e.to_string())),
+        };
+        let _ = tx.send(AppEvent::MemoryConfigSaved(result));
     });
 }
 
