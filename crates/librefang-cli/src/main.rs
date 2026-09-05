@@ -403,7 +403,12 @@ fn main() {
             yes,
             dry_run,
         }) => {
-            std::process::exit(commands::purge::cmd_purge(&agent, yes, dry_run));
+            std::process::exit(commands::purge::cmd_purge(
+                cli.config.as_deref(),
+                &agent,
+                yes,
+                dry_run,
+            ));
         }
         Some(Commands::Spawn(args)) => cmd_spawn_alias(
             cli.config,
