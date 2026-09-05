@@ -10,9 +10,8 @@
 //! `Arc<dyn KernelApi>`.
 
 use librefang_channels::types::SenderContext;
-use librefang_skills::evolution::{create_skill, load_installed_skill_from_disk, update_skill};
-use librefang_skills::SkillError;
-use librefang_types::agent::AgentId;
+use librefang_skills::evolution::load_installed_skill_from_disk;
+use librefang_types::agent::{AgentId, SkillWorkshopConfig};
 use librefang_types::goal::{
     goals_storage_agent_id, Goal, GoalId, GoalRunState, DEFAULT_GOAL_MAX_ITERATIONS,
     GOALS_STORAGE_KEY,
@@ -102,17 +101,36 @@ impl LibreFangKernel {
             }
         };
 
-        // Lessons the run captured become a skill, so the next goal starts from
-        // them instead of rediscovering them. `create_skill` runs the same
-        // prompt-injection scan as every other skill-creation path, which is
-        // the boundary that matters here: the body is model-authored text.
+        // Lessons the run captured become a skill *proposal*, so the next goal
+        // can start from them instead of rediscovering them — but only once a
+        // human has read them. They go into the skill workshop's `pending/`
+        // queue (#3328), the same place every other machine-proposed skill
+        // waits, rather than straight into the installed skills directory.
+        //
+        // The workshop's cap / TTL settings are read once here, at run start:
+        // the hook fires on a background task after the run ends, and reaching
+        // back into the registry from there would mean carrying a kernel handle
+        // for two `u32`s.
         let skills_dir = self.home_dir().join("skills");
+        let workshop = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.skill_workshop)
+            .unwrap_or_default();
         let goal_title = self
             .goal_by_id(goal_id)
             .map(|g| g.title)
             .unwrap_or_else(|| format!("Goal {goal_id}"));
         let on_learnings = move |learnings: Vec<String>| {
-            persist_learnings_as_skill(&skills_dir, goal_id, &goal_title, &learnings);
+            queue_learnings_as_pending_skill(
+                &skills_dir,
+                agent_id,
+                &workshop,
+                goal_id,
+                &goal_title,
+                &learnings,
+            );
         };
 
         self.workflows.goal_runner.start(
@@ -242,60 +260,96 @@ fn learned_skill_body(goal_title: &str, learnings: &[String]) -> String {
     body
 }
 
-/// Write a run's lessons into a skill, creating it or refreshing an existing
-/// one.
+/// Sentinel trigger tag identifying a candidate that came from a goal run's
+/// `GOAL_LEARNED:` markers rather than from a conversation turn.
 ///
-/// A goal that is run more than once accumulates lessons across runs, so the
-/// second run must update the skill the first one wrote rather than fail on
-/// the name already existing and silently drop everything it learned. The
-/// durable record is the runner's own `goal_learnings_<id>` store entry; this
-/// is the copy the agent can actually read.
-fn persist_learnings_as_skill(
+/// The workshop's non-conversational producers reuse
+/// [`crate::skill_workshop::candidate::CaptureSource::ExplicitInstruction`]
+/// with a sentinel rather than growing a variant per producer — the background
+/// skill reviewer already does this with `auto_evolve_reviewer`.
+/// The tag is what a reviewer sees in `librefang skill pending show`, so it names the producer, not the shape.
+const LEARNED_CAPTURE_TRIGGER: &str = "goal_learned";
+
+/// Queue a run's lessons as a pending skill draft awaiting human approval.
+///
+/// The lessons are model-authored text an autonomous loop wrote about itself, so they go where every other machine-proposed skill goes: the workshop's `pending/` queue (#3328), promoted only by an explicit `librefang skill pending approve` / `POST /api/skills/pending/{id}/approve`.
+/// Installing them directly would have handed a goal run the one power the workshop deliberately withholds — authoring a skill that loads itself into the next prompt with nobody having read it.
+///
+/// A goal can be run more than once, and by then the draft its first run produced may already be an installed skill.
+/// That case is what [`crate::skill_workshop::candidate::CandidateKind::Update`] exists for: the draft targets the installed skill and approval routes through `evolution::update_skill` instead of failing on the name already existing and silently dropping everything the second run learned.
+///
+/// Nothing here is the durable record — that is the runner's own `goal_learnings_<id>` store entry, written before this is called.
+/// A draft that is capped out, deduped, or rejected loses the agent a convenience, not the lessons.
+fn queue_learnings_as_pending_skill(
     skills_dir: &std::path::Path,
+    agent_id: AgentId,
+    workshop: &SkillWorkshopConfig,
     goal_id: GoalId,
     goal_title: &str,
     learnings: &[String],
 ) {
+    use crate::skill_workshop::candidate::{
+        CandidateKind, CandidateSkill, CaptureSource, Provenance, PROVENANCE_EXCERPT_MAX_CHARS,
+    };
+
     if learnings.is_empty() {
         return;
     }
     let name = learned_skill_name(goal_id, goal_title);
-    let body = learned_skill_body(goal_title, learnings);
+    // A goal title is capped at 256 chars, so the description stays well
+    // inside the 1024 `create_skill` enforces at approval time.
     let description = format!("Lessons captured while pursuing the goal: {goal_title}");
-    let created = create_skill(
+    let installed = load_installed_skill_from_disk(skills_dir, &name).ok();
+    let candidate = CandidateSkill {
+        id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: None,
+        captured_at: chrono::Utc::now(),
+        source: CaptureSource::ExplicitInstruction {
+            trigger: LEARNED_CAPTURE_TRIGGER.to_string(),
+        },
+        name: name.clone(),
+        description,
+        prompt_context: learned_skill_body(goal_title, learnings),
+        provenance: Provenance {
+            // The goal is the whole context this draft has; there is no
+            // conversation turn behind it.
+            user_message_excerpt: goal_title
+                .chars()
+                .take(PROVENANCE_EXCERPT_MAX_CHARS)
+                .collect(),
+            assistant_response_excerpt: None,
+            turn_index: 0,
+        },
+        kind: if installed.is_some() {
+            CandidateKind::Update
+        } else {
+            CandidateKind::Create
+        },
+        target_skill_id: installed.as_ref().map(|_| name.clone()),
+        current_version: installed
+            .as_ref()
+            .map(|s| s.manifest.skill.version.clone())
+            .filter(|v| !v.is_empty()),
+        proposed_version: None,
+    };
+
+    match crate::skill_workshop::storage::save_candidate(
         skills_dir,
-        &name,
-        &description,
-        &body,
-        vec!["goal-learned".to_string()],
-        Some("goal-runner"),
-    );
-    match created {
-        Ok(_) => {
-            tracing::info!(%goal_id, skill = %name, count = learnings.len(),
-                           "Goal run: captured lessons into a new skill");
-        }
-        Err(SkillError::AlreadyInstalled(_)) => {
-            match load_installed_skill_from_disk(skills_dir, &name).and_then(|skill| {
-                update_skill(
-                    &skill,
-                    &body,
-                    "Lessons from a later goal run",
-                    Some("goal-runner"),
-                )
-            }) {
-                Ok(_) => tracing::info!(%goal_id, skill = %name, count = learnings.len(),
-                                        "Goal run: refreshed the captured-lessons skill"),
-                Err(e) => tracing::warn!(%goal_id, skill = %name, error = %e,
-                                         "Goal run: failed to refresh the captured-lessons skill"),
-            }
-        }
+        &candidate,
+        workshop.max_pending,
+        workshop.max_pending_age_days,
+    ) {
+        Ok(true) => tracing::info!(%goal_id, skill = %name, count = learnings.len(),
+                                   "Goal run: queued captured lessons as a pending skill draft for human approval"),
+        Ok(false) => tracing::debug!(%goal_id, skill = %name,
+                                     "Goal run: pending draft skipped (duplicate or max_pending=0)"),
         Err(e) => {
             // Most likely the prompt-injection scan rejecting model-authored
             // text, which is the scan doing its job. The lessons are still in
             // the runner's durable store either way.
             tracing::warn!(%goal_id, skill = %name, error = %e,
-                           "Goal run: failed to capture lessons into a skill");
+                           "Goal run: failed to queue captured lessons as a pending draft");
         }
     }
 }
@@ -375,6 +429,85 @@ mod tests {
         let a = learned_skill_name(GoalId::new(), "Same title");
         let b = learned_skill_name(GoalId::new(), "Same title");
         assert_ne!(a, b);
+    }
+
+    /// A goal run is an autonomous loop, and the lessons it captures are
+    /// model-authored text. Writing them straight into the installed skills
+    /// directory would let an agent author a skill that loads itself into the
+    /// next prompt with nobody having read it — the exact power the workshop
+    /// (#3328) withholds by parking every machine-proposed skill in `pending/`.
+    #[test]
+    fn goal_lessons_wait_in_pending_instead_of_installing_themselves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path();
+        let agent = AgentId::new();
+        let goal_id = GoalId::new();
+        queue_learnings_as_pending_skill(
+            skills,
+            agent,
+            &SkillWorkshopConfig::default(),
+            goal_id,
+            "Ship the report",
+            &["Back off before retrying".to_string()],
+        );
+
+        let name = learned_skill_name(goal_id, "Ship the report");
+        assert!(
+            load_installed_skill_from_disk(skills, &name).is_err(),
+            "a goal run must not install a skill without human approval"
+        );
+
+        let pending =
+            crate::skill_workshop::storage::list_pending(skills, &agent.to_string()).unwrap();
+        assert_eq!(pending.len(), 1, "the lessons must be queued for review");
+        assert_eq!(pending[0].name, name);
+        assert!(pending[0]
+            .prompt_context
+            .contains("Back off before retrying"));
+    }
+
+    /// The other half of the same boundary: approval is what installs the
+    /// skill, and it is the only thing that does.
+    #[test]
+    fn approving_the_pending_lesson_is_what_installs_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path();
+        let agent = AgentId::new();
+        let goal_id = GoalId::new();
+        queue_learnings_as_pending_skill(
+            skills,
+            agent,
+            &SkillWorkshopConfig::default(),
+            goal_id,
+            "Ship the report",
+            &["Back off before retrying".to_string()],
+        );
+
+        let pending =
+            crate::skill_workshop::storage::list_pending(skills, &agent.to_string()).unwrap();
+        let id = pending
+            .first()
+            .expect("a candidate must be waiting to approve")
+            .id
+            .clone();
+        crate::skill_workshop::storage::approve_candidate(skills, skills, &id)
+            .expect("approval must install the skill");
+
+        let name = learned_skill_name(goal_id, "Ship the report");
+        let installed = load_installed_skill_from_disk(skills, &name)
+            .expect("the approved lesson must now be an installed skill");
+        assert!(installed
+            .manifest
+            .prompt_context
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Back off before retrying"));
+        assert!(
+            crate::skill_workshop::storage::list_pending(skills, &agent.to_string())
+                .unwrap()
+                .is_empty(),
+            "approval consumes the pending draft"
+        );
     }
 
     #[test]
