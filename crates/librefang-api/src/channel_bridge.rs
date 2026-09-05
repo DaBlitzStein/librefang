@@ -285,6 +285,7 @@ use librefang_kernel::config::load_config as kernel_load_config;
 use librefang_kernel::llm_driver::StreamEvent;
 use librefang_kernel::DeliveryTracker;
 use librefang_kernel::KernelApi;
+use librefang_kernel::LibreFangKernel;
 use librefang_types::agent::{AgentId, ResetScope, SessionId};
 use std::sync::Arc;
 use std::time::Instant;
@@ -749,26 +750,38 @@ impl KernelBridgeAdapter {
         }
     }
 
-    /// The agent's canonical session, when it is not the one `sid` already names.
+    /// The session a `/new` / `/reboot` / `/compact` in this chat must address.
     ///
-    /// The message path resolves a conversation through more options than the
-    /// channel-derived sid alone: the agent's canonical session
-    /// (`entry.session_id`) wins whenever the sender context falls past the
-    /// channel branch — the WebUI chat, and some routing chains. A reset that
-    /// touches only the derived sid then "succeeds" against a dead session
-    /// while the conversation the user is looking at keeps its history.
+    /// Delegates to the kernel's `channel_session_id`, which is the same function every dispatch resolver takes for channel traffic, so the reset lands on the session the conversation actually resolved to instead of re-deriving an id that can drift from it (#7701).
     ///
-    /// Observed live on proteo: `deannatroi`'s derived session held 0 messages
-    /// and its canonical session held 198, so `/new` acked and changed nothing.
+    /// `is_internal_system: false` is not a default, it is the fact about this call site: the reset handlers are reachable only from `handle_command` in the channels bridge, i.e. external channel ingress, whose `SenderContext` is built by `build_sender_context` with `is_internal_system: false`.
+    /// A reserved channel name arriving here is therefore rewritten to `ext-<name>` on both sides, exactly as the inbound turn was.
+    fn channel_session(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+    ) -> SessionId {
+        LibreFangKernel::channel_session_id(agent_id, channel, chat_id, false)
+    }
+
+    /// How many messages a reset is about to clear, for the ack.
     ///
-    /// Returns `None` when the two coincide, which is the ordinary case and
-    /// needs no second reset. Same #7140 divergence family, session dimension.
-    fn canonical_session_besides(&self, agent_id: AgentId, sid: SessionId) -> Option<SessionId> {
-        self.kernel
-            .agent_registry()
-            .get(agent_id)
-            .map(|e| e.session_id)
-            .filter(|csid| *csid != sid)
+    /// `None` means the substrate could not answer, which must not read as "zero": the whole point of the count is to make a no-op visible, so folding a lookup error into `0` prints the no-op reading next to a successful-looking ack — the exact ambiguity #7701 was reported as.
+    fn session_message_count(&self, agent_id: AgentId, sid: SessionId) -> Option<usize> {
+        match self.kernel.memory_substrate().get_session(sid) {
+            Ok(Some(session)) => Some(session.messages.len()),
+            Ok(None) => Some(0),
+            Err(error) => {
+                warn!(
+                    %agent_id,
+                    session_id = %sid,
+                    %error,
+                    "session lookup failed before reset — ack cannot report a cleared count"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -1934,30 +1947,20 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         channel: &str,
         chat_id: Option<&str>,
     ) -> Result<String, String> {
-        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        let canonical = self.canonical_session_besides(agent_id, sid);
-
-        // Count what we are about to clear so the ack is diagnosable in
-        // the chat itself ("did /new do anything?" → "N messages cleared").
-        let mut cleared = 0usize;
-        if let Some(csid) = canonical {
-            if let Ok(Some(s)) = self.kernel.memory_substrate().get_session(csid) {
-                cleared += s.messages.len();
-            }
-            self.kernel
-                .reset_session(agent_id, ResetScope::Session(csid))
-                .await
-                .map_err(|e| format!("{e}"))?;
-        }
-        if let Ok(Some(s)) = self.kernel.memory_substrate().get_session(sid) {
-            cleared += s.messages.len();
-        }
+        let sid = self.channel_session(agent_id, channel, chat_id);
+        // Counted before the reset so the ack is diagnosable from the chat
+        // itself ("did /new do anything?" → "N messages cleared").
+        let cleared = self.session_message_count(agent_id, sid);
         self.kernel
             .reset_session(agent_id, ResetScope::Session(sid))
             .await
             .map_err(|e| format!("{e}"))?;
+        let cleared = match cleared {
+            Some(n) => format!("{n} messages cleared"),
+            None => "cleared count unavailable".to_string(),
+        };
         Ok(format!(
-            "Session reset for this {channel} chat ({cleared} messages cleared). Other surfaces untouched."
+            "Session reset for this {channel} chat ({cleared}). Other surfaces untouched."
         ))
     }
 
@@ -1967,13 +1970,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         channel: &str,
         chat_id: Option<&str>,
     ) -> Result<String, String> {
-        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        if let Some(csid) = self.canonical_session_besides(agent_id, sid) {
-            self.kernel
-                .reboot_session(agent_id, ResetScope::Session(csid))
-                .await
-                .map_err(|e| format!("{e}"))?;
-        }
+        let sid = self.channel_session(agent_id, channel, chat_id);
         self.kernel
             .reboot_session(agent_id, ResetScope::Session(sid))
             .await
@@ -1989,13 +1986,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         channel: &str,
         chat_id: Option<&str>,
     ) -> Result<String, String> {
-        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        if let Some(csid) = self.canonical_session_besides(agent_id, sid) {
-            self.kernel
-                .compact_agent_session_with_id(agent_id, Some(csid), true)
-                .await
-                .map_err(|e| format!("{e}"))?;
-        }
+        let sid = self.channel_session(agent_id, channel, chat_id);
         self.kernel
             .compact_agent_session_with_id(agent_id, Some(sid), true)
             .await
@@ -3674,17 +3665,16 @@ mod tests {
         kernel.shutdown();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reset_channel_session_clears_derived_and_canonical() {
-        // Regression for the proteo /new no-op: the telegram conversation
-        // lived in the agent's canonical session (`entry.session_id`) while
-        // /new reset only the channel-derived sid — the ack was honest
-        // about a dead session. The adapter must clear BOTH when they
-        // differ and report the number of cleared messages.
-        use librefang_testing::MockKernelBuilder;
+    /// Seed the canonical/derived pair the #7701 divergence is about, so a test
+    /// can tell which of the two a channel command actually addressed.
+    ///
+    /// The canonical session (`entry.session_id`) is the one the WebUI chat
+    /// writes to; the derived one is where a `telegram:chat-42` turn lands.
+    fn seed_canonical_and_derived_sessions(
+        kernel: &Arc<librefang_kernel::LibreFangKernel>,
+    ) -> (AgentId, SessionId, SessionId) {
         use librefang_types::message::Message;
 
-        let (kernel, _tmp) = MockKernelBuilder::new().build();
         let assistant = kernel
             .agent_registry()
             .find_by_name("assistant")
@@ -3695,7 +3685,8 @@ mod tests {
             .get(assistant)
             .expect("assistant entry")
             .session_id;
-        let derived = SessionId::for_sender_scope(assistant, "telegram", Some("chat-42"));
+        let derived =
+            LibreFangKernel::channel_session_id(assistant, "telegram", Some("chat-42"), false);
         assert_ne!(canonical, derived, "test premise: sids must differ");
 
         let substrate = kernel.memory_substrate();
@@ -3703,7 +3694,7 @@ mod tests {
             .create_session(assistant)
             .expect("create canonical seed");
         c.id = canonical;
-        c.messages = vec![Message::user("canonical history")];
+        c.messages = vec![Message::user("webui history")];
         substrate.save_session(&c).expect("save canonical seed");
         let mut d = substrate
             .create_session(assistant)
@@ -3712,26 +3703,99 @@ mod tests {
         d.messages = vec![Message::user("derived history")];
         substrate.save_session(&d).expect("save derived seed");
 
+        (assistant, canonical, derived)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reset_channel_session_leaves_the_canonical_session_untouched() {
+        // #7701 review, blocking 1: the canonical session is not a dead session
+        // — it is the one the WebUI chat is using. A `/new` typed in Telegram
+        // must clear the session this conversation resolved to and nothing
+        // else, or the ack's "Other surfaces untouched." is a lie in exactly
+        // the case the fix was written for.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let (assistant, canonical, derived) = seed_canonical_and_derived_sessions(&kernel);
+        let substrate = kernel.memory_substrate();
+
         let adapter = KernelBridgeAdapter::new(kernel.clone());
         let reply = adapter
             .reset_channel_session(assistant, "telegram", Some("chat-42"))
             .await
             .expect("reset must succeed");
         assert!(
-            reply.contains("2 messages cleared"),
-            "ack must report the cleared count, got: {reply}"
+            reply.contains("1 messages cleared"),
+            "ack must report only the messages of the session this chat owns, got: {reply}"
         );
 
         let c_after = substrate
             .get_session(canonical)
             .expect("lookup canonical")
-            .expect("canonical session must still exist (empty)");
+            .expect("canonical session must still exist");
+        assert_eq!(
+            c_after.messages.len(),
+            1,
+            "a channel /new must not clear the WebUI conversation"
+        );
         let d_after = substrate
             .get_session(derived)
             .expect("lookup derived")
             .expect("derived session must still exist (empty)");
-        assert!(c_after.messages.is_empty());
-        assert!(d_after.messages.is_empty());
+        assert!(
+            d_after.messages.is_empty(),
+            "the session this chat resolved to must be cleared"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reboot_and_compact_channel_session_leave_the_canonical_session_untouched() {
+        // #7701 review, blocking 2 and 3. Blast radius: /reboot and /compact
+        // carried the same collateral damage as /new with no wording change at
+        // all. And blocking 3 — a `?` on a secondary target aborting the
+        // primary before it ran — cannot recur while there is exactly one
+        // target per command, which is what this asserts.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let (assistant, canonical, _derived) = seed_canonical_and_derived_sessions(&kernel);
+        let substrate = kernel.memory_substrate();
+
+        let adapter = KernelBridgeAdapter::new(kernel.clone());
+        adapter
+            .reboot_channel_session(assistant, "telegram", Some("chat-42"))
+            .await
+            .expect("reboot must succeed");
+        assert_eq!(
+            substrate
+                .get_session(canonical)
+                .expect("lookup canonical")
+                .expect("canonical session must still exist")
+                .messages
+                .len(),
+            1,
+            "a channel /reboot must not clear the WebUI conversation"
+        );
+
+        // `/compact` runs with force = true and needs a live provider to
+        // summarise, which the mock kernel has none of. Whether it succeeds is
+        // beside the point here — what must hold either way is that it never
+        // reaches the canonical session.
+        let _ = adapter
+            .compact_channel_session(assistant, "telegram", Some("chat-42"))
+            .await;
+        assert_eq!(
+            substrate
+                .get_session(canonical)
+                .expect("lookup canonical")
+                .expect("canonical session must still exist")
+                .messages
+                .len(),
+            1,
+            "a channel /compact must not rewrite the WebUI conversation"
+        );
 
         kernel.shutdown();
     }
