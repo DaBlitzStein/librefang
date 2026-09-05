@@ -1025,6 +1025,48 @@ async fn restore_overwrites_the_local_copy_and_reads_back_the_registry_version()
     cleanup(name);
 }
 
+/// The registry restore is the one write path that destroys the local copy by design, so it has to leave a snapshot behind like every other write path does.
+/// A manifest whose current content came from a hand-edit of the file has no history row of its own, and a restore that records nothing leaves the operator with nothing to go back to while `GET /history` keeps reporting whatever was there before as current.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_from_registry_records_a_version_snapshot() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore_history";
+    cleanup(name);
+    write_agent_type(
+        name,
+        &registry_manifest_body(name, "hand edited on disk", 42),
+    );
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
+
+    let h = boot().await;
+
+    let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        1,
+        "the restore must record exactly one snapshot: {history}"
+    );
+    assert_eq!(versions[0]["template_name"], name, "{history}");
+    assert_eq!(
+        versions[0]["change_source"], "registry-restore",
+        "{history}"
+    );
+    assert!(
+        versions[0]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("from registry"),
+        "the snapshot must carry the content the restore wrote: {history}"
+    );
+
+    cleanup(name);
+}
+
 // POST /api/templates/{name}/promote (#8043)
 // ---------------------------------------------------------------------------
 
