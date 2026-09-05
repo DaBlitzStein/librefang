@@ -1,4 +1,0 @@
-Homogenized "agent template" naming to "agent type" across the surfaces that manage `~/.librefang/templates/*.toml` manifests.
-`/api/agent-types` is now the canonical HTTP surface (`list_agent_types`, `get_agent_type`, `create_agent_type`, `update_agent_type`, `delete_agent_type`, `get_agent_type_toml`); the old `/api/templates` paths keep working as a deprecated alias, documented as such in the OpenAPI spec.
-The dashboard's data layer, the CLI TUI's agent-type picker, `librefang agent new`, and the Agent Types docs page were renamed to match, while CLI/API flags that already carry a `template` wire contract (`--template`, `POST /api/agents {"template": ...}`) were left untouched since that is a distinct, unrelated spawn-time convenience field.
-Workflow templates (`/api/workflow-templates`) are a separate concept and were not touched. (@DaBlitzStein)
