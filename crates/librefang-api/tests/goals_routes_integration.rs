@@ -1178,6 +1178,179 @@ async fn goal_run_pause_and_resume_reject_a_malformed_id() {
     }
 }
 
+/// Seed a pause checkpoint the way a paused loop leaves one behind.
+///
+/// Driving a real pause through the routes would need the loop to finish an agent turn, which these tests have no provider for (see `goal_run_pause_signals_a_live_run`).
+/// Writing the checkpoint the loop writes puts the goal in exactly the state `/resume` reads, so the resume path is exercised for real from there on.
+fn seed_pause_checkpoint(
+    h: &Harness,
+    goal_id: &str,
+    agent_id: &str,
+    iteration: u64,
+    max_iterations: u64,
+    started_at: &str,
+    paused_at: &str,
+) {
+    let key = librefang_kernel::goal_runner::goal_pause_key(goal_id.parse().unwrap());
+    h._state
+        .kernel
+        .memory_substrate()
+        .structured_set(
+            librefang_types::goal::goals_storage_agent_id(),
+            &key,
+            serde_json::json!({
+                "agent_id": agent_id,
+                "iteration": iteration,
+                "max_iterations": max_iterations,
+                "last_progress": 40,
+                "started_at": started_at,
+                "paused_at": paused_at,
+            }),
+        )
+        .expect("seeding the pause checkpoint must succeed");
+}
+
+const PAUSED_AGENT: &str = "11111111-1111-1111-1111-111111111111";
+const RUN_STARTED_AT: &str = "2026-01-02T03:04:05";
+const RUN_PAUSED_AT: &str = "2026-01-02T09:10:11";
+
+/// Create a goal, put it in the paused state, and hand back its id.
+async fn paused_goal(h: &Harness) -> String {
+    let goal = create_goal(
+        h,
+        serde_json::json!({"title": "Long horizon", "agent_id": PAUSED_AGENT}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+    seed_pause_checkpoint(
+        h,
+        &id,
+        PAUSED_AGENT,
+        30,
+        100,
+        &format!("{RUN_STARTED_AT}Z"),
+        &format!("{RUN_PAUSED_AT}Z"),
+    );
+    id
+}
+
+/// Resuming must continue under the cap the operator started the run with.
+///
+/// `/resume` sent no body, so `start_or_resume` read `max_iterations: None` and the kernel substituted the compiled default — a run started with 100 came back with 25.
+/// With the paused iteration count already past that default the loop's top-of-loop guard would end the resumed run before its first turn, and the checkpoint is cleared on the way out, so the progress it was asked to continue was destroyed.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_keeps_the_paused_runs_iteration_cap() {
+    let h = boot().await;
+    let id = paused_goal(&h).await;
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/resume"), None).await;
+    assert_eq!(status, StatusCode::OK, "resume failed: {body:?}");
+    assert_eq!(
+        body["run"]["max_iterations"].as_u64(),
+        Some(100),
+        "a resumed run must keep the cap it was started with, not the compiled default: {body:?}"
+    );
+    assert_eq!(
+        body["run"]["iteration"].as_u64(),
+        Some(30),
+        "the resumed run must carry the checkpoint's iteration count: {body:?}"
+    );
+
+    json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+}
+
+/// An explicit `max_iterations` on a resume body is a deliberate re-budget and wins over the checkpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_honours_an_explicit_iteration_cap() {
+    let h = boot().await;
+    let id = paused_goal(&h).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/goals/{id}/resume"),
+        Some(serde_json::json!({"max_iterations": 60})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resume failed: {body:?}");
+    assert_eq!(
+        body["run"]["max_iterations"].as_u64(),
+        Some(60),
+        "an explicit cap on the resume body must override the checkpoint's: {body:?}"
+    );
+
+    json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+}
+
+/// The same validation as `/start`: a resume body carrying an unusable cap is refused rather than silently ignored.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_rejects_an_invalid_iteration_cap() {
+    let h = boot().await;
+    let id = paused_goal(&h).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/goals/{id}/resume"),
+        Some(serde_json::json!({"max_iterations": 0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// A paused run's timestamps are facts about the run, not about the moment it was polled.
+///
+/// `state()`'s checkpoint fallback stamped both with `Utc::now()`, so two consecutive polls of a goal that is not moving disagreed, and "how long has this been paused" computed to roughly zero every time.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_of_a_paused_goal_reports_the_checkpoints_timestamps() {
+    let h = boot().await;
+    let id = paused_goal(&h).await;
+
+    let (status, first) =
+        json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["run"]["phase"].as_str(), Some("paused"), "{first:?}");
+    let (_, second) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+
+    assert_eq!(
+        first["run"]["started_at"], second["run"]["started_at"],
+        "two polls of a run that has not moved must report the same start time"
+    );
+    assert_eq!(
+        first["run"]["updated_at"], second["run"]["updated_at"],
+        "two polls of a run that has not moved must report the same update time"
+    );
+    let started = first["run"]["started_at"].as_str().unwrap_or_default();
+    let updated = first["run"]["updated_at"].as_str().unwrap_or_default();
+    assert!(
+        started.starts_with(RUN_STARTED_AT),
+        "started_at must be when the run began, got {started}"
+    );
+    assert!(
+        updated.starts_with(RUN_PAUSED_AT),
+        "updated_at must be when the run paused, got {updated}"
+    );
+}
+
+/// A resume continues the run it checkpointed, so the run keeps the time it actually began.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_preserves_the_original_started_at() {
+    let h = boot().await;
+    let id = paused_goal(&h).await;
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/resume"), None).await;
+    assert_eq!(status, StatusCode::OK, "resume failed: {body:?}");
+    let started = body["run"]["started_at"].as_str().unwrap_or_default();
+    assert!(
+        started.starts_with(RUN_STARTED_AT),
+        "a resumed run must keep the start time of the run it continues, got {started}"
+    );
+
+    json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+}
+
 // ---------------------------------------------------------------------------
 // Configurable cadence
 // ---------------------------------------------------------------------------
