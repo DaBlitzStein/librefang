@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
@@ -38,8 +38,8 @@ use librefang_memory::{GoalRunRow, GoalRunStore, MemorySubstrate};
 use librefang_types::agent::AgentId;
 use librefang_types::goal::{
     goals_storage_agent_id, Goal, GoalId, GoalRunPhase, GoalRunState, GoalStatus,
-    DEFAULT_GOAL_TICK_INTERVAL_SECS, GOALS_STORAGE_KEY, MAX_GOAL_TICK_INTERVAL_SECS,
-    MIN_GOAL_TICK_INTERVAL_SECS,
+    DEFAULT_GOAL_MAX_ITERATIONS, DEFAULT_GOAL_TICK_INTERVAL_SECS, GOALS_STORAGE_KEY,
+    MAX_GOAL_TICK_INTERVAL_SECS, MIN_GOAL_TICK_INTERVAL_SECS,
 };
 
 use crate::background::{classify_tick_error, TickOutcome};
@@ -285,16 +285,26 @@ fn patch_goal(
 /// goals array itself), and it holds the whole checkpoint as one value, which
 /// makes the pause write atomic rather than a multi-column update that could
 /// tear.
-fn goal_pause_key(goal_id: GoalId) -> String {
+///
+/// Public so a test outside this crate can seed the checkpoint a paused loop leaves behind without restating the key format and silently drifting from it.
+pub fn goal_pause_key(goal_id: GoalId) -> String {
     format!("goal_pause_{goal_id}")
 }
 
 /// The state a paused run hands to its successor.
+///
+/// Every field except `agent_id` is optional-shaped where a checkpoint written by an older daemon could lack it, so a partial checkpoint degrades to the compiled defaults instead of resuming a run with a cap of zero or a start time in 1970.
 struct ResumePoint {
     agent_id: AgentId,
     iteration: u32,
-    max_iterations: u32,
+    /// The cap the paused run was actually running under, restored on resume so the operator's number survives the suspension.
+    /// `None` for a checkpoint written before this field existed, or one carrying a zero that no `start` could have produced.
+    max_iterations: Option<u32>,
     last_progress: u8,
+    /// When the run being continued first began — not when it paused.
+    started_at: Option<DateTime<Utc>>,
+    /// When it paused, which is the last moment its state changed.
+    paused_at: Option<DateTime<Utc>>,
 }
 
 /// Write the checkpoint a paused run resumes from.
@@ -307,6 +317,8 @@ fn persist_pause_checkpoint(substrate: &MemorySubstrate, goal_id: GoalId, state:
             "iteration": state.iteration,
             "max_iterations": state.max_iterations,
             "last_progress": state.last_progress,
+            // The run's own start time, so a resume can continue the run rather than presenting itself as a new one that happens to begin at iteration N.
+            "started_at": state.started_at.to_rfc3339(),
             "paused_at": Utc::now().to_rfc3339(),
         }),
     ) {
@@ -331,13 +343,35 @@ fn load_pause_checkpoint(substrate: &MemorySubstrate, goal_id: GoalId) -> Option
         max_iterations: value
             .get("max_iterations")
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32,
+            .and_then(|n| u32::try_from(n).ok())
+            // A zero means the field was absent or unusable, never a real cap: `start` clamps every cap up to at least 1 before a run can carry it.
+            .filter(|n| *n > 0),
         last_progress: value
             .get("last_progress")
             .and_then(|v| v.as_u64())
             .unwrap_or(0)
             .min(100) as u8,
+        started_at: checkpoint_timestamp(&value, "started_at"),
+        paused_at: checkpoint_timestamp(&value, "paused_at"),
     })
+}
+
+/// Read an RFC 3339 timestamp out of a checkpoint.
+///
+/// `None` covers both a checkpoint written before the field existed and one whose value will not parse; every caller falls back to the clock, so a missing timestamp costs accuracy rather than the resume itself.
+fn checkpoint_timestamp(value: &serde_json::Value, key: &str) -> Option<DateTime<Utc>> {
+    let raw = value.get(key)?.as_str()?;
+    match DateTime::parse_from_rfc3339(raw) {
+        Ok(dt) => Some(dt.with_timezone(&Utc)),
+        Err(e) => {
+            warn!(
+                key,
+                value = raw,
+                "Unparseable timestamp in goal pause checkpoint: {e}"
+            );
+            None
+        }
+    }
 }
 
 /// Drop a pause checkpoint once it has been consumed or cancelled.
@@ -482,6 +516,9 @@ impl GoalRunner {
     /// live entry. A paused run's loop task exits and self-cleans its
     /// registry slot, so without this fallback pausing a goal would make it
     /// vanish from `GET /api/goals/{id}/run` entirely.
+    ///
+    /// The reconstructed state's timestamps come from the checkpoint, not from the clock: they describe the run, and a paused run does not change between polls.
+    /// Minting them per call made two consecutive `GET /api/goals/{id}/run` on a motionless goal disagree, and any client computing "paused for how long" got approximately zero every time.
     pub fn state(&self, goal_id: GoalId) -> Option<GoalRunState> {
         if let Some(handle) = self.runs.get(&goal_id) {
             // try_lock: None → `running:false`; run_loop must never hold this lock across I/O.
@@ -495,11 +532,13 @@ impl GoalRunner {
             agent_id: checkpoint.agent_id,
             phase: GoalRunPhase::Paused,
             iteration: checkpoint.iteration,
-            max_iterations: checkpoint.max_iterations,
+            max_iterations: checkpoint
+                .max_iterations
+                .unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS),
             last_progress: checkpoint.last_progress,
             last_error: None,
-            started_at: now,
-            updated_at: now,
+            started_at: checkpoint.started_at.unwrap_or(now),
+            updated_at: checkpoint.paused_at.unwrap_or(now),
         })
     }
 
@@ -579,11 +618,20 @@ impl GoalRunner {
     /// goal persistence, and the rate-limit circuit breaker.
     ///
     /// Replaces any existing run for the same goal.
+    ///
+    /// ## Where the iteration cap comes from
+    ///
+    /// `max_iterations` is resolved here rather than by the caller, because this is the only layer that knows whether the goal is being resumed.
+    /// In precedence order: an explicit argument, then the cap the paused run was already running under, then [`DEFAULT_GOAL_MAX_ITERATIONS`].
+    ///
+    /// So an operator who passes a cap gets it, on a resume as on a fresh start — a resume body naming `max_iterations` is a deliberate re-budgeting of the remaining run, and refusing to honour it would leave no way to extend a run that is about to hit its cap.
+    /// Passing nothing restores the run's own cap, because the alternative is substituting the compiled default for a number the operator chose: with the iteration count restored from the same checkpoint, a smaller default ends the resumed run at the top of its first loop, and that exit clears the checkpoint, so the progress the resume was asked to continue is destroyed.
+    /// Only a goal that never had a cap of its own falls through to the default.
     pub fn start<F, Fut>(
         &self,
         goal_id: GoalId,
         agent_id: AgentId,
-        max_iterations: u32,
+        max_iterations: Option<u32>,
         substrate: Arc<MemorySubstrate>,
         send_message: F,
     ) -> bool
@@ -624,6 +672,13 @@ impl GoalRunner {
             );
         }
 
+        // See the doc comment: explicit argument, then the resumed run's own
+        // cap, then the compiled default.
+        let max_iterations = max_iterations
+            .or_else(|| resume.as_ref().and_then(|r| r.max_iterations))
+            .unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS)
+            .max(1);
+
         // Replace any prior run for this goal. `stop_locked` (not `stop`)
         // because we already hold `start_lock`, which is non-reentrant.
         self.stop_locked(goal_id);
@@ -636,7 +691,9 @@ impl GoalRunner {
             max_iterations,
             last_progress: resume.as_ref().map(|r| r.last_progress).unwrap_or(0),
             last_error: None,
-            started_at: now,
+            // A resume continues the run it checkpointed rather than opening a new segment, so the run keeps the moment it actually began.
+            // The alternative — re-stamping — would make a long-horizon run suspended overnight report an age of seconds, and the age of the run is what the timestamp exists to answer.
+            started_at: resume.as_ref().and_then(|r| r.started_at).unwrap_or(now),
             updated_at: now,
         };
         // Persist the initial Running row before the first tick so a crash
@@ -1557,7 +1614,7 @@ mod tests {
         runner.start(
             goal_id,
             agent_id,
-            25,
+            Some(25),
             substrate,
             |_agent_id, _message| async move {
                 std::future::pending::<Result<String, String>>().await
@@ -1625,7 +1682,7 @@ mod tests {
                 runner.start(
                     goal_id,
                     agent_id,
-                    10,
+                    Some(10),
                     substrate.clone(),
                     |_agent_id, _message| async move { Ok::<String, String>(String::new()) },
                 ),
@@ -1683,7 +1740,7 @@ mod tests {
         assert!(runner.start(
             goal_id,
             agent_id,
-            1,
+            Some(1),
             substrate.clone(),
             move |_agent_id, _message| {
                 // Report registry visibility from inside the first turn, then
@@ -1716,7 +1773,7 @@ mod tests {
             runner.start(
                 goal_id,
                 agent_id,
-                25,
+                Some(25),
                 substrate,
                 |_agent_id, _message| async move {
                     std::future::pending::<Result<String, String>>().await
@@ -1927,10 +1984,10 @@ mod tests {
             let sub1 = substrate.clone();
             let sub2 = substrate.clone();
             let h1 = tokio::spawn(async move {
-                r1.start(goal_id, agent_id, 100, sub1, s1);
+                r1.start(goal_id, agent_id, Some(100), sub1, s1);
             });
             let h2 = tokio::spawn(async move {
-                r2.start(goal_id, agent_id, 100, sub2, s2);
+                r2.start(goal_id, agent_id, Some(100), sub2, s2);
             });
             let _ = tokio::join!(h1, h2);
 
@@ -1994,7 +2051,7 @@ mod tests {
             }
         };
 
-        assert!(runner.start(goal_id, agent_id, 100, substrate.clone(), send));
+        assert!(runner.start(goal_id, agent_id, Some(100), substrate.clone(), send));
 
         // Wait for at least one tick to land, then pause.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -2027,7 +2084,13 @@ mod tests {
         let send_pending = |_a: AgentId, _m: String| async move {
             std::future::pending::<Result<String, String>>().await
         };
-        assert!(runner.start(goal_id, agent_id, 100, substrate.clone(), send_pending));
+        assert!(runner.start(
+            goal_id,
+            agent_id,
+            Some(100),
+            substrate.clone(),
+            send_pending
+        ));
         let resumed = runner.state(goal_id).unwrap();
         assert_eq!(resumed.phase, GoalRunPhase::Running);
         assert_eq!(resumed.iteration, paused_iteration);
@@ -2087,6 +2150,130 @@ mod tests {
         );
         assert!(load_pause_checkpoint(&substrate, goal_id).is_none());
         assert!(runner.state(goal_id).is_none());
+    }
+
+    /// Seed a checkpoint for a run that began `started_at` and paused later,
+    /// under a cap of 100 at iteration 30.
+    fn seed_checkpoint(
+        substrate: &MemorySubstrate,
+        goal_id: GoalId,
+        agent_id: AgentId,
+        started_at: DateTime<Utc>,
+    ) {
+        persist_pause_checkpoint(
+            substrate,
+            goal_id,
+            &GoalRunState {
+                goal_id,
+                agent_id,
+                phase: GoalRunPhase::Paused,
+                iteration: 30,
+                max_iterations: 100,
+                last_progress: 45,
+                last_error: None,
+                started_at,
+                updated_at: Utc::now(),
+            },
+        );
+    }
+
+    /// Everything a resume needs must survive the write / read round-trip.
+    /// `paused_at` and `started_at` were written but never parsed, so both
+    /// were dead weight in the store and the reader silently fell back to the
+    /// clock.
+    #[test]
+    fn pause_checkpoint_round_trips_its_cap_and_timestamps() {
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let goal_id = GoalId::new();
+        let agent_id = AgentId::new();
+        let started_at = Utc::now() - chrono::Duration::hours(9);
+        seed_checkpoint(&substrate, goal_id, agent_id, started_at);
+
+        let loaded = load_pause_checkpoint(&substrate, goal_id).expect("checkpoint must load");
+        assert_eq!(loaded.iteration, 30);
+        assert_eq!(loaded.max_iterations, Some(100));
+        assert_eq!(loaded.last_progress, 45);
+        assert_eq!(
+            loaded.started_at.expect("started_at must round-trip"),
+            started_at
+        );
+        assert!(
+            loaded.paused_at.expect("paused_at must round-trip") >= started_at,
+            "a run cannot pause before it started"
+        );
+    }
+
+    /// Resuming without an explicit cap restores the paused run's own, and the
+    /// run keeps the time it actually began.
+    ///
+    /// The cap used to come from the argument alone, so the kernel's default
+    /// substitution replaced it: a run started with 100 and paused at
+    /// iteration 30 resumed under a cap of 25 and hit the loop's
+    /// `iteration >= max_iterations` guard before its first turn, discarding
+    /// the checkpoint on the way out.
+    #[tokio::test]
+    async fn resume_restores_the_checkpoints_cap_and_start_time() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+        let started_at = Utc::now() - chrono::Duration::hours(9);
+        seed_checkpoint(&substrate, goal_id, agent_id, started_at);
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store, substrate.clone());
+        assert!(runner.start(
+            goal_id,
+            agent_id,
+            None,
+            substrate.clone(),
+            |_a: AgentId, _m: String| async move {
+                std::future::pending::<Result<String, String>>().await
+            },
+        ));
+
+        let resumed = runner.state(goal_id).expect("the resumed run must exist");
+        assert_eq!(
+            resumed.max_iterations, 100,
+            "an absent cap must restore the paused run's, not the compiled default"
+        );
+        assert_eq!(resumed.iteration, 30);
+        assert_eq!(
+            resumed.started_at, started_at,
+            "a resume continues the run it checkpointed, so it keeps its start time"
+        );
+
+        assert!(runner.stop(goal_id));
+    }
+
+    /// An explicit cap is an operator re-budgeting the remaining run, so it
+    /// outranks the checkpoint's.
+    #[tokio::test]
+    async fn an_explicit_cap_outranks_the_checkpoints_on_resume() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+        seed_checkpoint(&substrate, goal_id, agent_id, Utc::now());
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store, substrate.clone());
+        assert!(runner.start(
+            goal_id,
+            agent_id,
+            Some(60),
+            substrate.clone(),
+            |_a: AgentId, _m: String| async move {
+                std::future::pending::<Result<String, String>>().await
+            },
+        ));
+
+        assert_eq!(runner.state(goal_id).unwrap().max_iterations, 60);
+        assert!(runner.stop(goal_id));
     }
 
     /// The loop must honour a per-goal `tick_interval_secs` override instead
