@@ -274,7 +274,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "[on|off]",
         subcommands: &[],
         telegram_menu: true,
-        dashboard_exec: None,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
     CommandDef {
         name: "verbose",
@@ -429,7 +429,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         aliases: &[],
         category: Category::Automation,
         scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
-        description: "Create and start an autonomous goal",
+        description: "Create an autonomous goal and start driving it",
         args_hint: "<description> [--loop-engineering]",
         subcommands: &[],
         telegram_menu: true,
@@ -590,11 +590,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
-        dashboard_exec: None,
+        dashboard_exec: Some(DashboardExec::Client),
     },
 ];
 
 impl CommandDef {
+    /// One-line usage hint, e.g. `Usage: /goal <description> [--loop-engineering]`.
     pub fn usage(&self) -> String {
         if self.args_hint.is_empty() {
             format!("Usage: /{}", self.name)
@@ -1066,10 +1067,10 @@ mod tests {
 
     #[test]
     fn dashboard_exec_matches_the_historical_chat_menu() {
-        let client: &[&str] = &["help", "clear", "agents", "info"];
+        let client: &[&str] = &["help", "clear", "agents", "info", "exit"];
         let backend: &[&str] = &[
             "new", "compact", "reset", "reboot", "stop", "model", "usage", "context", "verbose",
-            "budget", "peers", "a2a", "queue",
+            "budget", "peers", "a2a", "queue", "think",
         ];
         for name in client {
             let def = lookup(name).unwrap_or_else(|| panic!("`/{name}` must be registered"));
@@ -1100,6 +1101,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The converse of `dashboard_exec_implies_dashboard_scope`, and the direction
+    /// that catches a silent regression: a command whose `Scope::DASHBOARD` survives
+    /// an edit while its `dashboard_exec` does not is still catalogued by the SPA, so
+    /// nothing fails loudly — it just stops appearing in the slash menu.
+    ///
+    /// Pinned as a set rather than a blanket `is_some()`, because the implication does
+    /// not actually hold and asserting it would assert something that was never true.
+    /// `dashboard_exec: None` on a `Scope::DASHBOARD` command is a meaningful state:
+    /// `chatCommands.ts` documents it as "catalogued but no dashboard execution path",
+    /// which keeps the command out of the slash menu and lets it fall through to the
+    /// agent as ordinary text. `/status` is deliberately in that state.
+    ///
+    /// Pinning the set is also strictly stronger than skipping the exceptions: it fails
+    /// both when a command silently loses its exec and when one silently acquires a
+    /// `None`, so neither direction of the drift can land unnoticed.
+    #[test]
+    fn dashboard_scope_without_exec_is_limited_to_known_catalogue_only_commands() {
+        let catalogue_only: std::collections::BTreeSet<&str> = iter_for(Scope::DASHBOARD)
+            .filter(|c| c.dashboard_exec.is_none())
+            .map(|c| c.name)
+            .collect();
+
+        assert_eq!(
+            catalogue_only,
+            std::collections::BTreeSet::from(["status"]),
+            "a Scope::DASHBOARD command without dashboard_exec is catalogued by the SPA \
+             and hidden from the slash menu; if this set grew, that command silently \
+             dropped out of the dashboard menu, and if it shrank, update this test"
+        );
     }
 
     #[test]
