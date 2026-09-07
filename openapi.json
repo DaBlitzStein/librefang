@@ -4254,9 +4254,6 @@
           "401": {
             "description": "Not authenticated"
           },
-          "409": {
-            "description": "Caller is not the passkey principal"
-          },
           "503": {
             "description": "Passkey login not enabled"
           }
@@ -4296,9 +4293,6 @@
           },
           "401": {
             "description": "Not authenticated"
-          },
-          "409": {
-            "description": "Caller is not the passkey principal"
           },
           "503": {
             "description": "Passkey login not enabled"
@@ -12756,7 +12750,7 @@
           "system"
         ],
         "summary": "PUT /api/templates/:name/toml — Replace the template manifest with raw TOML.",
-        "description": "Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.\nThis is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.",
+        "description": "Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.\nThis is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.\n\nThree contracts worth stating before touching this handler:\n\n- **Identity is pinned to the URL.** The document's `name` key is overwritten with the path segment, so an operator who edits `name = \"…\"` in the raw-TOML tab gets a 200 whose response carries the URL's name — the same deliberate pin the flat `PUT /templates/{name}` makes.\n  It is asserted by `toml_put_pins_the_name_to_the_url_rather_than_the_body`.\n- **Keys the manifest does not recognize are reported, not dropped in silence.**\n  `AgentManifest` is `#[serde(default)]` without `deny_unknown_fields` (forward compatibility with manifests written by a newer daemon), so a typo like `sesion_mode` would otherwise parse cleanly, persist, and vanish from the file.\n  The handler round-trips the submitted document through `AgentManifest` and reports any top-level key that did not survive as `unknown_keys` in the 200 response, with a `WARN` log naming the template.\n- **Every save is snapshotted into the version history**, with the change source `\"toml\"`, the same way create and the flat `PUT` snapshot theirs.\n  A write path that skips the snapshot makes `GET /api/templates/{name}/history` report the previous save as current while the file on disk is something else, and a history that is silently incomplete is worse than none because nothing distinguishes the two.",
         "operationId": "put_agent_template_toml",
         "parameters": [
           {
@@ -13965,129 +13959,6 @@
         }
       }
     },
-    "/api/vault/keys": {
-      "get": {
-        "tags": [
-          "vault"
-        ],
-        "operationId": "vault_list_keys",
-        "responses": {
-          "200": {
-            "description": "Writable vault keys, whether the vault holds each one, and the effective source the daemon resolves it from (`unset` / `vault` / `environment`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Owner credential required"
-          },
-          "403": {
-            "description": "Owner role required"
-          }
-        }
-      }
-    },
-    "/api/vault/keys/{key}": {
-      "put": {
-        "tags": [
-          "vault"
-        ],
-        "operationId": "vault_put_key",
-        "parameters": [
-          {
-            "name": "key",
-            "in": "path",
-            "description": "Vault key name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/VaultSetRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Secret stored; `source` reports whether the daemon will actually use it or the process environment still overrides it",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Empty or oversized value"
-          },
-          "401": {
-            "description": "Owner credential required"
-          },
-          "403": {
-            "description": "Owner role required"
-          },
-          "404": {
-            "description": "Key is not writable over HTTP"
-          },
-          "503": {
-            "description": "Vault could not be unlocked or written"
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "vault"
-        ],
-        "operationId": "vault_delete_key",
-        "parameters": [
-          {
-            "name": "key",
-            "in": "path",
-            "description": "Vault key name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Vault copy removed (or already absent); `source` still reports `environment` when the process environment continues to supply the key",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Owner credential required"
-          },
-          "403": {
-            "description": "Owner role required"
-          },
-          "404": {
-            "description": "Key is not writable over HTTP"
-          },
-          "503": {
-            "description": "Vault could not be unlocked or written"
-          }
-        }
-      }
-    },
     "/api/version": {
       "get": {
         "tags": [
@@ -14746,7 +14617,7 @@
           "workflows"
         ],
         "summary": "POST /api/workflows/:id/run — Execute a workflow.",
-        "description": "By default (no query params) this is **asynchronous**: the run is spawned\nin the background and a 202 is returned immediately with `{\"run_id\":\"...\"}`.\nThe caller can poll `GET /api/workflows/runs/{run_id}` to track progress.\n\nWith `?wait=true` the request blocks until the executor returns (original behavior, kept for backward compat).\nWith `?wait=true&timeout_ms=N` the block is capped at N milliseconds; if the run hasn't finished, 202 is returned and the run continues in the background.\n\n\"The executor returned\" is not the same as \"the workflow finished\": a run that reaches a `mode = \"approval\"` / `mode = \"operator\"` step suspends there, and a suspended run answers `202 {\"status\":\"paused\"}` with the pause reason rather than `200 {\"status\":\"completed\"}`.\nIts `output` is the artifact put in front of the reviewer, not the workflow's result.",
+        "description": "By default (no query params) this is **asynchronous**: the run is spawned\nin the background and a 202 is returned immediately with `{\"run_id\":\"...\"}`.\nThe caller can poll `GET /api/workflows/runs/{run_id}` to track progress.\n\nWith `?wait=true` the request blocks until completion (original behavior,\nkept for backward compat). With `?wait=true&timeout_ms=N` the block is\ncapped at N milliseconds; if the run hasn't finished, 202 is returned\nand the run continues in the background.",
         "operationId": "run_workflow",
         "parameters": [
           {
@@ -14786,7 +14657,6 @@
           "workflows"
         ],
         "summary": "GET /api/workflows/:id/runs — List runs for the workflow named in the path.",
-        "description": "`steps_completed` and `total_steps` are deliberately not a fraction, and a client that renders them as one will be wrong in both directions.\n`steps_completed` counts *executions* — the entries in `step_results` — while `total_steps` counts the steps the workflow *defines*.\nA `StepMode::Loop` step pushes one result per iteration, so a one-step workflow looping five times reports `steps_completed: 5, total_steps: 1`; a `StepMode::Conditional` step that is skipped pushes none, so a fully completed four-step workflow can report `steps_completed: 2, total_steps: 4`.\nThe field `total_steps` actually bounds is `current_step_index`, which is an index into the workflow's step list; that pair is the one safe to render as \"step 2 of 4\".",
         "operationId": "list_workflow_runs",
         "parameters": [
           {
@@ -14801,7 +14671,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List workflow runs; `steps_completed` counts step executions (a loop step contributes one per iteration) while `total_steps` counts defined steps — the two are not a fraction",
+            "description": "List workflow runs",
             "content": {
               "application/json": {
                 "schema": {
@@ -16874,7 +16744,7 @@
           },
           "has_policy": {
             "type": "boolean",
-            "description": "True when the user has any per-user tool policy configured — either an allow/deny list, tool-category overrides, or per-channel rules.\nSummary only; the contents are served by `GET /api/users/{name}/policy`, which is on the same generic GET rule as this list rather than behind a higher role floor — see the module docs."
+            "description": "True when the user has any per-user tool policy configured —\neither an allow/deny list, tool-category overrides, or\nper-channel rules. Summary only; the contents stay behind\n`/api/users/{name}/policy`."
           },
           "name": {
             "type": "string"
@@ -16883,19 +16753,6 @@
             "type": "string"
           }
         }
-      },
-      "VaultSetRequest": {
-        "type": "object",
-        "required": [
-          "value"
-        ],
-        "properties": {
-          "value": {
-            "type": "string",
-            "description": "The secret to store. Surrounding whitespace is trimmed — a token pasted with a trailing newline is the common case and would otherwise be sent in an `Authorization` header verbatim."
-          }
-        },
-        "additionalProperties": false
       },
       "WhoamiView": {
         "type": "object",
@@ -17041,10 +16898,6 @@
     {
       "name": "groups",
       "description": "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"
-    },
-    {
-      "name": "vault",
-      "description": "Credential vault writes — store, list presence of, and delete the secrets the daemon resolves at runtime. Values are never returned"
     }
   ]
 }
