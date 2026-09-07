@@ -12748,6 +12748,7 @@
           "system"
         ],
         "summary": "POST /api/templates/:name/restore — Overwrite local agent type with the registry version.",
+        "description": "Snapshots the result into the version history like every other write path, because this one destroys the local copy by design.\nA manifest whose current content came from a hand-edit of the file has no snapshot anywhere, so without the record here a restore leaves nothing to go back to, and `GET /api/templates/{name}/history` keeps reporting the previous dashboard save as current while the file on disk is the registry copy.",
         "operationId": "restore_agent_type_from_registry",
         "parameters": [
           {
