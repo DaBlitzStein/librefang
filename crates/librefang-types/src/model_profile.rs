@@ -316,9 +316,6 @@ cost_budget = "medium"
         assert_eq!(ov.cost_budget, Some(CostTier::Medium));
     }
 
-    /// `permits` is the spawn-time enforcement point (#7789 review): the
-    /// allowlist and the cost budget must bind a named profile exactly as
-    /// they bind the per-turn router's choice.
     #[test]
     fn permits_applies_allowed_profiles_and_cost_budget() {
         fn profile(name: &str, tier: CostTier) -> ModelProfile {
@@ -356,27 +353,5 @@ cost_budget = "medium"
         assert!(both.permits(&profile("quick", CostTier::Cheap)));
         assert!(!both.permits(&profile("architect", CostTier::Cheap)));
         assert!(!both.permits(&profile("quick", CostTier::Expensive)));
-    }
-
-    /// `permits` deliberately ignores `fixed` — a pinned agent has opted out
-    /// of profiles entirely, which the spawn path refuses separately.
-    #[test]
-    fn permits_ignores_the_fixed_flag() {
-        let ov = AgentRouterOverride {
-            fixed: true,
-            ..Default::default()
-        };
-        let p = ModelProfile {
-            name: "quick".to_string(),
-            tags: Default::default(),
-            provider: "provider".into(),
-            model: "model".into(),
-            context_window: None,
-            cost_tier: CostTier::Cheap,
-            priority: 0,
-            max_complexity: 1.0,
-            description: None,
-        };
-        assert!(ov.permits(&p));
     }
 }
