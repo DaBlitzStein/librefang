@@ -1,0 +1,5 @@
+The dashboard's user menu shows the account you actually logged in as, and the Console link follows the daemon's terminal policy, on a session that starts at the login dialog.
+Both values come from one bootstrap effect that fetches `GET /api/auth/dashboard-check` and `GET /api/status`, and that effect deliberately skips its authed half while the user is still unauthenticated.
+Its only dependency was a stable Zustand setter, so it never ran a second time once the login succeeded: the avatar kept the generic placeholder icon and the Console link's visibility stayed at whatever the store already held rather than at what the daemon reports, for the rest of the session.
+A session restored from stored credentials was unaffected, because there the effect's own first run already finds the user authenticated.
+The effect now also depends on an auth epoch that the login callback bumps, so the refetch happens for every route through the dialog — username/password, TOTP, API key and passkey alike — rather than only for the one flow that has a username field to read from. (#8096) (@DaBlitzStein)
