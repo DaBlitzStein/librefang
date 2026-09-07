@@ -2448,6 +2448,8 @@ tui-groups-hints = ↑/↓ навігація · r оновити
 tui-goals-judge-label = { "  " }Суддя цілі:{ " " }
 tui-goals-phase-label = { "  " }Фаза запуску:{ " " }
 # purge command
+purge-failed-config = Очищення перервано: не вдалося завантажити конфігурацію, тому невідомо, яку інсталяцію очищати: { $error }
+purge-database-line = База даних: { $path }
 purge-failed-no-database = Не вдалося очистити: немає бази даних за шляхом { $path }
 purge-failed-open-database = Не вдалося очистити: відкриття бази даних: { $error }
 purge-nothing-to-purge = Нічого очищати: '{ $agent }' не залишив слідів у цій інсталяції.

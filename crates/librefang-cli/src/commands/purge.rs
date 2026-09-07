@@ -19,21 +19,13 @@ use std::path::Path;
 const PURGE_DECAY_RATE: f32 = 0.01;
 
 pub(crate) fn cmd_purge(config: Option<&Path>, agent: &str, yes: bool, dry_run: bool) -> i32 {
-    // The config decides where the workspaces root is (`workspaces_dir`), so
-    // purge has to read it rather than assume `{home}/workspaces/agents`.
-    // `load_config` already reports a parse failure on stderr (#5186); falling
-    // back to the defaults keeps the command usable on a broken config, which
-    // is a state a cleanup command should expect to meet.
-    let config = librefang_kernel::config::load_config(config).unwrap_or_else(|e| {
-        eprintln!(
-            "{}",
-            i18n::t_args(
-                "common-warning-config-default",
-                &[("error", &e.to_string())]
-            )
-        );
-        KernelConfig::default()
-    });
+    let config = match resolve_config(config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}", i18n::t_args("purge-failed-config", &[("error", &e)]));
+            return 1;
+        }
+    };
     let home = config.home_dir.clone();
     let db = home.join("data").join("librefang.db");
     if !db.exists() {
@@ -58,12 +50,42 @@ pub(crate) fn cmd_purge(config: Option<&Path>, agent: &str, yes: bool, dry_run: 
         }
     };
 
-    purge_with(&substrate, &config, agent, dry_run, |_| {
+    purge_with(&substrate, &config, &db, agent, dry_run, |_| {
         // On a non-TTY stdin the prompt reads EOF and answers "no", so --yes
         // is effectively required there — exactly the gate the review asked
         // for.
         yes || prompt_yes_no(&i18n::t("label-confirm-prompt"), false)
     })
+}
+
+/// Resolve the configuration that names the purge target, refusing to guess.
+///
+/// The config decides which database and which workspaces root the command
+/// deletes from, so a config that cannot be loaded is not a degraded mode — it
+/// means the target is unknown. `load_config` answers a failure with
+/// `KernelConfig::default()`, and for `--config /srv/instance-b/config.toml` a
+/// TOML error in that file would therefore retarget the deletion at the default
+/// installation and purge its unrelated agent of the same name. Substituting a
+/// target is not something a warning can make safe, which is why this uses the
+/// strict loader: `try_load_config` returns `Err` for a read failure, a TOML
+/// syntax error, a broken `include` chain, a failed migration, a deserialize
+/// mismatch and an unknown field under `strict_config`, where `load_config`
+/// falls back to defaults for all but the last three.
+///
+/// The one tolerated absence is a config file that is not there at the *default*
+/// location and was not asked for by path. Nothing is substituted in that case:
+/// the defaults describe the same default installation the operator meant, and
+/// an install that never wrote a `config.toml` still has data worth cleaning up.
+/// A default config that exists but cannot be read is a failure like any other —
+/// it may well be the file that points `home_dir` somewhere else.
+fn resolve_config(explicit: Option<&Path>) -> Result<KernelConfig, String> {
+    let path = explicit
+        .map(Path::to_path_buf)
+        .unwrap_or_else(librefang_kernel::config::default_config_path);
+    if explicit.is_none() && !path.exists() {
+        return Ok(KernelConfig::default());
+    }
+    librefang_kernel::config::try_load_config(&path)
 }
 
 /// The command's decisions, with the database and the confirmation both
@@ -75,10 +97,23 @@ pub(crate) fn cmd_purge(config: Option<&Path>, agent: &str, yes: bool, dry_run: 
 fn purge_with(
     substrate: &MemorySubstrate,
     config: &KernelConfig,
+    db: &Path,
     agent: &str,
     dry_run: bool,
     confirm: impl FnOnce(&PurgeReport) -> bool,
 ) -> i32 {
+    // Name the database before describing the plan. Removal categories say what
+    // kind of thing goes; only the path says *whose*, which is the difference
+    // between confirming a cleanup and confirming it against the wrong
+    // installation.
+    println!(
+        "{}",
+        i18n::t_args(
+            "purge-database-line",
+            &[("path", &db.display().to_string())]
+        )
+    );
+
     // Plan first in both directions. The destructive path used to print a
     // static warning listing everything a purge *can* remove and prompt on
     // that, so the operator confirmed a template rather than what was about to
@@ -177,7 +212,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
 
-        let code = purge_with(&substrate, &cfg_for(&home), "nobody", false, |_| {
+        let db = home.path().join("data").join("librefang.db");
+        let code = purge_with(&substrate, &cfg_for(&home), &db, "nobody", false, |_| {
             panic!("prompted over a plan that removes nothing")
         });
 
@@ -196,7 +232,8 @@ mod tests {
         let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
         let seen = Cell::new(false);
 
-        let code = purge_with(&substrate, &cfg_for(&home), "alpha", false, |plan| {
+        let db = home.path().join("data").join("librefang.db");
+        let code = purge_with(&substrate, &cfg_for(&home), &db, "alpha", false, |plan| {
             seen.set(true);
             assert!(plan.agent_type_removed);
             assert!(!plan.roster_entry_removed);
@@ -207,5 +244,115 @@ mod tests {
         assert!(seen.get(), "the plan never reached the prompt");
         assert_eq!(code, 1, "declining is not success");
         assert!(agent_type.exists(), "declining must not delete anything");
+    }
+
+    /// Serializes the two env-var-mutating tests below.
+    /// `LIBREFANG_HOME` is process-wide state, and the whole point of these
+    /// tests is what the command resolves it to.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Point `LIBREFANG_HOME` at `home` for the duration of `body`, restoring
+    /// the previous value afterwards.
+    fn with_librefang_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
+        let previous = std::env::var("LIBREFANG_HOME").ok();
+        // SAFETY: every caller holds `env_lock`, so no other thread in this
+        // process is reading or writing the variable concurrently.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home) };
+        let out = body();
+        // SAFETY: see above — still under `env_lock`.
+        unsafe {
+            match previous {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+        }
+        out
+    }
+
+    /// A default installation carrying an agent-type template for `agent`, and
+    /// a database for `cmd_purge` to find. Returns the template's path so a
+    /// test can assert it survived.
+    fn default_installation_with(home: &Path, agent: &str) -> std::path::PathBuf {
+        let types = librefang_types::agent_type_store::agent_types_dir_in(home);
+        std::fs::create_dir_all(&types).unwrap();
+        let agent_type = types.join(format!("{agent}.toml"));
+        std::fs::write(&agent_type, "x").unwrap();
+        let data = home.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        drop(MemorySubstrate::open(&data.join("librefang.db"), PURGE_DECAY_RATE).unwrap());
+        agent_type
+    }
+
+    /// A config that cannot be loaded must abort the purge, not silently
+    /// retarget it at the default installation. `--config <broken>` used to
+    /// warn and fall back to `KernelConfig::default()`, whose `home_dir` is the
+    /// default installation — so a TOML error deleted an unrelated agent that
+    /// merely shared a name with the intended one.
+    #[test]
+    fn an_unloadable_explicit_config_purges_nothing_from_the_default_installation() {
+        let _guard = env_lock();
+        let default_home = tempfile::tempdir().unwrap();
+        let agent_type = default_installation_with(default_home.path(), "worker");
+
+        let broken = tempfile::tempdir().unwrap();
+        let broken_config = broken.path().join("config.toml");
+        std::fs::write(&broken_config, "this is not = = valid toml").unwrap();
+
+        let code = with_librefang_home(default_home.path(), || {
+            cmd_purge(Some(&broken_config), "worker", true, false)
+        });
+
+        assert_eq!(code, 1, "an unloadable config must fail the command");
+        assert!(
+            agent_type.exists(),
+            "purge substituted the default installation as its target"
+        );
+    }
+
+    /// The same substitution, through the failure mode that survives a naive
+    /// fix: `load_config` answers a *missing* file with `Ok(defaults)` rather
+    /// than `Err`, so a `--config` pointing at a path that does not exist —
+    /// a typo, an unmounted volume — never reaches the error branch at all.
+    #[test]
+    fn a_missing_explicit_config_purges_nothing_from_the_default_installation() {
+        let _guard = env_lock();
+        let default_home = tempfile::tempdir().unwrap();
+        let agent_type = default_installation_with(default_home.path(), "worker");
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let absent = elsewhere.path().join("never-written.toml");
+
+        let code = with_librefang_home(default_home.path(), || {
+            cmd_purge(Some(&absent), "worker", true, false)
+        });
+
+        assert_eq!(code, 1, "a config that is not there must fail the command");
+        assert!(
+            agent_type.exists(),
+            "purge substituted the default installation as its target"
+        );
+    }
+
+    /// A config file that is simply absent from the default location is not a
+    /// failure: the defaults describe the very installation the operator meant,
+    /// so nothing is substituted and the command still works on an install that
+    /// never wrote a `config.toml`.
+    #[test]
+    fn a_missing_default_config_still_purges_the_default_installation() {
+        let _guard = env_lock();
+        let default_home = tempfile::tempdir().unwrap();
+        let agent_type = default_installation_with(default_home.path(), "worker");
+
+        let code = with_librefang_home(default_home.path(), || {
+            cmd_purge(None, "worker", true, false)
+        });
+
+        assert_eq!(code, 0, "a config-less installation is still purgeable");
+        assert!(!agent_type.exists(), "the agent-type template survived");
     }
 }

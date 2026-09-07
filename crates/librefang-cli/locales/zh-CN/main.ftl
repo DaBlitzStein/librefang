@@ -2356,6 +2356,8 @@ tui-groups-hints = ↑/↓ 导航 · r 刷新
 tui-goals-judge-label = { "  " }目标裁判:{ " " }
 tui-goals-phase-label = { "  " }运行阶段:{ " " }
 # purge command
+purge-failed-config = 清除已中止：无法加载配置，因此无法确定要清除哪个安装：{ $error }
+purge-database-line = 数据库：{ $path }
 purge-failed-no-database = 清除失败：{ $path } 处无数据库
 purge-failed-open-database = 清除失败：打开数据库：{ $error }
 purge-nothing-to-purge = 无需清除：'{ $agent }' 在此安装中未留下痕迹。

@@ -2497,6 +2497,8 @@ tui-groups-hints = ↑/↓ 이동 · r 새로고침
 tui-goals-judge-label = { "  " }목표 심사자:{ " " }
 tui-goals-phase-label = { "  " }실행 단계:{ " " }
 # purge command
+purge-failed-config = 삭제 중단: 설정을 불러올 수 없어 삭제할 설치 대상을 알 수 없습니다: { $error }
+purge-database-line = 데이터베이스: { $path }
 purge-failed-no-database = 삭제 실패: { $path }에 데이터베이스가 없습니다
 purge-failed-open-database = 삭제 실패: 데이터베이스 열기: { $error }
 purge-nothing-to-purge = 삭제할 항목이 없습니다: '{ $agent }'은(는) 이 설치에 흔적을 남기지 않았습니다.

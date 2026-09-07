@@ -2498,6 +2498,8 @@ tui-groups-hints = ↑/↓ navigate · r refresh
 tui-goals-judge-label = { "  " }Goal Judge:{ " " }
 tui-goals-phase-label = { "  " }Run Phase:{ " " }
 # purge command
+purge-failed-config = Purge aborted: the configuration could not be loaded, so the installation to purge is unknown: { $error }
+purge-database-line = Database: { $path }
 purge-failed-no-database = Purge failed: no database at { $path }
 purge-failed-open-database = Purge failed: open database: { $error }
 purge-nothing-to-purge = Nothing to purge: '{ $agent }' left no trace in this installation.
