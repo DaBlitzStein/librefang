@@ -14,6 +14,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
 
 use super::screens::{
+    agents::ManifestVersion,
     audit::AuditEntry,
     channels::{ChannelAdapterInfo, ChannelFieldInfo, ChannelInstance, ConfigureRequest},
     config_editor::{parse_config_sections, ConfigSection},
@@ -398,6 +399,9 @@ pub enum AppEvent {
         id: String,
         warnings: Vec<String>,
     },
+    /// The agent's recorded manifest snapshots, newest first. An empty vector is
+    /// a real answer — an agent whose manifest was never persisted has none.
+    AgentManifestHistoryLoaded(Vec<ManifestVersion>),
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -2026,6 +2030,79 @@ pub fn spawn_fetch_agent_model_params(
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
                 "tui-event-model-params-daemon-only",
+            )));
+        }
+    });
+}
+
+/// Largest page `GET /api/agents/{id}/manifest-history` will serve.
+///
+/// Asked for in full because the endpoint has no offset parameter: whatever the
+/// first response omits cannot be paged to afterwards, and the store keeps far
+/// fewer snapshots per agent than this anyway.
+const MANIFEST_HISTORY_LIMIT: u32 = 200;
+
+/// Fetch an agent's recorded manifest snapshots for the read-only history pane.
+pub fn spawn_fetch_agent_manifest_history(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    let limit = MANIFEST_HISTORY_LIMIT;
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            // A bad agent id is answered by the endpoint (400 for a non-UUID,
+            // 404 for one it does not know), so the reason it gives is reported
+            // instead of a generic failure.
+            let outcome = daemon_response(
+                client
+                    .get(format!(
+                        "{base_url}/api/agents/{agent_id}/manifest-history?limit={limit}"
+                    ))
+                    .send(),
+                || crate::i18n::t("tui-event-manifest-history-fetch-failed"),
+            );
+            let resp = match outcome {
+                Ok(resp) => resp,
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
+            let Ok(body) = resp.json::<serde_json::Value>() else {
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                    "tui-event-manifest-history-fetch-failed",
+                )));
+                return;
+            };
+            let versions = body["versions"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|v| ManifestVersion {
+                            timestamp: v["timestamp"].as_str().unwrap_or_default().to_string(),
+                            change_source: v["change_source"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                            manifest_toml: v["manifest_toml"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let _ = tx.send(AppEvent::AgentManifestHistoryLoaded(versions));
+        }
+        // Snapshots are recorded by the daemon as it persists manifests, and are
+        // read back through the endpoint above; an in-process TUI has no such
+        // history to show, so it says that rather than rendering an empty pane
+        // that would read as "this agent never changed".
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-manifest-history-daemon-only",
             )));
         }
     });
