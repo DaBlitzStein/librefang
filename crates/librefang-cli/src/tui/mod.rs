@@ -2098,6 +2098,7 @@ impl App {
                 title,
                 description,
                 agent_id,
+                tick_interval_secs,
             } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_create_goal(
@@ -2105,6 +2106,7 @@ impl App {
                         title,
                         description,
                         agent_id,
+                        tick_interval_secs,
                         self.event_tx.clone(),
                     );
                 }
