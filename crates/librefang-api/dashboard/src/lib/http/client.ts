@@ -444,6 +444,7 @@ export type {
   PermissionPolicy,
   PermissionPolicyUpdate,
   VaultKeyStatus,
+  VaultKeySource,
   UserToolPolicy,
   UserToolCategories,
   UserMemoryAccess,

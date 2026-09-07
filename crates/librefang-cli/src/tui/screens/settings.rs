@@ -8,6 +8,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
+use zeroize::Zeroizing;
 
 // ── Data types ──────────────────────────────────────────────────────────────
 
@@ -40,15 +41,53 @@ pub struct ToolInfo {
     pub description: String,
 }
 
+/// Where the daemon actually resolves a vault key from, mirroring the API's
+/// `source` field.
+///
+/// The daemon reads its own process environment before it touches the vault, so
+/// "is it in the vault" is not the question the operator is asking. Reporting
+/// only the vault made this pane say `Not set` on a host that exports
+/// `GITHUB_TOKEN` while promotion worked, and say it again after a clear that
+/// revoked nothing.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum VaultKeySource {
+    /// Neither the environment nor the vault holds a value.
+    #[default]
+    Unset,
+    /// The vault supplies the value the daemon uses.
+    Vault,
+    /// The daemon's own environment supplies it, overriding any vault entry.
+    Environment,
+}
+
+impl VaultKeySource {
+    /// Parse the wire string. An unrecognised value falls back to `Unset`
+    /// rather than guessing, so a newer daemon can add a source without this
+    /// pane claiming a key resolves from somewhere it does not.
+    pub fn from_wire(raw: &str) -> Self {
+        match raw {
+            "vault" => Self::Vault,
+            "environment" => Self::Environment,
+            _ => Self::Unset,
+        }
+    }
+}
+
 /// One writable vault key as `GET /api/vault/keys` reports it (#8164).
 ///
 /// There is no `value` field and there must never be one: the API has no
 /// read-back endpoint, so the only thing any surface can know about a stored
-/// secret is that it exists.
+/// secret is where it comes from.
+///
+/// `set` and `source` answer different questions and both are needed: `set` is
+/// vault presence alone, `source` is what a request would actually use. An
+/// operator whose environment overrides the key still needs to know whether
+/// their write landed, and whether `d` has anything to clear.
 #[derive(Clone, Default)]
 pub struct VaultKeyInfo {
     pub key: String,
     pub set: bool,
+    pub source: VaultKeySource,
 }
 
 #[derive(Clone)]
@@ -186,7 +225,17 @@ pub struct SettingsState {
     /// inert, so `Esc` is the documented way back out.
     pub restore: Option<RestoreForm>,
     pub confirm_delete: bool,
-    pub input_buf: String,
+    /// Live keystrokes for whichever secret the operator is typing — a
+    /// provider API key or a vault value.
+    ///
+    /// `Zeroizing` because that is what `librefang-extensions`' vault uses for
+    /// exactly this material. `std::mem::replace` already moved the buffer
+    /// rather than copying it, so nothing was left at the old site; what was
+    /// missing is that the moved-out `String` was dropped without its heap
+    /// allocation being overwritten first. Deref makes it behave as a `String`
+    /// everywhere it is pushed to, cleared or measured, so ratatui's rendering
+    /// path is untouched.
+    pub input_buf: Zeroizing<String>,
     pub input_mode: bool,
     pub editing_provider: Option<String>,
     /// Vault key currently being retyped, if any. Mutually exclusive with
@@ -207,15 +256,16 @@ pub enum SettingsAction {
     RefreshBackups,
     RefreshVault,
     /// Store `value` under vault key `key`. The value is moved straight into
-    /// the request and never kept on the screen state.
+    /// the request and never kept on the screen state, and stays `Zeroizing`
+    /// the whole way so the buffer is overwritten when the request drops it.
     SetVaultKey {
         key: String,
-        value: String,
+        value: Zeroizing<String>,
     },
     DeleteVaultKey(String),
     SaveProviderKey {
         name: String,
-        key: String,
+        key: Zeroizing<String>,
     },
     DeleteProviderKey(String),
     TestProvider(String),
@@ -240,7 +290,7 @@ impl SettingsState {
             vault_list: ListState::default(),
             restore: None,
             confirm_delete: false,
-            input_buf: String::new(),
+            input_buf: Zeroizing::new(String::new()),
             input_mode: false,
             editing_provider: None,
             editing_vault_key: None,
@@ -342,7 +392,8 @@ impl SettingsState {
                 // into the action in one move, so nothing is left on the
                 // screen state for a later draw to reach.
                 if let Some(key) = self.editing_vault_key.take() {
-                    let value = std::mem::take(&mut self.input_buf);
+                    let value =
+                        std::mem::replace(&mut self.input_buf, Zeroizing::new(String::new()));
                     if !value.trim().is_empty() {
                         return SettingsAction::SetVaultKey { key, value };
                     }
@@ -350,8 +401,8 @@ impl SettingsState {
                 }
                 if let Some(name) = self.editing_provider.take() {
                     if !self.input_buf.is_empty() {
-                        let api_key = self.input_buf.clone();
-                        self.input_buf.clear();
+                        let api_key =
+                            std::mem::replace(&mut self.input_buf, Zeroizing::new(String::new()));
                         return SettingsAction::SaveProviderKey { name, key: api_key };
                     }
                 }
@@ -698,13 +749,65 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// The badge for one vault key: the *effective* source, not vault presence.
+///
+/// Split out of [`draw_vault`] so the wording can be asserted without standing
+/// up a terminal. The environment case gets its own label and colour because it
+/// is the one an operator has to act on somewhere other than this pane — no
+/// amount of typing here changes what the daemon uses.
+fn vault_badge(entry: &VaultKeyInfo) -> (String, Style) {
+    match entry.source {
+        VaultKeySource::Environment => (
+            format!("⚠ {}", crate::i18n::t("tui-settings-vault-status-env")),
+            Style::default().fg(theme::YELLOW),
+        ),
+        VaultKeySource::Vault => (
+            format!("● {}", crate::i18n::t("tui-settings-vault-status-set")),
+            Style::default().fg(theme::GREEN),
+        ),
+        VaultKeySource::Unset => (
+            format!("○ {}", crate::i18n::t("tui-settings-vault-status-notset")),
+            theme::dim_style(),
+        ),
+    }
+}
+
+/// The footer line under the list: the standing note, replaced by the
+/// environment-override warning as soon as any listed key resolves from the
+/// environment.
+///
+/// The warning wins because it changes what the pane's own keys do: `e` still
+/// stores and `d` still clears, but neither alters the credential the daemon
+/// hands to a promotion request.
+fn vault_note(keys: &[VaultKeyInfo]) -> (String, Style) {
+    let overridden: Vec<&str> = keys
+        .iter()
+        .filter(|e| e.source == VaultKeySource::Environment)
+        .map(|e| e.key.as_str())
+        .collect();
+    if overridden.is_empty() {
+        return (
+            crate::i18n::t("tui-settings-vault-note"),
+            theme::dim_style(),
+        );
+    }
+    (
+        crate::i18n::t_args(
+            "tui-settings-vault-note-env-override",
+            &[("keys", &overridden.join(", "))],
+        ),
+        Style::default().fg(theme::YELLOW),
+    )
+}
+
 /// Vault sub-tab (#8164).
 ///
-/// Renders the key name and a set/not-set badge and nothing else. The stored
-/// value is never drawn, not even as a mask sized to it — the daemon does not
-/// hand it over, and a mask at the real length would disclose the length. The
-/// only bullets on this pane belong to the operator's own live keystrokes,
-/// which are cleared the moment `Enter` hands them to the request.
+/// Renders the key name and a badge for the source the daemon resolves it from,
+/// and nothing else. The stored value is never drawn, not even as a mask sized
+/// to it — the daemon does not hand it over, and a mask at the real length would
+/// disclose the length. The only bullets on this pane belong to the operator's
+/// own live keystrokes, which are cleared the moment `Enter` hands them to the
+/// request.
 fn draw_vault(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
@@ -738,17 +841,7 @@ fn draw_vault(f: &mut Frame, area: Rect, state: &mut SettingsState) {
             .vault_keys
             .iter()
             .map(|entry| {
-                let (badge, badge_style) = if entry.set {
-                    (
-                        format!("● {}", crate::i18n::t("tui-settings-vault-status-set")),
-                        Style::default().fg(theme::GREEN),
-                    )
-                } else {
-                    (
-                        format!("○ {}", crate::i18n::t("tui-settings-vault-status-notset")),
-                        theme::dim_style(),
-                    )
-                };
+                let (badge, badge_style) = vault_badge(entry);
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("  {:<32}", entry.key),
@@ -794,11 +887,13 @@ fn draw_vault(f: &mut Frame, area: Rect, state: &mut SettingsState) {
             chunks[2],
         );
     } else {
+        let (note, note_style) = vault_note(&state.vault_keys);
         f.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                format!("  {}", crate::i18n::t("tui-settings-vault-note")),
-                theme::dim_style(),
-            )])),
+                format!("  {note}"),
+                note_style,
+            )]))
+            .wrap(ratatui::widgets::Wrap { trim: true }),
             chunks[2],
         );
     }
@@ -1493,11 +1588,23 @@ mod tests {
     // ── Vault sub-tab (#8164) ───────────────────────────────────────────────
 
     fn on_vault_tab(set: bool) -> SettingsState {
+        on_vault_tab_with(
+            set,
+            if set {
+                VaultKeySource::Vault
+            } else {
+                VaultKeySource::Unset
+            },
+        )
+    }
+
+    fn on_vault_tab_with(set: bool, source: VaultKeySource) -> SettingsState {
         let mut state = SettingsState::new();
         state.sub = SettingsSub::Vault;
         state.vault_keys = vec![VaultKeyInfo {
             key: "GITHUB_TOKEN".to_string(),
             set,
+            source,
         }];
         state.vault_list.select(Some(0));
         state
@@ -1550,7 +1657,7 @@ mod tests {
         match action {
             SettingsAction::SetVaultKey { key: k, value } => {
                 assert_eq!(k, "GITHUB_TOKEN");
-                assert_eq!(value, "ghp_fixture");
+                assert_eq!(value.as_str(), "ghp_fixture");
             }
             _ => panic!("expected SetVaultKey"),
         }
@@ -1584,7 +1691,7 @@ mod tests {
         state.handle_key(key(KeyCode::Char('e')));
         typed(&mut state, "1234567");
         assert!(state.sub == SettingsSub::Vault);
-        assert_eq!(state.input_buf, "1234567");
+        assert_eq!(state.input_buf.as_str(), "1234567");
     }
 
     #[test]
@@ -1608,6 +1715,71 @@ mod tests {
         let mut state = on_vault_tab(false);
         assert!(state.handle_key(key(KeyCode::Char('d'))).is_noop());
         assert!(!state.confirm_delete);
+    }
+
+    /// The badge names the *effective* source. Reporting vault presence made
+    /// this pane say "Not set" on a host that exports the credential, while
+    /// promotion using it worked.
+    #[test]
+    fn the_badge_reports_the_effective_source_not_vault_presence() {
+        let env_set = on_vault_tab_with(true, VaultKeySource::Environment);
+        let (badge, _) = vault_badge(&env_set.vault_keys[0]);
+        assert!(
+            badge.contains(&crate::i18n::t("tui-settings-vault-status-env")),
+            "an environment override must not be badged from the vault: {badge}"
+        );
+
+        // The same override with no vault copy at all — still the environment.
+        let env_only = on_vault_tab_with(false, VaultKeySource::Environment);
+        let (badge, _) = vault_badge(&env_only.vault_keys[0]);
+        assert!(badge.contains(&crate::i18n::t("tui-settings-vault-status-env")));
+
+        let vaulted = on_vault_tab(true);
+        let (badge, _) = vault_badge(&vaulted.vault_keys[0]);
+        assert!(badge.contains(&crate::i18n::t("tui-settings-vault-status-set")));
+
+        let unset = on_vault_tab(false);
+        let (badge, _) = vault_badge(&unset.vault_keys[0]);
+        assert!(badge.contains(&crate::i18n::t("tui-settings-vault-status-notset")));
+    }
+
+    /// The footer has to say the override out loud, naming the key, because
+    /// `e` and `d` keep working and keep not changing what the daemon uses.
+    #[test]
+    fn the_footer_warns_about_an_environment_override() {
+        let overridden = on_vault_tab_with(true, VaultKeySource::Environment);
+        let (note, _) = vault_note(&overridden.vault_keys);
+        assert!(
+            note.contains("GITHUB_TOKEN"),
+            "the warning must name the overridden key: {note}"
+        );
+        assert_ne!(
+            note,
+            crate::i18n::t("tui-settings-vault-note"),
+            "the standing note must give way to the override warning"
+        );
+
+        let normal = on_vault_tab(true);
+        let (note, _) = vault_note(&normal.vault_keys);
+        assert_eq!(note, crate::i18n::t("tui-settings-vault-note"));
+    }
+
+    /// An unrecognised source is not evidence that a key resolves from
+    /// anywhere, so it must read as unset rather than as a working credential.
+    #[test]
+    fn an_unknown_source_string_reads_as_unset() {
+        assert_eq!(VaultKeySource::from_wire("vault"), VaultKeySource::Vault);
+        assert_eq!(
+            VaultKeySource::from_wire("environment"),
+            VaultKeySource::Environment
+        );
+        assert_eq!(VaultKeySource::from_wire("unset"), VaultKeySource::Unset);
+        assert_eq!(VaultKeySource::from_wire(""), VaultKeySource::Unset);
+        assert_eq!(
+            VaultKeySource::from_wire("keyring"),
+            VaultKeySource::Unset,
+            "a source this build does not know must not be rendered as configured"
+        );
     }
 
     /// Leaving and re-entering the Settings tab must not resurrect a

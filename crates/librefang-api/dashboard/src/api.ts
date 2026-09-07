@@ -3858,14 +3858,30 @@ export async function revokePasskey(
 // --- Credential vault write surface (#8164) ---
 
 /**
- * One allowlisted vault key and whether the daemon currently holds a value for
- * it. There is deliberately no `value` field: `/api/vault/keys` reports names
- * and a boolean, and the API has no read-back endpoint at all, so nothing on
- * this side of the wire can ever display a stored secret.
+ * Where the daemon actually resolves a vault key from.
+ *
+ * The daemon reads its own process environment before it touches the vault, so
+ * `set` alone describes storage rather than behaviour: on a host that exports
+ * `GITHUB_TOKEN` a vault-only flag reads `false` while promotion works, and
+ * reads `false` again after a delete that revoked nothing.
+ */
+export type VaultKeySource = "unset" | "vault" | "environment";
+
+/**
+ * One allowlisted vault key, whether the vault holds it, and where the daemon
+ * would actually take its value from. There is deliberately no `value` field:
+ * `/api/vault/keys` reports names, a boolean and a source, and the API has no
+ * read-back endpoint at all, so nothing on this side of the wire can ever
+ * display a stored secret.
+ *
+ * Both fields are needed and they answer different questions: `set` is vault
+ * presence, `source` is the effective credential. An operator whose environment
+ * overrides the key still has to know whether their write landed.
  */
 export interface VaultKeyStatus {
   key: string;
   set: boolean;
+  source: VaultKeySource;
 }
 
 /**

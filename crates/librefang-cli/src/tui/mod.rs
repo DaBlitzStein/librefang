@@ -809,14 +809,30 @@ impl App {
                 }
                 self.settings.loading = false;
             }
-            AppEvent::VaultKeySaved(key) => {
-                self.settings.status_msg =
-                    crate::i18n::t_args("tui-mod-vault-key-saved", &[("key", &key)]);
+            // A write that lands under an environment override is stored and
+            // inert. Confirming it as a plain success is the report houko
+            // flagged: the operator walks away believing they changed what the
+            // daemon uses.
+            AppEvent::VaultKeySaved(key, source) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    if source == settings::VaultKeySource::Environment {
+                        "tui-mod-vault-key-saved-env-override"
+                    } else {
+                        "tui-mod-vault-key-saved"
+                    },
+                    &[("key", &key)],
+                );
                 self.refresh_settings_vault();
             }
-            AppEvent::VaultKeyDeleted(key) => {
-                self.settings.status_msg =
-                    crate::i18n::t_args("tui-mod-vault-key-deleted", &[("key", &key)]);
+            AppEvent::VaultKeyDeleted(key, source) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    if source == settings::VaultKeySource::Environment {
+                        "tui-mod-vault-key-deleted-env-override"
+                    } else {
+                        "tui-mod-vault-key-deleted"
+                    },
+                    &[("key", &key)],
+                );
                 self.refresh_settings_vault();
             }
             AppEvent::ModelCatalogLoaded(list) => {
