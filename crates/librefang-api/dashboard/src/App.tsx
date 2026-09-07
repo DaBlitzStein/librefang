@@ -921,6 +921,11 @@ function DashboardApp() {
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
   const [authNeeded, setAuthNeeded] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
+  // Bumped by every successful login so the bootstrap effect below re-runs.
+  // Its authed half (`fetchAuthedBootstrap`) is skipped on the mount that
+  // renders the login dialog, and without a re-run the username and the
+  // terminal policy would keep their pre-login values for the whole session.
+  const [authEpoch, setAuthEpoch] = useState(0);
   const [authMode, setAuthMode] = useState<AuthMode>("none");
   const [appVersion, setAppVersion] = useState("");
   const [hostname, setHostname] = useState("");
@@ -1012,6 +1017,12 @@ function DashboardApp() {
 
     void checkAuth();
     getVersionInfo().then((v) => {
+      // Guarded like every other continuation in this effect. The values are
+      // identical on every call, so a late landing overwrites nothing today —
+      // but the effect now re-runs once per login, so the window exists where
+      // it did not before, and the odd one out is the one that surprises the
+      // next reader.
+      if (cancelled) return;
       setAppVersion(v.version ?? "");
       setHostname(v.hostname ?? "");
     }).catch(() => { /* Version info is non-essential; silently ignore failure. */ });
@@ -1020,7 +1031,7 @@ function DashboardApp() {
       cancelled = true;
       setOnUnauthorized(null);
     };
-  }, [setTerminalEnabled]);
+  }, [setTerminalEnabled, authEpoch]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -1164,6 +1175,7 @@ function DashboardApp() {
           mode={authMode}
           onAuthenticated={() => {
             setAuthNeeded(false);
+            setAuthEpoch((epoch) => epoch + 1);
             void navigate({ to: "/overview", replace: true });
           }}
         />
