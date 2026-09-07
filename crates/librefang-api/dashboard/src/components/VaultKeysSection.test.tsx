@@ -36,7 +36,7 @@ type QueryStub = { data?: unknown; isError?: boolean; error?: unknown; isLoading
 
 function stubQuery(over: QueryStub = {}) {
   mockUseVaultKeys.mockReturnValue({
-    data: [{ key: "GITHUB_TOKEN", set: false }],
+    data: [{ key: "GITHUB_TOKEN", set: false, source: "unset" }],
     isError: false,
     error: null,
     isLoading: false,
@@ -44,13 +44,16 @@ function stubQuery(over: QueryStub = {}) {
   } as ReturnType<typeof useVaultKeys>);
 }
 
-function stubMutations(setImpl = vi.fn().mockResolvedValue({ key: "GITHUB_TOKEN", set: true })) {
+function stubMutations(
+  setImpl = vi.fn().mockResolvedValue({ key: "GITHUB_TOKEN", set: true, source: "vault" }),
+  deleteImpl = vi.fn().mockResolvedValue({ key: "GITHUB_TOKEN", set: false, removed: true, source: "unset" }),
+) {
   mockUseSetVaultKey.mockReturnValue({
     mutateAsync: setImpl,
     isPending: false,
   } as unknown as ReturnType<typeof useSetVaultKey>);
   mockUseDeleteVaultKey.mockReturnValue({
-    mutateAsync: vi.fn().mockResolvedValue({ key: "GITHUB_TOKEN", set: false, removed: true }),
+    mutateAsync: deleteImpl,
     isPending: false,
   } as unknown as ReturnType<typeof useDeleteVaultKey>);
   return setImpl;
@@ -66,8 +69,8 @@ describe("VaultKeysSection", () => {
   it("renders the keys the API reported rather than a hard-coded list", () => {
     stubQuery({
       data: [
-        { key: "GITHUB_TOKEN", set: true },
-        { key: "SOME_FUTURE_KEY", set: false },
+        { key: "GITHUB_TOKEN", set: true, source: "vault" },
+        { key: "SOME_FUTURE_KEY", set: false, source: "unset" },
       ],
     });
     render(<VaultKeysSection />);
@@ -78,7 +81,7 @@ describe("VaultKeysSection", () => {
   });
 
   it("shows set / not set without ever rendering a value", () => {
-    stubQuery({ data: [{ key: "GITHUB_TOKEN", set: true }] });
+    stubQuery({ data: [{ key: "GITHUB_TOKEN", set: true, source: "vault" }] });
     const { container } = render(<VaultKeysSection />);
     expect(screen.getByText("Set")).toBeInTheDocument();
     const input = screen.getByLabelText("New value for GITHUB_TOKEN") as HTMLInputElement;
@@ -143,7 +146,7 @@ describe("VaultKeysSection", () => {
   });
 
   it("requires a second click before removing a stored secret", async () => {
-    stubQuery({ data: [{ key: "GITHUB_TOKEN", set: true }] });
+    stubQuery({ data: [{ key: "GITHUB_TOKEN", set: true, source: "vault" }] });
     render(<VaultKeysSection />);
     const del = mockUseDeleteVaultKey.mock.results[0].value.mutateAsync;
 
@@ -152,5 +155,64 @@ describe("VaultKeysSection", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     await waitFor(() => expect(del).toHaveBeenCalledWith({ key: "GITHUB_TOKEN" }));
+  });
+
+  // ── Effective source (#8186 review) ──────────────────────────────────────
+  //
+  // The daemon reads its own environment before the vault, so a badge built
+  // from `set` reported "Not set" on a deployment where promotion worked, and
+  // reported it again after a delete that revoked nothing.
+
+  it("says the environment overrides the key instead of reporting it unset", () => {
+    stubQuery({ data: [{ key: "GITHUB_TOKEN", set: false, source: "environment" }] });
+    render(<VaultKeysSection />);
+    expect(screen.getByText("Overridden by the environment")).toBeInTheDocument();
+    expect(screen.queryByText("Not set")).not.toBeInTheDocument();
+    expect(screen.getByText(/reads GITHUB_TOKEN from its own environment/)).toBeInTheDocument();
+  });
+
+  it("says a stored copy is inert when the environment wins", () => {
+    stubQuery({ data: [{ key: "GITHUB_TOKEN", set: true, source: "environment" }] });
+    render(<VaultKeysSection />);
+    expect(screen.getByText("Overridden by the environment")).toBeInTheDocument();
+    expect(screen.queryByText("Set")).not.toBeInTheDocument();
+    expect(screen.getByText(/A vault copy is stored but inert\./)).toBeInTheDocument();
+  });
+
+  it("leaves a vault-sourced key badged as set with no override notice", () => {
+    stubQuery({ data: [{ key: "GITHUB_TOKEN", set: true, source: "vault" }] });
+    render(<VaultKeysSection />);
+    expect(screen.getByText("Set")).toBeInTheDocument();
+    expect(screen.queryByText(/own environment/)).not.toBeInTheDocument();
+  });
+
+  it("does not confirm a write as effective when the environment still overrides", async () => {
+    stubMutations(vi.fn().mockResolvedValue({ key: "GITHUB_TOKEN", set: true, source: "environment" }));
+    render(<VaultKeysSection />);
+    const input = screen.getByLabelText("New value for GITHUB_TOKEN") as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: SECRET } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    const message = await screen.findByText(
+      /GITHUB_TOKEN stored, but the daemon reads it from its own environment/,
+    );
+    expect(message.textContent).not.toContain(SECRET);
+  });
+
+  it("does not claim a delete revoked anything the environment still supplies", async () => {
+    stubMutations(
+      undefined,
+      vi.fn().mockResolvedValue({ key: "GITHUB_TOKEN", set: false, removed: true, source: "environment" }),
+    );
+    stubQuery({ data: [{ key: "GITHUB_TOKEN", set: true, source: "environment" }] });
+    render(<VaultKeysSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove GITHUB_TOKEN" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(
+      await screen.findByText(/removed from the vault, but the daemon still reads it/),
+    ).toBeInTheDocument();
   });
 });
