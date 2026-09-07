@@ -1,4 +1,4 @@
-import { formatRelativeTime } from "../lib/datetime";
+import { formatRelativeTime, formatSqliteDateTime } from "../lib/datetime";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
@@ -2384,14 +2384,6 @@ export function AgentsPage() {
   // ---------- History tab — manifest version timeline
   const renderHistoryTab = (_agent: AgentDetail) => {
     const versions = manifestHistoryQuery.data ?? [];
-    const fmtTs = (s?: string): string => {
-      if (!s) return "—";
-      try {
-        return new Date(s + "Z").toLocaleString();
-      } catch {
-        return s;
-      }
-    };
     return (
       <div className="flex flex-col gap-3">
         <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
@@ -2412,7 +2404,7 @@ export function AgentsPage() {
               >
                 <summary className="px-3 py-2 cursor-pointer text-[12px] flex items-center gap-2 select-none">
                   <History className="w-3.5 h-3.5 text-text-dim shrink-0" />
-                  <span className="font-medium">{fmtTs(v.timestamp)}</span>
+                  <span className="font-medium">{formatSqliteDateTime(v.timestamp)}</span>
                   <span className="text-text-dim">· {v.change_source}</span>
                 </summary>
                 <pre className="px-3 pb-3 text-[11px] font-mono leading-[1.6] max-h-60 overflow-auto whitespace-pre-wrap break-all text-text-dim">
