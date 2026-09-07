@@ -24,6 +24,12 @@ pub struct KvPair {
 /// than "this one is doing the work". The resolved name and its provenance
 /// are what an operator actually needs — a slow model inherited here runs
 /// after every reply and delays every answer.
+///
+/// It is not dropped either, because it is the only writable one of the two.
+/// The resolved name is what boot made of the setting — the provider prefix
+/// split off, `[default_model]` substituted when nothing was configured, and
+/// an edit still waiting for a restart not yet reflected — so writing it back
+/// as the setting rewrites configuration nobody touched.
 #[derive(Clone, Default)]
 pub struct MemoryConfigView {
     pub embedding_provider: String,
@@ -32,8 +38,25 @@ pub struct MemoryConfigView {
     pub auto_retrieve: bool,
     /// The model extraction actually runs on, chosen or inherited.
     pub effective_extraction_model: String,
+    /// The raw `extraction_model` setting, verbatim: `provider/model` when it
+    /// was written that way, and `None` when the file leaves it out to inherit.
+    /// This is the value a save may write; the resolved one above is display.
+    pub configured_extraction_model: Option<String>,
     /// True when nobody picked it and it fell through to `[default_model]`.
     pub extraction_model_inherited: bool,
+}
+
+/// What the model editor starts from.
+///
+/// The configured setting when there is one, so editing
+/// `groq/llama-3.3-70b-versatile` does not begin from the bare half boot split
+/// off it. Nothing is configured under an inherited model, and there the
+/// running name is the only useful starting point — pinning it is then the
+/// operator's own keystroke rather than a side effect of some other edit.
+fn seed_model_buf(cfg: &MemoryConfigView) -> String {
+    cfg.configured_extraction_model
+        .clone()
+        .unwrap_or_else(|| cfg.effective_extraction_model.clone())
 }
 
 #[derive(Clone)]
@@ -107,6 +130,10 @@ pub struct MemoryState {
     /// Draft of the extraction model while it is being typed.
     pub config_model_buf: String,
     pub config_editing_model: bool,
+    /// Set when the operator accepts a model in the editor, and only then: a
+    /// save omits `extraction_model` while it is false, so toggling a boolean
+    /// cannot rewrite a setting the operator never opened.
+    pub config_model_edited: bool,
     /// Set once anything is changed, cleared on save — so the panel can say
     /// there is unsaved work instead of losing it silently on Esc.
     pub config_dirty: bool,
@@ -120,7 +147,9 @@ pub enum MemoryUIAction {
     SaveConfig {
         auto_memorize: bool,
         auto_retrieve: bool,
-        extraction_model: String,
+        /// `None` leaves the configured model untouched, which is what a save
+        /// that only flipped a boolean must do.
+        extraction_model: Option<String>,
     },
     LoadKv(String),
     SaveKv {
@@ -154,12 +183,25 @@ impl MemoryState {
             config_field: ConfigField::AutoMemorize,
             config_model_buf: String::new(),
             config_editing_model: false,
+            config_model_edited: false,
             config_dirty: false,
         }
     }
 
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+    }
+
+    /// Put a freshly fetched configuration on the panel.
+    ///
+    /// Clearing the edited flag is the point of having a method: the fetch
+    /// answers with what the file now says, so any draft the operator accepted
+    /// before it is stale, and a save carrying it would write back a value the
+    /// panel is no longer showing.
+    pub fn apply_config(&mut self, config: MemoryConfigView) {
+        self.config = Some(config);
+        self.loading = false;
+        self.config_model_edited = false;
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> MemoryUIAction {
@@ -182,15 +224,19 @@ impl MemoryState {
                 KeyCode::Esc => {
                     self.config_editing_model = false;
                     if let Some(cfg) = &self.config {
-                        self.config_model_buf = cfg.effective_extraction_model.clone();
+                        self.config_model_buf = seed_model_buf(cfg);
                     }
                 }
                 KeyCode::Enter => {
                     self.config_editing_model = false;
                     if let Some(cfg) = &mut self.config {
                         cfg.effective_extraction_model = self.config_model_buf.clone();
+                        // The typed text is the setting, prefix and all — the
+                        // one place a save is allowed to write one.
+                        cfg.configured_extraction_model = Some(self.config_model_buf.clone());
                         cfg.extraction_model_inherited = false;
                     }
+                    self.config_model_edited = true;
                     self.config_dirty = true;
                 }
                 KeyCode::Backspace => {
@@ -220,7 +266,7 @@ impl MemoryState {
                 }
                 ConfigField::ExtractionModel => {
                     if let Some(cfg) = &self.config {
-                        self.config_model_buf = cfg.effective_extraction_model.clone();
+                        self.config_model_buf = seed_model_buf(cfg);
                         self.config_editing_model = true;
                     }
                 }
@@ -230,7 +276,15 @@ impl MemoryState {
                     let action = MemoryUIAction::SaveConfig {
                         auto_memorize: cfg.auto_memorize,
                         auto_retrieve: cfg.auto_retrieve,
-                        extraction_model: cfg.effective_extraction_model.clone(),
+                        // Sent only when the operator edited it. The displayed
+                        // name is what boot resolved the setting to, so sending
+                        // it on every save replaces `groq/llama-3.3-70b-versatile`
+                        // with its bare half, pins a model that was inheriting,
+                        // and overwrites an edit still waiting for a restart.
+                        extraction_model: self
+                            .config_model_edited
+                            .then(|| cfg.configured_extraction_model.clone())
+                            .flatten(),
                     };
                     // `config_dirty` stays set until the daemon confirms the
                     // write — see `apply_save_result`.
@@ -258,6 +312,9 @@ impl MemoryState {
         self.status_msg = match result {
             Ok(()) => {
                 self.config_dirty = false;
+                // The model is now the configured one, so the next save has
+                // nothing of its own to write until the operator edits again.
+                self.config_model_edited = false;
                 crate::i18n::t("tui-memory-config-saved")
             }
             Err(crate::tui::event::FetchFailure::RequiresDaemon) => {
@@ -1004,9 +1061,32 @@ mod tests {
         );
     }
 
+    /// A configuration whose raw setting and resolved name differ — the shape
+    /// that makes writing one back as the other visible.
+    fn loaded_with_setting(configured: Option<&str>, effective: &str) -> MemoryState {
+        let mut state = MemoryState::new();
+        state.config = Some(MemoryConfigView {
+            auto_memorize: true,
+            auto_retrieve: true,
+            effective_extraction_model: effective.to_string(),
+            configured_extraction_model: configured.map(str::to_string),
+            extraction_model_inherited: configured.is_none(),
+            ..Default::default()
+        });
+        state.sub = MemorySub::Config;
+        state
+    }
+
+    /// Flipping a toggle must not rewrite the model. The panel shows what boot
+    /// resolved the setting to, which for `groq/llama-3.3-70b-versatile` is the
+    /// bare `llama-3.3-70b-versatile`: sending that back as the setting drops
+    /// the provider the operator wrote.
     #[test]
-    fn saving_sends_exactly_what_the_panel_shows() {
-        let mut state = loaded("litellm:sensor-model-generic");
+    fn a_boolean_only_save_leaves_a_provider_qualified_model_alone() {
+        let mut state = loaded_with_setting(
+            Some("groq/llama-3.3-70b-versatile"),
+            "llama-3.3-70b-versatile",
+        );
         state.handle_key(key(KeyCode::Char(' ')));
 
         let action = state.handle_key(key(KeyCode::Char('s')));
@@ -1022,7 +1102,10 @@ mod tests {
                     "the toggle the operator flipped must be sent"
                 );
                 assert!(auto_retrieve);
-                assert_eq!(extraction_model, "litellm:sensor-model-generic");
+                assert_eq!(
+                    extraction_model, None,
+                    "an untouched model must be left out of the save, not rewritten"
+                );
             }
             other => panic!("expected a save, got {other:?}"),
         }
@@ -1030,6 +1113,74 @@ mod tests {
             state.config_dirty,
             "the keypress only asks for a save; the marker is what says the edits are still pending"
         );
+    }
+
+    /// Nothing configured means the model is inherited from `[default_model]`.
+    /// Writing the running name back would pin it, turning "follow the default"
+    /// into a choice the operator never made.
+    #[test]
+    fn a_boolean_only_save_does_not_pin_an_inherited_model() {
+        let mut state = loaded_with_setting(None, "inherited-fast");
+        state.handle_key(key(KeyCode::Char(' ')));
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            MemoryUIAction::SaveConfig {
+                extraction_model, ..
+            } => assert_eq!(extraction_model, None),
+            other => panic!("expected a save, got {other:?}"),
+        }
+    }
+
+    /// The other half of the contract: a model the operator did type is sent,
+    /// verbatim, prefix included.
+    #[test]
+    fn an_edited_model_is_saved_as_typed() {
+        let mut state = loaded_with_setting(Some("groq/llama-3.1-8b"), "llama-3.1-8b");
+        state.config_field = ConfigField::ExtractionModel;
+        state.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            state.config_model_buf, "groq/llama-3.1-8b",
+            "the editor must start from the setting, not from the name boot split out of it"
+        );
+        for _ in 0.."groq/llama-3.1-8b".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "cerebras/llama-3.3-70b".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            MemoryUIAction::SaveConfig {
+                extraction_model, ..
+            } => assert_eq!(extraction_model, Some("cerebras/llama-3.3-70b".to_string())),
+            other => panic!("expected a save, got {other:?}"),
+        }
+    }
+
+    /// A refetch answers with what the file says now, so the draft that was
+    /// accepted before it must stop being something the next save writes.
+    #[test]
+    fn a_refetch_stops_a_previous_edit_from_being_saved_again() {
+        let mut state = loaded_with_setting(Some("groq/llama-3.1-8b"), "llama-3.1-8b");
+        state.config_field = ConfigField::ExtractionModel;
+        state.handle_key(key(KeyCode::Enter));
+        state.handle_key(key(KeyCode::Char('x')));
+        state.handle_key(key(KeyCode::Enter));
+        assert!(state.config_model_edited);
+
+        state.apply_config(MemoryConfigView {
+            configured_extraction_model: Some("groq/llama-3.1-8b".to_string()),
+            effective_extraction_model: "llama-3.1-8b".to_string(),
+            ..Default::default()
+        });
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            MemoryUIAction::SaveConfig {
+                extraction_model, ..
+            } => assert_eq!(extraction_model, None),
+            other => panic!("expected a save, got {other:?}"),
+        }
     }
 
     #[test]

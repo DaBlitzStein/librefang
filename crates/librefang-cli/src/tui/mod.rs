@@ -623,8 +623,7 @@ impl App {
                     crate::i18n::t_args("tui-mod-session-deleted", &[("id", &id)]);
             }
             AppEvent::MemoryConfigLoaded(config) => {
-                self.memory.config = Some(config);
-                self.memory.loading = false;
+                self.memory.apply_config(config);
             }
             AppEvent::MemoryConfigSaved(result) => {
                 self.memory.apply_save_result(result);

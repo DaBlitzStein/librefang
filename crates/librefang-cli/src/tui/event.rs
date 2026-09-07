@@ -2514,6 +2514,11 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                 .as_str()
                 .unwrap_or("")
                 .to_string(),
+            // The raw setting travels alongside it, because it is the only one
+            // of the two a save may write back: the resolved name has already
+            // lost its provider prefix, and is `[default_model]`'s when nothing
+            // was configured at all.
+            configured_extraction_model: pm["extraction_model"].as_str().map(str::to_string),
             extraction_model_inherited: pm["extraction_model_source"].as_str()
                 == Some("inherited_default"),
         };
@@ -2521,11 +2526,19 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
     });
 }
 
+/// Write the memory configuration back.
+///
+/// `extraction_model` is `None` when the operator did not edit it, and the
+/// field is then left out of the PATCH entirely: the endpoint only writes the
+/// keys a request carries, so omitting it is what keeps a boolean-only save
+/// from rewriting the model. Sending the panel's displayed name instead would
+/// strip a `provider/` prefix, pin a model that was inheriting, or overwrite a
+/// change that is still waiting for a restart to take effect.
 pub fn spawn_save_memory_config(
     backend: BackendRef,
     auto_memorize: bool,
     auto_retrieve: bool,
-    extraction_model: String,
+    extraction_model: Option<String>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
@@ -2539,13 +2552,18 @@ pub fn spawn_save_memory_config(
             return;
         };
         let client = make_daemon_client(api_key.as_deref());
-        let body = serde_json::json!({
-            "proactive_memory": {
-                "auto_memorize": auto_memorize,
-                "auto_retrieve": auto_retrieve,
-                "extraction_model": extraction_model,
-            }
+        let mut proactive_memory = serde_json::json!({
+            "auto_memorize": auto_memorize,
+            "auto_retrieve": auto_retrieve,
         });
+        if let Some(model) = extraction_model.as_deref().map(str::trim) {
+            // An emptied field is not a request to configure the empty string,
+            // and the endpoint has no "unset" for this key — leave it alone.
+            if !model.is_empty() {
+                proactive_memory["extraction_model"] = serde_json::Value::String(model.to_string());
+            }
+        }
+        let body = serde_json::json!({ "proactive_memory": proactive_memory });
         let result = match client
             .patch(format!("{base_url}/api/memory/config"))
             .json(&body)
