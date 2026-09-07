@@ -1,10 +1,17 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { CheckCircle, KeyRound, Save, Trash2, XCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle,
+  KeyRound,
+  Save,
+  Trash2,
+  XCircle,
+} from "lucide-react";
 
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
-import { ApiError } from "../lib/http/client";
+import { ApiError, type VaultKeyStatus } from "../lib/http/client";
 import { useVaultKeys } from "../lib/queries/vault";
 import { useDeleteVaultKey, useSetVaultKey } from "../lib/mutations/vault";
 
@@ -13,8 +20,16 @@ import { useDeleteVaultKey, useSetVaultKey } from "../lib/mutations/vault";
  *
  * The value of a stored secret is never rendered, not even masked at its real
  * length — the daemon has no read-back endpoint, and a mask sized to the real
- * value would leak the length. The only state shown is the key name and a
- * set/not-set boolean, exactly what `GET /api/vault/keys` returns.
+ * value would leak the length. The only state shown is the key name, whether
+ * the vault holds it, and where the daemon resolves it from, exactly what
+ * `GET /api/vault/keys` returns.
+ *
+ * The badge reports `source`, not `set`. The daemon reads its own process
+ * environment first, so a badge built from vault presence said "Not set" on a
+ * deployment that exports `GITHUB_TOKEN` while promotion using it worked, and
+ * said the same after a delete that revoked nothing. `set` still drives whether
+ * a delete control is offered, because that is genuinely a question about the
+ * stored copy.
  *
  * The draft input is cleared on a successful write rather than repopulated,
  * because there is nothing to repopulate it from and leaving the typed secret
@@ -24,6 +39,38 @@ import { useDeleteVaultKey, useSetVaultKey } from "../lib/mutations/vault";
  * extending the daemon's `WRITABLE_KEYS` allowlist surfaces the new key here
  * with no dashboard change.
  */
+/**
+ * The badge for one key: the source the daemon resolves it from.
+ *
+ * The environment case is its own visual state rather than a variant of "Set",
+ * because it is the one the operator cannot act on from this form.
+ */
+function SourceBadge({ entry }: { entry: VaultKeyStatus }) {
+  const { t } = useTranslation();
+  if (entry.source === "environment") {
+    return (
+      <Badge variant="warning">
+        <AlertTriangle className="w-3 h-3 mr-1" />
+        {t("settings.vault_from_env", "Overridden by the environment")}
+      </Badge>
+    );
+  }
+  if (entry.source === "vault") {
+    return (
+      <Badge variant="success">
+        <CheckCircle className="w-3 h-3 mr-1" />
+        {t("settings.vault_is_set", "Set")}
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="default">
+      <XCircle className="w-3 h-3 mr-1" />
+      {t("settings.vault_not_set", "Not set")}
+    </Badge>
+  );
+}
+
 export function VaultKeysSection() {
   const { t } = useTranslation();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -55,10 +102,18 @@ export function VaultKeysSection() {
     setError(null);
     setSuccess(null);
     try {
-      await setKey.mutateAsync({ key, value });
+      const result = await setKey.mutateAsync({ key, value });
       // Clear before anything else can read it back out of state.
       setDrafts((prev) => ({ ...prev, [key]: "" }));
-      setSuccess(t("settings.vault_saved", "{{key}} stored.", { key }));
+      setSuccess(
+        result?.source === "environment"
+          ? t(
+              "settings.vault_saved_but_overridden",
+              "{{key}} stored, but the daemon reads it from its own environment — the stored value is not the one it uses.",
+              { key },
+            )
+          : t("settings.vault_saved", "{{key}} stored.", { key }),
+      );
     } catch (e) {
       // Only the server's message, never the value the operator typed.
       setError(
@@ -74,10 +129,18 @@ export function VaultKeysSection() {
     setError(null);
     setSuccess(null);
     try {
-      await deleteKey.mutateAsync({ key });
+      const result = await deleteKey.mutateAsync({ key });
       setDrafts((prev) => ({ ...prev, [key]: "" }));
       setConfirmDelete(null);
-      setSuccess(t("settings.vault_removed", "{{key}} removed.", { key }));
+      setSuccess(
+        result?.source === "environment"
+          ? t(
+              "settings.vault_removed_but_overridden",
+              "{{key}} removed from the vault, but the daemon still reads it from its own environment — nothing was revoked.",
+              { key },
+            )
+          : t("settings.vault_removed", "{{key}} removed.", { key }),
+      );
     } catch (e) {
       setError(
         e instanceof Error
@@ -143,17 +206,20 @@ export function VaultKeysSection() {
                 <p className="text-sm font-semibold font-mono truncate">
                   {entry.key}
                 </p>
-                <Badge variant={entry.set ? "success" : "default"}>
-                  {entry.set ? (
-                    <CheckCircle className="w-3 h-3 mr-1" />
-                  ) : (
-                    <XCircle className="w-3 h-3 mr-1" />
+                <SourceBadge entry={entry} />
+              </div>
+              {entry.source === "environment" && (
+                <p className="text-xs text-amber-500">
+                  {t(
+                    "settings.vault_env_override",
+                    "The daemon reads {{key}} from its own environment, which overrides the vault. Saving or removing a value here changes the stored copy, not the credential the daemon uses.",
+                    { key: entry.key },
                   )}
                   {entry.set
-                    ? t("settings.vault_is_set", "Set")
-                    : t("settings.vault_not_set", "Not set")}
-                </Badge>
-              </div>
+                    ? ` ${t("settings.vault_env_override_stored", "A vault copy is stored but inert.")}`
+                    : ""}
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 <input
                   type="password"
