@@ -1159,6 +1159,12 @@ export interface GoalItem {
   verify_agent_id?: string;
   /** Model that judges goal completion; only used with loop_engineering. */
   evaluator_model?: string;
+  /**
+   * Pause between the autonomous runner's loop iterations, in seconds.
+   * Absent means the compiled default (2s). Applies to every run, not only
+   * loop-engineered ones.
+   */
+  tick_interval_secs?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -4547,6 +4553,7 @@ export async function createGoal(payload: {
   loop_engineering?: boolean;
   verify_agent_id?: string;
   evaluator_model?: string;
+  tick_interval_secs?: number;
 }): Promise<GoalItem> {
   return post<GoalItem>("/api/goals", payload);
 }
@@ -4563,6 +4570,8 @@ export async function updateGoal(
     loop_engineering?: boolean;
     verify_agent_id?: string | null;
     evaluator_model?: string | null;
+    /** `null` clears the override and restores the default cadence. */
+    tick_interval_secs?: number | null;
   }
 ): Promise<GoalItem> {
   // Issue #3832: handler now returns the mutated GoalItem instead of an ack

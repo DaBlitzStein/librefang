@@ -2946,7 +2946,9 @@
     "verifier_agent": "Agent weryfikujący",
     "no_verifier_selected": "Bez weryfikatora (bez kontroli)",
     "evaluator_model": "Model oceniający",
-    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)"
+    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)",
+    "tick_interval": "Odstęp między iteracjami",
+    "tick_interval_placeholder": "Sekundy między iteracjami pętli (domyślnie 2)"
   },
   "sessions": {
     "title": "Sesje",

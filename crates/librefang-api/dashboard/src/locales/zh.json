@@ -2906,7 +2906,9 @@
     "verifier_agent": "验证代理",
     "no_verifier_selected": "无验证代理（不设关卡）",
     "evaluator_model": "评估模型",
-    "evaluator_model_placeholder": "评估模型（可选）"
+    "evaluator_model_placeholder": "评估模型（可选）",
+    "tick_interval": "循环间隔",
+    "tick_interval_placeholder": "两次循环迭代之间的秒数（默认 2）"
   },
   "sessions": {
     "title": "会话",

@@ -308,6 +308,63 @@ describe("GoalsPage", () => {
     // verify_agent_id outright, and `""` is not a UUID.
     expect(payload).not.toHaveProperty("verify_agent_id");
     expect(payload).not.toHaveProperty("evaluator_model");
+    // And a blank cadence: `""` fails the backend's integer check, while
+    // omitting the field is what leaves the goal on the default 2s.
+    expect(payload).not.toHaveProperty("tick_interval_secs");
+  });
+
+  // The runner reads the cadence on every autonomous run, so the control must
+  // be reachable without ticking loop engineering first.
+  it("sends the tick interval as a number on create, ungated by loop engineering", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { create } = setMutations();
+    renderPage();
+
+    fireEvent.change(
+      screen.getByPlaceholderText("goals.goal_title_placeholder"),
+      { target: { value: "Slow burn" } },
+    );
+    fireEvent.change(
+      screen.getByPlaceholderText("goals.tick_interval_placeholder"),
+      { target: { value: "900" } },
+    );
+
+    const submitBtn = screen
+      .getAllByText("goals.create_goal")
+      .map((el) => el.closest("button"))
+      .find((b): b is HTMLButtonElement => !!b && b.type === "submit");
+    fireEvent.click(submitBtn!);
+
+    await Promise.resolve();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const payload = create.mock.calls[0][0] as Record<string, unknown>;
+    // A string would fail the backend's `as_u64()` check with a 400.
+    expect(payload.tick_interval_secs).toBe(900);
+    expect(payload).toMatchObject({ title: "Slow burn", loop_engineering: false });
+  });
+
+  it("pre-fills the tick interval on edit and clears it with null when emptied", async () => {
+    const paced: GoalItem = { ...PARENT_GOAL, tick_interval_secs: 30 };
+    useGoalsMock.mockReturnValue(makeQuery([paced]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { update } = setMutations();
+    renderPage();
+
+    fireEvent.click(screen.getByTitle("common.edit"));
+
+    const tickInput = screen.getByDisplayValue("30") as HTMLInputElement;
+    fireEvent.change(tickInput, { target: { value: "" } });
+
+    fireEvent.click(screen.getByText("common.save"));
+    await Promise.resolve();
+
+    expect(update).toHaveBeenCalledTimes(1);
+    const { data } = update.mock.calls[0][0] as { data: Record<string, unknown> };
+    // `null` is the backend's clear signal; `""` would be rejected as a
+    // malformed integer instead of restoring the default cadence.
+    expect(data.tick_interval_secs).toBeNull();
   });
 
   // Loop engineering is opt-in, so the controls that configure it stay out of

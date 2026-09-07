@@ -2946,7 +2946,9 @@
     "verifier_agent": "Агент-перевіряч",
     "no_verifier_selected": "Без перевіряча (без контролю)",
     "evaluator_model": "Модель-оцінювач",
-    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)"
+    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)",
+    "tick_interval": "Інтервал ітерацій",
+    "tick_interval_placeholder": "Секунди між ітераціями циклу (типово 2)"
   },
   "sessions": {
     "title": "Сесії",

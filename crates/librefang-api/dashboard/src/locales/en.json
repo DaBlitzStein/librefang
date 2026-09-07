@@ -2940,7 +2940,9 @@
     "verifier_agent": "Verifier agent",
     "no_verifier_selected": "No verifier (run ungated)",
     "evaluator_model": "Evaluator model",
-    "evaluator_model_placeholder": "Evaluator model (optional)"
+    "evaluator_model_placeholder": "Evaluator model (optional)",
+    "tick_interval": "Tick interval",
+    "tick_interval_placeholder": "Seconds between loop iterations (default 2)"
   },
   "sessions": {
     "title": "Sessions",
