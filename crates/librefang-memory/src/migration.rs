@@ -281,6 +281,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // prior configuration from the dashboard.
     run_step!(55, migrate_v55);
 
+    // v56 (#7752): add `sessions.parent_session_id` so a sub-agent run
+    // records which session spawned it. The parent can enumerate its
+    // children, and deleting the parent cascades. NULL on every ordinary
+    // session, which is almost all of them.
+    run_step!(56, migrate_v56);
+
     // v58: per-task claim TTL override on the Task Board. `[task_board]
     // claim_ttl_secs` is one global number, so an installation that mixes a
     // 30-second health check with a two-hour import has to pick a TTL that is
@@ -1239,6 +1245,26 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (55, datetime('now'), 'Template (agent-type) version history table')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v56 (#7752): session parentage — `sessions.parent_session_id`.
+fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "sessions", "parent_session_id")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (56, datetime('now'), 'Add sessions.parent_session_id for sub-agent run lineage (#7752)')",
         [],
     )?;
     Ok(())
@@ -4242,6 +4268,14 @@ mod tests {
                 user_id TEXT NOT NULL,
                 PRIMARY KEY (chat_id, user_id)
             );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                messages BLOB NOT NULL,
+                context_window_tokens INTEGER DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             CREATE TABLE task_queue (
                 id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
