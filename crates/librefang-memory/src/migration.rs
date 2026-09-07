@@ -4318,6 +4318,7 @@ mod tests {
                 message_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
             CREATE TABLE task_queue (
                 id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
