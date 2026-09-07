@@ -1352,6 +1352,33 @@ impl WorkflowRun {
         self.paused_variables.clear();
         self.paused_current_input = None;
     }
+
+    /// The step index to report to an observer: `Some(i)` only while the run
+    /// is actually executing step `i`.
+    ///
+    /// Every terminal and pause transition also clears `current_step_index`
+    /// directly, but `state` is a plain field assigned from dozens of separate
+    /// branches in this module, so no choke point exists where that clear
+    /// could be made to happen once — and because the field and its writers
+    /// share a module, privacy cannot create one either.
+    /// The invariant is upheld today by remembering to add a line to each new
+    /// branch.
+    /// Gating the *read* on the state gives the same guarantee for the two
+    /// places the field is ever observed (the run-detail and run-list JSON),
+    /// so a future branch that forgets the clear cannot make a finished run
+    /// advertise a step it is no longer executing.
+    ///
+    /// The predicate is a whitelist rather than `!is_terminal()` so that a
+    /// state variant added later fails closed: reporting no progress for a
+    /// live run is a display gap, reporting a step for a run that ended is a
+    /// lie, and only one of those is worth defaulting to.
+    pub fn live_step_index(&self) -> Option<usize> {
+        if matches!(self.state, WorkflowRunState::Running) {
+            self.current_step_index
+        } else {
+            None
+        }
+    }
 }
 
 /// External pause request lodged on a `WorkflowRun`. Pre-generates the
@@ -10908,6 +10935,46 @@ prompt_template = "do {{x}}"
             paused_current_input: None,
             owner_agent_id: None,
         }
+    }
+
+    /// The hand-written `current_step_index = None` lines are what keeps a
+    /// finished run from advertising a step it is no longer executing, and
+    /// they are maintained by remembering to add one to each new terminal
+    /// branch. This pins the guarantee to the read instead: a branch that
+    /// forgets the line still cannot surface a live step, because
+    /// `live_step_index` asks the state rather than trusting the field.
+    #[test]
+    fn live_step_index_is_none_for_a_non_running_run_that_kept_its_index() {
+        let states = [
+            WorkflowRunState::Pending,
+            WorkflowRunState::Completed,
+            WorkflowRunState::Failed,
+            WorkflowRunState::Cancelled,
+            WorkflowRunState::Paused {
+                resume_token_hash: "deadbeef".to_string(),
+                reason: "waiting".to_string(),
+                paused_at: Utc::now(),
+            },
+        ];
+        for state in states {
+            let mut run = make_terminal_run(state.clone());
+            // The clear the imagined new branch forgot to write.
+            run.current_step_index = Some(1);
+            assert_eq!(
+                run.live_step_index(),
+                None,
+                "a run in {state:?} must not report a live step index"
+            );
+        }
+    }
+
+    /// The other half of the whitelist: gating the read must not hide progress
+    /// on a run that really is executing a step.
+    #[test]
+    fn live_step_index_reports_the_step_a_running_run_is_executing() {
+        let mut run = make_terminal_run(WorkflowRunState::Running);
+        run.current_step_index = Some(1);
+        assert_eq!(run.live_step_index(), Some(1));
     }
 
     #[test]
