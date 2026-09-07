@@ -1970,6 +1970,10 @@ pub async fn build_router(
             axum::routing::post(routes::agents::upload_file),
         )
         .layer(RequestBodyLimitLayer::new(upload_body_cap))
+        // The two limits are not the same limit and neither substitutes for the other.
+        // `RequestBodyLimitLayer` bounds the *stream*; `DefaultBodyLimit` bounds what the `Bytes` **extractor** will buffer, and its default is axum's own 2 MiB.
+        // Without this line the stream cap is irrelevant above 2 MiB: `upload_file` extracts `axum::body::Bytes`, so a 3 MiB attachment is refused by the extractor with a 413 even when the operator set `max_upload_size_bytes` to 10 MB or 100 MB — which is most of the PDFs the issue was reported about (#8185).
+        .layer(axum::extract::DefaultBodyLimit::max(upload_body_cap))
         // Outermost on the upload path, so it answers before the limit layer cuts the stream: a body whose declared `Content-Length` is over the cap gets a JSON 413 naming the cap, and the daemon logs it.
         // Without this the operator sees nothing at all and the client sees a dropped connection it cannot tell apart from an unreachable daemon (#8181).
         .layer(axum::middleware::from_fn_with_state(

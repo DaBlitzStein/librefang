@@ -28,6 +28,13 @@ const GLOBAL_BODY_CAP: usize = 1024;
 const UPLOAD_BODY_CAP: usize = 64 * 1024;
 const BETWEEN_THE_CAPS: usize = 8 * 1024;
 
+/// The production default for `max_upload_size_bytes`, so the case below is the one an operator who changed nothing actually hits.
+const DEFAULT_UPLOAD_BODY_CAP: usize = 10 * 1024 * 1024;
+
+/// Above axum's own 2 MiB `DefaultBodyLimit` — the limit the `Bytes` extractor applies when nothing overrides it — and below `DEFAULT_UPLOAD_BODY_CAP`, so nothing but the extractor limit can refuse it.
+/// The caps the rest of this file uses are all under 2 MiB, which is exactly why they could not see this limit (#8185).
+const OVER_THE_EXTRACTOR_DEFAULT: usize = 3 * 1024 * 1024;
+
 struct Harness {
     app: axum::Router,
     state: Arc<AppState>,
@@ -41,6 +48,10 @@ impl Drop for Harness {
 }
 
 async fn boot() -> Harness {
+    boot_with_upload_cap(UPLOAD_BODY_CAP).await
+}
+
+async fn boot_with_upload_cap(upload_cap: usize) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     let config = KernelConfig {
@@ -48,7 +59,7 @@ async fn boot() -> Harness {
         data_dir: tmp.path().join("data"),
         api_key: TEST_TOKEN.to_string(),
         max_request_body_bytes: GLOBAL_BODY_CAP,
-        max_upload_size_bytes: UPLOAD_BODY_CAP,
+        max_upload_size_bytes: upload_cap,
         default_model: DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
@@ -100,6 +111,28 @@ async fn upload_between_the_global_cap_and_the_upload_cap_is_accepted() {
         response.status(),
         StatusCode::CREATED,
         "an {BETWEEN_THE_CAPS}-byte upload is under max_upload_size_bytes ({UPLOAD_BODY_CAP}) and must be accepted even though it exceeds max_request_body_bytes ({GLOBAL_BODY_CAP})"
+    );
+}
+
+/// The stream cap is not the only cap: `upload_file` extracts `axum::body::Bytes`, whose own limit is 2 MiB unless `DefaultBodyLimit` overrides it.
+///
+/// Every other case in this file runs under caps below 2 MiB, so they all pass whether or not that override is there — which is how the limit survived the first fix.
+/// A real attachment is usually bigger than 2 MiB, so without the override raising `max_upload_size_bytes` buys the operator nothing (#8185).
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_over_the_extractor_default_is_accepted_under_a_larger_cap() {
+    let harness = boot_with_upload_cap(DEFAULT_UPLOAD_BODY_CAP).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(upload_request(OVER_THE_EXTRACTOR_DEFAULT))
+        .await
+        .expect("router responds");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "a {OVER_THE_EXTRACTOR_DEFAULT}-byte upload is well under max_upload_size_bytes ({DEFAULT_UPLOAD_BODY_CAP}) and must be accepted; a 413 here means the Bytes extractor is still capped at axum's 2 MiB default"
     );
 }
 
