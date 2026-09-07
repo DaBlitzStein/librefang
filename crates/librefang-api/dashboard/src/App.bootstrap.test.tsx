@@ -1,0 +1,138 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { App } from "./App";
+import { useUIStore } from "./lib/store";
+import {
+  checkDashboardAuthMode,
+  dashboardLogin,
+  getDashboardUsername,
+  getStatus,
+  getVersionInfo,
+  verifyStoredAuth,
+} from "./api";
+
+vi.mock("react-i18next", async () => {
+  const actual = await vi.importActual<typeof import("react-i18next")>(
+    "react-i18next",
+  );
+  // `t` and the object wrapping it must be referentially stable: `navGroups`
+  // memoises on `t`, and a fresh identity each render re-runs the
+  // `pruneCollapsedNavGroups` effect into an update loop.
+  const translation = { t: (key: string) => key };
+  return {
+    ...actual,
+    useTranslation: () => translation,
+  };
+});
+
+vi.mock("motion/react", async () => {
+  const React = await import("react");
+  const MotionDiv = ({ children, ...props }: React.HTMLAttributes<HTMLDivElement>) =>
+    React.createElement("div", props, children);
+  return {
+    AnimatePresence: ({ children }: { children: React.ReactNode }) => children,
+    MotionConfig: ({ children }: { children: React.ReactNode }) => children,
+    motion: { div: MotionDiv },
+  };
+});
+
+vi.mock("@tanstack/react-router", async () => {
+  const React = await import("react");
+  return {
+    Link: ({
+      children,
+      to,
+      ...rest
+    }: { children: React.ReactNode; to?: string } & Record<string, unknown>) =>
+      React.createElement("a", { href: to, ...rest }, children),
+    Outlet: () => null,
+    useNavigate: () => vi.fn(),
+    useRouterState: () => ({ location: { pathname: "/overview" } }),
+  };
+});
+
+// The sidebar/topbar chrome pulls in TanStack Query consumers that are not
+// under test here; the bootstrap effect they surround is.
+vi.mock("./components/NotificationCenter", () => ({
+  NotificationCenter: () => null,
+}));
+vi.mock("./components/OfflineBanner", () => ({ OfflineBanner: () => null }));
+vi.mock("./components/EveryApiPartnerLink", () => ({
+  EveryApiPartnerLink: () => null,
+}));
+vi.mock("./components/ui/CommandPalette", () => ({
+  CommandPalette: () => null,
+  useCommandPalette: () => ({ isOpen: false, setIsOpen: vi.fn() }),
+}));
+vi.mock("./components/ui/PushDrawer", () => ({ PushDrawer: () => null }));
+
+vi.mock("./api", () => ({
+  changePassword: vi.fn(),
+  checkDashboardAuthMode: vi.fn(),
+  clearApiKey: vi.fn(),
+  dashboardLogin: vi.fn(),
+  dashboardLogout: vi.fn(),
+  getDashboardUsername: vi.fn(),
+  getStatus: vi.fn(),
+  getVersionInfo: vi.fn(),
+  isPasskeySupported: vi.fn(() => false),
+  loginWithPasskey: vi.fn(),
+  setApiKey: vi.fn(),
+  setOnUnauthorized: vi.fn(),
+  verifyStoredAuth: vi.fn(),
+}));
+
+async function logIn() {
+  const user = userEvent.setup();
+  await user.type(
+    await screen.findByPlaceholderText("auth.username_placeholder"),
+    "operator",
+  );
+  await user.type(
+    screen.getByPlaceholderText("auth.password_placeholder"),
+    "password",
+  );
+  await user.click(screen.getByRole("button", { name: "auth.submit" }));
+}
+
+describe("DashboardApp authed bootstrap", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useUIStore.setState({ terminalEnabled: null });
+    window.history.pushState({}, "", "/overview");
+    vi.mocked(checkDashboardAuthMode).mockResolvedValue("credentials");
+    // Unauthenticated on mount, authenticated once the login succeeds.
+    vi.mocked(verifyStoredAuth).mockResolvedValueOnce(false).mockResolvedValue(true);
+    vi.mocked(dashboardLogin).mockResolvedValue({ ok: true });
+    vi.mocked(getVersionInfo).mockResolvedValue({
+      version: "test",
+      hostname: "myhost",
+    });
+    vi.mocked(getStatus).mockResolvedValue({
+      terminal_enabled: true,
+    } as Awaited<ReturnType<typeof getStatus>>);
+    vi.mocked(getDashboardUsername).mockResolvedValue("daemon-user");
+  });
+
+  it("shows the daemon's username in the avatar after logging in", async () => {
+    render(<App />);
+
+    await logIn();
+
+    // "DA" from the daemon's `daemon-user`, not "OP" from the form input and
+    // not the "U" placeholder the empty state renders.
+    await waitFor(() => expect(screen.getAllByText("DA").length).toBeGreaterThan(0));
+    expect(screen.queryByText("OP")).not.toBeInTheDocument();
+  });
+
+  it("applies the daemon's terminal policy after logging in", async () => {
+    render(<App />);
+
+    await logIn();
+
+    await waitFor(() =>
+      expect(screen.getByText("nav.console")).toBeInTheDocument(),
+    );
+  });
+});
