@@ -528,7 +528,7 @@ function RestoreDiffModal({
       addToast(t("agentTypes.restore_success"), "success");
       onClose();
     } catch (err) {
-      addToast(toastErr(err, t("agentTypes.restore_failed")), "error");
+      addToast(toastErr(err, t("agentTypes.restore_from_registry_failed")), "error");
     }
   }
 
@@ -609,7 +609,7 @@ function RestoreDiffModal({
               onClick={() => void handleRestore()}
               isLoading={restore.isPending}
             >
-              {t("agentTypes.restore")}
+              {t("agentTypes.restore_from_registry")}
             </Button>
           </div>
         </div>
@@ -803,8 +803,8 @@ function AgentTypeRow({
               type="button"
               onClick={onRestore}
               className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
-              aria-label={t("agentTypes.restore")}
-              title={t("agentTypes.restore")}
+              aria-label={t("agentTypes.restore_from_registry")}
+              title={t("agentTypes.restore_from_registry")}
             >
               <RotateCcw className="h-3.5 w-3.5" />
             </button>
