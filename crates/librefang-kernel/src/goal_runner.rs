@@ -714,11 +714,18 @@ impl GoalRunner {
             last_progress: checkpoint.last_progress,
             last_error: None,
             // The checkpoint stores the run's progress, not its loop-engineering
-            // configuration, so these come back from the goal document — the same
-            // place `start()`'s caller reads them from. Reconstructing them from
-            // the clock-free source keeps a paused run's reported verifier the one
-            // its resume will actually use, instead of a blank that reads as "no
-            // gate on this run".
+            // configuration, so the two fields the goal document does carry come
+            // back from there — the same place `start()`'s caller reads them
+            // from. That keeps a paused run's reported verifier the one its
+            // resume will actually use, instead of a blank that reads as "no gate
+            // on this run".
+            //
+            // `verify_max_retries` is the exception and is not on `Goal` at all:
+            // it is a per-request field (`routes/goals.rs`'s optional body) that
+            // neither the document nor `ResumePoint` persists. So the compiled
+            // default is what a resume without an explicit value will run under,
+            // and reporting it here matches what the run is about to use — but it
+            // does not recover a larger number an earlier `/start` was given.
             verify_agent_id: goal
                 .as_ref()
                 .filter(|g| g.loop_engineering)
