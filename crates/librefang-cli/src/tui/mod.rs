@@ -530,9 +530,20 @@ impl App {
                 };
                 self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
+            AppEvent::AgentManifestHistoryLoaded(versions) => {
+                self.agents.set_manifest_history(versions);
+            }
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
                 match self.active_tab {
+                    // The agent screen has panes that render a spinner-ish
+                    // "loading" line while a fetch is in flight; dropping the
+                    // error here would leave them loading forever with nothing
+                    // said about why.
+                    Tab::Agents => {
+                        self.agents.manifest_history_loading = false;
+                        self.agents.status_msg = err;
+                    }
                     Tab::Workflows => self.workflows.status_msg = err,
                     Tab::Triggers => self.triggers.status_msg = err,
                     Tab::Goals => self.goals.status_msg = err,
@@ -1900,6 +1911,23 @@ impl App {
             agents::AgentAction::FetchAgentModelParams(id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_model_params(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::FetchManifestHistory(id) => {
+                match self.backend.to_ref() {
+                    Some(backend) => {
+                        event::spawn_fetch_agent_manifest_history(
+                            backend,
+                            id,
+                            self.event_tx.clone(),
+                        );
+                    }
+                    // Nothing will ever answer, so the pane is told now rather
+                    // than left on its loading line for the rest of the session.
+                    None => {
+                        self.agents.manifest_history_loading = false;
+                        self.agents.status_msg = crate::i18n::t("chat-runner-no-backend-connected");
+                    }
                 }
             }
             agents::AgentAction::UpdateModelParams { id, changes } => {
