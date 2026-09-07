@@ -1017,6 +1017,12 @@ function DashboardApp() {
 
     void checkAuth();
     getVersionInfo().then((v) => {
+      // Guarded like every other continuation in this effect. The values are
+      // identical on every call, so a late landing overwrites nothing today —
+      // but the effect now re-runs once per login, so the window exists where
+      // it did not before, and the odd one out is the one that surprises the
+      // next reader.
+      if (cancelled) return;
       setAppVersion(v.version ?? "");
       setHostname(v.hostname ?? "");
     }).catch(() => { /* Version info is non-essential; silently ignore failure. */ });
