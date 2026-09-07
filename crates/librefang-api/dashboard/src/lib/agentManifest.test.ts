@@ -971,8 +971,19 @@ prompt_template = "on push"
     expect(reparsed.form.tool_allowlist).toEqual(["file_read"]);
     expect(reparsed.extras.topLevel["future_field"]).toBe("unknown to this daemon");
     expect(reparsed.extras.topLevel["compaction"]).toEqual({ threshold_messages: 7 });
-    expect(reparsed.extras.topLevel["workspaces"]).toEqual({
-      notes: { path: "notes", mode: "rw" },
+    // `[workspaces]` is a first-class field since #8013, not an unknown key: the
+    // parser lifts it into `form.workspaces` and re-emits it from there. This
+    // assertion was written when it still fell through to `extras.topLevel`, and
+    // the two PRs met here — the parser from one, the assertion from the other.
+    // What it is really pinning is that the section survives the round trip, so
+    // it checks the place the section now lives.
+    // `_uid` is minted per parse for React keys, so match on the fields the
+    // manifest actually carries rather than pinning a generated id.
+    expect(reparsed.form.workspaces).toHaveLength(1);
+    expect(reparsed.form.workspaces[0]).toMatchObject({
+      name: "notes",
+      path: "notes",
+      mode: "rw",
     });
     expect(reparsed.extras.topLevel["triggers"]).toEqual([
       { pattern: "git.push", prompt_template: "on push" },
