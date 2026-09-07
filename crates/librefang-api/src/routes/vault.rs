@@ -1,6 +1,6 @@
 //! Credential-vault write surface (#8164).
 //!
-//! * `GET /api/vault/keys` — which writable keys are currently set. Names and a boolean only.
+//! * `GET /api/vault/keys` — which writable keys the vault holds, and where the daemon actually resolves each one from. Names, a boolean and a [`KeySource`]; never a value.
 //! * `PUT /api/vault/keys/{key}` — store a secret under a writable key.
 //! * `DELETE /api/vault/keys/{key}` — remove it.
 //!
@@ -9,6 +9,10 @@
 //! # Why an allowlist rather than arbitrary key names
 //!
 //! The vault is a single flat namespace shared with the MCP OAuth flow, which stores `mcp-oauth:{server_url}:client_secret` entries there. An endpoint that accepted any key would let an authenticated caller overwrite another server's OAuth client secret, and a listing that returned every key would disclose the set of MCP servers an operator has authenticated against. [`WRITABLE_KEYS`] therefore names exactly the keys a surface is allowed to manage; extending it is a one-line change plus the reasoning for why that key belongs on an operator-facing form.
+//!
+//! # Why the listing reports a source and not just presence
+//!
+//! The daemon reads its own process environment before it touches the vault ([`resolve_key`]), so a listing built from the vault alone describes storage rather than behaviour. On a deployment that exports `GITHUB_TOKEN`, a vault-only flag says "not set" while skill proposal and agent-type promotion work, and says "not set" again after a delete that revoked nothing. [`KeySource`] is the field that lets a surface say "overridden by the environment" instead of either lie; `set` keeps its narrow meaning so the operator can still tell a landed-but-inert write from an empty vault.
 //!
 //! # Hot reload
 //!
@@ -39,6 +43,53 @@ pub const WRITABLE_KEYS: &[&str] = &["GITHUB_TOKEN"];
 
 /// Longest secret accepted. Comfortably above any provider token; a body larger than this is a mistake, not a credential.
 const MAX_SECRET_LEN: usize = 8192;
+
+/// Where the daemon actually resolves a key's value from, in the precedence order [`resolve_key`] applies.
+///
+/// This exists because "is there a value in the vault" is not the question an operator is asking. The daemon reads its own process environment first, so on a host that exports `GITHUB_TOKEN` a vault-only flag reports "not set" while skill proposal and agent-type promotion work fine — and reports "not set" again after a delete that revoked nothing, because the environment still supplies the token. Both readings are wrong in a way that costs the operator a debugging session.
+///
+/// The variants stay the *effective* answer, never the stored one: [`KeySource::Environment`] means the environment is what a request would use, whatever the vault also holds. The separate `set` flag on each listing entry keeps the narrow vault-presence meaning, so a surface can tell "your write landed but is inert" from "there is nothing stored at all".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeySource {
+    /// Neither the environment nor the vault holds a non-empty value.
+    Unset,
+    /// The vault supplies the value the daemon uses.
+    Vault,
+    /// The daemon's own environment supplies it, overriding any vault entry.
+    Environment,
+}
+
+/// Resolve a vault key the way the daemon does: process environment first, vault second, values that are empty or whitespace-only treated as absent.
+///
+/// The environment variable name is the vault key name. Every entry in [`WRITABLE_KEYS`] is a credential the daemon already accepts from its own environment under that exact name, which is what makes one lookup rule correct for the whole allowlist; a future key that does not follow the convention needs its own mapping here rather than a second precedence order somewhere else.
+///
+/// `routes::skills::resolve_github_token` and [`key_source`] both go through this so the order can only be defined once. A listing that computed presence independently is exactly how the two drifted apart in the first place.
+pub(crate) fn resolve_key(state: &AppState, key: &str) -> Option<(String, KeySource)> {
+    if let Ok(value) = std::env::var(key) {
+        if !value.trim().is_empty() {
+            return Some((value, KeySource::Environment));
+        }
+    }
+    state
+        .kernel
+        .vault_get(key)
+        .filter(|v| !v.trim().is_empty())
+        .map(|value| (value, KeySource::Vault))
+}
+
+/// [`resolve_key`] with the value dropped. Nothing on the HTTP surface holds a secret longer than it takes to decide where it came from.
+pub(crate) fn key_source(state: &AppState, key: &str) -> KeySource {
+    resolve_key(state, key).map_or(KeySource::Unset, |(_, source)| source)
+}
+
+/// Whether the vault itself holds a non-empty entry, ignoring the environment.
+fn stored_in_vault(state: &AppState, key: &str) -> bool {
+    state
+        .kernel
+        .vault_get(key)
+        .is_some_and(|v| !v.trim().is_empty())
+}
 
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
@@ -118,7 +169,7 @@ fn vault_unavailable(error: &str) -> Response {
     path = "/api/vault/keys",
     tag = "vault",
     responses(
-        (status = 200, description = "Writable vault keys and whether each is set", body = crate::types::JsonObject),
+        (status = 200, description = "Writable vault keys, whether the vault holds each one, and the effective source the daemon resolves it from (`unset` / `vault` / `environment`)", body = crate::types::JsonObject),
         (status = 401, description = "Admin credential required"),
         (status = 403, description = "Admin role required"),
     )
@@ -135,7 +186,9 @@ pub async fn vault_list_keys(
         .map(|key| {
             serde_json::json!({
                 "key": key,
-                "set": state.kernel.vault_get(key).is_some_and(|v| !v.trim().is_empty()),
+                // `set` is vault presence alone; `source` is what a request would actually use.
+                "set": stored_in_vault(&state, key),
+                "source": key_source(&state, key),
             })
         })
         .collect();
@@ -149,7 +202,7 @@ pub async fn vault_list_keys(
     params(("key" = String, Path, description = "Vault key name")),
     request_body = VaultSetRequest,
     responses(
-        (status = 200, description = "Secret stored", body = crate::types::JsonObject),
+        (status = 200, description = "Secret stored; `source` reports whether the daemon will actually use it or the process environment still overrides it", body = crate::types::JsonObject),
         (status = 400, description = "Empty or oversized value"),
         (status = 401, description = "Admin credential required"),
         (status = 403, description = "Admin role required"),
@@ -195,7 +248,9 @@ pub async fn vault_put_key(
         api_user.as_ref().map(|e| e.0.user_id),
         Some("api".to_string()),
     );
-    Json(serde_json::json!({ "key": key, "set": true })).into_response()
+    // The write landed, but it is inert while the daemon's environment carries the same key — report the effective source rather than a bare success the surface would render as "configured".
+    Json(serde_json::json!({ "key": key, "set": true, "source": key_source(&state, key) }))
+        .into_response()
 }
 
 #[utoipa::path(
@@ -204,7 +259,7 @@ pub async fn vault_put_key(
     tag = "vault",
     params(("key" = String, Path, description = "Vault key name")),
     responses(
-        (status = 200, description = "Secret removed (or already absent)", body = crate::types::JsonObject),
+        (status = 200, description = "Vault copy removed (or already absent); `source` still reports `environment` when the process environment continues to supply the key", body = crate::types::JsonObject),
         (status = 401, description = "Admin credential required"),
         (status = 403, description = "Admin role required"),
         (status = 404, description = "Key is not writable over HTTP"),
@@ -239,7 +294,14 @@ pub async fn vault_delete_key(
             Some("api".to_string()),
         );
     }
-    Json(serde_json::json!({ "key": key, "set": false, "removed": removed })).into_response()
+    // A delete revokes the vault copy and nothing else. When the environment still supplies the key, `source` is what stops the response from reading as "revoked".
+    Json(serde_json::json!({
+        "key": key,
+        "set": false,
+        "removed": removed,
+        "source": key_source(&state, key),
+    }))
+    .into_response()
 }
 
 #[cfg(test)]
@@ -266,5 +328,14 @@ mod tests {
         );
         assert_eq!(writable_key("__sentinel__"), None);
         assert_eq!(writable_key("github_token"), None, "matching must be exact");
+    }
+
+    /// The wire strings a surface branches on. Renaming a variant silently breaks the dashboard and TUI wording, which have no compiler to catch it.
+    #[test]
+    fn key_source_serializes_to_the_documented_wire_strings() {
+        let json = |s: KeySource| serde_json::to_value(s).expect("KeySource must serialize");
+        assert_eq!(json(KeySource::Unset), "unset");
+        assert_eq!(json(KeySource::Vault), "vault");
+        assert_eq!(json(KeySource::Environment), "environment");
     }
 }

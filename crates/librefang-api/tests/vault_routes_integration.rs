@@ -131,16 +131,29 @@ fn body_json(bytes: &[u8]) -> serde_json::Value {
     serde_json::from_slice(bytes).expect("response body must be valid JSON")
 }
 
-/// The presence flag for `key` in a `GET /api/vault/keys` response body.
-fn key_is_set(body: &serde_json::Value, key: &str) -> bool {
+/// The entry for `key` in a `GET /api/vault/keys` response body.
+fn key_entry<'a>(body: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
     body["keys"]
         .as_array()
         .expect("`keys` must be an array")
         .iter()
         .find(|entry| entry["key"] == key)
-        .unwrap_or_else(|| panic!("`keys` must list {key}"))["set"]
+        .unwrap_or_else(|| panic!("`keys` must list {key}"))
+}
+
+/// The vault-presence flag for `key`. Says nothing about what the daemon resolves — see [`key_source`].
+fn key_is_set(body: &serde_json::Value, key: &str) -> bool {
+    key_entry(body, key)["set"]
         .as_bool()
         .expect("`set` must be a boolean")
+}
+
+/// The effective source reported for `key`: `unset`, `vault` or `environment`.
+fn key_source(body: &serde_json::Value, key: &str) -> String {
+    key_entry(body, key)["source"]
+        .as_str()
+        .expect("`source` must be a string")
+        .to_string()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -391,5 +404,176 @@ async fn vault_writes_require_an_admin_credential() {
         h.state.kernel.vault_get("GITHUB_TOKEN"),
         None,
         "no refused request may have written"
+    );
+}
+
+/// Serializes the tests that mutate `GITHUB_TOKEN`. An environment variable is process-global, so two of them running on different test threads would see each other's writes.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A guard that takes [`ENV_LOCK`], clears `GITHUB_TOKEN` for the duration of a test, and restores whatever the process started with.
+///
+/// The listing's `source` field is the only thing in this binary that reads the ambient environment, and a CI runner that happens to export `GITHUB_TOKEN` would otherwise turn the `unset` case into a false failure.
+struct GithubTokenEnvGuard {
+    prior: Option<String>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl GithubTokenEnvGuard {
+    fn take() -> Self {
+        // A sibling test that panicked mid-guard poisons the mutex; the exclusion it provides is still what we want.
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("GITHUB_TOKEN").ok();
+        std::env::remove_var("GITHUB_TOKEN");
+        Self { prior, _lock: lock }
+    }
+
+    fn set(value: &str) {
+        std::env::set_var("GITHUB_TOKEN", value);
+    }
+
+    fn clear() {
+        std::env::remove_var("GITHUB_TOKEN");
+    }
+}
+
+impl Drop for GithubTokenEnvGuard {
+    fn drop(&mut self) {
+        match self.prior.take() {
+            Some(prior) => std::env::set_var("GITHUB_TOKEN", prior),
+            None => std::env::remove_var("GITHUB_TOKEN"),
+        }
+    }
+}
+
+/// The listing reports where the daemon actually resolves each key from, not merely whether the vault holds a copy.
+///
+/// `resolve_github_token` reads the process environment before it touches the vault, so a `set` flag computed from the vault alone reports `false` on a host where promotion works, and reports `false` again after a delete that revoked nothing because the environment still supplies the token. All three cases live in one test so the environment mutation is never visible to a concurrently running sibling.
+#[tokio::test(flavor = "multi_thread")]
+async fn vault_listing_reports_the_effective_source_of_each_key() {
+    let _env = GithubTokenEnvGuard::take();
+    let h = build_harness();
+
+    // 1. Neither environment nor vault.
+    let (status, body) = send(
+        h.app.clone(),
+        Method::GET,
+        "/api/vault/keys",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert_eq!(key_source(&body, "GITHUB_TOKEN"), "unset");
+    assert!(!key_is_set(&body, "GITHUB_TOKEN"));
+
+    // 2. Vault only — the value the daemon resolves comes from the vault.
+    let (status, _) = send(
+        h.app.clone(),
+        Method::PUT,
+        "/api/vault/keys/GITHUB_TOKEN",
+        Some(ADMIN_KEY),
+        Some(serde_json::json!({ "value": "ghp_from_the_vault" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = send(
+        h.app.clone(),
+        Method::GET,
+        "/api/vault/keys",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    let body = body_json(&body);
+    assert_eq!(key_source(&body, "GITHUB_TOKEN"), "vault");
+    assert!(key_is_set(&body, "GITHUB_TOKEN"));
+
+    // 3. Environment set on top of the vault copy — the environment wins, and the listing must say so rather than reporting the vault copy as the effective credential.
+    GithubTokenEnvGuard::set("ghp_from_the_environment");
+    let (_, body) = send(
+        h.app.clone(),
+        Method::GET,
+        "/api/vault/keys",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    let raw = String::from_utf8_lossy(&body).to_string();
+    let body = body_json(&body);
+    assert_eq!(key_source(&body, "GITHUB_TOKEN"), "environment");
+    assert!(
+        key_is_set(&body, "GITHUB_TOKEN"),
+        "`set` keeps its narrow meaning: the vault still holds a copy"
+    );
+    assert!(
+        !raw.contains("ghp_from_the_environment") && !raw.contains("ghp_from_the_vault"),
+        "reporting the source must not leak either value: {raw}"
+    );
+
+    // 4. The delete that revokes nothing. The vault copy goes, the environment still supplies the token, and both the write response and the listing have to keep saying so.
+    let (status, delete_body) = send(
+        h.app.clone(),
+        Method::DELETE,
+        "/api/vault/keys/GITHUB_TOKEN",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body_json(&delete_body)["source"],
+        "environment",
+        "a delete that leaves the environment in charge must not answer `unset`"
+    );
+    let (_, body) = send(
+        h.app.clone(),
+        Method::GET,
+        "/api/vault/keys",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    let body = body_json(&body);
+    assert_eq!(key_source(&body, "GITHUB_TOKEN"), "environment");
+    assert!(
+        !key_is_set(&body, "GITHUB_TOKEN"),
+        "the vault copy is gone even though the environment still resolves"
+    );
+
+    // 5. Environment gone too — back to genuinely unset.
+    GithubTokenEnvGuard::clear();
+    let (_, body) = send(
+        h.app.clone(),
+        Method::GET,
+        "/api/vault/keys",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(key_source(&body_json(&body), "GITHUB_TOKEN"), "unset");
+}
+
+/// A write while the environment overrides the key still reports `environment`, so the operator is told the value they just stored is inert rather than being shown a bare success.
+#[tokio::test(flavor = "multi_thread")]
+async fn vault_put_reports_an_environment_override_rather_than_a_bare_success() {
+    let _env = GithubTokenEnvGuard::take();
+    GithubTokenEnvGuard::set("ghp_env_wins");
+    let h = build_harness();
+
+    let (status, body) = send(
+        h.app.clone(),
+        Method::PUT,
+        "/api/vault/keys/GITHUB_TOKEN",
+        Some(ADMIN_KEY),
+        Some(serde_json::json!({ "value": "ghp_stored_but_inert" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = body_json(&body);
+    assert_eq!(parsed["set"], true, "the vault write did land");
+    assert_eq!(
+        parsed["source"], "environment",
+        "but the daemon still resolves the environment's value"
     );
 }

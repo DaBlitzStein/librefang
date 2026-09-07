@@ -13917,7 +13917,7 @@
         "operationId": "vault_list_keys",
         "responses": {
           "200": {
-            "description": "Writable vault keys and whether each is set",
+            "description": "Writable vault keys, whether the vault holds each one, and the effective source the daemon resolves it from (`unset` / `vault` / `environment`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -13964,7 +13964,7 @@
         },
         "responses": {
           "200": {
-            "description": "Secret stored",
+            "description": "Secret stored; `source` reports whether the daemon will actually use it or the process environment still overrides it",
             "content": {
               "application/json": {
                 "schema": {
@@ -14008,7 +14008,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Secret removed (or already absent)",
+            "description": "Vault copy removed (or already absent); `source` still reports `environment` when the process environment continues to supply the key",
             "content": {
               "application/json": {
                 "schema": {
