@@ -902,7 +902,9 @@
       "manifest_saved": "Configuration saved",
       "manifest_load_failed": "Failed to load the current configuration.",
       "mcp_pending_title": "MCP servers not connected",
-      "mcp_pending_desc": "Granted in agent.toml but no live connection, so they contribute no tools. Check the server on the MCP page; the grant activates as soon as it connects."
+      "mcp_pending_desc": "Granted in agent.toml but no live connection, so they contribute no tools. Check the server on the MCP page; the grant activates as soon as it connects.",
+      "manifest_history": "Manifest history",
+      "no_history": "No config changes recorded yet."
     },
     "tab": {
       "conversation": "Conversation",
@@ -910,7 +912,8 @@
       "skills": "Skills",
       "tools": "Tools",
       "schedule": "Schedule",
-      "logs": "Logs"
+      "logs": "Logs",
+      "history": "History"
     },
     "configure": "Configure",
     "select_an_agent": "Select an agent",
