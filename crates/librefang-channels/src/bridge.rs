@@ -1813,6 +1813,22 @@ impl BridgeManager {
                                         &approval.description,
                                     );
 
+                                    // #8227: "this approval reached nobody" is
+                                    // a verdict on the whole fan-out, not on
+                                    // one adapter's turn in it. A host running
+                                    // one sidecar per agent is a supported
+                                    // configuration, and there every approval
+                                    // has N-1 adapters that legitimately do not
+                                    // cover the requesting agent. The signal is
+                                    // "some adapter produced a delivery
+                                    // target", not "some adapter's send
+                                    // succeeded": a transport failure already
+                                    // logs its own WARN naming the error, and
+                                    // blaming it on missing routing config
+                                    // would point the operator at the wrong
+                                    // thing.
+                                    let mut covered_by_any_adapter = false;
+
                                     for adapter in &adapters {
                                         // #4985 / PR #4994 follow-up: scope
                                         // delivery to adapters bound to the
@@ -1957,6 +1973,7 @@ impl BridgeManager {
                                                 // Direct route handled this
                                                 // adapter; skip the legacy
                                                 // recipients fan-out below.
+                                                covered_by_any_adapter = true;
                                                 continue;
                                             }
                                         }
@@ -2025,22 +2042,26 @@ impl BridgeManager {
                                                 );
                                                 if peers.is_empty() {
                                                     // No default AND no
-                                                    // binding-derived peers.
-                                                    // Surface this loudly:
-                                                    // the operator probably
-                                                    // forgot to configure
-                                                    // either (and would
-                                                    // otherwise have no
-                                                    // signal that approvals
-                                                    // are being dropped on
-                                                    // the floor).
-                                                    warn!(
+                                                    // binding-derived peers on
+                                                    // THIS adapter. Says
+                                                    // nothing about whether
+                                                    // the approval is
+                                                    // deliverable — a sibling
+                                                    // adapter may well cover
+                                                    // the agent — so it is a
+                                                    // debug line. The
+                                                    // "operator forgot to
+                                                    // configure anything"
+                                                    // signal #5002 wanted is
+                                                    // the aggregate WARN
+                                                    // after the loop (#8227).
+                                                    debug!(
                                                         adapter = adapter.name(),
                                                         account_id = adapter.account_id().unwrap_or(""),
                                                         channel = ct_str,
                                                         request_id = %approval.request_id,
                                                         requesting_agent = %requesting_agent,
-                                                        "Approval dropped: no channel_default and no AgentBinding peer_id covers the requesting agent on this adapter"
+                                                        "Adapter has no channel_default and no AgentBinding peer_id covering the requesting agent — skipping approval broadcast"
                                                     );
                                                     continue;
                                                 }
@@ -2063,6 +2084,7 @@ impl BridgeManager {
                                             );
                                             continue;
                                         }
+                                        covered_by_any_adapter = true;
                                         for user in &recipients {
                                             // `send_interactive` has a built-in
                                             // text fallback for adapters that
@@ -2097,6 +2119,24 @@ impl BridgeManager {
                                                 );
                                             }
                                         }
+                                    }
+
+                                    // #5002's guarantee, evaluated once: an
+                                    // approval nobody can act on must not be
+                                    // swallowed silently.
+                                    //
+                                    // Skipped when there are no channel
+                                    // adapters at all — a daemon approving
+                                    // through the dashboard or CLI is not
+                                    // misconfigured, and warning there would
+                                    // trade one false positive for another.
+                                    if !covered_by_any_adapter && !adapters.is_empty() {
+                                        warn!(
+                                            request_id = %approval.request_id,
+                                            requesting_agent = %requesting_agent,
+                                            adapters = adapters.len(),
+                                            "Approval reached no channel: no adapter has a channel_default or AgentBinding peer_id covering the requesting agent"
+                                        );
                                     }
                                 }
                             }
