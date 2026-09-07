@@ -1,0 +1,4 @@
+Show the live step progress of a workflow run in the TUI, so the terminal answers "which step is it on, out of how many" without switching to the dashboard or curling the API.
+The run history gains a `Progress` column reading `▰▰▱▱▱ 2/5`, and re-polls itself every two seconds while it is the visible screen — `a` stops and restarts the polling, as it does on the logs screen, and the header badge says which of the two it is doing.
+The count is 1-based against the step actually in flight while the run is executing, and against the steps that produced a result once it is not, so a run that failed halfway reads `2/5` rather than claiming the whole workflow.
+A run whose total the daemon does not know — one persisted before the figure was recorded, or a workflow that declares no steps at all — prints `?` for the denominator and no bar, which is also why a zero-step run renders a count instead of dividing by zero. (#PR) (@DaBlitzStein)

@@ -25,6 +25,51 @@ pub struct WorkflowRun {
     pub state: String,
     pub duration: String,
     pub output_preview: String,
+    /// Steps that have recorded a result (`steps_completed` in the run list).
+    pub steps_completed: usize,
+    /// 0-based index of the step the run is executing right now.
+    /// The daemon gates this on the run's state (`WorkflowRun::live_step_index`),
+    /// so it is `None` for anything that is not actually running.
+    pub current_step_index: Option<usize>,
+    /// Steps the workflow declares. `0` means the daemon has no figure to give:
+    /// a run persisted before the column existed, or a workflow with no steps.
+    pub total_steps: usize,
+}
+
+/// Cells in the inline progress bar drawn beside the `n/m` count.
+const PROGRESS_BAR_CELLS: usize = 5;
+
+/// The `Progress` cell for one run — how far it has got, out of how many.
+///
+/// While a run is executing, `current_step_index` names the step in flight and
+/// is rendered 1-based, so a run on its first step reads `1/4` rather than `0/4`.
+/// Otherwise the count is the steps that actually produced a result, which stays
+/// honest for every way a run can stop: not started reads `0/4`, completed reads
+/// `4/4`, failed halfway reads `2/4`.
+///
+/// `total_steps == 0` covers both a run recovered from before the daemon recorded
+/// the figure and a workflow that declares no steps.
+/// Neither has a denominator, so both print `?` and no bar — there is no fraction
+/// to compute, and computing one anyway is how this would divide by zero.
+pub fn run_progress_label(run: &WorkflowRun) -> String {
+    let done = match run.current_step_index {
+        Some(i) => i.saturating_add(1),
+        None => run.steps_completed,
+    };
+    if run.total_steps == 0 {
+        return format!("{}/?", done);
+    }
+    // A payload claiming more progress than the workflow has steps would
+    // otherwise overrun the bar; believe the larger of the two rather than
+    // subtract past zero.
+    let total = run.total_steps.max(done);
+    let filled = done * PROGRESS_BAR_CELLS / total;
+    let bar = format!(
+        "{}{}",
+        "\u{25b0}".repeat(filled),
+        "\u{25b1}".repeat(PROGRESS_BAR_CELLS - filled)
+    );
+    format!("{} {}/{}", bar, done, total)
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -86,6 +131,11 @@ pub struct WorkflowState {
     pub run_result: Option<String>,
     pub loading: bool,
     pub tick: usize,
+    /// Re-poll the run list on a timer so step progress advances on screen
+    /// without the operator pressing `r`. Toggled with `a`, as on the logs
+    /// screen.
+    pub auto_refresh: bool,
+    pub poll_tick: usize,
     pub status_msg: String,
 }
 
@@ -124,12 +174,33 @@ impl WorkflowState {
             run_result: None,
             loading: false,
             tick: 0,
+            auto_refresh: true,
+            poll_tick: 0,
             status_msg: String::new(),
         }
     }
 
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+        self.poll_tick = self.poll_tick.wrapping_add(1);
+    }
+
+    /// The id of the workflow whose runs are on screen, if one is selected.
+    pub fn selected_workflow_id(&self) -> Option<String> {
+        self.workflows
+            .get(self.selected_workflow?)
+            .map(|w| w.id.clone())
+    }
+
+    /// True when it is time to re-fetch the run list (every ~2s at the 50ms
+    /// tick rate). Only while the run history is the visible sub-screen — the
+    /// list, the create wizard and the run form neither show progress nor want
+    /// their state replaced underneath the operator.
+    pub fn should_poll(&self) -> bool {
+        self.sub == WorkflowSubScreen::Runs
+            && self.auto_refresh
+            && self.poll_tick > 0
+            && self.poll_tick.is_multiple_of(40)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> WorkflowAction {
@@ -216,12 +287,12 @@ impl WorkflowState {
                 let next = (i + 1) % total;
                 self.runs_list_state.select(Some(next));
             }
+            KeyCode::Char('a') => {
+                self.auto_refresh = !self.auto_refresh;
+            }
             KeyCode::Char('r') => {
-                if let Some(idx) = self.selected_workflow {
-                    if idx < self.workflows.len() {
-                        let wf_id = self.workflows[idx].id.clone();
-                        return WorkflowAction::LoadRuns(wf_id);
-                    }
+                if let Some(wf_id) = self.selected_workflow_id() {
+                    return WorkflowAction::LoadRuns(wf_id);
                 }
             }
             _ => {}
@@ -495,6 +566,28 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
         .map(|w| w.name.as_str())
         .unwrap_or("?");
 
+    let auto_badge = if state.auto_refresh {
+        Span::styled(
+            format!(
+                " {} {}",
+                "\u{25cf}",
+                crate::i18n::t("tui-workflows-badge-auto")
+            ),
+            Style::default()
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            format!(
+                " {} {}",
+                "\u{25cb}",
+                crate::i18n::t("tui-workflows-badge-paused")
+            ),
+            theme::dim_style(),
+        )
+    };
+
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
@@ -504,6 +597,7 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                     .fg(theme::TEXT_PRIMARY)
                     .add_modifier(Modifier::BOLD),
             ),
+            auto_badge,
         ])),
         chunks[0],
     );
@@ -511,9 +605,10 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
-                "  {:<12} {:<12} {:<12} {}",
+                "  {:<12} {:<12} {:<12} {:<12} {}",
                 crate::i18n::t("tui-workflows-header-run-id"),
                 crate::i18n::t("tui-workflows-header-state"),
+                crate::i18n::t("tui-workflows-header-progress"),
                 crate::i18n::t("tui-workflows-header-duration"),
                 crate::i18n::t("tui-workflows-header-output")
             ),
@@ -542,11 +637,22 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                     ),
                     Span::styled(format!(" {:<12}", badge), badge_style),
                     Span::styled(
+                        format!(" {:<12}", run_progress_label(run)),
+                        // A run still in flight is the one the operator is
+                        // watching, so its bar gets the accent; anything
+                        // finished states its final count in the muted tone.
+                        if run.current_step_index.is_some() {
+                            Style::default().fg(theme::ACCENT)
+                        } else {
+                            Style::default().fg(theme::TEXT_SECONDARY)
+                        },
+                    ),
+                    Span::styled(
                         format!(" {:<12}", run.duration),
                         Style::default().fg(theme::YELLOW),
                     ),
                     Span::styled(
-                        format!(" {}", widgets::truncate(&run.output_preview, 30)),
+                        format!(" {}", widgets::truncate(&run.output_preview, 20)),
                         Style::default().fg(theme::TEXT_SECONDARY),
                     ),
                 ]))
@@ -1048,5 +1154,141 @@ mod run_param_tests {
         let mut s = state_with(vec![]);
         s.run_input = "texto libre".to_string();
         assert_eq!(s.build_run_input(), "texto libre");
+    }
+}
+
+#[cfg(test)]
+mod step_progress_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn run(current: Option<usize>, completed: usize, total: usize) -> WorkflowRun {
+        WorkflowRun {
+            id: "run-1".to_string(),
+            state: "running".to_string(),
+            duration: String::new(),
+            output_preview: String::new(),
+            steps_completed: completed,
+            current_step_index: current,
+            total_steps: total,
+        }
+    }
+
+    /// The run history sub-screen, with `runs` on it, ready to draw.
+    fn runs_screen(runs: Vec<WorkflowRun>) -> WorkflowState {
+        let mut s = WorkflowState::new();
+        s.sub = WorkflowSubScreen::Runs;
+        s.workflows.push(WorkflowInfo {
+            id: "wf-1".to_string(),
+            name: "nightly".to_string(),
+            ..Default::default()
+        });
+        s.selected_workflow = Some(0);
+        s.runs = runs;
+        s.runs_list_state.select(Some(0));
+        s
+    }
+
+    fn render(state: &mut WorkflowState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), state))
+            .expect("draw must not panic");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn a_running_run_counts_the_step_in_flight_one_based() {
+        // Executing index 0 of 4 is "step 1 of 4", not "step 0 of 4".
+        assert!(run_progress_label(&run(Some(0), 0, 4)).ends_with("1/4"));
+        assert!(run_progress_label(&run(Some(2), 2, 4)).ends_with("3/4"));
+    }
+
+    #[test]
+    fn progress_advances_when_the_poll_delivers_a_later_step() {
+        let mut state = runs_screen(vec![run(Some(0), 0, 4)]);
+        let before = render(&mut state);
+        assert!(
+            before.contains("1/4"),
+            "first draw should show step 1: {before}"
+        );
+
+        // What the auto-poll does: the same run comes back further along.
+        state.runs = vec![run(Some(2), 2, 4)];
+        let after = render(&mut state);
+        assert!(after.contains("3/4"), "redraw should show step 3: {after}");
+        assert!(!after.contains("1/4"), "stale count must be gone: {after}");
+    }
+
+    #[test]
+    fn a_finished_run_reports_the_steps_that_produced_a_result() {
+        // The daemon clears the live index on every terminal transition, so a
+        // completed run counts results, and a run that failed halfway says so
+        // rather than claiming the whole workflow.
+        assert!(run_progress_label(&run(None, 4, 4)).ends_with("4/4"));
+        assert!(run_progress_label(&run(None, 2, 4)).ends_with("2/4"));
+        assert!(run_progress_label(&run(None, 0, 4)).ends_with("0/4"));
+    }
+
+    #[test]
+    fn an_unknown_total_prints_a_question_mark_instead_of_a_fraction() {
+        // `total_steps == 0`: a workflow with no steps, or a run persisted
+        // before the daemon recorded the figure.
+        assert_eq!(run_progress_label(&run(None, 0, 0)), "0/?");
+        assert_eq!(run_progress_label(&run(Some(1), 1, 0)), "2/?");
+    }
+
+    #[test]
+    fn a_zero_step_run_renders_without_dividing_by_zero() {
+        let mut state = runs_screen(vec![run(None, 0, 0)]);
+        let out = render(&mut state);
+        assert!(out.contains("0/?"), "{out}");
+    }
+
+    #[test]
+    fn a_run_claiming_more_steps_than_the_workflow_has_does_not_overrun_the_bar() {
+        // A payload out of step with the definition must not make the bar
+        // subtract past zero.
+        let label = run_progress_label(&run(Some(9), 0, 4));
+        assert!(label.ends_with("10/10"), "{label}");
+        assert_eq!(label.matches('\u{25b0}').count(), PROGRESS_BAR_CELLS);
+    }
+
+    #[test]
+    fn auto_refresh_polls_the_run_history_and_a_toggles_it_off() {
+        let mut state = runs_screen(vec![run(Some(0), 0, 4)]);
+        for _ in 0..40 {
+            state.tick();
+        }
+        assert!(state.should_poll());
+        assert_eq!(state.selected_workflow_id().as_deref(), Some("wf-1"));
+
+        state.handle_key(key(KeyCode::Char('a')));
+        for _ in 0..40 {
+            state.tick();
+        }
+        assert!(!state.should_poll(), "[a] must stop the polling");
+    }
+
+    #[test]
+    fn only_the_run_history_polls() {
+        let mut state = runs_screen(vec![run(Some(0), 0, 4)]);
+        state.sub = WorkflowSubScreen::List;
+        for _ in 0..40 {
+            state.tick();
+        }
+        assert!(!state.should_poll());
     }
 }
