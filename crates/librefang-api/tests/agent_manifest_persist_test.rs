@@ -417,6 +417,9 @@ model = "test-model"
         "a successful persist records the 'update' change_source"
     );
 
+    // The exact timestamp shape is a contract with the dashboard — see the
+    // dedicated test below.
+
     // `limit=0` is clamped to at least one row rather than honoured literally.
     let (status, body) = send(
         h.app.clone(),
@@ -465,5 +468,77 @@ model = "test-model"
         status,
         StatusCode::BAD_REQUEST,
         "non-numeric limit must 400"
+    );
+}
+
+/// The shape of `timestamp` is a contract with the dashboard, so pin it here
+/// rather than in a hand-written literal on the TypeScript side.
+///
+/// `manifest_versions.timestamp` defaults to SQLite's `datetime('now')` and
+/// `ManifestVersionStore::record_version` never supplies the column, so the
+/// value reaches the client as `YYYY-MM-DD HH:MM:SS`: space-separated, UTC,
+/// and carrying no offset.
+/// The dashboard's `formatSqliteDateTime` swaps the space for a `T` and stamps
+/// the missing `Z` on that basis. Were this ever serialised through `chrono` as
+/// RFC 3339 instead, that helper still copes — it leaves a zone-bearing value
+/// alone — but the assumption stops being load-bearing, and this test is how
+/// that change announces itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn manifest_history_timestamp_is_sqlite_naive_utc() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "history-timestamp");
+
+    let manifest = r#"
+name = "history-timestamp"
+description = "records one version"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#;
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({"manifest_toml": manifest}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get_json(&format!("/api/agents/{id}/manifest-history")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let ts = body["versions"][0]["timestamp"]
+        .as_str()
+        .expect("timestamp is a string")
+        .to_string();
+
+    assert_eq!(
+        ts.len(),
+        19,
+        "expected the 19-char `YYYY-MM-DD HH:MM:SS` form, got {ts:?}"
+    );
+    assert_eq!(
+        &ts[10..11],
+        " ",
+        "SQLite separates date and time with a space, not a `T` — the dashboard \
+         normalises on this: {ts:?}"
+    );
+    assert_eq!(&ts[4..5], "-", "date separator: {ts:?}");
+    assert_eq!(&ts[7..8], "-", "date separator: {ts:?}");
+    assert_eq!(&ts[13..14], ":", "time separator: {ts:?}");
+    assert_eq!(&ts[16..17], ":", "time separator: {ts:?}");
+    assert!(
+        !ts.ends_with('Z') && !ts.contains('+'),
+        "the naive form declares no zone, which is why the dashboard appends one: {ts:?}"
+    );
+    assert!(
+        ts.chars()
+            .all(|c| c.is_ascii_digit() || c == '-' || c == ':' || c == ' '),
+        "unexpected character in the timestamp: {ts:?}"
     );
 }
