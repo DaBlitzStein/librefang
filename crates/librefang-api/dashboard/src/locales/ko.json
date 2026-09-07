@@ -912,7 +912,8 @@
       "tools": "도구",
       "schedule": "일정",
       "logs": "로그",
-      "history": "기록"
+      "history": "기록",
+      "routing": "라우팅"
     },
     "configure": "구성",
     "select_an_agent": "에이전트를 선택하세요",

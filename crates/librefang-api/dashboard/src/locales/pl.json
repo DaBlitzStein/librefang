@@ -915,7 +915,8 @@
       "tools": "Narzędzia",
       "schedule": "Harmonogram",
       "logs": "Logi",
-      "history": "Historia"
+      "history": "Historia",
+      "routing": "Routing"
     },
     "configure": "Konfiguruj",
     "select_an_agent": "Wybierz agenta",

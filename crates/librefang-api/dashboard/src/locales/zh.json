@@ -913,7 +913,8 @@
       "tools": "工具",
       "schedule": "计划",
       "logs": "日志",
-      "history": "历史"
+      "history": "历史",
+      "routing": "路由"
     },
     "configure": "配置",
     "select_an_agent": "选择智能体",
