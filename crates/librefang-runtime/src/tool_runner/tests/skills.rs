@@ -331,6 +331,83 @@ fn test_select_native_tools_trims_to_native_set() {
     }
 }
 
+/// Counts WARN-level events so a test can assert on their absence.
+struct WarnCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl tracing::Subscriber for WarnCounter {
+    fn enabled(&self, meta: &tracing::Metadata<'_>) -> bool {
+        *meta.level() <= tracing::Level::WARN
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// An agent that was never granted one of the always-native tools is a
+/// supported configuration, not a defect, and must not produce a WARN.
+///
+/// It used to produce one per tool per turn, saying the tool was "missing from
+/// definitions". That is false — the definition exists, the agent just does not
+/// have the tool — and chasing those warnings in a production log cost a real
+/// misdiagnosis of the tool registry before the agent type turned out to be the
+/// answer (#8225).
+#[test]
+fn test_ungranted_native_tool_does_not_warn() {
+    let defs = builtin_tool_definitions();
+    // Drop one always-native tool that genuinely has a definition, so the only
+    // reason it is absent is that this agent was not granted it.
+    let dropped = ALWAYS_NATIVE_TOOLS
+        .iter()
+        .find(|n| defs.iter().any(|t| t.name == **n))
+        .expect("at least one always-native tool must have a definition");
+    let granted: Vec<_> = defs
+        .iter()
+        .filter(|t| t.name != *dropped)
+        .cloned()
+        .collect();
+
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tracing::subscriber::with_default(WarnCounter(count.clone()), || {
+        let native = select_native_tools(&granted);
+        assert!(
+            !native.iter().any(|t| t.name == *dropped),
+            "a tool the agent was not granted must not come back in the native set"
+        );
+    });
+
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "not granting {dropped:?} is a valid configuration and must not WARN"
+    );
+}
+
+/// The invariant the surviving WARN actually guards: every name listed in
+/// `ALWAYS_NATIVE_TOOLS` has a definition. If someone adds a constant without
+/// one, lazy mode silently ships a shorter list than it advertises, and this
+/// fails before the warning has to.
+#[test]
+fn test_every_always_native_tool_has_a_definition() {
+    let defs = builtin_tool_definitions();
+    let names: std::collections::HashSet<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+    let orphans: Vec<&str> = ALWAYS_NATIVE_TOOLS
+        .iter()
+        .copied()
+        .filter(|n| !names.contains(n))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "listed in ALWAYS_NATIVE_TOOLS with no definition: {orphans:?}"
+    );
+}
+
 #[test]
 fn test_lazy_mode_reduces_serialized_tool_payload() {
     // Quantify the savings this PR is claiming (issue #3044). The lazy
