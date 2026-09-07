@@ -193,11 +193,21 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// Pause an active goal run, checkpointing progress for a later resume.
     fn pause_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
     /// Resume a goal run from its pause checkpoint.
+    ///
+    /// Takes the same loop-engineering arguments as [`Self::start_goal_run`]:
+    /// the checkpoint records the run's progress, not its verifier
+    /// configuration, so a resume that did not carry them would silently drop
+    /// the gate the operator configured on the goal.
+    #[allow(clippy::too_many_arguments)]
     fn resume_goal_run(
         &self,
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) -> bool;
     /// Snapshot the observable state of a goal's run, if one is active.
     fn goal_run_state(
@@ -1022,8 +1032,20 @@ impl KernelApi for LibreFangKernel {
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) -> bool {
-        self.goal_run_resume(goal_id, agent_id, max_iterations)
+        self.goal_run_resume(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
     }
     fn goal_run_state(
         &self,
