@@ -21,13 +21,13 @@
     "better-sqlite3": "^12.8.0",
     "pino": "^9",
     "qrcode": "^1.5",
-    "toml": "^3.0.0"
+    "toml": "^4.2.0"
   },
   "overrides": {
     "link-preview-js": "^4.0.1"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "license": "MIT"
 }
