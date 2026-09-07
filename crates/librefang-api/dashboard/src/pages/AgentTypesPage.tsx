@@ -639,12 +639,12 @@ function TemplateHistoryModal({
                         addToast(t("agentTypes.restored", { defaultValue: "Version restored" }), "success");
                         onClose();
                       } catch (err) {
-                        addToast(toastErr(err, t("agentTypes.restore_failed", { defaultValue: "Restore failed" })), "error");
+                        addToast(toastErr(err, t("agentTypes.restore_version_failed", { defaultValue: "Restore failed" })), "error");
                       }
                     }}
                     disabled={restore.isPending}
                     className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-text-dim hover:bg-brand/10 hover:text-brand"
-                    title={t("agentTypes.restore", { defaultValue: "Restore this version" })}
+                    title={t("agentTypes.restore_version", { defaultValue: "Restore this version" })}
                   >
                     <RotateCcw className="h-3 w-3" />
                     {t("agentTypes.restore_btn", { defaultValue: "Restore" })}
