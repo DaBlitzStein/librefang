@@ -2362,7 +2362,7 @@ tui-goals-count = { $count } 个目标
 tui-goals-filter = 过滤：{ $query }
 tui-goals-loading = 正在加载目标...
 tui-goals-empty = 暂无目标。按 [n] 创建一个。
-tui-goals-hints = [↑↓] 导航  [Enter] 详情  [n] 新建  [s] 启动/停止  [d] 删除  [/] 搜索  [r] 刷新
+tui-goals-hints = [↑↓] 导航  [Enter] 详情  [n] 新建  [s] 启动/停止  [p] 暂停/恢复  [d] 删除  [/] 搜索  [r] 刷新
 tui-goals-confirm-delete = 删除此目标？[y] 确认  [其他任意键] 取消
 tui-goals-none-selected = 未选择目标。
 tui-goals-agent-none = 未指定
@@ -2402,12 +2402,16 @@ tui-goal-created = 目标已创建: { $id }
 tui-goal-deleted = 目标已删除: { $id }
 tui-goal-run-started = 运行已开始: { $id }
 tui-goal-run-stopped = 运行已停止: { $id }
+tui-goal-run-paused = 运行已暂停: { $id }
+tui-goal-run-resumed = 运行已恢复: { $id }
 tui-goal-create-failed = 无法创建目标。
 tui-goal-create-error = 无法创建目标：{ $error }
 tui-goal-delete-failed = 无法删除目标。
 tui-goal-start-failed = 无法开始运行。
 tui-goal-start-error = 无法开始运行：{ $error }
 tui-goal-stop-failed = 无法停止运行。
+tui-goal-pause-failed = 无法暂停运行。
+tui-goal-resume-failed = 无法恢复运行。
 tui-goal-inproc-unavailable = 进程内模式下目标管理不可用。
 
 # --- goal command (CLI) ---

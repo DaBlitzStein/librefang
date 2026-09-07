@@ -609,6 +609,16 @@ impl App {
                 self.refresh_goal_run(id);
                 self.refresh_goals();
             }
+            AppEvent::GoalRunPaused(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-paused", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
+            }
+            AppEvent::GoalRunResumed(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-resumed", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
+            }
 
             // ── New screen events ──
             AppEvent::SessionsLoaded(list) => {
@@ -2033,6 +2043,16 @@ impl App {
             goals::GoalsAction::StopRun { goal_id } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_stop_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::PauseRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_pause_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::ResumeRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_resume_goal_run(backend, goal_id, self.event_tx.clone());
                 }
             }
         }

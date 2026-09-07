@@ -38,6 +38,15 @@ impl GoalInfo {
     pub fn is_running(&self) -> bool {
         self.run_phase.as_deref() == Some("running")
     }
+
+    /// Whether the run registry reports this goal as paused.
+    ///
+    /// Kept separate from [`Self::is_running`] rather than folded into it: a
+    /// paused run is neither running nor absent, and the pause key has to tell
+    /// the two apart to know whether it should pause or resume.
+    pub fn is_paused(&self) -> bool {
+        self.run_phase.as_deref() == Some("paused")
+    }
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -74,6 +83,14 @@ pub enum GoalsAction {
         goal_id: String,
     },
     StopRun {
+        goal_id: String,
+    },
+    /// Checkpoint a running goal so it can be resumed from where it stopped.
+    PauseRun {
+        goal_id: String,
+    },
+    /// Continue a paused goal from its checkpoint.
+    ResumeRun {
         goal_id: String,
     },
     DeleteGoal {
@@ -179,6 +196,26 @@ impl GoalsState {
         }
     }
 
+    /// Pause or resume `goal`, whichever its live phase calls for.
+    ///
+    /// A goal that is neither running nor paused has nothing to toggle, so the
+    /// key is inert rather than guessing — starting a run is what `s` is for,
+    /// and silently starting one from a pause key would be a surprise on a
+    /// screen where the two states look similar.
+    fn toggle_pause(goal: &GoalInfo) -> GoalsAction {
+        if goal.is_running() {
+            GoalsAction::PauseRun {
+                goal_id: goal.id.clone(),
+            }
+        } else if goal.is_paused() {
+            GoalsAction::ResumeRun {
+                goal_id: goal.id.clone(),
+            }
+        } else {
+            GoalsAction::Continue
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> GoalsAction {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return GoalsAction::Continue;
@@ -265,6 +302,11 @@ impl GoalsState {
                     return Self::toggle_run(g);
                 }
             }
+            KeyCode::Char('p') => {
+                if let Some(g) = self.selected_in_list() {
+                    return Self::toggle_pause(g);
+                }
+            }
             KeyCode::Char('/') => {
                 self.search_mode = true;
                 self.search_buf.clear();
@@ -284,6 +326,13 @@ impl GoalsState {
                 if let Some(idx) = self.selected_goal {
                     if let Some(g) = self.goals.get(idx) {
                         return Self::toggle_run(g);
+                    }
+                }
+            }
+            KeyCode::Char('p') => {
+                if let Some(idx) = self.selected_goal {
+                    if let Some(g) = self.goals.get(idx) {
+                        return Self::toggle_pause(g);
                     }
                 }
             }
@@ -772,6 +821,61 @@ mod tests {
         s.goals = goals;
         s.refilter();
         s
+    }
+
+    /// `p` has to read the live phase, not the goal document: a running goal
+    /// pauses, a paused one resumes, and one that is doing neither is left
+    /// alone rather than being started — `s` is the key that starts a run, and
+    /// a pause key that silently launched one would be a surprise on a screen
+    /// where "stopped" and "paused" sit next to each other.
+    #[test]
+    fn pause_key_pauses_a_running_goal_and_resumes_a_paused_one() {
+        let mut running = goal("1", "Ship the report", None);
+        running.run_phase = Some("running".to_string());
+        let mut s = state_with(vec![running]);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::PauseRun { ref goal_id } if goal_id == "1"
+        ));
+
+        let mut paused = goal("2", "Ship the report", None);
+        paused.run_phase = Some("paused".to_string());
+        let mut s = state_with(vec![paused]);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::ResumeRun { ref goal_id } if goal_id == "2"
+        ));
+    }
+
+    /// A goal with no live run, and one whose run already finished, both leave
+    /// the key inert. `run_phase` is `None` until the detail pane fetches it,
+    /// so this is also the state the list is in before anything is opened.
+    #[test]
+    fn pause_key_is_inert_when_there_is_no_run_to_pause() {
+        for phase in [None, Some("completed"), Some("stopped"), Some("failed")] {
+            let mut g = goal("1", "Ship the report", None);
+            g.run_phase = phase.map(str::to_string);
+            let mut s = state_with(vec![g]);
+            assert!(
+                matches!(s.handle_key(key(KeyCode::Char('p'))), GoalsAction::Continue),
+                "phase {phase:?} must not produce a pause or resume"
+            );
+        }
+    }
+
+    /// The detail pane binds the same key against the goal it has open, which
+    /// is a different selection path from the list's.
+    #[test]
+    fn pause_key_works_from_the_detail_pane_too() {
+        let mut running = goal("7", "Ship the report", None);
+        running.run_phase = Some("running".to_string());
+        let mut s = state_with(vec![running]);
+        s.detail_open = true;
+        s.selected_goal = Some(0);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::PauseRun { ref goal_id } if goal_id == "7"
+        ));
     }
 
     #[test]

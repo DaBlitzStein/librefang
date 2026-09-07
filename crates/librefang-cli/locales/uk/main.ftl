@@ -2454,7 +2454,7 @@ tui-goals-count = Цілей: { $count }
 tui-goals-filter = фільтр: { $query }
 tui-goals-loading = Завантаження цілей...
 tui-goals-empty = Цілей ще немає. Натисніть [n], щоб створити.
-tui-goals-hints = [↑↓] Навігація  [Enter] Деталі  [n] Нова  [s] Запуск/зупинка  [d] Видалити  [/] Пошук  [r] Оновити
+tui-goals-hints = [↑↓] Навігація  [Enter] Деталі  [n] Нова  [s] Запуск/зупинка  [p] Пауза/відновлення  [d] Видалити  [/] Пошук  [r] Оновити
 tui-goals-confirm-delete = Видалити цю ціль? [y] підтвердити  [будь-яка інша клавіша] скасувати
 tui-goals-none-selected = Ціль не вибрано.
 tui-goals-agent-none = не призначено
@@ -2494,12 +2494,16 @@ tui-goal-created = Ціль створено: { $id }
 tui-goal-deleted = Ціль видалено: { $id }
 tui-goal-run-started = Запуск розпочато: { $id }
 tui-goal-run-stopped = Запуск зупинено: { $id }
+tui-goal-run-paused = Запуск призупинено: { $id }
+tui-goal-run-resumed = Запуск відновлено: { $id }
 tui-goal-create-failed = Не вдалося створити ціль.
 tui-goal-create-error = Не вдалося створити ціль: { $error }
 tui-goal-delete-failed = Не вдалося видалити ціль.
 tui-goal-start-failed = Не вдалося почати запуск.
 tui-goal-start-error = Не вдалося почати запуск: { $error }
 tui-goal-stop-failed = Не вдалося зупинити запуск.
+tui-goal-pause-failed = Не вдалося призупинити запуск.
+tui-goal-resume-failed = Не вдалося відновити запуск.
 tui-goal-inproc-unavailable = Керування цілями недоступне в інпроцес-режимі.
 
 # --- goal command (CLI) ---
