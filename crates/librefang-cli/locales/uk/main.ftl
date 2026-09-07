@@ -2575,7 +2575,7 @@ tui-goals-run-requires-daemon = Стан запуску надходить з AP
 tui-goals-run-fetch-failed = Не вдалося прочитати стан запуску для { $id }: { $error }
 
 # config_editor.rs — загальний редактор секцій конфігурації (#8165)
-tui-settings-tab-config = 5 Конфігурація
+tui-settings-tab-config = 6 Конфігурація
 tui-settings-hints-config =   [↑↓] Навігація  [Enter] Відкрити секцію  [r] Оновити
 tui-settings-hints-config-fields =   [↑↓] Навігація  [Enter] Редагувати / Перемкнути  [Esc] Назад  [r] Оновити
 tui-settings-config-loading = Завантаження конфігурації…

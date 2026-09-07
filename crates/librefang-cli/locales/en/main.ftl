@@ -2553,7 +2553,7 @@ tui-goals-run-requires-daemon = Run state comes from the daemon API — not avai
 tui-goals-run-fetch-failed = Could not read the run state for { $id }: { $error }
 
 # config_editor.rs — generic config-section editor (#8165)
-tui-settings-tab-config = 5 Configuration
+tui-settings-tab-config = 6 Configuration
 tui-settings-hints-config =   [↑↓] Navigate  [Enter] Open section  [r] Refresh
 tui-settings-hints-config-fields =   [↑↓] Navigate  [Enter] Edit / Toggle  [Esc] Back  [r] Refresh
 tui-settings-config-loading = Loading configuration…

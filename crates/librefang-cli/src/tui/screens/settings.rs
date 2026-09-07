@@ -283,7 +283,7 @@ impl SettingsState {
                     self.switch_sub(SettingsSub::Backups);
                     return SettingsAction::RefreshBackups;
                 }
-                KeyCode::Char('5') => {
+                KeyCode::Char('6') => {
                     self.switch_sub(SettingsSub::Config);
                     return SettingsAction::RefreshConfig;
                 }
@@ -1229,19 +1229,19 @@ mod tests {
     }
 
     #[test]
-    fn the_fifth_number_key_opens_the_config_tab_and_loads_it() {
+    fn the_sixth_number_key_opens_the_config_tab_and_loads_it() {
         let mut state = SettingsState::new();
-        let action = state.handle_key(key(KeyCode::Char('5')));
+        let action = state.handle_key(key(KeyCode::Char('6')));
         assert!(state.sub == SettingsSub::Config);
         assert!(matches!(action, SettingsAction::RefreshConfig));
     }
 
-    /// The config editor's value prompt takes typed characters, so `1`-`5`
+    /// The config editor's value prompt takes typed characters, so `1`-`6`
     /// must reach the buffer rather than switching sub-tab out from under it.
     #[test]
     fn an_open_config_prompt_holds_the_sub_tab_switch_keys() {
         let mut state = SettingsState::new();
-        state.handle_key(key(KeyCode::Char('5')));
+        state.handle_key(key(KeyCode::Char('6')));
         state
             .config
             .set_sections(vec![config_editor::ConfigSection {

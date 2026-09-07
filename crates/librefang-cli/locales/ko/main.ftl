@@ -2552,7 +2552,7 @@ tui-goals-run-requires-daemon = 실행 상태는 데몬 API에서 가져옵니�
 tui-goals-run-fetch-failed = { $id }의 실행 상태를 읽을 수 없습니다: { $error }
 
 # config_editor.rs — 범용 설정 섹션 편집기 (#8165)
-tui-settings-tab-config = 5 구성
+tui-settings-tab-config = 6 구성
 tui-settings-hints-config =   [↑↓] 탐색  [Enter] 섹션 열기  [r] 새로고침
 tui-settings-hints-config-fields =   [↑↓] 탐색  [Enter] 편집 / 전환  [Esc] 뒤로  [r] 새로고침
 tui-settings-config-loading = 구성을 불러오는 중…

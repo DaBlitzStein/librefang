@@ -2507,7 +2507,7 @@ tui-goals-run-requires-daemon = 运行状态来自守护进程 API —— TUI �
 tui-goals-run-fetch-failed = 无法读取 { $id } 的运行状态：{ $error }
 
 # config_editor.rs —— 通用配置分区编辑器 (#8165)
-tui-settings-tab-config = 5 配置
+tui-settings-tab-config = 6 配置
 tui-settings-hints-config =   [↑↓] 导航  [Enter] 打开分区  [r] 刷新
 tui-settings-hints-config-fields =   [↑↓] 导航  [Enter] 编辑 / 切换  [Esc] 返回  [r] 刷新
 tui-settings-config-loading = 正在加载配置…

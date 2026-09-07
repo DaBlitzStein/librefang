@@ -329,7 +329,7 @@ impl ConfigEditorState {
     }
 
     /// True while the value prompt holds the keyboard, so the Settings screen
-    /// knows not to read `1`-`5` as sub-tab switches.
+    /// knows not to read `1`-`6` as sub-tab switches.
     pub fn is_editing(&self) -> bool {
         self.input.is_some()
     }
