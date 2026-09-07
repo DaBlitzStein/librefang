@@ -328,10 +328,18 @@ fn load_pause_checkpoint(substrate: &MemorySubstrate, goal_id: GoalId) -> Option
             .parse()
             .ok()?,
         iteration: value.get("iteration").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        // Aborts the load like `agent_id` above, rather than defaulting.
+        // Zero is a meaningful value for `iteration` and `last_progress`, so
+        // those keep `unwrap_or(0)`; a cap of zero is not a state an operator
+        // can ask for — the API rejects `max_iterations: 0` and
+        // `goal_run_start` clamps it up with `.max(1)` — so reading one out of
+        // a partial checkpoint would report a paused run that never existed.
+        // Falling through to `None` puts a damaged checkpoint on the restart
+        // path, which is what an unreadable one already does.
         max_iterations: value
             .get("max_iterations")
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32,
+            .filter(|n| *n > 0)? as u32,
         last_progress: value
             .get("last_progress")
             .and_then(|v| v.as_u64())
@@ -2087,6 +2095,57 @@ mod tests {
         );
         assert!(load_pause_checkpoint(&substrate, goal_id).is_none());
         assert!(runner.state(goal_id).is_none());
+    }
+
+    /// A checkpoint that lost `max_iterations` must fall into the restart path
+    /// an unreadable checkpoint already takes, not surface as a paused run
+    /// carrying a cap nobody chose.
+    ///
+    /// `agent_id` aborts the load with `?` for exactly this case, while
+    /// `max_iterations` answered the same question with `unwrap_or(0)`.
+    /// Zero is not a meaningful cap anywhere else in the system — the API
+    /// rejects `max_iterations: 0` as a bad request and `goal_run_start`
+    /// clamps it up with `.max(1)` — so defaulting to it invented a state the
+    /// operator cannot reach on purpose. `iteration` and `last_progress` keep
+    /// `unwrap_or(0)` because zero is a real value for both.
+    #[tokio::test]
+    async fn checkpoint_missing_max_iterations_is_unreadable_so_the_goal_restarts() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+
+        // A partial checkpoint: every other field intact, `max_iterations` gone.
+        substrate
+            .structured_set(
+                goals_storage_agent_id(),
+                &goal_pause_key(goal_id),
+                serde_json::json!({
+                    "agent_id": agent_id.to_string(),
+                    "iteration": 7,
+                    "last_progress": 65,
+                    "paused_at": Utc::now().to_rfc3339(),
+                }),
+            )
+            .unwrap();
+
+        assert!(
+            load_pause_checkpoint(&substrate, goal_id).is_none(),
+            "a checkpoint missing max_iterations must be rejected, not read as a zero cap"
+        );
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store, substrate.clone());
+
+        // This is what the `/resume` precondition reads: with no paused run to
+        // report, resume 409s and the operator starts a fresh run instead of
+        // continuing from a checkpoint that lost part of itself.
+        assert!(
+            runner.state(goal_id).is_none(),
+            "an unreadable checkpoint must not surface as a paused run"
+        );
     }
 
     /// The loop must honour a per-goal `tick_interval_secs` override instead
