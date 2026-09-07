@@ -4,7 +4,8 @@
 //! skill workshop), this module contributes it back to the configured
 //! registry repository (default `librefang/librefang-registry`) by:
 //!
-//! 1. forking the registry repo under the authenticated user (idempotent),
+//! 1. forking the registry repo under the configured owner, or the
+//!    authenticated user when none is configured (idempotent),
 //! 2. creating a branch off the fork's default branch,
 //! 3. committing the skill files (`skill.toml`, prompt context, supporting
 //!    files) under `skills/<name>/` via the Contents API, and
@@ -675,10 +676,23 @@ impl RegistryGithubClient {
             })
     }
 
-    /// Ensure a fork of `upstream` exists under our account. If
-    /// `fork_repo` already resolves, reuse it; otherwise request a fork
-    /// and poll until GitHub finishes creating it.
-    async fn ensure_fork(&self, upstream: &str, fork_repo: &str) -> Result<(), SkillError> {
+    /// Ensure a fork of `upstream` exists at `fork_repo`. If `fork_repo`
+    /// already resolves, reuse it; otherwise request a fork and poll until
+    /// GitHub finishes creating it.
+    ///
+    /// `configured_owner` carries the destination from
+    /// `skills.promotion.fork_owner`, and is `None` when the owner was derived
+    /// from the token's own login. GitHub creates the fork under the
+    /// authenticated user unless the request body names an `organization`, so
+    /// an organization destination has to travel in that body — without it the
+    /// fork lands under the token owner while the poll below waits for a
+    /// repository that will never appear.
+    async fn ensure_fork(
+        &self,
+        upstream: &str,
+        fork_repo: &str,
+        configured_owner: Option<&str>,
+    ) -> Result<(), SkillError> {
         let api = &self.api_base;
         if self
             .get_json(&format!("{api}/repos/{fork_repo}"))
@@ -687,8 +701,17 @@ impl RegistryGithubClient {
         {
             return Ok(());
         }
+        // Only an organization destination takes the parameter: passing the
+        // token owner's own login would ask GitHub for an organization that
+        // does not exist. Logins are case-insensitive on GitHub's side.
+        let mut body = json!({});
+        if let Some(owner) = configured_owner {
+            if !owner.eq_ignore_ascii_case(&self.authenticated_login().await?) {
+                body["organization"] = Value::String(owner.to_string());
+            }
+        }
         // Kick off the fork.
-        self.post_json(&format!("{api}/repos/{upstream}/forks"), &json!({}))
+        self.post_json(&format!("{api}/repos/{upstream}/forks"), &body)
             .await?;
         // Fork creation is async on GitHub's side — poll briefly.
         for _ in 0..20 {
@@ -723,15 +746,20 @@ impl RegistryGithubClient {
         let (push_repo, head_owner) = match cfg.mode {
             RegistryPromotionMode::DirectPush => (upstream.to_string(), None),
             RegistryPromotionMode::Fork => {
-                let owner = match cfg.fork_owner.as_deref().map(str::trim) {
+                let configured = match cfg.fork_owner.as_deref().map(str::trim) {
                     Some(o) if !o.is_empty() => {
                         validate_owner(o)?;
-                        o.to_string()
+                        Some(o.to_string())
                     }
-                    _ => self.authenticated_login().await?,
+                    _ => None,
+                };
+                let owner = match &configured {
+                    Some(o) => o.clone(),
+                    None => self.authenticated_login().await?,
                 };
                 let fork_repo = format!("{owner}/{}", repo_name(upstream));
-                self.ensure_fork(upstream, &fork_repo).await?;
+                self.ensure_fork(upstream, &fork_repo, configured.as_deref())
+                    .await?;
                 (fork_repo, Some(owner))
             }
         };
@@ -885,8 +913,28 @@ mod tests {
     /// flow reads, so the request recorder is the only thing the tests assert
     /// on — which is the point: it is the wire, not an internal, that proves a
     /// configured value actually left the process.
-    async fn mock_github() -> MockServer {
+    ///
+    /// `missing_fork` is the repository slug that does not exist yet: it 404s
+    /// once and resolves from then on, which is what drives the run through the
+    /// initial-404 → create → poll path of [`RegistryGithubClient::ensure_fork`].
+    /// Answering 200 for every repository skips fork creation altogether and
+    /// leaves the request that carries the destination untested.
+    async fn mock_github(missing_fork: Option<&str>) -> MockServer {
         let server = MockServer::start().await;
+        if let Some(slug) = missing_fork {
+            Mock::given(method("GET"))
+                .and(path(format!("/repos/{slug}")))
+                .respond_with(ResponseTemplate::new(404))
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/repos/[^/]+/[^/]+/forks$"))
+                .respond_with(ResponseTemplate::new(202).set_body_json(json!({})))
+                .mount(&server)
+                .await;
+        }
         Mock::given(method("GET"))
             .and(path("/user"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "tokenowner"})))
@@ -973,7 +1021,7 @@ mod tests {
     /// commit author.
     #[tokio::test]
     async fn defaults_reproduce_the_pre_config_behaviour() {
-        let server = mock_github().await;
+        let server = mock_github(Some("tokenowner/registry")).await;
         let cfg = RegistryPromotionConfig {
             api_base_url: Some(server.uri()),
             ..Default::default()
@@ -983,6 +1031,12 @@ mod tests {
 
         // The login was derived rather than configured.
         assert!(find(&reqs, "GET", |p| p == "/user").is_some());
+        // The fork was created under that login, so the request carries no
+        // organization: sending one would ask GitHub for an org named after the
+        // token owner.
+        let fork = find(&reqs, "POST", |p| p.ends_with("/forks")).expect("fork was requested");
+        assert_eq!(fork.url.path(), "/repos/acme/registry/forks");
+        assert_eq!(body_json(fork), json!({}));
         // Branch and files landed on the fork under that login.
         let create = find(&reqs, "POST", |p| p.ends_with("/git/refs")).unwrap();
         assert_eq!(create.url.path(), "/repos/tokenowner/registry/git/refs");
@@ -1012,7 +1066,7 @@ mod tests {
     /// dead, so asserting on the request is the only check that means anything.
     #[tokio::test]
     async fn every_configured_value_reaches_the_github_request() {
-        let server = mock_github().await;
+        let server = mock_github(Some("acme-bots/registry")).await;
         let cfg = RegistryPromotionConfig {
             api_base_url: Some(server.uri()),
             fork_owner: Some("acme-bots".to_string()),
@@ -1032,12 +1086,26 @@ mod tests {
             !reqs.is_empty(),
             "no request reached the configured API base"
         );
-        // And `GET /user` was not needed, because the owner was configured.
-        assert!(find(&reqs, "GET", |p| p == "/user").is_none());
+        // fork_owner: the destination reaches the fork request itself. Without
+        // `organization` GitHub forks into the token owner's account, and the
+        // poll below it then waits out its timeout on a repository nobody
+        // created.
+        let fork = find(&reqs, "POST", |p| p.ends_with("/forks")).expect("fork was requested");
+        assert_eq!(fork.url.path(), "/repos/acme/registry/forks");
+        assert_eq!(body_json(fork), json!({"organization": "acme-bots"}));
 
         // fork_owner: the fork, the branch and the files live under it.
         let create = find(&reqs, "POST", |p| p.ends_with("/git/refs")).unwrap();
         assert_eq!(create.url.path(), "/repos/acme-bots/registry/git/refs");
+        let put_path = find(&reqs, "PUT", |p| p.contains("/contents/"))
+            .unwrap()
+            .url
+            .path()
+            .to_string();
+        assert!(
+            put_path.starts_with("/repos/acme-bots/registry/"),
+            "files landed on {put_path}"
+        );
 
         // base_branch: cut from `release`, and the PR targets `release`.
         assert!(find(&reqs, "GET", |p| p
@@ -1065,7 +1133,7 @@ mod tests {
     /// upstream registry and the PR head carries no owner prefix.
     #[tokio::test]
     async fn direct_push_mode_never_forks() {
-        let server = mock_github().await;
+        let server = mock_github(None).await;
         let cfg = RegistryPromotionConfig {
             api_base_url: Some(server.uri()),
             mode: RegistryPromotionMode::DirectPush,
@@ -1083,6 +1151,26 @@ mod tests {
         assert_eq!(create.url.path(), "/repos/acme/registry/git/refs");
         let pull = body_json(find(&reqs, "POST", |p| p.ends_with("/pulls")).unwrap());
         assert_eq!(pull["head"], pr.branch);
+    }
+
+    /// A `fork_owner` naming the token's own account is a personal fork, not an
+    /// organization one. GitHub resolves `organization` as an org login, so
+    /// sending the user's own login there is a 404 rather than a no-op — and
+    /// logins are case-insensitive, which is why the comparison is too.
+    #[tokio::test]
+    async fn a_fork_owner_matching_the_token_owner_sends_no_organization() {
+        let server = mock_github(Some("TokenOwner/registry")).await;
+        let cfg = RegistryPromotionConfig {
+            api_base_url: Some(server.uri()),
+            fork_owner: Some("TokenOwner".to_string()),
+            base_branch: Some("release".to_string()),
+            ..Default::default()
+        };
+        propose_with(&cfg).await.expect("proposal succeeds");
+        let reqs = requests(&server).await;
+
+        let fork = find(&reqs, "POST", |p| p.ends_with("/forks")).expect("fork was requested");
+        assert_eq!(body_json(fork), json!({}));
     }
 
     #[test]
