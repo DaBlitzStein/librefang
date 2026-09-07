@@ -1323,6 +1323,17 @@ pub fn spawn_fetch_workflow_runs(
                                     state: r["state"].as_str().unwrap_or("?").to_string(),
                                     duration: r["duration"].as_str().unwrap_or("").to_string(),
                                     output_preview: r["output"].as_str().unwrap_or("").to_string(),
+                                    steps_completed: r["steps_completed"].as_u64().unwrap_or(0)
+                                        as usize,
+                                    // Absent or null for anything the daemon
+                                    // does not report as running — that gate
+                                    // lives in `WorkflowRun::live_step_index`
+                                    // and is deliberately not second-guessed
+                                    // here.
+                                    current_step_index: r["current_step_index"]
+                                        .as_u64()
+                                        .map(|i| i as usize),
+                                    total_steps: r["total_steps"].as_u64().unwrap_or(0) as usize,
                                 })
                                 .collect()
                         })

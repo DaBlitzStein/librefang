@@ -307,9 +307,18 @@ impl App {
             }
             AppEvent::WorkflowRunsLoaded(runs) => {
                 self.workflows.runs = runs;
-                if !self.workflows.runs.is_empty() {
-                    self.workflows.runs_list_state.select(Some(0));
-                }
+                // The auto-poll delivers this event every ~2s, so re-selecting
+                // row 0 unconditionally would drag the cursor off whatever the
+                // operator had highlighted. Select only when nothing is, and
+                // clamp when the list came back shorter.
+                let len = self.workflows.runs.len();
+                let selected = match self.workflows.runs_list_state.selected() {
+                    _ if len == 0 => None,
+                    Some(i) if i < len => Some(i),
+                    Some(_) => Some(len - 1),
+                    None => Some(0),
+                };
+                self.workflows.runs_list_state.select(selected);
                 self.workflows.loading = false;
             }
             AppEvent::WorkflowRunResult(result) => {
@@ -1367,6 +1376,14 @@ impl App {
                 Tab::Peers if self.peers.should_poll() => self.refresh_peers(),
                 Tab::Groups if self.groups.should_poll() => self.refresh_groups(),
                 Tab::Comms if self.comms.should_poll() => self.refresh_comms(),
+                // Keeps the step counter on the run history moving while a
+                // workflow executes, instead of freezing at whatever it read
+                // when the operator opened the screen.
+                Tab::Workflows if self.workflows.should_poll() => {
+                    if let Some(wf_id) = self.workflows.selected_workflow_id() {
+                        self.handle_workflow_action(workflows::WorkflowAction::LoadRuns(wf_id));
+                    }
+                }
                 _ => {}
             }
         }
