@@ -972,8 +972,17 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 break GoalRunPhase::Finished;
             }
         };
+        // #7785 review: `goal.progress` has a second writer — the `goal_update`
+        // tool, which the agent's own system prompt tells it to call, and
+        // which patches the same shared document this read comes from. That
+        // write does not go through `parse_tick`, so the verifier gate below
+        // never sees it, and a rejected iteration could still close the run
+        // one tick later through this check alone. Bare progress is only a
+        // completion signal when there is no verifier configured to bypass —
+        // a gated run needs `status == Completed`, which only the gate's own
+        // `done` branch (or an explicit external status write) sets.
         if matches!(goal.status, GoalStatus::Completed | GoalStatus::Cancelled)
-            || goal.progress >= 100
+            || (verify_agent_id.is_none() && goal.progress >= 100)
         {
             break GoalRunPhase::Finished;
         }
@@ -1122,37 +1131,24 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 // the work it is attached to. Without this the gate would be
                 // decorative: the agent could close its own goal by asserting
                 // completion in an output the verifier had just rejected.
-                // A permanently dead verifier stops the run here, in the
-                // outer loop where the phase break is legal: the generator
-                // keeps succeeding so its own streak never trips, and
-                // without this check the run pays for every remaining
-                // iteration plus a dead dispatch per rework round before
-                // ending in MaxIterationsReached (#7785 review).
-                if let Some(cause) = &dead_verifier_cause {
-                    {
-                        let mut st = state.lock().await;
-                        st.last_error = Some(cause.clone());
-                        persist_run(&store, &st);
-                    }
-                    break GoalRunPhase::Stopped;
-                }
-
                 let done = verified && (parsed.done || evaluator_done);
                 let new_status = if done {
                     Some(GoalStatus::Completed)
                 } else {
                     Some(GoalStatus::InProgress)
                 };
-                // #7785 review: a rejected iteration must not advance
-                // persisted progress to the completion boundary. `parsed`
-                // is the same output the verifier refused, so its
-                // `GOAL_PROGRESS: 100` is an assertion from rejected work:
-                // persisting it lets the pre-existing `progress >= 100`
-                // check end the run one iteration later through the back
-                // door, leaving `progress: 100` + `status: in_progress`.
-                // Clamp below 100 so only a verified iteration can cross.
+                // #7785 review: only a REJECTED iteration's progress needs
+                // clamping — `parsed.progress` there is an assertion from
+                // work the verifier just refused. Clamping unconditionally
+                // also caught the plain no-verifier path and the accepted-
+                // but-undeclared-done path (`verified` true, no `GOAL_DONE`),
+                // pinning a legitimately-reported 100 at 99 and burning the
+                // rest of the iteration budget instead of letting the
+                // top-of-loop `progress >= 100` check end the run.
                 let new_progress = if done {
                     Some(100)
+                } else if verified {
+                    parsed.progress
                 } else {
                     parsed.progress.map(|p| p.min(99))
                 };
@@ -1179,10 +1175,24 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 // crash before the next tick still leaves a recoverable row.
                 persist_run(&store, &snapshot);
 
+                // A permanently dead verifier stops the run here, AFTER the
+                // same bookkeeping every other outcome gets above (iteration
+                // count, progress, the persisted row) — breaking before it
+                // left the run API reporting a stale iteration count for
+                // turns the daemon had already paid for (#7785 review).
+                if dead_verifier_cause.is_some() {
+                    break GoalRunPhase::Stopped;
+                }
                 if done {
                     break GoalRunPhase::Finished;
                 }
-                if parsed.blocked {
+                // #7785 review: gated by `verified` for the same reason
+                // `done` is — a `GOAL_BLOCKED` claim inside output the
+                // verifier just rejected is not a trustworthy signal either,
+                // and was the one remaining way a rejected iteration could
+                // end the run (as `Stopped`, not `Completed`, but still on
+                // the verifier's say-so rather than despite it).
+                if verified && parsed.blocked {
                     info!(goal_id = %goal_id, "Goal run: agent reported blocked; ending run");
                     break GoalRunPhase::Stopped;
                 }
@@ -1606,6 +1616,72 @@ mod tests {
         assert_eq!(
             load_goal(&substrate, goal.id).unwrap().status,
             GoalStatus::InProgress
+        );
+    }
+
+    /// #7785 review: a `GOAL_BLOCKED` claim inside output the verifier just
+    /// rejected was the one remaining way a rejected iteration could end a
+    /// run — as `Stopped` rather than `Completed`, so not a completion
+    /// bypass, but still the verifier's rejection being overruled by a
+    /// marker from the same rejected text. The claim must be ignored until
+    /// an iteration the verifier actually passes reports it.
+    #[tokio::test]
+    async fn a_rejected_iterations_blocked_marker_does_not_stop_the_run() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal.id, agent_id, verifier, 2, 1);
+
+        let call = Arc::new(AtomicU64::new(0));
+        let c = call.clone();
+        let send = move |target: AgentId, _p: String| {
+            let c = c.clone();
+            async move {
+                if target == verifier {
+                    let n = c.load(Ordering::SeqCst);
+                    if n <= 1 {
+                        Ok("VERDICT: FAIL\nREASON: not really stuck".to_string())
+                    } else {
+                        Ok("VERDICT: PASS".to_string())
+                    }
+                } else {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        Ok("stuck\nGOAL_BLOCKED: need a key".to_string())
+                    } else {
+                        Ok("done\nGOAL_DONE".to_string())
+                    }
+                }
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            2,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            state.lock().await.phase,
+            GoalRunPhase::Finished,
+            "the rejected iteration's blocked marker must not have stopped the run early"
+        );
+        assert_eq!(
+            load_goal(&substrate, goal.id).unwrap().status,
+            GoalStatus::Completed
         );
     }
 
@@ -2514,6 +2590,126 @@ mod tests {
         );
     }
 
+    /// #7785 review: `parsed.progress` is only one of two writers of
+    /// `goal.progress`. The `goal_update` tool (the agent's own system
+    /// prompt tells it to call this) patches the same shared document
+    /// directly, bypassing `parse_tick` entirely — so clamping the text
+    /// marker alone does not close the back door. Simulated here by calling
+    /// `patch_goal` from the tick closure exactly as the tool's kernel-side
+    /// handler does: same function, same document, same key.
+    #[tokio::test]
+    async fn a_rejected_iterations_tool_written_progress_cannot_cross_the_completion_boundary() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        let goal_id = goal.id;
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal_id, agent_id, verifier, 3, 1);
+
+        let turns = Arc::new(AtomicU64::new(0));
+        let t = turns.clone();
+        let sub = substrate.clone();
+        let send = move |target: AgentId, _p: String| {
+            let t = t.clone();
+            let sub = sub.clone();
+            async move {
+                if target == verifier {
+                    Ok("VERDICT: FAIL\nREASON: not actually done".to_string())
+                } else {
+                    t.fetch_add(1, Ordering::SeqCst);
+                    // No `GOAL_PROGRESS:` marker in the text — the agent
+                    // called the tool instead, which writes straight to the
+                    // store the runner reads at the top of the loop.
+                    patch_goal(&sub, goal_id, Some(100), None);
+                    Ok("still working on it".to_string())
+                }
+            }
+        };
+
+        run_loop(
+            goal_id,
+            agent_id,
+            3,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            turns.load(Ordering::SeqCst),
+            3,
+            "a tool-written progress of 100 must not let the top-of-loop check \
+             short-circuit the run after the first rejected iteration"
+        );
+        let s = state.lock().await;
+        assert_eq!(
+            s.phase,
+            GoalRunPhase::MaxIterationsReached,
+            "the run must spend its full budget, not finish through progress \
+             the verifier never saw"
+        );
+    }
+
+    /// #7785 review: the clamp on rejected progress must not reach the plain
+    /// no-verifier path. There is no gate to bypass there, so a `100` an
+    /// agent reports without an explicit `GOAL_DONE` (the two markers are
+    /// independent) must still let the top-of-loop `progress >= 100` check
+    /// end the run — clamping it unconditionally pinned it at 99 and burned
+    /// the rest of the iteration budget instead.
+    #[tokio::test]
+    async fn progress_100_without_goal_done_still_finishes_with_no_verifier_configured() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 5);
+
+        let turns = Arc::new(AtomicU64::new(0));
+        let t = turns.clone();
+        let send = move |_a: AgentId, _p: String| {
+            let t = t.clone();
+            async move {
+                t.fetch_add(1, Ordering::SeqCst);
+                Ok("GOAL_PROGRESS: 100".to_string())
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            5,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            turns.load(Ordering::SeqCst),
+            1,
+            "an unverified 100 must end the run on the next check, not burn the whole budget"
+        );
+        let stored = load_goal(&substrate, goal.id).unwrap();
+        assert_eq!(stored.progress, 100);
+        assert_eq!(state.lock().await.phase, GoalRunPhase::Finished);
+    }
+
     #[tokio::test]
     async fn verifier_pass_lets_goal_done_finish_the_run() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -3085,12 +3281,21 @@ mod tests {
         assert_eq!(s.phase, GoalRunPhase::Stopped);
         assert_eq!(
             s.last_error.as_deref(),
-            Some("verifier unreachable: verifier agent not found")
+            Some("Iteration 5 did not pass verification: verifier unreachable: verifier agent not found")
         );
         assert_eq!(
             verifier_calls.load(Ordering::SeqCst) as u32,
             MAX_ERROR_STREAK,
             "the breaker must fire at the streak limit, not at the iteration cap"
+        );
+        // #7785 review: the dead-verifier break used to happen before the
+        // iteration count and progress got their usual post-tick update, so
+        // the run API reported one fewer turn than the daemon actually paid
+        // for. The break now happens after that bookkeeping, same as every
+        // other terminal outcome.
+        assert_eq!(
+            s.iteration, MAX_ERROR_STREAK,
+            "the recorded iteration count must match the turns actually paid for"
         );
     }
 

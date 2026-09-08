@@ -307,7 +307,14 @@ pub async fn start_goal_run(
         evaluator_model,
     );
     if !started {
-        return ApiErrorResponse::internal("Failed to start goal run").into_json_tuple();
+        // #7785 review: the only way `start_goal_run` refuses is the goal
+        // vanishing between the read above and the runner's own reload —
+        // a delete racing this request. That is "the goal is gone", a 404,
+        // not the 500 an internal-fault response implies.
+        return ApiErrorResponse::not_found(format!(
+            "Goal '{id}' was deleted before its run could start"
+        ))
+        .into_json_tuple();
     }
 
     // Flip the goal to in_progress so the dashboard reflects the active run.
