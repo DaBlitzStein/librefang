@@ -18,9 +18,10 @@ use crate::commands::prelude::*;
 /// `GH_TOKEN` stays in the environment tier, where it always was; the vault is
 /// keyed on `GITHUB_TOKEN` only, matching the API.
 ///
-/// Reading the vault needs no prompt — `CredentialVault::unlock` resolves its
-/// master key from `LIBREFANG_VAULT_KEY` or the keyring — so a locked or absent
-/// vault is a silent `None` rather than a hang.
+/// Reading the vault does not prompt for a passphrase, so a locked or absent
+/// vault is a `None` rather than a hang — but on the no-env path
+/// `CredentialVault::unlock` consults the OS keyring (the migrating variant of
+/// `resolve_master_key`), which can surface a platform consent dialog.
 fn resolve_github_token(vault_path: &std::path::Path) -> Option<String> {
     for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
         if let Ok(token) = std::env::var(var) {
@@ -41,9 +42,12 @@ fn github_token_from_vault(vault_path: &std::path::Path) -> Option<String> {
     }
     if let Err(error) = vault.unlock() {
         // Not fatal: the caller falls through to the "set a token" message.
-        // Worth a line, though — a vault that holds the token but will not
-        // unlock is indistinguishable from an empty one at the call site.
-        tracing::debug!(%error, "could not unlock the vault while resolving GITHUB_TOKEN");
+        // A warn (not debug) so it is visible at the CLI's default level — a
+        // vault that holds the token but will not unlock is otherwise
+        // indistinguishable from an empty one, and the failure it describes is
+        // precisely the one the "set a token" message cannot explain (#8179
+        // review).
+        tracing::warn!(%error, "could not unlock the vault while resolving GITHUB_TOKEN");
         return None;
     }
     vault
@@ -1546,11 +1550,7 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
 #[cfg(test)]
 mod tests {
     use super::{github_token_from_vault, resolve_github_token, validate_skill_name};
-
-    /// The token-resolution tests mutate process-wide environment variables,
-    /// so they cannot run alongside each other. A plain mutex keeps them
-    /// serialized without pulling in a test-ordering crate.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::test_env::with_env_vars;
 
     /// Seed a vault at `path` holding `GITHUB_TOKEN`.
     ///
@@ -1573,61 +1573,85 @@ mod tests {
     /// token from the vault.
     #[test]
     fn resolves_the_token_from_the_vault_when_the_environment_has_none() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
         let vault_path = dir.path().join("vault.enc");
+        let key = base64_key();
 
         // 32 raw bytes, base64-encoded — LIBREFANG_VAULT_KEY is checked on
         // its decoded length, not its character count.
-        std::env::set_var("LIBREFANG_VAULT_KEY", base64_key());
-        std::env::remove_var("GITHUB_TOKEN");
-        std::env::remove_var("GH_TOKEN");
-        // Underscore, not `vault-token`: `tests/i18n_checks.rs` treats any
-        // lowercase hyphenated literal whose first segment matches a locale key
-        // prefix as a message id, and `vault-` is one, so the hyphenated
-        // spelling would demand a `vault-token` entry in every locale.
-        seed_vault_with_token(&vault_path, "vault_token");
+        with_env_vars(
+            &[
+                ("LIBREFANG_VAULT_KEY", Some(&key)),
+                ("GITHUB_TOKEN", None),
+                ("GH_TOKEN", None),
+            ],
+            || {
+                // Underscore, not `vault-token`: `tests/i18n_checks.rs` treats any
+                // lowercase hyphenated literal whose first segment matches a locale key
+                // prefix as a message id, and `vault-` is one, so the hyphenated
+                // spelling would demand a `vault-token` entry in every locale.
+                seed_vault_with_token(&vault_path, "vault_token");
 
-        assert_eq!(
-            resolve_github_token(&vault_path).as_deref(),
-            Some("vault_token")
+                assert_eq!(
+                    resolve_github_token(&vault_path).as_deref(),
+                    Some("vault_token")
+                );
+            },
         );
-        std::env::remove_var("LIBREFANG_VAULT_KEY");
     }
 
     /// Environment first, vault second — the same order as the API's
     /// `resolve_github_token`. Reversing it would swap one split for another.
     #[test]
     fn the_environment_wins_over_the_vault() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
         let vault_path = dir.path().join("vault.enc");
+        let key = base64_key();
 
-        std::env::set_var("LIBREFANG_VAULT_KEY", base64_key());
-        std::env::remove_var("GH_TOKEN");
-        seed_vault_with_token(&vault_path, "vault_token");
+        // Seeding happens once; each phase re-applies the vault key.
+        with_env_vars(
+            &[("LIBREFANG_VAULT_KEY", Some(&key)), ("GH_TOKEN", None)],
+            || seed_vault_with_token(&vault_path, "vault_token"),
+        );
 
-        std::env::set_var("GITHUB_TOKEN", "env-token");
-        assert_eq!(
-            resolve_github_token(&vault_path).as_deref(),
-            Some("env-token")
+        // GITHUB_TOKEN comes first in the environment tier.
+        with_env_vars(
+            &[
+                ("LIBREFANG_VAULT_KEY", Some(&key)),
+                ("GH_TOKEN", None),
+                ("GITHUB_TOKEN", Some("env-token")),
+            ],
+            || {
+                assert_eq!(
+                    resolve_github_token(&vault_path).as_deref(),
+                    Some("env-token")
+                );
+            },
         );
 
         // GH_TOKEN stays in the environment tier, ahead of the vault.
-        std::env::remove_var("GITHUB_TOKEN");
-        std::env::set_var("GH_TOKEN", "gh-token");
-        assert_eq!(
-            resolve_github_token(&vault_path).as_deref(),
-            Some("gh-token")
+        with_env_vars(
+            &[
+                ("LIBREFANG_VAULT_KEY", Some(&key)),
+                ("GITHUB_TOKEN", None),
+                ("GH_TOKEN", Some("gh-token")),
+            ],
+            || {
+                assert_eq!(
+                    resolve_github_token(&vault_path).as_deref(),
+                    Some("gh-token")
+                );
+            },
         );
-
-        std::env::remove_var("GH_TOKEN");
-        std::env::remove_var("LIBREFANG_VAULT_KEY");
     }
 
     /// A missing vault is a `None`, not a panic or a prompt — `skill publish`
     /// on a machine that never ran `librefang vault init` must still reach the
     /// "set a token" message.
+    ///
+    /// Deliberately does not take the env lock: the vault's absence short-
+    /// circuits in `github_token_from_vault` before any environment read, so
+    /// there is nothing here that could race an env-mutating sibling.
     #[test]
     fn a_missing_vault_resolves_to_none() {
         let dir = tempfile::TempDir::new().unwrap();

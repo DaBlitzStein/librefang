@@ -1065,6 +1065,14 @@ async fn run_registry_proposal(
         Err(librefang_skills::SkillError::InvalidManifest(msg)) => {
             ApiErrorResponse::bad_request(msg).into_json_tuple()
         }
+        // A server-side configuration error is not a malformed request: the
+        // promotion validators (`api_base_url`, `fork_owner`, `base_branch`,
+        // fork-parent) name the exact config key, and the value was
+        // operator-supplied, so it is echoed rather than scrubbed (#8179
+        // review).
+        Err(librefang_skills::SkillError::InvalidConfig(msg)) => {
+            ApiErrorResponse::internal(msg).into_json_tuple()
+        }
         Err(librefang_skills::SkillError::NotFound(msg)) => {
             ApiErrorResponse::not_found(msg).into_json_tuple()
         }
