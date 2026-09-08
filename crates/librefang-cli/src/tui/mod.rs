@@ -629,15 +629,24 @@ impl App {
             AppEvent::AgentWorkspacesLoaded(id, entries) => {
                 if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id) {
                     self.agents.workspaces = entries;
+                    self.agents.ws_loaded = true;
                     if !self.agents.workspaces.is_empty() {
                         self.agents.ws_cursor = 0;
                     }
                 }
             }
             AppEvent::AgentWorkspacesUpdated(id) => {
-                self.agents.status_msg =
-                    crate::i18n::t_args("tui-mod-agent-workspaces-updated", &[("id", &id)]);
-                self.agents.sub = agents::AgentSubScreen::AgentDetail;
+                // Guard on both the agent id and the sub-screen, mirroring
+                // `AgentWorkspacesLoaded` above — the PATCH is a two-request
+                // round trip, so this can land after the operator has moved
+                // on to editing something else (or a different agent).
+                if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id.clone())
+                    && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
+                {
+                    self.agents.status_msg =
+                        crate::i18n::t_args("tui-mod-agent-workspaces-updated", &[("id", &id)]);
+                    self.agents.sub = agents::AgentSubScreen::AgentDetail;
+                }
             }
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits
@@ -1133,7 +1142,14 @@ impl App {
                 _ => {}
             }
             // Tab cycling: Tab / Shift+Tab
-            if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+            //
+            // Exempted while the shared-folders editor has a field open —
+            // there, Tab is the field-to-field advance documented in
+            // `tui-agents-workspaces-help`, not a tab switch (#7835).
+            let editing_workspace_field = matches!(self.active_tab, Tab::Agents)
+                && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
+                && self.agents.ws_editing.is_some();
+            if key.code == KeyCode::Tab && key.modifiers.is_empty() && !editing_workspace_field {
                 self.next_tab();
                 return;
             }
@@ -3256,6 +3272,10 @@ mod agent_workspaces_event_tests {
     fn workspaces_updated_event_returns_to_detail_with_status() {
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
         app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
 
         app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
@@ -3268,6 +3288,83 @@ mod agent_workspaces_event_tests {
             app.agents.status_msg.contains("agent-1"),
             "status message should name the saved agent, got {:?}",
             app.agents.status_msg
+        );
+    }
+
+    /// A late-arriving save for an agent (or sub-screen) the operator has
+    /// since moved away from must not eject them from whatever they moved
+    /// on to — the same race `AgentWorkspacesLoaded` already guards against.
+    #[test]
+    fn workspaces_updated_event_ignored_for_stale_agent_or_subscreen() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditModelParams;
+
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::EditModelParams),
+            "a save for a sub-screen the operator already left must not move them"
+        );
+        assert!(
+            app.agents.status_msg.is_empty(),
+            "a stale save must not overwrite the status message either"
+        );
+
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-2".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::EditWorkspaces),
+            "a save for a different agent than the one on screen must not move the operator"
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_workspaces_tab_exemption_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// `Tab` while a shared-folders field is open must advance the field,
+    /// not switch tabs — the global Tab-cycling handler used to consume
+    /// bare `Tab` before screen dispatch ever ran (#7835).
+    #[test]
+    fn tab_advances_workspace_field_instead_of_switching_tabs() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Agents;
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+        app.agents.ws_loaded = true;
+        app.agents.handle_key(key(KeyCode::Char('a')));
+        assert!(matches!(app.agents.ws_editing, Some((0, 0))));
+
+        for c in "library".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Tab));
+
+        assert_eq!(app.agents.workspaces[0].0, "library");
+        assert!(
+            matches!(app.agents.ws_editing, Some((0, 1))),
+            "Tab must advance to the next field, not fall through to tab-cycling"
+        );
+        assert!(
+            matches!(app.active_tab, Tab::Agents),
+            "the global Tab-cycling handler must not fire while a field is open"
         );
     }
 }

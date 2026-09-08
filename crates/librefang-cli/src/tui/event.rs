@@ -1946,6 +1946,19 @@ pub fn spawn_fetch_agent_workspaces(
     });
 }
 
+/// Canonicalize a manifest `mode` string to the spelling
+/// `GET /api/agents/{id}/manifest` actually serializes (`readwrite` /
+/// `readonly`), collapsing the deserialize-only `WorkspaceMode` aliases
+/// (`rw`, `r`, `read`, `read-write`, `read-only` —
+/// `librefang-types/src/agent.rs`) into it. Downstream code compares
+/// against these two canonical spellings only.
+fn canonical_workspace_mode(raw: &str) -> &'static str {
+    match raw {
+        "r" | "read" | "read-only" | "readonly" => "readonly",
+        _ => "readwrite",
+    }
+}
+
 /// Path-based workspace rows for the editor, as `(name, path, mode)`.
 ///
 /// Declarations without a string `path` (mount-based, or malformed) are not
@@ -1963,7 +1976,8 @@ fn workspaces_editor_rows(manifest: &toml::Value) -> Vec<(String, String, String
                     let mode = decl
                         .get("mode")
                         .and_then(toml::Value::as_str)
-                        .unwrap_or("rw");
+                        .map(canonical_workspace_mode)
+                        .unwrap_or("readwrite");
                     Some((name.clone(), path.to_string(), mode.to_string()))
                 })
                 .collect()
@@ -2054,7 +2068,8 @@ enum WorkspacesRebuildError {
 /// Declarations the editor does not render — anything without a string
 /// `path` (mount-based, or malformed) — are carried over verbatim rather
 /// than dropped, so a save cannot turn a mount into an empty `path`.
-/// `mode` is written only when it is not the kernel default `rw`, so a
+/// `mode` is written only when it is not the kernel default `readwrite`
+/// (accepting the same aliases `canonical_workspace_mode` does), so a
 /// manifest that relies on the default does not gain an explicit key.
 /// Duplicate folder names are refused instead of silently last-wins.
 fn rebuild_manifest_with_workspaces(
@@ -2082,8 +2097,9 @@ fn rebuild_manifest_with_workspaces(
     for (name, path, mode) in workspaces {
         let mut entry = toml::map::Map::new();
         entry.insert("path".to_string(), toml::Value::String(path.clone()));
-        if mode != "rw" {
-            entry.insert("mode".to_string(), toml::Value::String(mode.clone()));
+        let mode = canonical_workspace_mode(mode);
+        if mode != "readwrite" {
+            entry.insert("mode".to_string(), toml::Value::String(mode.to_string()));
         }
         if ws.insert(name.clone(), toml::Value::Table(entry)).is_some() {
             return Err(WorkspacesRebuildError::DuplicateName(name.clone()));
@@ -5288,6 +5304,9 @@ mod tests {
 
     #[test]
     fn workspace_rows_skip_mount_declarations() {
+        // `mode = "r"` here is the deserialize-only `WorkspaceMode` alias, not
+        // what the live API renders (`readonly`) — exercising it proves the
+        // editor's read path normalizes both spellings the same way.
         let manifest: toml::Value = toml::from_str(
             r#"
 [workspaces.library]
@@ -5306,13 +5325,13 @@ mode = "r"
             vec![(
                 "library".to_string(),
                 "shared/library".to_string(),
-                "r".to_string()
+                "readonly".to_string()
             )]
         );
     }
 
     #[test]
-    fn workspace_rows_default_mode_to_rw() {
+    fn workspace_rows_default_mode_to_readwrite() {
         let manifest: toml::Value = toml::from_str(
             r#"
 [workspaces.library]
@@ -5326,9 +5345,26 @@ path = "shared/library"
             vec![(
                 "library".to_string(),
                 "shared/library".to_string(),
-                "rw".to_string()
+                "readwrite".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn workspace_rows_normalize_the_canonical_api_spelling_too() {
+        // This is what `GET /api/agents/{id}/manifest` actually serializes —
+        // `WorkspaceMode`'s aliases are deserialize-only, so the live wire
+        // format never contains `r` / `rw`.
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[workspaces.library]
+path = "shared/library"
+mode = "readonly"
+"#,
+        )
+        .unwrap();
+        let rows = workspaces_editor_rows(&manifest);
+        assert_eq!(rows[0].2, "readonly");
     }
 
     #[test]
@@ -5378,12 +5414,17 @@ mode = "r"
             &[(
                 "library".to_string(),
                 "shared/library".to_string(),
+                // The alias, not the canonical spelling — the write path
+                // must normalize it the same way the read path does.
                 "r".to_string(),
             )],
         )
         .unwrap();
         let value: toml::Value = toml::from_str(&rebuilt).unwrap();
-        assert_eq!(value["workspaces"]["library"]["mode"].as_str(), Some("r"));
+        assert_eq!(
+            value["workspaces"]["library"]["mode"].as_str(),
+            Some("readonly")
+        );
     }
 
     #[test]
