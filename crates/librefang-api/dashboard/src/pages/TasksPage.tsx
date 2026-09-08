@@ -18,6 +18,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
+import { useAgents } from "../lib/queries/agents";
 import { useTaskQueue } from "../lib/queries/runtime";
 import {
   useCreateTask,
@@ -458,18 +459,33 @@ export function TasksPage() {
 
   // Fetch all tasks (no status filter — we split client-side)
   const taskListQuery = useTaskQueue();
+  // The registry — the new-task assignee picker is built from this, not from
+  // historical tasks: the kernel validates the assignee against the registry
+  // now, so a picker offering a deleted agent's name (or a typo on an empty
+  // board) produces a 400 the moment the operator picks it.
+  const agentsQuery = useAgents();
 
   const allTasks: TaskQueueItem[] = taskListQuery.data?.tasks ?? [];
   const validTasks = allTasks.filter(
     (task): task is TaskQueueItem & { id: string } => typeof task.id === "string" && task.id.length > 0,
   );
 
-  // Derive unique agent names for the filter dropdown
+  // The filter dropdown still derives from the tasks themselves: filtering
+  // by a historical assignee whose agent has since been deleted is a read,
+  // not a write — those rows are still there and still filterable.
   const agentNames = Array.from(
     new Set(
       validTasks
         .map((t) => t.assigned_to)
         .filter((a): a is string => typeof a === "string" && a.length > 0),
+    ),
+  ).sort();
+
+  const registryAgentNames = Array.from(
+    new Set(
+      (agentsQuery.data ?? [])
+        .map((a) => a.name)
+        .filter((n): n is string => typeof n === "string" && n.length > 0),
     ),
   ).sort();
 
@@ -649,7 +665,7 @@ export function TasksPage() {
       <NewTaskModal
         isOpen={showNewTask}
         onClose={() => setShowNewTask(false)}
-        agents={agentNames}
+        agents={registryAgentNames}
       />
     </div>
   );
