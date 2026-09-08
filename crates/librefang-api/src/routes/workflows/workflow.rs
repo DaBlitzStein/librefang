@@ -785,37 +785,58 @@ pub async fn get_workflow_run(
         }
     });
 
-    match state.kernel.workflow_engine().get_run(run_id).await {
-        Some(run) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "id": run.id.to_string(),
-                "workflow_id": run.workflow_id.to_string(),
-                "workflow_name": run.workflow_name,
-                "input": run.input,
-                "state": serde_json::to_value(&run.state).unwrap_or_default(),
-                "output": run.output,
-                "error": run.error,
-                "started_at": run.started_at.to_rfc3339(),
-                "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
-                // #7714: the agent that asked for this run, `null` when an
-                // operator started it. Recording ownership is only useful if
-                // something can read it back, and this is the one endpoint
-                // that renders a single run in full.
-                "owner_agent_id": run.owner_agent_id.map(|a| a.to_string()),
-                "step_results": run.step_results.iter().map(|s| serde_json::json!({
-                    "step_name": s.step_name,
-                    "agent_id": s.agent_id,
-                    "agent_name": s.agent_name,
-                    "prompt": s.prompt,
-                    "output": s.output,
-                    "input_tokens": s.input_tokens,
-                    "output_tokens": s.output_tokens,
-                    "duration_ms": s.duration_ms,
-                    "error": s.error,
-                })).collect::<Vec<_>>(),
-            })),
-        ),
+    let engine = state.kernel.workflow_engine();
+    match engine.get_run(run_id).await {
+        Some(run) => {
+            // Total step count comes from the workflow definition, not the
+            // run — `step_results` only holds *completed* steps, so it
+            // under-counts by exactly the steps still ahead. `None` (workflow
+            // deleted since this run finished) leaves the dashboard to fall
+            // back to `step_results.len()`, which is never wrong, only blind
+            // to steps that have not executed yet.
+            let total_steps = engine
+                .get_workflow(run.workflow_id)
+                .await
+                .map(|w| w.steps.len());
+            // Steps before this index are in `step_results`; the step at
+            // this index is the one currently executing (when the run is
+            // still active). Cheap to compute because it is exactly the
+            // completed-step count — no separate "current step" field is
+            // tracked on `WorkflowRun` for this to drift out of sync with.
+            let current_step_index = run.step_results.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": run.id.to_string(),
+                    "workflow_id": run.workflow_id.to_string(),
+                    "workflow_name": run.workflow_name,
+                    "input": run.input,
+                    "state": serde_json::to_value(&run.state).unwrap_or_default(),
+                    "output": run.output,
+                    "error": run.error,
+                    "started_at": run.started_at.to_rfc3339(),
+                    "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
+                    // #7714: the agent that asked for this run, `null` when an
+                    // operator started it. Recording ownership is only useful if
+                    // something can read it back, and this is the one endpoint
+                    // that renders a single run in full.
+                    "owner_agent_id": run.owner_agent_id.map(|a| a.to_string()),
+                    "step_results": run.step_results.iter().map(|s| serde_json::json!({
+                        "step_name": s.step_name,
+                        "agent_id": s.agent_id,
+                        "agent_name": s.agent_name,
+                        "prompt": s.prompt,
+                        "output": s.output,
+                        "input_tokens": s.input_tokens,
+                        "output_tokens": s.output_tokens,
+                        "duration_ms": s.duration_ms,
+                        "error": s.error,
+                    })).collect::<Vec<_>>(),
+                    "total_steps": total_steps,
+                    "current_step_index": current_step_index,
+                })),
+            )
+        }
         None => ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple(),
     }
 }
