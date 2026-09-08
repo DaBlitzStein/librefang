@@ -81,7 +81,7 @@ import {
   useTools,
 } from "../lib/queries/agents";
 import {
-  useAgentTypeToml,
+  useAgentTemplateToml,
   useCloneAgent,
   useDeleteAgent,
   usePatchAgent,
@@ -632,7 +632,7 @@ export function AgentsPage() {
   const resetSessionMutation = useResetAgentSession();
   const updateToolsMutation = useUpdateAgentTools();
   const setAgentMcpServersMutation = useSetAgentMcpServers();
-  const templateTomlMutation = useAgentTypeToml();
+  const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
 
   const rawDeleteMutation = useDeleteAgent();
