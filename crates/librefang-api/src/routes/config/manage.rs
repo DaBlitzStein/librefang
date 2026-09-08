@@ -786,7 +786,10 @@ fn redacted_config_json(
         // Registry promotion GitHub settings (#8163). Serialized wholesale
         // rather than field-by-field because the section carries no secret and
         // no redaction marker — the GitHub token stays in the env / vault, so
-        // there is nothing here to scrub on the way out.
+        // there is nothing here to scrub on the way out. `api_base_url` is
+        // still shown: the *destination* it names, not the section, is what
+        // carries the credential, and it is write-blocked for exactly that
+        // reason (#8179 review).
         "promotion": serde_json::to_value(&config.skills.promotion)
             .unwrap_or_else(|_| serde_json::json!({})),
     });

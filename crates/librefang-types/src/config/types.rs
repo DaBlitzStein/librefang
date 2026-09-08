@@ -1734,6 +1734,10 @@ pub struct RegistryPromotionConfig {
     /// Set it to something like `https://github.example.com/api/v3` to promote
     /// against a GitHub Enterprise Server installation, which the flow could
     /// not reach at all while the host was a compiled-in constant.
+    /// Must be `https://` — plain `http` is accepted only for loopback hosts —
+    /// and it is not writable through `POST /api/config/set`: the promotion
+    /// flow attaches the repo-scoped GitHub token to every request built from
+    /// it, so the value is an edit-on-disk destination field (#8179 review).
     #[serde(default)]
     pub api_base_url: Option<String>,
     /// Account or organisation the fork is created under.

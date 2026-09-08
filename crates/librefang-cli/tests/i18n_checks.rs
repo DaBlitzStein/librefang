@@ -389,12 +389,17 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
 /// structured form puts fields ahead of the message — `debug!(%error, "…")` —
 /// and dropping those fields to satisfy the scanner would make the logs worse,
 /// so match the whole argument list instead: inside the statement the literal
-/// belongs to, take the last log-macro opener and check its parentheses are
-/// still unbalanced where the literal starts.
+/// belongs to, take the last log-macro opener and walk its argument list to
+/// see whether the opener's own parenthesis is still open where the literal
+/// starts.
 ///
 /// The search stops at the enclosing statement or block boundary on purpose. A
 /// scan over the whole file prefix would exempt any literal that merely follows
-/// a log call somewhere earlier in the file.
+/// a log call somewhere earlier in the file. `collapsed` must already have
+/// every earlier string literal's contents blanked out (see
+/// `collapse_code_prefix`), or a `;` / `{` / `}` inside an earlier literal's
+/// text — a format placeholder is the common case — would be mistaken for one
+/// of these boundary characters (#8179 review).
 fn is_inside_log_macro_args(collapsed: &str) -> bool {
     const LOG_MACRO_OPENERS: &[&str] = &["debug!(", "info!(", "warn!(", "error!(", "trace!("];
 
@@ -409,8 +414,46 @@ fn is_inside_log_macro_args(collapsed: &str) -> bool {
     else {
         return false;
     };
-    let args = &statement[args_start..];
-    args.matches('(').count() >= args.matches(')').count()
+    // Depth starts at 1 for the opener's own already-open '('. Comparing
+    // total '(' vs ')' counts (the old `>=` check) let an unrelated
+    // statement's parens *after* this call had already closed masquerade as
+    // still being inside it — e.g. a sibling match arm's `println!(` that
+    // follows an `error!(...)` which in fact already closed. Walking forward
+    // and stopping the instant depth returns to 0 catches that (#8179
+    // review).
+    let mut depth = 1;
+    for ch in statement[args_start..].chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth > 0
+}
+
+/// Build a whitespace-stripped copy of `content[..end]` with the text of
+/// every already-closed string literal in `literal_spans` blanked out.
+///
+/// [`is_inside_log_macro_args`] and the `i18n::t(` / clap-attribute suffix
+/// checks that use this string all reason about code structure — statement
+/// boundaries, macro openers, parenthesis depth — so a boundary character
+/// that only occurs inside an *earlier* literal's text (a `{}` format
+/// placeholder, a literal `;`) must not be mistaken for a code-level one
+/// (#8179 review).
+fn collapse_code_prefix(content: &str, end: usize, literal_spans: &[(usize, usize)]) -> String {
+    content[..end]
+        .char_indices()
+        .filter(|&(i, ch)| {
+            !ch.is_whitespace() && !literal_spans.iter().any(|&(s, e)| i >= s && i < e)
+        })
+        .map(|(_, ch)| ch)
+        .collect()
 }
 
 fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, String)> {
@@ -420,6 +463,9 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
     let mut in_quote = false;
     let mut current_literal = String::new();
     let mut literal_start_idx = 0;
+    // Byte spans of every string literal closed so far, used to blank their
+    // text out of later `collapse_code_prefix` calls (#8179 review).
+    let mut literal_spans: Vec<(usize, usize)> = Vec::new();
 
     let mut in_line_comment = false;
     let mut in_block_comment = false;
@@ -661,8 +707,7 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
                 // End of string literal
                 let is_byte_string =
                     literal_start_idx > 0 && content.as_bytes()[literal_start_idx - 1] == b'b';
-                let prefix = &content[..literal_start_idx];
-                let collapsed: String = prefix.chars().filter(|ch| !ch.is_whitespace()).collect();
+                let collapsed = collapse_code_prefix(content, literal_start_idx, &literal_spans);
                 let is_localized = collapsed.ends_with("i18n::t(")
                     || collapsed.ends_with("i18n::t_args(")
                     || is_inside_log_macro_args(&collapsed)
@@ -694,6 +739,10 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
 
                 current_literal.clear();
                 in_quote = false;
+                // idx is the closing '"', which is 1 byte; the span end is
+                // exclusive so later prefixes blank the whole literal
+                // including its delimiters.
+                literal_spans.push((literal_start_idx, idx + 1));
             } else {
                 in_quote = true;
                 literal_start_idx = idx;
@@ -1017,6 +1066,49 @@ fn assert_locale_covers_required_i18n_keys(
             missing_keys.join("\n")
         );
     }
+}
+
+/// A literal in a sibling match arm must still be flagged even when the
+/// preceding arm's log call has already closed by the time it appears —
+/// the old total-count balance check let `println!(`'s open paren, arriving
+/// after `error!(...)` had already closed, read as "still inside a log
+/// macro" (#8179 review).
+#[test]
+fn scan_flags_a_literal_in_a_sibling_arm_after_a_preceding_log_call_closes() {
+    let content = r#"
+fn f(r: Result<(), Error>) {
+    match r {
+        Err(e) => error!(%e, "failed"),
+        Ok(v) => println!("Untranslated {v}"),
+    }
+}
+"#;
+    let violations = scan_file_for_untranslated_strings(content);
+    assert!(
+        violations
+            .iter()
+            .any(|(_, lit, _)| lit == "Untranslated {v}"),
+        "the println! literal in the sibling arm must be flagged: {violations:?}"
+    );
+}
+
+/// A literal argument nested inside a log call must not be flagged just
+/// because an earlier argument to the same call happened to contain a `{}`
+/// format placeholder — the old scan ran over raw (non-blanked) text, so that
+/// placeholder was mistaken for the enclosing statement's opening brace and
+/// hid the `error!(` opener from the search entirely (#8179 review).
+#[test]
+fn scan_does_not_flag_a_literal_nested_behind_a_preceding_format_placeholder() {
+    let content = r#"
+fn f() {
+    error!("failed after {} tries", describe("retry attempt"));
+}
+"#;
+    let violations = scan_file_for_untranslated_strings(content);
+    assert!(
+        !violations.iter().any(|(_, lit, _)| lit == "retry attempt"),
+        "a literal argument nested inside error!(...) must not be flagged: {violations:?}"
+    );
 }
 
 #[test]

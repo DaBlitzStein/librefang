@@ -880,6 +880,12 @@ pub async fn promote_agent_type(
         Err(librefang_skills::SkillError::InvalidManifest(msg)) => {
             ApiErrorResponse::bad_request(msg).into_json_tuple()
         }
+        // A server-side promotion-configuration error maps to 500, not 400 —
+        // the request was well-formed; the daemon's own config is not (#8179
+        // review).
+        Err(librefang_skills::SkillError::InvalidConfig(msg)) => {
+            ApiErrorResponse::internal(msg).into_json_tuple()
+        }
         Err(librefang_skills::SkillError::NotFound(msg)) => {
             ApiErrorResponse::not_found(msg).into_json_tuple()
         }

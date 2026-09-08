@@ -418,23 +418,31 @@ fn validate_repo_slug(slug: &str) -> Result<(), SkillError> {
 /// the ones allowed here.
 fn validate_owner(owner: &str) -> Result<(), SkillError> {
     let ok = !owner.is_empty()
+        // A segment that is entirely dots (`.` / `..`) would be normalised out
+        // of the API path this is interpolated into, silently retargeting the
+        // request (#8179 review).
+        && !owner.chars().all(|c| c == '.')
         && owner
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
     if ok {
         Ok(())
     } else {
-        Err(SkillError::InvalidManifest(format!(
+        Err(SkillError::InvalidConfig(format!(
             "Invalid skills.promotion.fork_owner '{owner}' (expected a GitHub login or org name)"
         )))
     }
 }
 
-/// Reject an API base URL that is not a plain `http`/`https` origin.
+/// Reject an API base URL that is not a plain `https` origin.
 ///
 /// The value is the prefix of every request the promotion flow makes with the
-/// GitHub token attached, so a scheme-less or otherwise malformed value must
-/// fail loudly here rather than send the token somewhere unintended.
+/// GitHub token attached (`Authorization: Bearer …`), so a `http://` base
+/// sends the credential in the clear, and a redirected value sends it to
+/// whoever owns the host — the value is a post-auth credential-redirect knob,
+/// which is why plain `http` is accepted only for loopback hosts (tests and a
+/// local runner). Conservative default from the #8179 review; relaxing it to
+/// accept non-loopback `http` is a maintainer decision.
 fn validate_api_base_url(url: &str) -> Result<(), SkillError> {
     let rest = url
         .strip_prefix("https://")
@@ -443,13 +451,62 @@ fn validate_api_base_url(url: &str) -> Result<(), SkillError> {
         !host_and_path.is_empty()
             && !host_and_path.starts_with('/')
             && !host_and_path.contains(char::is_whitespace)
+            && (url.starts_with("https://") || is_loopback_host(host_and_path))
     });
     if ok {
         Ok(())
     } else {
-        Err(SkillError::InvalidManifest(format!(
-            "Invalid skills.promotion.api_base_url '{url}' (expected an http(s) URL such as https://github.example.com/api/v3)"
+        Err(SkillError::InvalidConfig(format!(
+            "Invalid skills.promotion.api_base_url '{url}' (expected an https URL such as https://github.example.com/api/v3; plain http is accepted only for loopback hosts)"
         )))
+    }
+}
+
+/// Whether the host in the `scheme://` authority of a URL is loopback:
+/// `localhost`, `127.0.0.0/8` or `[::1]`.
+fn is_loopback_host(host_and_path: &str) -> bool {
+    let authority = host_and_path
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let authority = authority.rsplit('@').next().unwrap_or_default();
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
+}
+
+/// Reject a configured base branch that is not a valid git ref name.
+///
+/// The value is interpolated into API paths (`/git/ref/heads/{branch}` and the
+/// pull request's `base`), so a `?` in it makes GitHub silently answer for a
+/// different branch (`heads/release?w=1` → `heads/release`) and everything
+/// after a `#` never leaves the URL — every write then lands before the pull
+/// request finally fails. Git's own ref-name rules are the cheapest correct
+/// check; `#` is rejected beyond those because a URL fragment is a URL
+/// property, not a git one (#8179 review).
+fn validate_base_branch(branch: &str) -> Result<(), SkillError> {
+    let invalid = branch.is_empty()
+        || branch.bytes().any(|b| {
+            b <= b' '
+                || b == 0x7f
+                || matches!(b, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\' | b'#')
+        })
+        || branch.starts_with('/')
+        || branch.ends_with('/')
+        || branch.starts_with('.')
+        || branch.ends_with('.')
+        || branch.contains("..")
+        || branch.ends_with(".lock")
+        || branch.contains("@{");
+    if invalid {
+        Err(SkillError::InvalidConfig(format!(
+            "Invalid skills.promotion.base_branch '{branch}' (expected a git ref name such as 'main' or 'release/1.0')"
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -484,6 +541,21 @@ fn resolve_commit_identity(cfg: &RegistryPromotionConfig) -> Option<Value> {
 
 fn repo_name(slug: &str) -> &str {
     slug.split('/').next_back().unwrap_or(slug)
+}
+
+/// A repository that resolves is only a reusable fork when GitHub marks it
+/// `fork: true` and its parent is the configured upstream. A same-named
+/// repository that is not a fork of the upstream registry is an unrelated
+/// repository, and pushing to it is unrecoverable — the files land before the
+/// pull request fails 422 for having no common history (#8179 review).
+fn verify_fork(existing: &Value, upstream: &str, fork_repo: &str) -> Result<(), SkillError> {
+    let parent = existing["parent"]["full_name"].as_str().unwrap_or_default();
+    if existing["fork"].as_bool() == Some(true) && parent.eq_ignore_ascii_case(upstream) {
+        return Ok(());
+    }
+    Err(SkillError::InvalidConfig(format!(
+        "{fork_repo} exists but is not a fork of {upstream}; point skills.promotion.fork_owner at a namespace where the fork lives"
+    )))
 }
 
 /// Turn a skill name into a safe branch-path component.
@@ -677,8 +749,8 @@ impl RegistryGithubClient {
     }
 
     /// Ensure a fork of `upstream` exists at `fork_repo`. If `fork_repo`
-    /// already resolves, reuse it; otherwise request a fork and poll until
-    /// GitHub finishes creating it.
+    /// already resolves, reuse it only when it really is a fork of `upstream`;
+    /// otherwise request a fork and poll until GitHub finishes creating it.
     ///
     /// `configured_owner` carries the destination from
     /// `skills.promotion.fork_owner`, and is `None` when the owner was derived
@@ -694,12 +766,13 @@ impl RegistryGithubClient {
         configured_owner: Option<&str>,
     ) -> Result<(), SkillError> {
         let api = &self.api_base;
-        if self
-            .get_json(&format!("{api}/repos/{fork_repo}"))
-            .await
-            .is_ok()
-        {
-            return Ok(());
+        if let Ok(existing) = self.get_json(&format!("{api}/repos/{fork_repo}")).await {
+            // Existence is not enough: a same-named repository in the
+            // configured `fork_owner` namespace that is *not* a fork of
+            // `upstream` would otherwise be pushed to, and the PR would then
+            // fail for having no common history — after the files had already
+            // landed. There is no rollback (#8179 review).
+            return verify_fork(&existing, upstream, fork_repo);
         }
         // Only an organization destination takes the parameter: passing the
         // token owner's own login would ask GitHub for an organization that
@@ -715,12 +788,8 @@ impl RegistryGithubClient {
             .await?;
         // Fork creation is async on GitHub's side — poll briefly.
         for _ in 0..20 {
-            if self
-                .get_json(&format!("{api}/repos/{fork_repo}"))
-                .await
-                .is_ok()
-            {
-                return Ok(());
+            if let Ok(existing) = self.get_json(&format!("{api}/repos/{fork_repo}")).await {
+                return verify_fork(&existing, upstream, fork_repo);
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
@@ -764,6 +833,17 @@ impl RegistryGithubClient {
             }
         };
 
+        // The base branch is interpolated into API paths and the PR's `base`;
+        // a `?` or `#` in it would silently retarget the ref lookup (#8179
+        // review). Validate the configured value before it is used anywhere.
+        if let Some(branch) = cfg
+            .base_branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+        {
+            validate_base_branch(branch)?;
+        }
         let (base_branch, base_sha) = self
             .branch_head(&push_repo, cfg.base_branch.as_deref())
             .await?;
@@ -953,11 +1033,17 @@ mod tests {
             )
             .mount(&server)
             .await;
+        // A repository that resolves is fork-shaped: the promotion flow now
+        // refuses to reuse a same-named repo that is not a fork of the
+        // upstream (`verify_fork`), so the default answer must carry `fork`
+        // and `parent` or the poll in `ensure_fork` would fail.
         Mock::given(method("GET"))
             .and(path_regex(r"^/repos/[^/]+/[^/]+$"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"default_branch": "trunk"})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "default_branch": "trunk",
+                "fork": true,
+                "parent": {"full_name": "acme/registry"}
+            })))
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -1129,6 +1215,45 @@ mod tests {
         assert_eq!(put["committer"], expected);
     }
 
+    /// A repository in the configured `fork_owner` namespace that resolves but
+    /// is not a fork of the upstream must be refused before anything is
+    /// written to it — the flow has no rollback, and the files would land
+    /// before the PR failed 422 for having no common history (#8179 review).
+    #[tokio::test]
+    async fn a_non_fork_same_named_repo_is_rejected_before_any_write() {
+        let server = mock_github(None).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme-bots/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "default_branch": "trunk",
+                "fork": false
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let cfg = RegistryPromotionConfig {
+            api_base_url: Some(server.uri()),
+            fork_owner: Some("acme-bots".to_string()),
+            ..Default::default()
+        };
+        let error = propose_with(&cfg)
+            .await
+            .expect_err("a same-named non-fork must be refused");
+        assert!(
+            error.to_string().contains("is not a fork of acme/registry"),
+            "unexpected error: {error}"
+        );
+        let reqs = requests(&server).await;
+        assert!(
+            find(&reqs, "POST", |p| p.ends_with("/git/refs")).is_none(),
+            "no branch must be created on a non-fork"
+        );
+        assert!(
+            find(&reqs, "PUT", |p| p.contains("/contents/")).is_none(),
+            "no file must be pushed to a non-fork"
+        );
+    }
+
     /// `direct_push` skips the fork entirely: the branch is created on the
     /// upstream registry and the PR head carries no owner prefix.
     #[tokio::test]
@@ -1213,10 +1338,11 @@ mod tests {
     }
 
     #[test]
-    fn api_base_url_must_be_an_http_origin() {
+    fn api_base_url_must_be_an_https_origin() {
         for good in [
             "https://api.github.com",
             "http://localhost:8080",
+            "http://127.0.0.1:8080/api/v3",
             "https://github.example.com/api/v3",
         ] {
             assert!(validate_api_base_url(good).is_ok(), "{good}");
@@ -1229,6 +1355,10 @@ mod tests {
             "http:///api",
             "https://exa mple.invalid",
             "file:///etc/passwd",
+            // Plain http to a non-loopback host would carry the bearer token
+            // in the clear to a redirectable destination (#8179 review).
+            "http://attacker.example/",
+            "http://ghe.internal/api/v3",
         ] {
             assert!(validate_api_base_url(bad).is_err(), "{bad:?}");
         }
@@ -1240,6 +1370,46 @@ mod tests {
         assert!(validate_owner("acme.bots_1").is_ok());
         for bad in ["", "acme/bots", "../etc", "acme bots", "acme?x=1"] {
             assert!(validate_owner(bad).is_err(), "{bad:?}");
+        }
+        // Dots-only segments normalise out of the API path (#8179 review).
+        for bad in [".", "..", "..."] {
+            assert!(validate_owner(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn base_branch_must_be_a_git_ref_name() {
+        for good in [
+            "main",
+            "release",
+            "release/1.0",
+            "feature-x_1.2",
+            "v1.0",
+            "topic.name",
+        ] {
+            assert!(validate_base_branch(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            "release?w=1",
+            "release#anchor",
+            "a b",
+            "release~1",
+            "a^b",
+            "a:b",
+            "a*b",
+            "a[b",
+            "a\\b",
+            "..",
+            "a..b",
+            "/leading",
+            "trailing/",
+            ".leading",
+            "trailing.",
+            "x.lock",
+            "@{x}",
+        ] {
+            assert!(validate_base_branch(bad).is_err(), "{bad:?}");
         }
     }
 

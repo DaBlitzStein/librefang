@@ -893,6 +893,13 @@ pub(crate) fn is_scrubbed_config_key(key: &str) -> bool {
         // in depth in case anything slips through a writable section.
         "client_id",
         "client_secret",
+        // Outbound-destination field of the skill registry promotion flow
+        // (#8163): every request built from it carries the repo-scoped
+        // GitHub token as `Authorization: Bearer …`, so a post-auth write
+        // hands the credential to the new host. Same threat model that
+        // kept `proxy.` / `telemetry.otlp_endpoint` / `audit.anchor_path`
+        // off the writable allowlist — edit on disk (#8179 review).
+        "api_base_url",
     ];
     // Round-4 review of #4678: env-var-name redirects. Codebase
     // pervasively uses `*_token_env`, `*_password_env`,

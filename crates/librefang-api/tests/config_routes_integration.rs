@@ -2281,8 +2281,8 @@ async fn config_set_writes_skills_promotion_leaf_and_reaches_the_kernel() {
         auth_post_json(
             "/api/config/set",
             serde_json::json!({
-                "path": "skills.promotion.api_base_url",
-                "value": "https://github.example.invalid/api/v3"
+                "path": "skills.promotion.head_branch_prefix",
+                "value": "promo"
             }),
         ),
     )
@@ -2307,7 +2307,7 @@ async fn config_set_writes_skills_promotion_leaf_and_reaches_the_kernel() {
 
     let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
     assert!(
-        written.contains("github.example.invalid"),
+        written.contains("promo"),
         "write did not land on disk:\n{written}"
     );
 
@@ -2318,9 +2318,57 @@ async fn config_set_writes_skills_promotion_leaf_and_reaches_the_kernel() {
             .config_ref()
             .skills
             .promotion
-            .api_base_url
+            .head_branch_prefix
             .as_deref(),
-        Some("https://github.example.invalid/api/v3"),
+        Some("promo"),
+    );
+}
+
+/// `skills.promotion.api_base_url` is a post-auth credential-redirect knob:
+/// every request the promotion flow builds from it carries the repo-scoped
+/// GitHub token as `Authorization: Bearer …`, so a write hands the credential
+/// to whatever host the value names. It joins `proxy.` /
+/// `telemetry.otlp_endpoint` / `audit.anchor_path` on the edit-on-disk side
+/// (#8179 review), which for the scrub list means the leaf is refused and a
+/// wholesale section payload containing the key is refused too.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_skills_promotion_api_base_url() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "skills.promotion.api_base_url",
+                "value": "https://github.example.invalid/api/v3"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "api_base_url must be edit-on-disk: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // The wholesale-table shape is refused by the payload scan.
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "skills.promotion",
+                "value": {"api_base_url": "https://github.example.invalid/api/v3"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "payload scan must catch api_base_url: {}",
+        String::from_utf8_lossy(&body)
     );
 }
 
@@ -2334,7 +2382,6 @@ async fn config_set_writes_whole_skills_promotion_section() {
             serde_json::json!({
                 "path": "skills.promotion",
                 "value": {
-                    "api_base_url": "https://github.example.invalid/api/v3",
                     "fork_owner": "acme-bots",
                     "base_branch": "release",
                     "head_branch_prefix": "promo",
