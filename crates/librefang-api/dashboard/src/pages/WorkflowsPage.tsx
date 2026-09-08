@@ -179,17 +179,17 @@ const isPausedRunState = (state: unknown): boolean => {
   return false;
 };
 
+// Run states a run never leaves. `WorkflowRunState::Paused` is absent on
+// purpose: it means "paused mid-execution, waiting for an external signal",
+// so a paused run resumes and must keep being polled (#7997).
+const TERMINAL_RUN_STATES = new Set(["completed", "failed", "cancelled"]);
+
 // Normalize either wire shape — bare string OR externally-tagged object
 // (currently only `{paused: {…}}`) — to a single discriminator string the
 // run-history row pill / dot can switch on. Without this helper, paused
 // runs in the list fall through `isRunState` as `undefined` and render
 // with the neutral grey "unknown" badge instead of the warning hue, even
 // though the page already knows how to colour them (#5257 round-2).
-// Run states a run never leaves. `WorkflowRunState::Paused` is absent on
-// purpose: it means "paused mid-execution, waiting for an external signal",
-// so a paused run resumes and must keep being polled (#7997).
-const TERMINAL_RUN_STATES = new Set(["completed", "failed", "cancelled"]);
-
 const runStateKind = (state: unknown): string | undefined => {
   if (typeof state === "string") return state;
   if (state !== null && typeof state === "object") {
@@ -208,6 +208,12 @@ function StepResultContent({ step }: { step: WorkflowStepResult }) {
   const imageRefs = useMemo(() => extractImageRefs(step.output), [step.output]);
   return (
     <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
+      {step.error && (
+        <div className="flex items-start gap-1.5 p-2 mt-2 rounded-lg bg-error/5 border border-error/20">
+          <AlertCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
+          <p className="text-[10px] text-error whitespace-pre-wrap">{step.error}</p>
+        </div>
+      )}
       <div>
         <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
@@ -510,9 +516,17 @@ export function WorkflowsPage() {
     runsQuery.data,
   ]);
 
-  // Show the "My Workflows" empty state on first visit so users see
-  // the "Create your first workflow" and "Ask an agent" options
-  // before being nudged toward templates.
+  // First-time visitors with no workflows configured land on the
+  // marketplace tab — instantiating a template is the obvious next
+  // step. Fires once per mount; if the user manually flips back to
+  // "My Workflows", we don't override on the next refetch (#3412).
+  const autoSwitchedRef = useRef(false);
+  useEffect(() => {
+    if (autoSwitchedRef.current) return;
+    if (!workflowsQuery.isSuccess) return;
+    autoSwitchedRef.current = true;
+    if ((workflowsQuery.data ?? []).length === 0) setActiveTab("templates");
+  }, [workflowsQuery.isSuccess, workflowsQuery.data]);
 
   useEffect(() => {
     if (!workflowsQuery.isSuccess) return;
@@ -539,12 +553,20 @@ export function WorkflowsPage() {
     }
   }, [allWorkflows, workflows, selectedWorkflowId, workflowsQuery.isSuccess]);
 
-  // Auto-scroll log console to bottom when new step results arrive.
+  // Auto-scroll log console to bottom when a new step line is appended.
+  // Keyed on `.length`, not the array itself — the array is freshly
+  // `JSON.parse`d on every 3s poll tick even when nothing changed, and
+  // scrolling on every tick would fight an operator who scrolled up to
+  // read an earlier step. Only snaps when already near the bottom, so a
+  // deliberate scroll-up survives the next tick too.
   useEffect(() => {
-    if (logConsoleRef.current) {
-      logConsoleRef.current.scrollTop = logConsoleRef.current.scrollHeight;
+    const el = logConsoleRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (nearBottom) {
+      el.scrollTop = el.scrollHeight;
     }
-  }, [runDetailQuery.data?.step_results]);
+  }, [runDetailQuery.data?.step_results.length]);
 
   // Auto-populate params from the most recent run's input on page load.
   // Only fills when the form is untouched (paramTouchedRef = false).
@@ -573,7 +595,11 @@ export function WorkflowsPage() {
           }
         }
         if (hasKnownParam) {
-          setParamValues(values);
+          // Merge onto the schema-seeded defaults rather than replacing
+          // them outright — the last run may not have carried every
+          // declared param, and a param absent here still has an
+          // authored default worth keeping in the form.
+          setParamValues((prev) => ({ ...prev, ...values }));
           if (typeof parsed.input === "string") setRunInput(parsed.input);
           autoPopulatedForRef.current = selectedWorkflowId;
         } else {
@@ -647,22 +673,26 @@ export function WorkflowsPage() {
   // Re-run a previous workflow run with its original params pre-filled.
   const handleRerun = (run?: { id?: string; input?: string }) => {
     const runInputStr = run?.input;
-    if (!runInputStr) return;
-    paramTouchedRef.current = false; // allow auto-populate to act
-    try {
-      const parsed = JSON.parse(runInputStr);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const values: Record<string, string> = {};
-        for (const p of detectedParams) {
-          if (parsed[p.name] !== undefined) values[p.name] = String(parsed[p.name]);
+    // Pre-fill is best-effort — a parameterless workflow launched with a
+    // blank textarea stores no input at all, and that must not stop the
+    // mutation below from firing.
+    if (runInputStr) {
+      paramTouchedRef.current = false; // allow auto-populate to act
+      try {
+        const parsed = JSON.parse(runInputStr);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          const values: Record<string, string> = {};
+          for (const p of detectedParams) {
+            if (parsed[p.name] !== undefined) values[p.name] = String(parsed[p.name]);
+          }
+          setParamValues(values);
+          if (typeof parsed.input === "string") setRunInput(parsed.input);
         }
-        setParamValues(values);
-        if (typeof parsed.input === "string") setRunInput(parsed.input);
+      } catch {
+        // Plain text input.
+        setRunInput(runInputStr);
+        setParamValues({});
       }
-    } catch {
-      // Plain text input.
-      setRunInput(runInputStr);
-      setParamValues({});
     }
     // #6292: the per-row control re-runs the workflow with the stored
     // parameters (pre-filled above so the operator can tweak before the
@@ -801,7 +831,9 @@ export function WorkflowsPage() {
     <button
       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
       onClick={toggle}>
-      <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
+      {step.error
+        ? <AlertCircle className="w-3 h-3 text-error shrink-0" />
+        : <CheckCircle2 className="w-3 h-3 text-success shrink-0" />}
       <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
       <span className="text-[9px] text-text-dim/50 shrink-0">{step.duration_ms}ms</span>
       <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
@@ -1163,7 +1195,7 @@ export function WorkflowsPage() {
                     onChange={(v) => { paramTouchedRef.current = true; setParamValues(v); }}
                   />
                 )}
-                <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
+                <textarea value={runInput} onChange={e => { paramTouchedRef.current = true; setRunInput(e.target.value); }}
                   placeholder={
                     detectedParams.length > 0
                       ? t("workflows.additional_context_placeholder", { defaultValue: "Additional context (optional)..." })
@@ -1335,8 +1367,9 @@ export function WorkflowsPage() {
                       })();
                       return (
                         <div key={runId}>
+                          <div className="flex items-stretch gap-1">
                           <button
-                            className={`w-full flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
+                            className={`flex-1 min-w-0 flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
                               isSelected
                                 ? "border-brand bg-brand/5"
                                 : "border-border-subtle bg-main hover:bg-surface"
@@ -1374,28 +1407,6 @@ export function WorkflowsPage() {
                                 {t("workflows.from_review_banner", { defaultValue: "from review banner" })}
                               </span>
                             )}
-                            {/* Re-run control — a span, not a button: the row itself is a
-                                <button> and nesting buttons is invalid HTML (hydration error). */}
-                            <span
-                              role="button"
-                              tabIndex={0}
-                              className="p-1 rounded-lg hover:bg-surface text-text-dim/40 hover:text-brand transition-colors shrink-0 cursor-pointer"
-                              title={t("workflows.rerun_hint", { defaultValue: "Re-run with these parameters" })}
-                              aria-label={t("workflows.rerun_same", { defaultValue: "Re-run with same parameters" })}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleRerun(run);
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  handleRerun(run);
-                                }
-                              }}
-                            >
-                              <Play className="w-3 h-3" />
-                            </span>
                             <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success/10 text-success" :
                               state === "failed" ? "bg-error/10 text-error" :
@@ -1403,6 +1414,29 @@ export function WorkflowsPage() {
                               "bg-main text-text-dim"
                             }`}>{state ?? "unknown"}</span>
                           </button>
+                          {/* Re-run control (#6292) — a sibling of the row
+                              button, never nested inside it, so it stays a
+                              valid standalone control (a <button> cannot
+                              contain another interactive element). Gated on
+                              isPending so a double-click can't queue two
+                              duplicate runs. */}
+                          {runId && (
+                            <button
+                              type="button"
+                              disabled={rerunMutation.isPending}
+                              title={t("workflows.rerun_hint", { defaultValue: "Re-run with these parameters" })}
+                              aria-label={t("workflows.rerun_same", { defaultValue: "Re-run with same parameters" })}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRerun(run);
+                              }}
+                              className="shrink-0 px-2.5 flex items-center justify-center rounded-xl border border-border-subtle bg-main text-text-dim/40 hover:text-brand hover:bg-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                              {rerunMutation.isPending && rerunMutation.variables?.runId === runId
+                                ? <Loader2 className="w-3 h-3 animate-spin" />
+                                : <Play className="w-3 h-3" />}
+                            </button>
+                          )}
+                          </div>
                           {/* Inline run detail — execution timeline */}
                           {isSelected && runDetailQuery.data && (() => {
                             const rd = runDetailQuery.data;
@@ -1467,25 +1501,28 @@ export function WorkflowsPage() {
                                 const fmtTime = (ts?: string | null) => ts ? new Date(ts).toLocaleTimeString() : "--:--:--";
                                 const fmtDur = (ms: number) => ms >= 60000 ? `${(ms/60000).toFixed(1)}m` : `${(ms/1000).toFixed(1)}s`;
                                 const fmtN = (n: number) => n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n);
+                                const varLine = (k: string, v: string) =>
+                                  "  " + t("workflows.console_var_line", { defaultValue: '{{varName}} = "{{value}}"', varName: `{{${k}}}`, value: String(v).slice(0, 60) });
                                 const logs: Array<{ts: string; level: "info"|"warn"|"error"; msg: string}> = [];
                                 // Run start
-                                logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `Run started — ${totalSteps || "?"} steps defined`});
+                                logs.push({ts: fmtTime(rd.started_at), level: "info", msg: t("workflows.console_run_started", { defaultValue: "Run started — {{steps}} steps defined", steps: totalSteps || "?" })});
                                 // Input params
                                 if (rd.input) {
-                                  try { const p = JSON.parse(rd.input); if (p && typeof p === "object" && !Array.isArray(p)) { for (const [k,v] of Object.entries(p).filter(([x]) => x !== "input")) { logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `  {{${k}}} = "${String(v).slice(0,60)}"`}); } } } catch {}
+                                  try { const p = JSON.parse(rd.input); if (p && typeof p === "object" && !Array.isArray(p)) { for (const [k,v] of Object.entries(p).filter(([x]) => x !== "input")) { logs.push({ts: fmtTime(rd.started_at), level: "info", msg: varLine(k, String(v))}); } } } catch {}
                                 }
                                 // Each step
                                 for (let i = 0; i < allSteps.length; i++) {
                                   const s = allSteps[i];
                                   const hasErr = !!s.error;
-                                  logs.push({ts: fmtTime(rd.started_at), level: hasErr ? "error" : "info", msg: `Step ${i+1}/${totalSteps||allSteps.length} "${s.step_name}" → ${s.agent_name||s.agent_id}${hasErr ? " FAILED" : ""}`});
+                                  const stepLine = t("workflows.console_step_line", { defaultValue: 'Step {{current}}/{{total}} "{{name}}" → {{agent}}', current: i + 1, total: totalSteps || allSteps.length, name: s.step_name, agent: s.agent_name || s.agent_id });
+                                  logs.push({ts: fmtTime(rd.started_at), level: hasErr ? "error" : "info", msg: hasErr ? stepLine + t("workflows.console_step_failed_suffix", { defaultValue: " FAILED" }) : stepLine});
                                   if (s.variables && Object.keys(s.variables).length > 0) {
                                     for (const [k,v] of Object.entries(s.variables)) {
-                                      logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `  {{${k}}} = "${String(v).slice(0,60)}"`});
+                                      logs.push({ts: fmtTime(rd.started_at), level: "info", msg: varLine(k, v)});
                                     }
                                   }
-                                  logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `  Prompt: ${fmtN(s.input_tokens||0)} tokens → Response: ${fmtN(s.output_tokens||0)} tokens in ${fmtDur(s.duration_ms||0)}`});
-                                  if (hasErr && s.error) logs.push({ts: fmtTime(rd.started_at), level: "error", msg: `  Error: ${s.error}`});
+                                  logs.push({ts: fmtTime(rd.started_at), level: "info", msg: "  " + t("workflows.console_step_io", { defaultValue: "Prompt: {{inTokens}} tokens → Response: {{outTokens}} tokens in {{duration}}", inTokens: fmtN(s.input_tokens || 0), outTokens: fmtN(s.output_tokens || 0), duration: fmtDur(s.duration_ms || 0) })});
+                                  if (hasErr && s.error) logs.push({ts: fmtTime(rd.started_at), level: "error", msg: "  " + t("workflows.console_step_error", { defaultValue: "Error: {{error}}", error: s.error })});
                                 }
                                 // Run completion
                                 if (rd.state === "completed") {
