@@ -125,6 +125,10 @@ pub struct MemoryState {
     pub tick: usize,
     pub confirm_delete: bool,
     pub status_msg: String,
+    /// The config panel's own status line. Kept separate from `status_msg`
+    /// (the KV browser's) so a "Saved" from one screen cannot render inside
+    /// the other after switching between them.
+    pub config_status_msg: String,
     pub config: Option<MemoryConfigView>,
     pub config_field: ConfigField,
     /// Draft of the extraction model while it is being typed.
@@ -137,6 +141,11 @@ pub struct MemoryState {
     /// Set once anything is changed, cleared on save — so the panel can say
     /// there is unsaved work instead of losing it silently on Esc.
     pub config_dirty: bool,
+    /// Snapshot of `(auto_memorize, auto_retrieve, configured_extraction_model)`
+    /// taken when a save is dispatched. `apply_save_result` only clears the
+    /// unsaved markers when the panel still matches this snapshot, so an edit
+    /// made while the PATCH was in flight is not reported as saved.
+    pending_save: Option<(bool, bool, Option<String>)>,
 }
 
 #[derive(Debug)]
@@ -179,12 +188,14 @@ impl MemoryState {
             tick: 0,
             confirm_delete: false,
             status_msg: String::new(),
+            config_status_msg: String::new(),
             config: None,
             config_field: ConfigField::AutoMemorize,
             config_model_buf: String::new(),
             config_editing_model: false,
             config_model_edited: false,
             config_dirty: false,
+            pending_save: None,
         }
     }
 
@@ -202,6 +213,10 @@ impl MemoryState {
         self.config = Some(config);
         self.loading = false;
         self.config_model_edited = false;
+        // A fresh fetch is by definition the saved state — leaving this set
+        // kept the yellow "Unsaved changes" banner up over a panel that now
+        // matched the server exactly.
+        self.config_dirty = false;
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> MemoryUIAction {
@@ -228,11 +243,21 @@ impl MemoryState {
                     }
                 }
                 KeyCode::Enter => {
+                    if self.config_model_buf.trim().is_empty() {
+                        // The endpoint has no "unset" for this key — an empty
+                        // draft is not a setting a save can express, so it
+                        // stays in the editor rather than being accepted here
+                        // and silently dropped downstream.
+                        return MemoryUIAction::Continue;
+                    }
                     self.config_editing_model = false;
                     if let Some(cfg) = &mut self.config {
-                        cfg.effective_extraction_model = self.config_model_buf.clone();
                         // The typed text is the setting, prefix and all — the
                         // one place a save is allowed to write one.
+                        // `effective_extraction_model` is left alone: it is
+                        // the boot-resolved model actually running, and
+                        // nothing here has reloaded the daemon yet to make
+                        // the typed model true.
                         cfg.configured_extraction_model = Some(self.config_model_buf.clone());
                         cfg.extraction_model_inherited = false;
                     }
@@ -272,23 +297,38 @@ impl MemoryState {
                 }
             },
             KeyCode::Char('s') => {
+                // Nothing edited means nothing to send — the endpoint does a
+                // full read-modify-write of config.toml, stripping every
+                // comment in it, so a no-op save is not harmless.
+                if !self.config_dirty {
+                    return MemoryUIAction::Continue;
+                }
                 if let Some(cfg) = &self.config {
+                    let extraction_model = self
+                        .config_model_edited
+                        .then(|| cfg.configured_extraction_model.clone())
+                        .flatten();
+                    // Sent only when the operator edited it. The displayed
+                    // name is what boot resolved the setting to, so sending
+                    // it on every save replaces `groq/llama-3.3-70b-versatile`
+                    // with its bare half, pins a model that was inheriting,
+                    // and overwrites an edit still waiting for a restart.
                     let action = MemoryUIAction::SaveConfig {
                         auto_memorize: cfg.auto_memorize,
                         auto_retrieve: cfg.auto_retrieve,
-                        // Sent only when the operator edited it. The displayed
-                        // name is what boot resolved the setting to, so sending
-                        // it on every save replaces `groq/llama-3.3-70b-versatile`
-                        // with its bare half, pins a model that was inheriting,
-                        // and overwrites an edit still waiting for a restart.
-                        extraction_model: self
-                            .config_model_edited
-                            .then(|| cfg.configured_extraction_model.clone())
-                            .flatten(),
+                        extraction_model,
                     };
+                    // Snapshot what is actually being sent, so a later edit
+                    // that lands before the daemon answers is not folded into
+                    // "saved" by `apply_save_result`.
+                    self.pending_save = Some((
+                        cfg.auto_memorize,
+                        cfg.auto_retrieve,
+                        cfg.configured_extraction_model.clone(),
+                    ));
                     // `config_dirty` stays set until the daemon confirms the
                     // write — see `apply_save_result`.
-                    self.status_msg = crate::i18n::t("tui-memory-config-saving");
+                    self.config_status_msg = crate::i18n::t("tui-memory-config-saving");
                     return action;
                 }
             }
@@ -308,13 +348,30 @@ impl MemoryState {
     /// only thing telling the operator their edits are still pending, so
     /// dropping it on the keypress turns a failed PATCH into "everything is
     /// saved" with a transient error beside it.
+    ///
+    /// A success only clears it when the panel still matches the snapshot
+    /// the request carried (`pending_save`) — the panel stays interactive
+    /// while the PATCH is in flight, and an edit made in that window (e.g.
+    /// toggling a second row) must not be discarded just because an earlier
+    /// save came back clean.
     pub fn apply_save_result(&mut self, result: Result<(), crate::tui::event::FetchFailure>) {
-        self.status_msg = match result {
+        let unchanged_since_dispatch = match (&self.pending_save, &self.config) {
+            (Some((auto_memorize, auto_retrieve, model)), Some(cfg)) => {
+                *auto_memorize == cfg.auto_memorize
+                    && *auto_retrieve == cfg.auto_retrieve
+                    && *model == cfg.configured_extraction_model
+            }
+            _ => false,
+        };
+        self.pending_save = None;
+        self.config_status_msg = match result {
             Ok(()) => {
-                self.config_dirty = false;
-                // The model is now the configured one, so the next save has
-                // nothing of its own to write until the operator edits again.
-                self.config_model_edited = false;
+                if unchanged_since_dispatch {
+                    self.config_dirty = false;
+                    // The model is now the configured one, so the next save
+                    // has nothing of its own to write until edited again.
+                    self.config_model_edited = false;
+                }
                 crate::i18n::t("tui-memory-config-saved")
             }
             Err(crate::tui::event::FetchFailure::RequiresDaemon) => {
@@ -566,6 +623,23 @@ fn draw_config(f: &mut Frame, area: Rect, state: &MemoryState) {
                 ));
             } else {
                 spans.push(value(&cfg.effective_extraction_model));
+                // The typed model is not what is running yet — it is what a
+                // save will write. Showing it as its own span, distinct from
+                // the effective one above, is what keeps the panel from
+                // claiming extraction already moved to it.
+                if state.config_model_edited {
+                    if let Some(pending) = &cfg.configured_extraction_model {
+                        spans.push(Span::styled("  → ", Style::default().fg(theme::YELLOW)));
+                        spans.push(Span::styled(
+                            pending.clone(),
+                            Style::default().fg(theme::YELLOW),
+                        ));
+                        spans.push(Span::styled(
+                            format!(" ({})", crate::i18n::t("tui-memory-config-pending")),
+                            Style::default().fg(theme::YELLOW),
+                        ));
+                    }
+                }
             }
             if cfg.extraction_model_inherited {
                 spans.push(Span::styled(
@@ -603,9 +677,9 @@ fn draw_config(f: &mut Frame, area: Rect, state: &MemoryState) {
             Style::default().fg(theme::YELLOW),
         )));
     }
-    if !state.status_msg.is_empty() {
+    if !state.config_status_msg.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status_msg.clone(),
+            state.config_status_msg.clone(),
             Style::default().fg(theme::TEXT_SECONDARY),
         )));
     }
@@ -1037,10 +1111,42 @@ mod tests {
         state.handle_key(key(KeyCode::Enter));
 
         let cfg = state.config.as_ref().unwrap();
-        assert_eq!(cfg.effective_extraction_model, "inherited-one-fast");
+        assert_eq!(
+            cfg.configured_extraction_model.as_deref(),
+            Some("inherited-one-fast"),
+            "the typed model is the pending setting, sent verbatim on the next save"
+        );
+        assert_eq!(
+            cfg.effective_extraction_model, "inherited-one",
+            "nothing has reloaded yet, so the model actually running must not change"
+        );
         assert!(
             !cfg.extraction_model_inherited,
             "choosing a model is not inheriting one; the panel must stop saying it is"
+        );
+    }
+
+    #[test]
+    fn emptying_the_model_buffer_and_pressing_enter_keeps_the_editor_open() {
+        let mut state = loaded("keep-me");
+        state.config_field = ConfigField::ExtractionModel;
+        state.handle_key(key(KeyCode::Enter));
+        for _ in 0.."keep-me".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        assert_eq!(state.config_model_buf, "");
+
+        let action = state.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(action, MemoryUIAction::Continue));
+        assert!(
+            state.config_editing_model,
+            "an empty draft is not a setting a save can express; the editor must stay open"
+        );
+        assert!(!state.config_model_edited);
+        assert_eq!(
+            state.config.as_ref().unwrap().effective_extraction_model,
+            "keep-me"
         );
     }
 
@@ -1174,6 +1280,15 @@ mod tests {
             effective_extraction_model: "llama-3.1-8b".to_string(),
             ..Default::default()
         });
+        assert!(
+            !state.config_dirty,
+            "a fresh fetch is by definition the saved state, discarded draft included"
+        );
+
+        // A refetch with nothing else edited has nothing left to save; the
+        // discarded model draft must not ride along with a later, real edit.
+        state.config_field = ConfigField::AutoMemorize;
+        state.handle_key(key(KeyCode::Char(' ')));
 
         match state.handle_key(key(KeyCode::Char('s'))) {
             MemoryUIAction::SaveConfig {
@@ -1181,6 +1296,28 @@ mod tests {
             } => assert_eq!(extraction_model, None),
             other => panic!("expected a save, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_refetch_with_nothing_else_edited_leaves_nothing_to_save() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' '))); // toggle -> dirty
+        assert!(state.config_dirty);
+
+        state.apply_config(MemoryConfigView {
+            effective_extraction_model: "litellm:x".to_string(),
+            ..Default::default()
+        });
+
+        assert!(
+            !state.config_dirty,
+            "a fresh fetch replaces the draft; the yellow banner must not survive it"
+        );
+        let action = state.handle_key(key(KeyCode::Char('s')));
+        assert!(
+            matches!(action, MemoryUIAction::Continue),
+            "nothing is dirty after the refetch, so 's' must not PATCH the whole file"
+        );
     }
 
     #[test]
@@ -1196,7 +1333,7 @@ mod tests {
             "a successful save clears the unsaved marker"
         );
         assert_eq!(
-            state.status_msg,
+            state.config_status_msg,
             crate::i18n::t("tui-memory-config-saved"),
             "a saved panel must say it saved, not repeat a row label"
         );
@@ -1219,9 +1356,9 @@ mod tests {
             "edits the daemon refused are still unsaved"
         );
         assert!(
-            state.status_msg.contains("500"),
+            state.config_status_msg.contains("500"),
             "the panel must carry why it failed, got {:?}",
-            state.status_msg
+            state.config_status_msg
         );
     }
 
@@ -1236,12 +1373,32 @@ mod tests {
         state.apply_save_result(Err(crate::tui::event::FetchFailure::RequiresDaemon));
 
         assert_eq!(
-            state.status_msg,
+            state.config_status_msg,
             crate::i18n::t("tui-memory-config-requires-daemon")
         );
         assert!(
             state.config_dirty,
             "nothing was written, so nothing is safe"
+        );
+    }
+
+    /// A second edit landing in the window between dispatching a save and the
+    /// daemon's answer must not be folded into "saved" just because an
+    /// earlier snapshot came back clean.
+    #[test]
+    fn an_edit_made_while_a_save_is_in_flight_is_not_marked_saved() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' '))); // auto_memorize -> false
+        let _ = state.handle_key(key(KeyCode::Char('s'))); // snapshot: (false, true, None)
+
+        state.handle_key(key(KeyCode::Down)); // auto_retrieve row
+        state.handle_key(key(KeyCode::Char(' '))); // auto_retrieve -> false, after the snapshot
+
+        state.apply_save_result(Ok(()));
+
+        assert!(
+            state.config_dirty,
+            "the second toggle arrived after the snapshot the in-flight save carried"
         );
     }
 
@@ -1254,6 +1411,19 @@ mod tests {
         assert!(
             matches!(action, MemoryUIAction::Continue),
             "an empty panel must not PATCH blanks over the stored configuration"
+        );
+    }
+
+    #[test]
+    fn saving_with_nothing_edited_does_nothing() {
+        let mut state = loaded("litellm:x");
+
+        let action = state.handle_key(key(KeyCode::Char('s')));
+
+        assert!(
+            matches!(action, MemoryUIAction::Continue),
+            "the endpoint does a full read-modify-write of config.toml; a no-op save still \
+             strips every comment in it"
         );
     }
 

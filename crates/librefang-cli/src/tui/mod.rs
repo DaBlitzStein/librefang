@@ -631,8 +631,10 @@ impl App {
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits
                 // on its spinner forever and the message never gets read.
+                // The message is the config panel's own, not the KV
+                // browser's — this fetch is only ever for the config screen.
                 self.memory.loading = false;
-                self.memory.status_msg = match failure {
+                self.memory.config_status_msg = match failure {
                     event::FetchFailure::RequiresDaemon => {
                         crate::i18n::t("tui-memory-config-requires-daemon")
                     }
