@@ -6489,6 +6489,39 @@ async fn task_post_rejects_unknown_assignee() {
     );
 }
 
+/// `POST /api/comms/task` is the dashboard's path onto the same queue as
+/// `POST /api/tasks`, but it had its own `Err(e) => internal_scrub(e)` catch-all
+/// with no `AgentNotFound` arm, so the same unresolvable assignee that
+/// `/api/tasks` refuses with 400 blew this route up as a 500. Asserts the two
+/// routes now agree.
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_task_rejects_unknown_assignee_with_400_not_500() {
+    let harness = start_full_router("").await;
+
+    let (status, body) = task_request(
+        &harness,
+        "POST",
+        "/api/comms/task",
+        Some(serde_json::json!({
+            "title": "Orphan",
+            "description": "Assigned to nobody real",
+            "assigned_to": "no-such-agent",
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an assignee that resolves to no agent must be refused as a bad request, not 500'd (body: {body})"
+    );
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("assigned_to") && err.contains("no-such-agent"),
+        "the error must name the offending field and value, got: {err}"
+    );
+}
+
 /// An unassigned task is legitimate — it is the "any worker may claim this"
 /// form that `task_claim` matches via `assigned_to = ''`. Validation must not
 /// have turned the optional field into a required one.
