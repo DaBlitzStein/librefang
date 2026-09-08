@@ -3,4 +3,4 @@ The text-based tool-call recovery only understood JSON bodies inside the functio
 Measured on a production host: two consecutive Telegram replies of 605 and 465 characters, both nothing but `<function=shell_exec>` syntax, emitted after the loop guard forced a tools-stripped completion.
 Parameter values are taken verbatim — a `command` parameter routinely spans several lines — and numbers and booleans keep their JSON type, so the tool's argument deserialization accepts them instead of rejecting a stringified "180".
 A reply that is still nothing but markup the recovery could not parse — an unknown tool, a malformed body — is replaced by one honest sentence instead of reaching the user as raw syntax, in both the streaming and non-streaming loops.
-(#PR) (@DaBlitzStein)
+(#8236) (@DaBlitzStein)
