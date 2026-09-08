@@ -1056,8 +1056,9 @@ fn agent_spawn_profile_refused_when_parent_is_fixed() {
         fixed: true,
         ..Default::default()
     };
+    let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel::default());
 
-    let err = check_profile_against_parent(&profile, &override_, &[])
+    let err = check_profile_against_parent(&kernel, &profile, &override_)
         .expect_err("a fixed parent must not select profiles at all")
         .to_string();
     assert!(
@@ -1079,8 +1080,16 @@ fn agent_spawn_profile_refused_over_parent_cost_budget() {
         cost_budget: Some(librefang_types::model_profile::CostTier::Cheap),
         default_profile: None,
     };
-    let permitted = vec!["quick".to_string()];
-    let err = check_profile_against_parent(&profile, &override_, &permitted)
+    // The permitted list now comes from the stub's catalog on the failure
+    // branch, so the catalog must carry the cheap profile the message should
+    // enumerate.
+    let quick = spawn_test_profile("quick", "cheapo", "cheap-model", None);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+        profiles: vec![quick, profile.clone()],
+        ..Default::default()
+    });
+
+    let err = check_profile_against_parent(&kernel, &profile, &override_)
         .expect_err("an over-budget profile must be refused")
         .to_string();
     assert!(
@@ -1095,6 +1104,7 @@ fn agent_spawn_profile_refused_over_parent_cost_budget() {
 #[test]
 fn agent_spawn_profile_allowed_when_parent_override_permits() {
     let profile = spawn_test_profile("quick", "cheapo", "cheap-model", None);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel::default());
     let unconstrained = librefang_types::model_profile::AgentRouterOverride {
         fixed: false,
         allowed_profiles: Default::default(),
@@ -1102,7 +1112,7 @@ fn agent_spawn_profile_allowed_when_parent_override_permits() {
         default_profile: None,
     };
     assert!(
-        check_profile_against_parent(&profile, &unconstrained, &[]).is_ok(),
+        check_profile_against_parent(&kernel, &profile, &unconstrained).is_ok(),
         "a permitted profile must pass the check"
     );
 
@@ -1112,7 +1122,43 @@ fn agent_spawn_profile_allowed_when_parent_override_permits() {
         cost_budget: Some(librefang_types::model_profile::CostTier::Expensive),
         default_profile: None,
     };
-    assert!(check_profile_against_parent(&profile, &allowlisted, &[]).is_ok());
+    assert!(check_profile_against_parent(&kernel, &profile, &allowlisted).is_ok());
+}
+
+/// An empty permitted list states the constraint instead of rendering
+/// "Permitted profiles: ." (#7789 review).
+#[test]
+fn agent_spawn_profile_refused_over_budget_with_empty_permitted_list() {
+    let mut profile = spawn_test_profile("architect", "cheapo", "cheap-model", None);
+    profile.cost_tier = librefang_types::model_profile::CostTier::Expensive;
+    let override_ = librefang_types::model_profile::AgentRouterOverride {
+        fixed: false,
+        allowed_profiles: Default::default(),
+        cost_budget: Some(librefang_types::model_profile::CostTier::Cheap),
+        default_profile: None,
+    };
+    // Catalog carries nothing the cheap budget permits — the case the review
+    // described, where the old message truncated to "Permitted profiles: .".
+    let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+        profiles: vec![profile.clone()],
+        ..Default::default()
+    });
+
+    let err = check_profile_against_parent(&kernel, &profile, &override_)
+        .expect_err("an over-budget profile must be refused")
+        .to_string();
+    assert!(
+        err.contains("architect"),
+        "must name the refused profile: {err}"
+    );
+    assert!(
+        err.contains("No profile in the catalog satisfies"),
+        "must state the constraint instead of an empty list: {err}"
+    );
+    assert!(
+        !err.contains("Permitted profiles: ."),
+        "must not render the empty list: {err}"
+    );
 }
 
 /// A budgeted parent's cap must survive the hop into the agent it spawns.
@@ -1136,7 +1182,7 @@ async fn agent_spawn_propagates_parent_cost_budget_to_the_child() {
 
     let stub = Arc::new(SpawnCheckKernel {
         parent_override: Ok(Some(parent_override.clone())),
-        profiles: vec![architect.clone(), quick],
+        profiles: vec![architect.clone(), quick.clone()],
         ..Default::default()
     });
     let kernel: Arc<dyn KernelHandle> = stub.clone();
@@ -1199,8 +1245,12 @@ async fn agent_spawn_propagates_parent_cost_budget_to_the_child() {
     // The second hop, which is where the escape used to be: the child's own
     // `agent_spawn { profile: "architect" }` is now checked against the
     // override it inherited, and refused.
-    let err = check_profile_against_parent(&architect, &child_override, &["quick".to_string()])
-        .expect_err("the inherited budget must refuse the expensive profile at the next hop")
+    let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+        profiles: vec![quick, architect.clone()],
+        ..Default::default()
+    });
+    let err = check_profile_against_parent(&kernel, &architect, &child_override)
+        .expect_err("the inherited budget must refuse the expensive profile at the second hop")
         .to_string();
     assert!(
         err.contains("architect"),
@@ -1283,7 +1333,8 @@ async fn agent_spawn_propagates_parent_fixed_pin_to_the_child() {
         "the pin must reach the child, got: {child_override:?}"
     );
 
-    let err = check_profile_against_parent(&architect, &child_override, &[])
+    let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel::default());
+    let err = check_profile_against_parent(&kernel, &architect, &child_override)
         .expect_err("an inherited pin must refuse profiles at the next hop")
         .to_string();
     assert!(err.contains("fixed = true"), "must explain the pin: {err}");
@@ -1354,6 +1405,571 @@ async fn agent_spawn_refused_when_the_parent_override_cannot_be_looked_up() {
     assert!(
         stub.captured_manifest.lock().unwrap().is_none(),
         "the spawn must be refused before it reaches the kernel"
+    );
+}
+
+/// The other half of the lookup contract (#7789 review): with no profile
+/// requested there is no cap to enforce on this hop and no manifest left to
+/// propagate, so a miss degrades to "no override to copy" instead of
+/// hard-failing spawns that never named a profile — the REST tool endpoint's
+/// caller-supplied `agent_id` and the deferred resume path after the
+/// requesting agent left the registry.
+#[tokio::test]
+async fn agent_spawn_without_profile_survives_an_unresolvable_parent() {
+    let stub = Arc::new(SpawnCheckKernel {
+        parent_override: Err("agent 'ghost' is not in the registry".to_string()),
+        profiles: vec![spawn_test_profile("quick", "cheapo", "cheap-model", None)],
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "helper",
+            "system_prompt": "You help.",
+            "tools": []
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some("ghost"),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "a spawn that never named a profile must not fail on a lookup miss, got: {}",
+        result.content
+    );
+    let child = stub.spawned_manifest();
+    assert!(
+        child.model.router_override.is_none(),
+        "nothing to propagate when the parent's manifest cannot be read"
+    );
+}
+
+/// A `profile` present but of the wrong JSON type is refused, not silently
+/// dropped (#7789 review): `as_str()` on a mistyped value is `None`, which
+/// used to take the absent arm and spawn on the default model.
+#[tokio::test]
+async fn agent_spawn_profile_mistyped_value_is_refused() {
+    let stub = Arc::new(SpawnCheckKernel {
+        profiles: vec![spawn_test_profile("quick", "cheapo", "cheap-model", None)],
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "helper",
+            "system_prompt": "You help.",
+            "profile": {"name": "quick"}
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some("parent-agent-id"),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "a mistyped profile value must be refused, got: {}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("expected a profile name as a string"),
+        "must say what the parameter expects: {}",
+        result.content
+    );
+}
+
+/// A profile whose provider nobody configured a key for is refused at spawn
+/// time (#7789 review) — the same guard `route_to_profile` applies per turn,
+/// where the fallback is a one-turn skip. Here the wrong provider is
+/// persisted into a manifest, so it refuses and names the env var.
+#[tokio::test]
+async fn agent_spawn_profile_refused_when_the_provider_has_no_credentials() {
+    let stub = Arc::new(SpawnCheckKernel {
+        profiles: vec![spawn_test_profile("quick", "cheapo", "cheap-model", None)],
+        credential_check: Err(
+            "provider 'cheapo' has no API key configured — set CHEAPO_API_KEY \
+             or add a credential pool for it"
+                .to_string(),
+        ),
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "helper",
+            "system_prompt": "You help.",
+            "tools": [],
+            "profile": "quick"
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some("parent-agent-id"),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "a provider with no key must refuse the spawn, got: {}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("Cannot pin agent to model profile 'quick'"),
+        "must name the profile it could not pin: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("CHEAPO_API_KEY"),
+        "must name the env var the operator must set: {}",
+        result.content
+    );
+    assert!(
+        stub.captured_manifest.lock().unwrap().is_none(),
+        "the spawn must be refused before it reaches the kernel"
+    );
+}
+
+// -----------------------------------------------------------------------
+// agent_spawn `profile` / explicit `model` on the ephemeral path (#7789 review)
+// -----------------------------------------------------------------------
+
+const EPHEMERAL_PARENT_UUID: &str = "11111111-1111-1111-1111-111111111111";
+
+#[tokio::test]
+async fn agent_spawn_ephemeral_profile_pins_the_worker_model() {
+    let stub = Arc::new(SpawnCheckKernel {
+        profiles: vec![spawn_test_profile("quick", "cheapo", "cheap-model", None)],
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "verify",
+            "ephemeral": true,
+            "message": "is this done?",
+            "profile": "quick"
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some(EPHEMERAL_PARENT_UUID),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "a permitted profile must reach the worker, got: {}",
+        result.content
+    );
+    let request = stub
+        .captured_ephemeral
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the worker must have been spawned");
+    let model = request
+        .model
+        .expect("the profile must pin the worker's model");
+    assert_eq!(
+        model.provider.as_deref(),
+        Some("cheapo"),
+        "the profile's provider must reach the worker: {model:?}"
+    );
+    assert_eq!(
+        model.model.as_deref(),
+        Some("cheap-model"),
+        "the profile's model must reach the worker: {model:?}"
+    );
+}
+
+/// The ephemeral case the review called the likely call: a parent budgeted at
+/// `cheap` naming an over-budget profile for its worker is refused, same as
+/// on the permanent path.
+#[tokio::test]
+async fn agent_spawn_ephemeral_profile_refused_over_parent_cost_budget() {
+    let mut architect = spawn_test_profile("architect", "anthropic", "claude-opus-4-1", None);
+    architect.cost_tier = librefang_types::model_profile::CostTier::Expensive;
+    let stub = Arc::new(SpawnCheckKernel {
+        parent_override: Ok(Some(librefang_types::model_profile::AgentRouterOverride {
+            fixed: false,
+            allowed_profiles: Default::default(),
+            cost_budget: Some(librefang_types::model_profile::CostTier::Cheap),
+            default_profile: None,
+        })),
+        profiles: vec![architect.clone()],
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "verify",
+            "ephemeral": true,
+            "message": "is this done?",
+            "profile": "architect"
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some(EPHEMERAL_PARENT_UUID),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "an over-budget profile must be refused for the worker too"
+    );
+    assert!(
+        result.content.contains("not permitted for this agent"),
+        "must be the budget refusal, got: {}",
+        result.content
+    );
+}
+
+/// An explicit `model` override on the worker path is refused when the parent
+/// is capped (#7789 review): the refusal message names the cap, so the caller
+/// is told to route around it via `profile` instead of being handed the gap.
+#[tokio::test]
+async fn agent_spawn_ephemeral_model_override_refused_when_parent_capped() {
+    let stub = Arc::new(SpawnCheckKernel {
+        parent_override: Ok(Some(librefang_types::model_profile::AgentRouterOverride {
+            fixed: false,
+            allowed_profiles: Default::default(),
+            cost_budget: Some(librefang_types::model_profile::CostTier::Cheap),
+            default_profile: None,
+        })),
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "w",
+            "ephemeral": true,
+            "message": "run this",
+            "model": {"provider": "anthropic", "model": "claude-opus-4-1"}
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some(EPHEMERAL_PARENT_UUID),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "a capped parent must not get a worker on an explicit model"
+    );
+    assert!(
+        result
+            .content
+            .contains("explicit `model` override is refused"),
+        "must name the cap and the refusal, got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("cost_budget"),
+        "must name the cap kind, got: {}",
+        result.content
+    );
+}
+
+/// The unconstrained-parent case: an explicit `model` override still works.
+#[tokio::test]
+async fn agent_spawn_ephemeral_model_override_honoured_when_parent_uncapped() {
+    let stub = Arc::new(SpawnCheckKernel::default());
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "w",
+            "ephemeral": true,
+            "message": "run this",
+            "model": {"provider": "anthropic", "model": "claude-opus-4-1"}
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some(EPHEMERAL_PARENT_UUID),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "an unconstrained parent keeps its explicit model override, got: {}",
+        result.content
+    );
+    let request = stub
+        .captured_ephemeral
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the worker must have been spawned");
+    let model = request.model.expect("the explicit model must be honoured");
+    assert_eq!(
+        model.provider.as_deref(),
+        Some("anthropic"),
+        "provider must reach the worker: {model:?}"
+    );
+    assert_eq!(
+        model.model.as_deref(),
+        Some("claude-opus-4-1"),
+        "model must reach the worker: {model:?}"
+    );
+}
+
+/// `profile` and an explicit `model` on one worker call cannot both win.
+#[tokio::test]
+async fn agent_spawn_ephemeral_profile_and_model_are_mutually_exclusive() {
+    let stub = Arc::new(SpawnCheckKernel {
+        profiles: vec![spawn_test_profile("quick", "cheapo", "cheap-model", None)],
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let parent_allowed = vec!["agent_spawn".to_string()];
+
+    let result = execute_tool(
+        "test-id",
+        "agent_spawn",
+        &serde_json::json!({
+            "name": "w",
+            "ephemeral": true,
+            "message": "run this",
+            "profile": "quick",
+            "model": {"provider": "anthropic", "model": "claude-opus-4-1"}
+        }),
+        Some(&kernel),
+        Some(&parent_allowed),
+        Some(EPHEMERAL_PARENT_UUID),
+        None,
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        None, // process_manager
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "giving both parameters must be refused rather than one silently winning"
+    );
+    assert!(
+        result.content.contains("not both"),
+        "must say the parameters are mutually exclusive, got: {}",
+        result.content
     );
 }
 
@@ -2078,9 +2694,16 @@ struct SpawnCheckKernel {
     parent_override: Result<Option<librefang_types::model_profile::AgentRouterOverride>, String>,
     /// Catalog `resolve_model_profile` / `model_profile_names` answer from.
     profiles: Vec<librefang_types::model_profile::ModelProfile>,
+    /// What `check_provider_credentials` reports (#7789 review). `Ok(())`
+    /// means "every provider configured"; the Err is the refusal reason the
+    /// real kernel composes (it names the provider's env var).
+    credential_check: Result<(), String>,
     /// The manifest TOML the last `spawn_agent_checked` was handed, so a test
     /// can assert what the child was actually born with.
     captured_manifest: std::sync::Mutex<Option<String>>,
+    /// The request the last `spawn_ephemeral` was handed, so a test can
+    /// assert what the worker was actually born with (#7789 review).
+    captured_ephemeral: std::sync::Mutex<Option<librefang_types::ephemeral::EphemeralSpawnRequest>>,
 }
 
 impl Default for SpawnCheckKernel {
@@ -2089,7 +2712,9 @@ impl Default for SpawnCheckKernel {
             should_fail_escalation: false,
             parent_override: Ok(None),
             profiles: Vec::new(),
+            credential_check: Ok(()),
             captured_manifest: std::sync::Mutex::new(None),
+            captured_ephemeral: std::sync::Mutex::new(None),
         }
     }
 }
@@ -2142,6 +2767,23 @@ impl AgentControl for SpawnCheckKernel {
                 .map_err(librefang_kernel_handle::KernelOpError::Internal)?;
         }
         Ok(("test-id-456".to_string(), "good-child".to_string()))
+    }
+
+    async fn spawn_ephemeral(
+        &self,
+        request: librefang_types::ephemeral::EphemeralSpawnRequest,
+    ) -> Result<
+        librefang_types::ephemeral::EphemeralSpawnResult,
+        librefang_kernel_handle::KernelOpError,
+    > {
+        *self.captured_ephemeral.lock().unwrap() = Some(request.clone());
+        Ok(librefang_types::ephemeral::EphemeralSpawnResult {
+            name: "worker-ab12cd34".to_string(),
+            response: "worker done".to_string(),
+            iterations: 1,
+            cost_usd: None,
+            tools: Vec::new(),
+        })
     }
 
     async fn send_to_agent(
@@ -2329,6 +2971,10 @@ impl librefang_kernel_handle::CatalogQuery for SpawnCheckKernel {
         _agent_id: &str,
     ) -> Result<Option<librefang_types::model_profile::AgentRouterOverride>, String> {
         self.parent_override.clone()
+    }
+
+    fn check_provider_credentials(&self, _provider: &str) -> Result<(), String> {
+        self.credential_check.clone()
     }
 }
 impl ApiAuth for SpawnCheckKernel {
