@@ -74,6 +74,15 @@ impl LibreFangKernel {
             }
         };
 
+        // The completion judge and the learnings hook both name the goal, so
+        // resolve the title once, up front. `goal_by_id` re-reads the shared
+        // goals document; the runner loads it again independently, which is why
+        // its refusal is still propagated below.
+        let goal_title = self
+            .goal_by_id(goal_id)
+            .map(|g| g.title)
+            .unwrap_or_else(|| format!("Goal {goal_id}"));
+
         // Completion judge. A one-shot call on a model of the operator's
         // choosing, deliberately NOT a turn on the goal's own agent: routing it
         // there would both bill a full agent turn and put the worker back in
@@ -82,18 +91,32 @@ impl LibreFangKernel {
         // closure a single concrete type.
         let eval_kernel = kernel.clone();
         let eval_model = evaluator_model.clone();
+        // #7785 review: the judge needs a goal statement. A title-only goal
+        // (the dashboard create form allows it — the description textarea is
+        // optional) renders `GOAL: ` followed by a blank line, the model
+        // answers from the output alone at max_tokens: 10, and one
+        // plausible-looking iteration draws a YES that closes the goal
+        // against an empty condition. Both halves mirror `build_goal_prompt`:
+        // pass the title too, and skip the call entirely (falling back to
+        // the agent's own marker) when there is nothing to judge.
+        let eval_goal_title = goal_title.clone();
         let evaluate = move |goal_description: String, output: String| {
             let k = eval_kernel.clone();
             let eval_model = eval_model.clone();
+            let goal_title = eval_goal_title.clone();
             async move {
                 let Some(model) = eval_model else {
+                    return Ok(false);
+                };
+                let Some(goal_statement) = evaluator_goal_statement(&goal_title, &goal_description)
+                else {
                     return Ok(false);
                 };
                 let prompt = format!(
                     "You are judging whether a goal has been achieved. Read the goal and \
                      the worker's latest output, then answer with the single word YES or \
                      NO — YES only if the goal is fully achieved, NO if any work remains.\
-                     \n\nGOAL: {goal_description}\n\nLATEST OUTPUT:\n{output}\n\nAchieved?"
+                     \n\nGOAL: {goal_statement}\n\nLATEST OUTPUT:\n{output}\n\nAchieved?"
                 );
                 k.one_shot_llm_call(&model, &prompt)
                     .await
@@ -118,10 +141,6 @@ impl LibreFangKernel {
             .get(agent_id)
             .map(|e| e.manifest.skill_workshop)
             .unwrap_or_default();
-        let goal_title = self
-            .goal_by_id(goal_id)
-            .map(|g| g.title)
-            .unwrap_or_else(|| format!("Goal {goal_id}"));
         let on_learnings = move |learnings: Vec<String>| {
             queue_learnings_as_pending_skill(
                 &skills_dir,
@@ -133,6 +152,13 @@ impl LibreFangKernel {
             );
         };
 
+        // #7785 review: `GoalRunner::start` returns false when the goal
+        // vanished between the caller's load and the runner's own
+        // (`load_goal` in the spawn), and `goal_run_start` — therefore
+        // `KernelApi::start_goal_run`, whose doc reads as fallible — must
+        // propagate that refusal instead of hardcoding success. The old
+        // `true` made the dead 409 path unreachable: every caller reported
+        // a started run that did not exist.
         self.workflows.goal_runner.start(
             goal_id,
             agent_id,
@@ -145,8 +171,7 @@ impl LibreFangKernel {
             verify_agent_id,
             verify_max_retries,
             evaluator_model,
-        );
-        true
+        )
     }
 
     /// Load a persisted [`Goal`] by id from the shared goals document.
@@ -207,6 +232,27 @@ fn evaluator_reply_is_yes(reply: &str) -> bool {
         }
     }
     saw_yes && !saw_no
+}
+
+/// Build the goal statement handed to the completion judge, or `None` when
+/// there is nothing to judge.
+///
+/// #7785 review: a title-only goal (the dashboard create form leaves the
+/// description optional) used to render as `GOAL: ` with a blank line, and
+/// the judge answered from the worker's output alone — one plausible-looking
+/// iteration was enough to draw a YES and close a goal against an empty
+/// condition. Mirrors `build_goal_prompt`'s handling for the worker: fold in
+/// the title, and signal "skip the call" (fall back to the agent's own
+/// marker) rather than asking a model to grade nothing.
+fn evaluator_goal_statement(goal_title: &str, goal_description: &str) -> Option<String> {
+    let title = goal_title.trim();
+    let description = goal_description.trim();
+    match (title.is_empty(), description.is_empty()) {
+        (true, true) => None,
+        (true, false) => Some(description.to_string()),
+        (false, true) => Some(title.to_string()),
+        (false, false) => Some(format!("{title} — {description}")),
+    }
 }
 
 /// Turn a goal title into a skill-name slug.
@@ -278,7 +324,7 @@ const LEARNED_CAPTURE_TRIGGER: &str = "goal_learned";
 /// A goal can be run more than once, and by then the draft its first run produced may already be an installed skill.
 /// That case is what [`crate::skill_workshop::candidate::CandidateKind::Update`] exists for: the draft targets the installed skill and approval routes through `evolution::update_skill` instead of failing on the name already existing and silently dropping everything the second run learned.
 ///
-/// Nothing here is the durable record — that is the runner's own `goal_learnings_<id>` store entry, written before this is called.
+/// Nothing here is the durable record — that is the runner's own `goal_learnings_<goal_id>_<run start timestamp>` store entry, written before this is called.
 /// A draft that is capped out, deduped, or rejected loses the agent a convenience, not the lessons.
 fn queue_learnings_as_pending_skill(
     skills_dir: &std::path::Path,
@@ -390,6 +436,38 @@ mod tests {
         assert!(!evaluator_reply_is_yes("Yes and no - NO, not done."));
         assert!(!evaluator_reply_is_yes("I am not sure."));
         assert!(!evaluator_reply_is_yes(""));
+    }
+
+    /// #7785 review: a title-only goal must still give the judge something
+    /// to grade against, rather than rendering as `GOAL: ` with nothing
+    /// after it.
+    #[test]
+    fn evaluator_goal_statement_falls_back_to_the_title_when_the_description_is_empty() {
+        assert_eq!(
+            evaluator_goal_statement("Migrate the billing tables", ""),
+            Some("Migrate the billing tables".to_string())
+        );
+        assert_eq!(
+            evaluator_goal_statement("Migrate the billing tables", "   "),
+            Some("Migrate the billing tables".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluator_goal_statement_combines_title_and_description() {
+        assert_eq!(
+            evaluator_goal_statement("Ship the report", "Cover Q3 revenue"),
+            Some("Ship the report — Cover Q3 revenue".to_string())
+        );
+    }
+
+    /// A goal with neither a title nor a description has nothing to judge —
+    /// the caller must skip the evaluator call rather than ask a model to
+    /// grade emptiness.
+    #[test]
+    fn evaluator_goal_statement_is_none_when_both_title_and_description_are_empty() {
+        assert_eq!(evaluator_goal_statement("", ""), None);
+        assert_eq!(evaluator_goal_statement("   ", "\n"), None);
     }
 
     #[test]

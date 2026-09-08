@@ -1018,8 +1018,115 @@ async fn goal_run_start_rejects_invalid_iteration_limits() {
     assert_eq!(run["running"], false);
 }
 
-/// #6562: create / update now reject a non-UUID `agent_id`, but goals written
-/// before that fix still carry junk.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_rejects_invalid_verify_max_retries() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Bounded retries",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap();
+
+    // 0, a non-number, a negative, a fraction, and an out-of-u32-range value
+    // are all rejected rather than truncated or misread as "absent".
+    for verify_max_retries in [
+        serde_json::json!(0),
+        serde_json::json!("3"),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::json!(u64::from(u32::MAX) + 1),
+    ] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            &format!("/api/goals/{id}/start"),
+            Some(serde_json::json!({"verify_max_retries": verify_max_retries})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+    }
+
+    let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(
+        run["running"], false,
+        "no run may be started by a rejected body"
+    );
+}
+
+/// #6562: the create form submits blank ids from reset form controls, so a
+/// blank `verify_agent_id` must be "absent", not a 400 — same contract as
+/// `agent_id` / `parent_id`.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_blank_verify_agent_id_as_absent() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({"title": "No verifier", "verify_agent_id": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert!(
+        body.get("verify_agent_id").is_none(),
+        "blank verify_agent_id must not be persisted: {body:?}"
+    );
+}
+
+/// A verifier id is validated at the boundary like `agent_id`: a non-UUID is
+/// a 400 instead of junk `start_goal_run` has to refuse later, and a
+/// non-string is a 400 instead of a silently dropped field.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_rejects_wrong_typed_verify_agent_id() {
+    let h = boot().await;
+    for payload in [
+        serde_json::json!({"title": "bad", "verify_agent_id": "not-a-uuid"}),
+        serde_json::json!({"title": "bad", "verify_agent_id": 123}),
+    ] {
+        let (status, body) = json_request(&h, Method::POST, "/api/goals", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+    }
+}
+
+/// Same contract for `verify_agent_id` on update: blank clears the link, a
+/// non-UUID is a 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_blank_verify_agent_id_clears_assignment() {
+    let h = boot().await;
+    let verifier = uuid::Uuid::new_v4().to_string();
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Verified", "verify_agent_id": verifier}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"verify_agent_id": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert!(
+        body.get("verify_agent_id").is_none(),
+        "blank verify_agent_id must clear the link: {body:?}"
+    );
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"verify_agent_id": "not-a-uuid"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
 /// Reporting those as unassigned points the operator at a field that already looks filled in, so the two cases get distinct messages.
 #[tokio::test(flavor = "multi_thread")]
 async fn goal_run_start_distinguishes_a_corrupt_agent_id_from_an_unassigned_one_6562() {
