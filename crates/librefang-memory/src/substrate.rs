@@ -1374,12 +1374,14 @@ impl MemorySubstrate {
         tokio::task::spawn_blocking(move || {
             let db = conn.get().map_err(LibreFangError::memory)?;
 
-            let now_unix = chrono::Utc::now().timestamp();
-            // `claimed_at` is RFC3339 as written by `task_claim`; SQLite's
-            // ISO-8601 parser reads that form (offset and fractional seconds
-            // included), so the epoch arithmetic below is exact rather than
-            // the lexicographic string compare the single-TTL query could
-            // get away with.
+            let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+            // `claimed_at` is RFC3339 as written by `task_claim`, fractional
+            // seconds included. `strftime('%s', ...)` truncates that to a
+            // whole second before the comparison, which floors every claim's
+            // age by up to a second — enough for a task claimed just before a
+            // second boundary to look one tick stucker than it is. `julianday`
+            // keeps the fractional part, so the elapsed-seconds arithmetic
+            // below is exact rather than floored.
             let global_ttl = ttl_secs as i64;
 
             let mut stmt = db
@@ -1388,13 +1390,13 @@ impl MemorySubstrate {
                      WHERE status = 'in_progress' \
                        AND claimed_at IS NOT NULL \
                        AND COALESCE(timeout_secs, ?1) > 0 \
-                       AND CAST(strftime('%s', claimed_at) AS INTEGER) \
-                           + COALESCE(timeout_secs, ?1) <= ?2",
+                       AND (julianday(?2) - julianday(claimed_at)) * 86400.0 \
+                           >= COALESCE(timeout_secs, ?1)",
                 )
                 .map_err(LibreFangError::memory)?;
 
             let stuck: Vec<(String, u32)> = stmt
-                .query_map(rusqlite::params![global_ttl, now_unix], |row| {
+                .query_map(rusqlite::params![global_ttl, now_rfc3339], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
                 })
                 .map_err(LibreFangError::memory)?
@@ -2316,6 +2318,57 @@ mod tests {
         // Second sweep is a no-op — stuck task is already pending.
         let reset_again = substrate.task_reset_stuck(60, 0).await.unwrap();
         assert!(reset_again.is_empty());
+    }
+
+    /// `strftime('%s', claimed_at)` truncates the fractional second before
+    /// comparing, so a claim whose fractional second happens to be just past
+    /// a whole-second boundary reads a full second older than it really is.
+    /// This backs `claimed_at` onto exactly `ttl` seconds before "now" minus
+    /// one nanosecond (fractional second `.999999999`, the worst case for
+    /// that truncation): the real elapsed time is always under `ttl` by
+    /// nearly a full second, but the old floor-based comparison read it as
+    /// `ttl + 1` and reset it early.
+    #[tokio::test]
+    async fn test_task_reset_stuck_is_subsecond_precise_not_floored_to_a_second() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post(
+                "Sub-second task",
+                "Claimed a moment ago",
+                Some("worker"),
+                None,
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+        substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap();
+
+        let ttl: i64 = 2;
+        let now_ts = chrono::Utc::now().timestamp();
+        let claimed_at = chrono::DateTime::<chrono::Utc>::from_timestamp(now_ts - ttl, 999_999_999)
+            .unwrap()
+            .to_rfc3339();
+        {
+            let conn = substrate.pool.get().unwrap();
+            conn.execute(
+                "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
+                rusqlite::params![claimed_at, task_id],
+            )
+            .unwrap();
+        }
+
+        let reset = substrate.task_reset_stuck(ttl as u64, 0).await.unwrap();
+        assert!(
+            reset.is_empty(),
+            "a claim under {ttl}s old by real elapsed time must not be swept just because \
+             its fractional second rounds the wrong way, got reset: {reset:?}"
+        );
+        let still_in_progress = substrate.task_list(Some("in_progress")).await.unwrap();
+        assert_eq!(still_in_progress.len(), 1, "task must remain in_progress");
     }
 
     #[tokio::test]

@@ -803,9 +803,13 @@ impl LibreFangKernel {
                 // global and is never reclaimed (the historical behaviour, and
                 // what every pre-v56 row means), while a row that declared its
                 // own non-zero timeout is still swept. Same "two rules, two
-                // switches" reasoning as the reconcile above; the sweep is a
-                // single indexed query, so running it unconditionally costs
-                // nothing when there is nothing to reclaim.
+                // switches" reasoning as the reconcile above. Running the
+                // sweep unconditionally is still cheap, but not because the
+                // whole query is indexed: `idx_task_status_claimed_at`
+                // narrows it to the `in_progress` rows (normally a handful),
+                // and only that small set pays for the per-row deadline
+                // comparison, which computes on `claimed_at` and so cannot
+                // itself use the index.
                 match kernel
                     .memory
                     .substrate
