@@ -856,6 +856,7 @@
       "tools_customize": "사용자 정의 — 허용 목록으로 전환",
       "tools_all_title": "사용 가능한 모든 도구 사용",
       "tools_all_desc": "아직 시스템에 등록된 도구가 없습니다.",
+      "mcp_hard_disabled_note": "이 에이전트의 MCP 서버는 강제 비활성화되었습니다(tools_disabled 또는 mcp_disabled). 강제 스위치를 끄기 전까지 여기서 부여해도 아무 것도 바뀌지 않으므로 토글은 작동하지 않습니다.",
       "tools_fine_grain": "개별 도구 구성",
       "tools_remove_group": "전체 그룹 제거",
       "tools_available": "사용 가능",

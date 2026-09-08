@@ -857,6 +857,7 @@
       "tools_customize": "自定义 — 切换到 allowlist",
       "tools_all_title": "使用所有可用工具",
       "tools_all_desc": "系统中还没有注册工具",
+      "mcp_hard_disabled_note": "该代理的 MCP 服务器已被硬禁用（tools_disabled 或 mcp_disabled）。在硬开关关闭之前，在此授权不会有任何效果，因此这些开关是无效的。",
       "tools_fine_grain": "配置单个工具",
       "tools_remove_group": "移除整个组",
       "tools_available": "可用",
