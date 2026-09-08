@@ -161,6 +161,16 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
             {t("tasks.by")} {task.created_by}
           </span>
         )}
+        {!!task.priority && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {t("tasks.priority_badge", { priority: task.priority })}
+          </span>
+        )}
+        {task.timeout_secs != null && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {t("tasks.timeout_badge", { secs: task.timeout_secs })}
+          </span>
+        )}
         <span className="ml-auto flex items-center gap-1 text-[10px] text-text-dim/50 shrink-0">
           <Clock className="w-2.5 h-2.5" />
           {relativeTime(task.created_at)}
@@ -327,6 +337,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assignee, setAssignee] = useState("");
+  const [priority, setPriority] = useState("");
+  const [timeoutSecs, setTimeoutSecs] = useState("");
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -335,6 +347,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       title: title.trim(),
       description: description.trim(),
       ...(assignee.trim() ? { assigned_to: assignee.trim() } : {}),
+      ...(priority.trim() ? { priority: Number(priority) } : {}),
+      ...(timeoutSecs.trim() ? { timeout_secs: Number(timeoutSecs) } : {}),
     });
   }
 
@@ -347,6 +361,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       setTitle("");
       setDescription("");
       setAssignee("");
+      setPriority("");
+      setTimeoutSecs("");
     }
   }, [isOpen]);
 
@@ -408,6 +424,34 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
               className={INPUT_CLASS}
             />
           )}
+        </div>
+
+        <div className="flex gap-3">
+          <div className="flex-1">
+            <label className="block text-xs font-semibold text-text-dim mb-1.5">
+              {t("tasks.field_priority")}
+            </label>
+            <input
+              type="number"
+              value={priority}
+              onChange={(e) => setPriority(e.target.value)}
+              placeholder={t("tasks.field_priority_placeholder")}
+              className={INPUT_CLASS}
+            />
+          </div>
+          <div className="flex-1">
+            <label className="block text-xs font-semibold text-text-dim mb-1.5">
+              {t("tasks.field_timeout")}
+            </label>
+            <input
+              type="number"
+              min={0}
+              value={timeoutSecs}
+              onChange={(e) => setTimeoutSecs(e.target.value)}
+              placeholder={t("tasks.field_timeout_placeholder")}
+              className={INPUT_CLASS}
+            />
+          </div>
         </div>
 
         {createMutation.isError && (

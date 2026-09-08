@@ -3382,6 +3382,7 @@ export interface TaskQueueItem {
   result?: string;
   claimed_at?: string;
   priority?: number;
+  timeout_secs?: number;
   [key: string]: unknown;
 }
 
@@ -3390,6 +3391,8 @@ export interface CreateTaskPayload {
   description: string;
   assigned_to?: string;
   created_by?: string;
+  priority?: number;
+  timeout_secs?: number;
 }
 
 export interface CreateTaskResult {
