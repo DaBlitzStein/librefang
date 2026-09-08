@@ -179,7 +179,12 @@ impl LibreFangKernel {
     ///   message), and leaves all other sessions untouched. Quota is **not**
     ///   reset (per-channel resets must not give one user a way to clear an
     ///   agent-wide token-quota state). Used by channel `/new`.
-    pub async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
+    ///
+    /// Returns how many messages were cleared, read under the same lock the
+    /// delete took — so an ack built from the return value cannot
+    /// under-report or count the messages `inject_reset_prompt` adds to the
+    /// fresh session (#7701 review).
+    pub async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<usize> {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
@@ -198,7 +203,13 @@ impl LibreFangKernel {
     ///
     /// `scope` follows the same agent-wide vs. per-session split as
     /// [`Self::reset_session`] (#4868).
-    pub async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
+    /// Returns how many messages were cleared (same contract as
+    /// [`Self::reset_session`]).
+    pub async fn reboot_session(
+        &self,
+        agent_id: AgentId,
+        scope: ResetScope,
+    ) -> KernelResult<usize> {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
@@ -258,7 +269,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         entry: &AgentEntry,
         save_summary: bool,
-    ) -> KernelResult<()> {
+    ) -> KernelResult<usize> {
         let agent_lock = self
             .agents
             .agent_msg_locks
@@ -291,8 +302,10 @@ impl LibreFangKernel {
                 .clone();
             _session_guards.push(lock.lock_owned().await);
         }
+        let mut cleared = 0usize;
         for sid in &pre_delete_sids {
             if let Ok(Some(old_session)) = self.memory.substrate.get_session(*sid) {
+                cleared += old_session.messages.len();
                 // Fire session:end before removing the old session.
                 self.governance.external_hooks.fire(
                     crate::hooks::ExternalHookEvent::SessionEnd,
@@ -368,7 +381,7 @@ impl LibreFangKernel {
             op = if save_summary { "reset" } else { "reboot" },
             "Agent-wide session wipe complete"
         );
-        Ok(())
+        Ok(cleared)
     }
 
     /// Implementation of [`ResetScope::Session`] — wipe exactly one session
@@ -396,13 +409,18 @@ impl LibreFangKernel {
     /// in the brief gap between reset and the next turn, the directory
     /// shows the row in SQL with no file; this is the same shape lazy
     /// session creation produces and is harmless.
+    /// Returns how many messages the session held before the wipe — read
+    /// under the same agent+session lock the delete takes, so an inbound
+    /// turn cannot make the ack under-report, and taken from the row the
+    /// ownership check already loaded rather than a second full decode
+    /// (#7701 review).
     async fn reset_one_session(
         &self,
         agent_id: AgentId,
         sid: SessionId,
         entry: &AgentEntry,
         save_summary: bool,
-    ) -> KernelResult<()> {
+    ) -> KernelResult<usize> {
         let agent_lock = self
             .agents
             .agent_msg_locks
@@ -434,6 +452,11 @@ impl LibreFangKernel {
                 )));
             }
         }
+        // Counted from the row already read under the lock, BEFORE
+        // `inject_reset_prompt` can add anything to the fresh session —
+        // a second `/new` with a configured reset prompt reports 0, not
+        // the injected messages (#7701 review).
+        let cleared = old_session.as_ref().map(|s| s.messages.len()).unwrap_or(0);
 
         // Fire SessionEnd + save summary only when the session actually
         // existed (no point summarising a never-touched per-channel sid).
@@ -532,7 +555,7 @@ impl LibreFangKernel {
             op = if save_summary { "reset" } else { "reboot" },
             "Per-session wipe complete (sibling sessions untouched)"
         );
-        Ok(())
+        Ok(cleared)
     }
 
     /// Best-effort removal of `<workspace>/sessions/{sid}.jsonl` mirrors after

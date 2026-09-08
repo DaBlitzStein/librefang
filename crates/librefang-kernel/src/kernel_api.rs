@@ -340,10 +340,10 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// per-session split (#4868). Async because it acquires the same
     /// per-agent / per-session message lock that `send_message_full` holds,
     /// to serialize against in-flight turns.
-    async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()>;
+    async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<usize>;
     /// Hard-reboot an agent's session(s) — no summary saved. See
     /// [`ResetScope`] for the agent-wide vs. per-session split (#4868).
-    async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()>;
+    async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<usize>;
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()>;
     /// Delete a single session by id and any process-local side-state keyed
     /// on it (currently the per-session `file_read_tracker` bucket — see
@@ -1165,10 +1165,10 @@ impl KernelApi for LibreFangKernel {
     ) -> KernelResult<String> {
         Self::compact_agent_session_with_id(self, agent_id, session_id, force).await
     }
-    async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
+    async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<usize> {
         Self::reset_session(self, agent_id, scope).await
     }
-    async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
+    async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<usize> {
         Self::reboot_session(self, agent_id, scope).await
     }
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
