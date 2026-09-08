@@ -233,13 +233,18 @@ pub(super) fn recover_text_tool_calls(
             continue;
         }
 
-        // Parse JSON input
+        // Parse the input: a JSON object, or — for the Hermes/Llama-3
+        // parameter style some GGUFs emit behind OpenAI-compatible proxies —
+        // a sequence of <parameter=NAME>value</parameter> pairs (#8235).
         let input: serde_json::Value = match serde_json::from_str(json_body) {
             Ok(v) => v,
-            Err(e) => {
-                warn!(tool = tool_name, error = %e, "Failed to parse text-based tool call JSON — skipping");
-                continue;
-            }
+            Err(e) => match parse_parameter_style_body(json_body) {
+                Some(v) => v,
+                None => {
+                    warn!(tool = tool_name, error = %e, "Failed to parse text-based tool call JSON — skipping");
+                    continue;
+                }
+            },
         };
 
         info!(
@@ -268,12 +273,20 @@ pub(super) fn recover_text_tool_calls(
         let inner = &text[after_tag..after_tag + close_offset];
         search_from = after_tag + close_offset + "</function>".len();
 
-        // The inner content is "tool_name{json}" — find the first '{' to split
-        let Some(brace_pos) = inner.find('{') else {
-            continue;
+        // The inner content is normally "tool_name{json}". The Hermes/Llama-3
+        // parameter style has no JSON object — the name runs up to the first
+        // '<' of the parameter markup instead (#8235), so split at whichever
+        // marker comes first.
+        let brace_pos = inner.find('{');
+        let angle_pos = inner.find('<');
+        let split_pos = match (brace_pos, angle_pos) {
+            (Some(b), Some(a)) => b.min(a),
+            (Some(b), None) => b,
+            (None, Some(a)) => a,
+            (None, None) => continue,
         };
-        let tool_name = inner[..brace_pos].trim();
-        let json_body = inner[brace_pos..].trim();
+        let tool_name = inner[..split_pos].trim();
+        let body = inner[split_pos..].trim();
 
         if tool_name.is_empty() {
             continue;
@@ -288,13 +301,17 @@ pub(super) fn recover_text_tool_calls(
             continue;
         }
 
-        // Parse JSON input
-        let input: serde_json::Value = match serde_json::from_str(json_body) {
+        // Parse JSON input, falling back to the parameter style when the
+        // body is not a JSON object (#8235).
+        let input: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => {
-                warn!(tool = tool_name, error = %e, "Failed to parse text-based tool call JSON (variant 2) — skipping");
-                continue;
-            }
+            Err(e) => match parse_parameter_style_body(body) {
+                Some(v) => v,
+                None => {
+                    warn!(tool = tool_name, error = %e, "Failed to parse text-based tool call JSON (variant 2) — skipping");
+                    continue;
+                }
+            },
         };
 
         // Avoid duplicates if pattern 1 already captured this call
@@ -618,6 +635,135 @@ pub(super) fn recover_text_tool_calls(
     }
 
     calls
+}
+
+/// A reply that is nothing but tool-call markup the recovery could not parse
+/// is replaced by this sentence (#8235). Delivering the raw syntax to the
+/// channel is the worst possible answer: it is truthful about nothing and
+/// unreadable to the user.
+const HONEST_UNRECOVERABLE_REPLY: &str = "I tried to call a tool, but the call could not be parsed, so no action was performed. Please send the request again, or start a fresh session with /reset.";
+
+/// Guard the delivered reply against raw tool-call syntax (#8235).
+///
+/// When a model answers with nothing but a tool call written as text that
+/// recovery could not parse — unknown tool, malformed body — the leftover
+/// markup is all the user would receive. A reply that starts with a known
+/// tool-call opener and leaves nothing once the markup spans are stripped is
+/// replaced by one honest sentence. Anything that starts with prose passes
+/// through untouched, even when it contains markup further in.
+pub(super) fn replace_unrecoverable_tool_call_reply(text: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = text.trim_start();
+    const OPENERS: &[&str] = &[
+        "<function=",
+        "<function>",
+        "<tool>",
+        "[TOOL_CALL]",
+        "<tool_call>",
+        "<|tool_call|>",
+    ];
+    if !OPENERS.iter().any(|o| trimmed.starts_with(o)) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    if strip_tool_call_spans(trimmed).trim().is_empty() {
+        std::borrow::Cow::Borrowed(HONEST_UNRECOVERABLE_REPLY)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+/// Remove every recognized tool-call markup span from `text`, keeping the
+/// prose between them. A span whose closer never appears is dropped to the
+/// end of the text — an unterminated call is not something to show either.
+fn strip_tool_call_spans(text: &str) -> String {
+    const SPANS: &[(&str, &str)] = &[
+        ("<function=", "</function>"),
+        ("<function>", "</function>"),
+        ("<tool>", "</tool>"),
+        ("[TOOL_CALL]", "[/TOOL_CALL]"),
+        ("<tool_call>", "```"),
+        ("<|tool_call|>", "<|/tool_call|>"),
+    ];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'outer: while !rest.is_empty() {
+        // Earliest opener wins, so prose before it is kept in order.
+        let mut earliest: Option<(usize, (&str, &str))> = None;
+        for (open, close) in SPANS {
+            if let Some(pos) = rest.find(open) {
+                if earliest.map_or(true, |(p, _)| pos < p) {
+                    earliest = Some((pos, (open, close)));
+                }
+            }
+        }
+        let Some((pos, (open, close))) = earliest else {
+            break 'outer;
+        };
+        out.push_str(&rest[..pos]);
+        let after_open = pos + open.len();
+        match rest[after_open..].find(close) {
+            Some(closer_off) => {
+                rest = &rest[after_open + closer_off + close.len()..];
+            }
+            None => {
+                // Unterminated span — drop the remainder.
+                break 'outer;
+            }
+        }
+    }
+    out
+}
+
+/// Parse the Hermes/Llama-3 parameter style some models emit inside the
+/// function tags: a sequence of `<parameter=NAME>value</parameter>` pairs
+/// instead of a JSON object (#8235). Values are free text — a `command`
+/// parameter routinely spans several lines — and the parser takes each value
+/// verbatim up to the first closing tag.
+fn parse_parameter_style_body(body: &str) -> Option<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    let mut search_from = 0;
+    let mut saw_any = false;
+    while let Some(start) = body[search_from..].find("<parameter=") {
+        let after_name = search_from + start + "<parameter=".len();
+        let Some(name_end) = body[after_name..].find('>') else {
+            break;
+        };
+        let name = body[after_name..after_name + name_end].trim();
+        let value_start = after_name + name_end + 1;
+        let Some(close_rel) = body[value_start..].find("</parameter>") else {
+            break;
+        };
+        let value = body[value_start..value_start + close_rel].trim();
+        search_from = value_start + close_rel + "</parameter>".len();
+        if name.is_empty() {
+            continue;
+        }
+        saw_any = true;
+        map.insert(name.to_string(), coerce_scalar(value));
+    }
+    if !saw_any {
+        return None;
+    }
+    Some(serde_json::Value::Object(map))
+}
+
+/// Type a raw parameter value the way the tool's input schema expects:
+/// integers, floats and booleans keep their JSON type, everything else is a
+/// string. A stringified `"180"` would be rejected downstream where the tool
+/// deserializes its arguments, so numeric recognition matters. `NaN`/`inf`
+/// parse as floats in Rust but have no JSON form, so they stay strings.
+fn coerce_scalar(raw: &str) -> serde_json::Value {
+    if let Ok(v) = raw.parse::<i64>() {
+        return v.into();
+    }
+    if raw == "true" || raw == "false" {
+        return serde_json::Value::Bool(raw == "true");
+    }
+    if let Ok(v) = raw.parse::<f64>() {
+        if let Some(n) = serde_json::Number::from_f64(v) {
+            return serde_json::Value::Number(n);
+        }
+    }
+    serde_json::Value::String(raw.to_string())
 }
 
 /// Parse a JSON object that represents a tool call.

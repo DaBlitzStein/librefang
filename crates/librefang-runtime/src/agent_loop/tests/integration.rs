@@ -2212,6 +2212,107 @@ fn test_recover_text_tool_calls_multiple() {
     assert_eq!(calls[1].name, "read_file");
 }
 
+// #8235: models served behind OpenAI-compatible proxies (Hermes/Llama-3
+// tool-call format) emit the parameters as <parameter=NAME>value</parameter>
+// pairs instead of a JSON object. Verbatim shape from a production host:
+// the command value spans multiple lines and one parameter is numeric.
+#[test]
+fn test_recover_parameter_style_tool_call() {
+    let tools = vec![ToolDefinition {
+        name: "shell_exec".into(),
+        description: "Run a shell command".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text = concat!(
+        "<function=shell_exec>\n",
+        "<parameter=command>\n",
+        "export PATH=\"/home/u/.nvm/versions/node/v22/bin:$PATH\"\n",
+        "mercadona product 3024 --json\n",
+        "</parameter>\n",
+        "<parameter=timeout_seconds>\n",
+        "180\n",
+        "</parameter>\n",
+        "</function>"
+    );
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1, "a parameter-style call must be recovered");
+    assert_eq!(calls[0].name, "shell_exec");
+    assert_eq!(
+        calls[0].input["command"],
+        concat!(
+            "export PATH=\"/home/u/.nvm/versions/node/v22/bin:$PATH\"\n",
+            "mercadona product 3024 --json"
+        ),
+        "a multi-line parameter value must survive intact"
+    );
+    assert_eq!(
+        calls[0].input["timeout_seconds"],
+        serde_json::json!(180),
+        "a numeric parameter must arrive as a number, not a string"
+    );
+}
+
+#[test]
+fn test_recover_parameter_style_variant2() {
+    // Variant 2 shape (<function>NAME…</function>) with a parameter body and
+    // no JSON object. Before #8235 the search for '{' failed and the call
+    // was dropped.
+    let tools = vec![ToolDefinition {
+        name: "shell_exec".into(),
+        description: "Run a shell command".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text = "<function>shell_exec<parameter=command>ls -la</parameter></function>";
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].input["command"], "ls -la");
+}
+
+#[test]
+fn test_parameter_style_unknown_tool_is_still_rejected() {
+    let tools = vec![ToolDefinition {
+        name: "shell_exec".into(),
+        description: "Run a shell command".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text = "<function=hack_system><parameter=command>rm -rf /</parameter></function>";
+    let calls = recover_text_tool_calls(text, &tools);
+    assert!(
+        calls.is_empty(),
+        "the parameter fallback must not bypass the name check"
+    );
+}
+
+#[test]
+fn test_pure_tool_call_markup_is_replaced_with_honest_reply() {
+    // A model that answered with nothing but an unparseable tool call would
+    // otherwise deliver the raw syntax to the channel (#8235).
+    let text = "<function=shell_exec>\n<parameter=command>ls</parameter>\n<parameter=timeout_seconds>5</parameter>\n</function>";
+    let out = replace_unrecoverable_tool_call_reply(text);
+    assert!(
+        !out.contains("<function=") && !out.contains("<parameter="),
+        "raw tool-call syntax must never reach the user, got: {out:?}"
+    );
+    assert!(
+        !out.trim().is_empty(),
+        "the replacement must say something honest"
+    );
+}
+
+#[test]
+fn test_markup_mixed_with_prose_is_delivered_unchanged() {
+    let text =
+        "I could not run that. <function=shell_exec><parameter=command>ls</parameter></function>";
+    let out = replace_unrecoverable_tool_call_reply(text);
+    assert_eq!(out, text, "a reply that starts with prose passes through");
+}
+
+#[test]
+fn test_normal_text_untouched_by_reply_guard() {
+    let text = "Here are the prices I found: piña 1,20 €.";
+    assert_eq!(replace_unrecoverable_tool_call_reply(text), text);
+}
+
 #[test]
 fn test_recover_text_tool_calls_no_pattern() {
     let tools = vec![ToolDefinition {

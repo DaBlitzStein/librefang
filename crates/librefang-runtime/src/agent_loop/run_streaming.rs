@@ -1004,6 +1004,19 @@ async fn run_agent_loop_streaming_inner(
                     crate::reply_directives::parse_directives(&text);
                 let text = cleaned_text_s;
 
+                // #8235: a reply that is nothing but tool-call markup the
+                // recovery could not parse must not reach the channel as raw
+                // syntax — say something honest instead. When recovery did
+                // promote a call, the markup is already gone from the text.
+                let text = if tools_recovered_from_text {
+                    text
+                } else {
+                    match replace_unrecoverable_tool_call_reply(&text) {
+                        std::borrow::Cow::Borrowed(_) => text,
+                        std::borrow::Cow::Owned(replacement) => replacement,
+                    }
+                };
+
                 // NO_REPLY: agent intentionally chose not to reply
                 if is_no_reply(&text) || parsed_directives_s.silent {
                     let reason = if parsed_directives_s.silent {

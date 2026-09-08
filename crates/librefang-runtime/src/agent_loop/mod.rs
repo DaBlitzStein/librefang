@@ -73,7 +73,7 @@ use self::prompt::{
     RecallSetupContext,
 };
 use self::retry::call_with_retry;
-use self::text_recovery::recover_text_tool_calls;
+use self::text_recovery::{recover_text_tool_calls, replace_unrecoverable_tool_call_reply};
 use self::tool_call::{
     append_skipped_tool_results, execute_single_tool_call, execute_tool_group,
     handle_mid_turn_signal, stage_tool_use_turn, tool_use_blocks_from_calls,
@@ -1441,6 +1441,19 @@ async fn run_agent_loop_inner(
                 let (cleaned_text, parsed_directives) =
                     crate::reply_directives::parse_directives(&text);
                 let text = cleaned_text;
+
+                // #8235: a reply that is nothing but tool-call markup the
+                // recovery could not parse must not reach the channel as raw
+                // syntax — say something honest instead. When recovery did
+                // promote a call, the markup is already gone from the text.
+                let text = if tools_recovered_from_text {
+                    text
+                } else {
+                    match replace_unrecoverable_tool_call_reply(&text) {
+                        std::borrow::Cow::Borrowed(_) => text,
+                        std::borrow::Cow::Owned(replacement) => replacement,
+                    }
+                };
 
                 // NO_REPLY: agent intentionally chose not to reply
                 if is_no_reply(&text) || parsed_directives.silent {
