@@ -452,6 +452,33 @@ impl LibreFangKernel {
         let model_catalog = self.llm.model_catalog.load();
         if let Some(resolved) = model_catalog.resolve_alias(&profile.model) {
             profile.model = resolved.to_string();
+        } else if model_catalog.find_model(&profile.model).is_none()
+            && !{
+                // #7781 review: a remote provider whose catalog lists models
+                // validates ids — posting the literal alias "sonnet" to it fails
+                // with 404 on *every* routed turn, and the credential gate below
+                // cannot see it (the key is fine). Decline to route when the
+                // catalog knows this provider well enough to reject the id.
+                // Local providers (ollama, llama.cpp) accept any model string
+                // and never appear in the catalog, and a remote provider the
+                // catalog lists no models for (offline, unsynced, custom) cannot
+                // be judged — in both cases the id passes through untouched.
+                let is_local =
+                    librefang_runtime::provider_health::is_local_provider(&profile.provider);
+                let provider_has_models = !model_catalog
+                    .models_by_provider(&profile.provider)
+                    .is_empty();
+                is_local || !provider_has_models
+            }
+        {
+            warn!(
+                agent = %manifest.name,
+                profile = %profile.name,
+                provider = %profile.provider,
+                unresolved_model = %profile.model,
+                "Profile routing skipped — the catalog lists this provider and does not know this model id; using the agent's own model"
+            );
+            return None;
         }
 
         if profile.provider != manifest.model.provider {
@@ -1106,11 +1133,26 @@ impl LibreFangKernel {
         } else if let (ModelSelectionPath::Profile, Some(profile)) =
             (selection_path, routed_profile)
         {
+            // #7781 review: a provider change must also drop the per-agent
+            // api_key_env / base_url overrides — they described the previous
+            // provider's endpoint and would send the routed request to the
+            // wrong place with the wrong credentials. Same contract
+            // `set_agent_model` applies (`agent_state.rs:269-278`).
+            let prev_provider = manifest.model.provider.clone();
+            if prev_provider != profile.provider {
+                manifest.model.api_key_env = None;
+                manifest.model.base_url = None;
+            }
             manifest.model.provider = profile.provider;
             manifest.model.model = profile.model;
-            if profile.context_window.is_some() {
-                manifest.model.context_window = profile.context_window;
-            }
+            // `context_window` / `max_output_tokens` are limits that describe
+            // what the *endpoint* can do, not preferences of the agent
+            // (`ModelConfig`'s doc, librefang-types/src/agent.rs). After
+            // routing the endpoint is a different one, so a profile that
+            // does not carry them must not leave the previous model's limits
+            // in place — that would cap the new model at the old model's
+            // window (#7781 review).
+            manifest.model.context_window = profile.context_window;
         } else if let (ModelSelectionPath::Tier, Some(routing_config)) =
             (selection_path, tier_routing_config)
         {

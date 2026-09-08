@@ -814,6 +814,10 @@ pub async fn get_agent_model_routing(
                 .and_then(|o| o.cost_budget)
                 .map(|t| t.as_str()),
             "default_profile": router_override.and_then(|o| o.default_profile.clone()),
+            // Readable so a client can round-trip it (#7781 review) — the
+            // per-agent opt-out was write-only before: no surface could
+            // know it was set.
+            "fixed": router_override.map(|o| o.fixed).unwrap_or(false),
         })),
     )
 }
@@ -857,6 +861,13 @@ pub async fn set_agent_model_routing(
         }
     };
 
+    // #6695: refuse to change the manifest of an agent the deployment
+    // provisioned — every other manifest-mutating PUT in this file has it;
+    // this one writes manifest.model.mode and router_override (#7781 review).
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
+
     let mode = match body["mode"].as_str() {
         Some("flexible") => ModelMode::Flexible,
         // Absent or explicit "fixed" both mean fixed — the backward-compatible
@@ -885,9 +896,9 @@ pub async fn set_agent_model_routing(
             })
             .unwrap_or_default();
 
-        let cost_budget = match &body["cost_budget"] {
-            serde_json::Value::Null => None,
-            serde_json::Value::String(s) => match CostTier::parse(s) {
+        let cost_budget = match body.get("cost_budget") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => match CostTier::parse(s) {
                 Some(tier) => Some(tier),
                 None => {
                     return (
@@ -901,14 +912,50 @@ pub async fn set_agent_model_routing(
                     )
                 }
             },
-            _ => None,
+            // A non-string, non-null `cost_budget` (a number, a boolean
+            // from an unset form toggle) must not silently read as "no
+            // cap" — that hands the agent the most expensive tier (#7781
+            // review). Reject it the same way an unknown string is.
+            Some(other) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": t.t_args(
+                            "api-error-generic",
+                            &[("error", &format!("cost_budget must be 'cheap', 'medium', 'expensive' or null, got {}", serde_json::to_string(other).unwrap_or_default()))],
+                        )
+                    })),
+                );
+            }
+        };
+
+        // #7781 review: read-modify-write. `fixed` is the documented
+        // per-agent opt-out and `default_profile` survives a save that does
+        // not carry it — rebuilding the override wholesale from the body
+        // dropped both, and `fixed` was not even readable through the GET.
+        let existing = state
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .and_then(|e| e.manifest.model.router_override.clone());
+        let fixed = body["fixed"]
+            .as_bool()
+            .or(existing.as_ref().map(|o| o.fixed))
+            .unwrap_or(false);
+        // Absent or null preserves the stored value (a save from a surface
+        // that does not model the field must not destroy it); an explicit
+        // empty string clears it — the one way a client can say "no default".
+        let default_profile = match body["default_profile"].as_str() {
+            Some(s) if !s.is_empty() => Some(String::from(s)),
+            Some(_) => None,
+            None => existing.as_ref().and_then(|o| o.default_profile.clone()),
         };
 
         Some(AgentRouterOverride {
-            fixed: false,
+            fixed,
             allowed_profiles,
             cost_budget,
-            default_profile: body["default_profile"].as_str().map(String::from),
+            default_profile,
         })
     } else {
         None
