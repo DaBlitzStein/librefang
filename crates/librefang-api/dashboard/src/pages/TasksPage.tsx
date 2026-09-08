@@ -12,8 +12,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   Loader2,
-  ArrowUpNarrowWide,
-  Hourglass,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -48,16 +46,6 @@ const COLUMNS: Array<{
   { key: "cancelled",   labelKey: "tasks.col_cancelled",   variant: "default", statuses: ["cancelled"] },
 ];
 
-// Operator-facing priority levels. The engine takes any integer and orders the
-// claim queue `priority DESC, created_at ASC`; these are the named rungs the
-// board offers. 0 is the neutral default every historical task carries.
-const PRIORITY_LEVELS: Array<{ value: number; labelKey: string }> = [
-  { value: 2,  labelKey: "tasks.priority_urgent" },
-  { value: 1,  labelKey: "tasks.priority_high" },
-  { value: 0,  labelKey: "tasks.priority_normal" },
-  { value: -1, labelKey: "tasks.priority_low" },
-];
-
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // `assigned_to` is stored as whichever spelling the poster used: the backend's
@@ -82,21 +70,6 @@ function taskMatchesAgent(
   if (!raw) return false;
   if (raw === agentId) return true;
   return agentsById.get(agentId)?.name === raw;
-}
-
-// A deadline badge that rounds is worse than no badge: an operator who set 90s
-// and reads "2m" will mistrust the field. Keep one decimal when the value does
-// not divide evenly, so the rendered figure is always the one that was set.
-function formatTimeout(secs: number | null | undefined): string | null {
-  if (secs === null || secs === undefined) return null;
-  if (secs === 0) return "∞";
-  if (secs < 60) return `${secs}s`;
-  if (secs < 3600) {
-    const mins = secs / 60;
-    return Number.isInteger(mins) ? `${mins}m` : `${mins.toFixed(1)}m`;
-  }
-  const hrs = secs / 3600;
-  return Number.isInteger(hrs) ? `${hrs}h` : `${hrs.toFixed(1)}h`;
 }
 
 function relativeTime(iso?: string): string {
@@ -212,31 +185,6 @@ function TaskCard({ task, isDragTarget, onDragStart, agentsById }: TaskCardProps
           </span>
         ) : (
           <span className="text-[10px] text-text-dim/50 italic shrink-0">{t("tasks.unassigned")}</span>
-        )}
-        {/* Only a non-neutral priority is worth pixels — every historical task
-            carries 0, so badging it would be noise on the whole board. */}
-        {typeof task.priority === "number" && task.priority !== 0 && (
-          <span
-            title={t("tasks.priority_tooltip")}
-            className={`flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-md shrink-0
-              ${task.priority > 0 ? "text-warning bg-warning/10" : "text-text-dim/60 bg-main/50"}`}
-          >
-            <ArrowUpNarrowWide className="w-2.5 h-2.5" />
-            {t(
-              PRIORITY_LEVELS.find((p) => p.value === task.priority)?.labelKey
-                ?? "tasks.priority_custom",
-              { value: task.priority },
-            )}
-          </span>
-        )}
-        {formatTimeout(task.timeout_secs) && (
-          <span
-            title={t("tasks.timeout_tooltip")}
-            className="flex items-center gap-1 text-[10px] font-mono text-text-dim/60 bg-main/50 px-1.5 py-0.5 rounded-md shrink-0"
-          >
-            <Hourglass className="w-2.5 h-2.5" />
-            {formatTimeout(task.timeout_secs)}
-          </span>
         )}
         {task.created_by && (
           <span className="text-[10px] text-text-dim/50 shrink-0">
@@ -412,28 +360,17 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assignee, setAssignee] = useState("");
-  const [priority, setPriority] = useState(0);
-  // Kept as a string so the field can be genuinely empty ("inherit the global
-  // TTL"), which `0` cannot express — `0` means "never reclaim".
-  const [timeout, setTimeout] = useState("");
-
-  const timeoutSecs = timeout.trim() === "" ? undefined : Number(timeout);
-  const timeoutInvalid =
-    timeoutSecs !== undefined && (!Number.isInteger(timeoutSecs) || timeoutSecs < 0);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!title.trim() || !description.trim() || timeoutInvalid) return;
+    if (!title.trim() || !description.trim()) return;
     createMutation.mutate({
       title: title.trim(),
       description: description.trim(),
       ...(assignee ? { assigned_to: assignee } : {}),
-      ...(priority !== 0 ? { priority } : {}),
-      ...(timeoutSecs !== undefined ? { timeout_secs: timeoutSecs } : {}),
     });
   }
 
-  // Reset form when modal opens
   // Reset form when modal opens. The previous `if (isOpen && !prev.current)
   // setX(...)` block called setState during render, which React strict-mode
   // warns against and can misbehave under Suspense / concurrent rendering.
@@ -442,8 +379,6 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       setTitle("");
       setDescription("");
       setAssignee("");
-      setPriority(0);
-      setTimeout("");
     }
   }, [isOpen]);
 
@@ -509,40 +444,6 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           )}
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs font-semibold text-text-dim mb-1.5">
-              {t("tasks.field_priority")}
-            </label>
-            <select
-              value={priority}
-              onChange={(e) => setPriority(Number(e.target.value))}
-              className={INPUT_CLASS}
-            >
-              {PRIORITY_LEVELS.map((p) => (
-                <option key={p.value} value={p.value}>{t(p.labelKey)}</option>
-              ))}
-            </select>
-            <p className="mt-1 text-[10px] text-text-dim/50">{t("tasks.field_priority_hint")}</p>
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-text-dim mb-1.5">
-              {t("tasks.field_timeout")}
-            </label>
-            <input
-              type="number"
-              min={0}
-              step={1}
-              value={timeout}
-              onChange={(e) => setTimeout(e.target.value)}
-              placeholder={t("tasks.field_timeout_placeholder")}
-              className={`${INPUT_CLASS} ${timeoutInvalid ? "border-error" : ""}`}
-            />
-            <p className="mt-1 text-[10px] text-text-dim/50">{t("tasks.field_timeout_hint")}</p>
-          </div>
-        </div>
-
         {createMutation.isError && (
           <p className="text-xs text-error">
             {createMutation.error instanceof Error
@@ -569,7 +470,7 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
             className="flex-1"
             isLoading={createMutation.isPending}
             disabled={
-              !title.trim() || !description.trim() || timeoutInvalid || createMutation.isPending
+              !title.trim() || !description.trim() || createMutation.isPending
             }
           >
             {t("tasks.submit")}
@@ -612,10 +513,13 @@ export function TasksPage() {
     [agents],
   );
 
-  // Apply agent filter
+  // Apply agent filter. Filtered from `validTasks`, not `allTasks` — an
+  // id-less row can never render a card (`KanbanColumn` drops it), so
+  // counting it here would make the column/total tiles disagree with
+  // what's actually on the board.
   const filteredTasks = agentFilter
-    ? allTasks.filter((t) => taskMatchesAgent(t, agentFilter, agentsById))
-    : allTasks;
+    ? validTasks.filter((t) => taskMatchesAgent(t, agentFilter, agentsById))
+    : validTasks;
 
   // Group by status
   function getColumnTasks(statuses: string[]): TaskQueueItem[] {
