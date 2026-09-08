@@ -2551,7 +2551,11 @@ pub fn spawn_save_memory_config(
             )));
             return;
         };
-        let client = make_daemon_client(api_key.as_deref());
+        // This write reads config.toml, rewrites it, and runs a full
+        // `reload_config()` that can rebuild the embedding/extraction
+        // drivers and rescan skills — the 5 s default is a read timeout
+        // sized for a GET, not for this.
+        let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(30));
         let mut proactive_memory = serde_json::json!({
             "auto_memorize": auto_memorize,
             "auto_retrieve": auto_retrieve,
@@ -2572,7 +2576,26 @@ pub fn spawn_save_memory_config(
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
-                    Ok(())
+                    // The endpoint's contract: PATCH returns 200 on every
+                    // path that reached disk, and `body.status` — not the
+                    // HTTP status — discriminates a clean save ("applied")
+                    // from one where the write succeeded but the live
+                    // reload failed ("partial", `restart_required: true`).
+                    // Treating 200 alone as success reports that case as a
+                    // clean "Saved" with the daemon still on the boot
+                    // snapshot.
+                    match resp.json::<serde_json::Value>() {
+                        Ok(json) if json["status"].as_str() == Some("applied") => Ok(()),
+                        Ok(json) => {
+                            let mut reason = crate::i18n::t("tui-memory-config-save-partial");
+                            if let Some(err) = json["reload_error"].as_str() {
+                                reason.push_str(": ");
+                                reason.push_str(err);
+                            }
+                            Err(FetchFailure::Error(reason))
+                        }
+                        Err(e) => Err(FetchFailure::Error(e.to_string())),
+                    }
                 } else {
                     // The body is where the API explains a 400; a status line
                     // reading "400 Bad Request" alone does not say which field.
