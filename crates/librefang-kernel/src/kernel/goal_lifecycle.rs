@@ -117,6 +117,9 @@ impl LibreFangKernel {
             .map(|g| g.title)
             .unwrap_or_else(|| format!("Goal {goal_id}"));
         let on_learnings = move |learnings: Vec<String>| {
+            if !should_queue_learnings(&workshop) {
+                return;
+            }
             queue_learnings_as_pending_skill(
                 &skills_dir,
                 agent_id,
@@ -316,6 +319,22 @@ fn learned_skill_body(goal_title: &str, learnings: &[String]) -> String {
 /// The tag is what a reviewer sees in `librefang skill pending show`, so it names the producer, not the shape.
 const LEARNED_CAPTURE_TRIGGER: &str = "goal_learned";
 
+/// Whether a goal run's captured `GOAL_LEARNED:` lessons should be queued as
+/// a pending skill draft at all.
+///
+/// The workshop is default-OFF and opted into per agent (`agent.toml:
+/// [skill_workshop] enabled = true`) — see [`SkillWorkshopConfig::default`].
+/// Without this gate a goal run queued a draft for every agent regardless of
+/// that setting, because `on_learnings_captured` had no reason to read it:
+/// nothing else in the goal-run path consults the workshop config, only the
+/// approval-side CLI / API / dashboard do. `auto_capture` is checked too —
+/// it is the independent "run the capture scan at all" toggle every other
+/// automatic capture path in the workshop already gates on (see
+/// `skill_workshop::mod.rs`).
+fn should_queue_learnings(workshop: &SkillWorkshopConfig) -> bool {
+    workshop.enabled && workshop.auto_capture
+}
+
 /// Queue a run's lessons as a pending skill draft awaiting human approval.
 ///
 /// The lessons are model-authored text an autonomous loop wrote about itself, so they go where every other machine-proposed skill goes: the workshop's `pending/` queue (#3328), promoted only by an explicit `librefang skill pending approve` / `POST /api/skills/pending/{id}/approve`.
@@ -430,6 +449,35 @@ fn goal_tick_sender_context(agent_id: AgentId, goal_id: GoalId) -> SenderContext
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The workshop is default-OFF: a goal run must not queue a pending
+    /// skill draft for an agent that never opted in.
+    #[test]
+    fn should_queue_learnings_is_false_by_default() {
+        assert!(!should_queue_learnings(&SkillWorkshopConfig::default()));
+    }
+
+    #[test]
+    fn should_queue_learnings_is_true_once_opted_in() {
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            ..SkillWorkshopConfig::default()
+        };
+        assert!(should_queue_learnings(&workshop));
+    }
+
+    /// `auto_capture` is the independent scan toggle within an enabled
+    /// workshop — turning it off must still block queuing, matching every
+    /// other automatic capture path.
+    #[test]
+    fn should_queue_learnings_is_false_when_auto_capture_is_off() {
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            auto_capture: false,
+            ..SkillWorkshopConfig::default()
+        };
+        assert!(!should_queue_learnings(&workshop));
+    }
 
     #[test]
     fn evaluator_verdict_reads_a_bare_yes_or_no() {
