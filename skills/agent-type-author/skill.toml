@@ -1,10 +1,3 @@
-[skill]
-name = "agent-type-author"
-version = "0.1.0"
-description = "Design, create and test complete agent types on demand with agent_type_create and agent_spawn."
-author = "librefang"
-tags = ["agent-types", "templates", "design", "onboarding"]
-
 prompt_context = """
 # Agent-Type Author
 
@@ -51,3 +44,10 @@ If the requester needs one of those, say it is not supported by the tool yet rat
 - **The type is a starting point, not a straitjacket.** Instances can override model and settings per agent; the type only has to be a good default.
 - **Reuse before creating.** If an existing type already covers the need, say so and propose using it instead of duplicating it.
 """
+
+[skill]
+name = "agent-type-author"
+version = "0.1.0"
+description = "Design, create and test complete agent types on demand with agent_type_create and agent_spawn."
+author = "librefang"
+tags = ["agent-types", "templates", "design", "onboarding"]

@@ -46,7 +46,7 @@ Each step needs:
 |------------|----------|
 | `fail` (default) | Stop the workflow on error |
 | `skip` | Continue to the next step |
-| `retry` | Retry the step with backoff |
+| `{"retry": {"max_retries": N}}` | Retry the step, up to `max_retries` times |
 
 ### Dependencies and variables
 
@@ -59,10 +59,12 @@ Declare `input_schema` so callers know what to pass to `workflow_run`:
 
 ```json
 [
-  { "name": "repo_url", "type": "string", "description": "Repository URL to analyze", "required": true },
-  { "name": "max_depth", "type": "number", "description": "Max analysis depth", "required": false }
+  { "name": "repo_url", "param_type": "string", "description": "Repository URL to analyze", "required": true },
+  { "name": "max_depth", "param_type": "number", "description": "Max analysis depth", "required": false }
 ]
 ```
+
+Note the key is `param_type`, not `type`.
 
 ## Examples
 
@@ -98,7 +100,7 @@ Ask the user which agents they have, then design:
     }
   ],
   "input_schema": [
-    { "name": "code_diff", "type": "string", "description": "Git diff or code to review", "required": true }
+    { "name": "code_diff", "param_type": "string", "description": "Git diff or code to review", "required": true }
   ]
 }
 ```
@@ -130,7 +132,7 @@ Ask the user which agents they have, then design:
     }
   ],
   "input_schema": [
-    { "name": "topic", "type": "string", "description": "Topic for the briefing", "required": true }
+    { "name": "topic", "param_type": "string", "description": "Topic for the briefing", "required": true }
   ]
 }
 ```
