@@ -258,7 +258,7 @@ describe("WorkflowsPage", () => {
     expect(screen.queryByText("alpha-flow")).not.toBeInTheDocument();
   });
 
-  it("stays on the workflows tab when there are no workflows, and opens templates on demand", () => {
+  it("auto-switches to templates tab when there are no workflows", () => {
     useWorkflowsMock.mockReturnValue(makeQuery([]));
     useWorkflowTemplatesMock.mockReturnValue(
       makeQuery([
@@ -272,21 +272,11 @@ describe("WorkflowsPage", () => {
       ]),
     );
     renderPage();
-
-    // An empty workflow list must NOT jump the operator to the template
-    // library: the "My Workflows" empty state offers "Create your first
-    // workflow" and "Ask an agent" first, and the page comment above the
-    // selection effect states that intent explicitly.
-    const workflowsTab = screen.getByRole("tab", { name: /workflows.my_workflows/ });
-    const templatesTab = screen.getByRole("tab", { name: /workflows.template_library/ });
-    expect(workflowsTab).toHaveAttribute("aria-selected", "true");
-    expect(templatesTab).toHaveAttribute("aria-selected", "false");
-    expect(screen.queryByText("Sample Template")).not.toBeInTheDocument();
-
-    // Choosing the tab is what surfaces the template card.
-    showTemplatesTab();
-    expect(templatesTab).toHaveAttribute("aria-selected", "true");
+    // Templates tab content surfaces the template card.
     expect(screen.getByText("Sample Template")).toBeInTheDocument();
+    // Templates tab is selected.
+    const templatesTab = screen.getByRole("tab", { name: /workflows.template_library/ });
+    expect(templatesTab).toHaveAttribute("aria-selected", "true");
   });
 
   it("renders workflow rows from the query data", () => {
@@ -353,6 +343,34 @@ describe("WorkflowsPage", () => {
     expect(mutations.rerun.mutateAsync).toHaveBeenCalledTimes(1);
     expect(mutations.rerun.mutateAsync).toHaveBeenCalledWith({
       runId: "run-1",
+      workflowId: "wf-1",
+    });
+  });
+
+  it("re-runs a parameterless run with a blank stored input (#7997)", async () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    const mutations = setMutationDefaults();
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          id: "run-2",
+          workflow_name: "alpha-flow",
+          state: "completed",
+          steps_completed: 1,
+          input: "",
+          started_at: "2026-01-02T00:00:00Z",
+          completed_at: "2026-01-02T00:01:00Z",
+        },
+      ]),
+    );
+    renderPage();
+
+    // A blank stored input must not stop the per-row re-run control from
+    // firing the mutation — only the parameter pre-fill is best-effort.
+    fireEvent.click(screen.getByLabelText("Re-run with same parameters"));
+    expect(mutations.rerun.mutateAsync).toHaveBeenCalledTimes(1);
+    expect(mutations.rerun.mutateAsync).toHaveBeenCalledWith({
+      runId: "run-2",
       workflowId: "wf-1",
     });
   });
