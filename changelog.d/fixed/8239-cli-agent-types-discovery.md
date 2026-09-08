@@ -1,0 +1,4 @@
+`librefang agent new` no longer skips an agent type created through the dashboard editor or the `agent_type_create` tool.
+`discover_template_dirs` in the CLI only ever scanned `workspaces/agents/` and `LIBREFANG_AGENTS_DIR`, both a directory per type, so it never looked at `~/.librefang/agent-types/` — the flat `{name}.toml` store that has been the canonical destination for an operator-authored type since #7758.
+The kernel's own `agent_template_candidates` already searched that store first, so a type an operator just created was immediately runnable from a workflow step and from the dashboard, but invisible to the one command an operator is most likely to reach for right after creating it.
+`load_all_templates` now reads the flat store first, ahead of the directory-per-type sources, matching the kernel's precedence so an `agent-types/` entry wins over a stale same-named workspace rather than being shadowed by it. (#8239) (@DaBlitzStein)

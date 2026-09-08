@@ -12,21 +12,31 @@ pub struct AgentTemplate {
     pub content: String,
 }
 
-/// Discover template directories. Checks:
-/// 1. The repo `agents/` dir (for dev builds)
-/// 2. `~/.librefang/workspaces/agents/` (installed templates)
-/// 3. `LIBREFANG_AGENTS_DIR` env var
-pub fn discover_template_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    // Installed templates (respects LIBREFANG_HOME)
-    let of_home = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
+/// Resolve `$LIBREFANG_HOME`, falling back to `~/.librefang`.
+fn librefang_home() -> PathBuf {
+    if let Ok(h) = std::env::var("LIBREFANG_HOME") {
         PathBuf::from(h)
     } else if let Some(home) = dirs::home_dir() {
         home.join(".librefang")
     } else {
         std::env::temp_dir().join(".librefang")
-    };
+    }
+}
+
+/// Discover directory-per-type template directories. Checks:
+/// 1. `~/.librefang/workspaces/agents/` (installed / live-agent templates)
+/// 2. `LIBREFANG_AGENTS_DIR` env var
+///
+/// This does NOT include `~/.librefang/agent-types/` — that store is a flat
+/// `{name}.toml` per type (#7758), not a directory per type, so scanning it
+/// the same way would silently find nothing. `load_all_templates` reads it
+/// separately, ahead of these, matching the precedence the kernel's
+/// `agent_template_candidates` already applies (#8239).
+pub fn discover_template_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    // Installed templates (respects LIBREFANG_HOME)
+    let of_home = librefang_home();
     {
         let agents = of_home.join("workspaces").join("agents");
         if agents.is_dir() && !dirs.contains(&agents) {
@@ -50,7 +60,35 @@ pub fn load_all_templates() -> Vec<AgentTemplate> {
     let mut templates = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    // First: load from filesystem (user-installed or dev repo)
+    // First: the canonical operator-authored store, `agent-types/<type>.toml`
+    // — one flat file per type, written by the dashboard editor and by the
+    // `agent_type_create` tool (#7758). Highest precedence, same as the
+    // kernel's `agent_template_candidates`.
+    let agent_types_dir = librefang_types::agent_type_store::agent_types_dir_in(&librefang_home());
+    if let Ok(entries) = std::fs::read_dir(&agent_types_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let Some(name) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if name == "custom" || !seen_names.insert(name.clone()) {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let description = extract_description(&content);
+                templates.push(AgentTemplate {
+                    name,
+                    description,
+                    content,
+                });
+            }
+        }
+    }
+
+    // Then: directory-per-type layouts (installed templates, env override).
     for dir in discover_template_dirs() {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
@@ -288,6 +326,119 @@ description = "second"
 
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&empty_home);
+    }
+
+    /// Regression for #8239: a type written only into the canonical
+    /// `agent-types/<name>.toml` store (the destination `POST /api/templates`
+    /// and `agent_type_create` both use) must show up in `load_all_templates`,
+    /// not just be visible to the kernel's own `agent_template_candidates`.
+    #[test]
+    fn load_all_templates_finds_type_written_only_to_agent_types_dir() {
+        let _guard = env_lock();
+
+        let home = std::env::temp_dir().join("librefang-cli-templates-test-8239-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let agent_types_dir = librefang_types::agent_type_store::agent_types_dir_in(&home);
+        std::fs::create_dir_all(&agent_types_dir).unwrap();
+        std::fs::write(
+            agent_types_dir.join("dashboard-only.toml"),
+            "name = \"dashboard-only\"\ndescription = \"created via the dashboard\"\n",
+        )
+        .unwrap();
+
+        let prev_home = std::env::var("LIBREFANG_HOME").ok();
+        let prev_agents = std::env::var("LIBREFANG_AGENTS_DIR").ok();
+        // SAFETY: serialized on ENV_LOCK.
+        unsafe {
+            std::env::set_var("LIBREFANG_HOME", &home);
+            std::env::remove_var("LIBREFANG_AGENTS_DIR");
+        }
+
+        let templates = load_all_templates();
+
+        // SAFETY: see above — still under ENV_LOCK.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+            match prev_agents {
+                Some(v) => std::env::set_var("LIBREFANG_AGENTS_DIR", v),
+                None => std::env::remove_var("LIBREFANG_AGENTS_DIR"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&home);
+
+        let names: Vec<&str> = templates.iter().map(|t| t.name.as_str()).collect();
+        let found = templates
+            .iter()
+            .find(|t| t.name == "dashboard-only")
+            .unwrap_or_else(|| panic!("dashboard-only type not found in {names:?}"));
+        assert_eq!(found.description, "created via the dashboard");
+    }
+
+    /// The flat `agent-types/` store must win over a same-named directory
+    /// under `workspaces/agents/`, matching the precedence the kernel's
+    /// `agent_template_candidates` already applies — otherwise editing a
+    /// type from the dashboard could appear to have no effect if a stale
+    /// live-agent workspace of the same name still exists.
+    #[test]
+    fn load_all_templates_prefers_agent_types_over_workspace_agent_of_same_name() {
+        let _guard = env_lock();
+
+        let home = std::env::temp_dir().join("librefang-cli-templates-test-8239-precedence");
+        let _ = std::fs::remove_dir_all(&home);
+
+        let agent_types_dir = librefang_types::agent_type_store::agent_types_dir_in(&home);
+        std::fs::create_dir_all(&agent_types_dir).unwrap();
+        std::fs::write(
+            agent_types_dir.join("shared-name.toml"),
+            "name = \"shared-name\"\ndescription = \"from agent-types\"\n",
+        )
+        .unwrap();
+
+        let workspace_dir = home.join("workspaces").join("agents").join("shared-name");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::write(
+            workspace_dir.join("agent.toml"),
+            "name = \"shared-name\"\ndescription = \"from workspaces/agents\"\n",
+        )
+        .unwrap();
+
+        let prev_home = std::env::var("LIBREFANG_HOME").ok();
+        let prev_agents = std::env::var("LIBREFANG_AGENTS_DIR").ok();
+        // SAFETY: serialized on ENV_LOCK.
+        unsafe {
+            std::env::set_var("LIBREFANG_HOME", &home);
+            std::env::remove_var("LIBREFANG_AGENTS_DIR");
+        }
+
+        let templates = load_all_templates();
+
+        // SAFETY: see above — still under ENV_LOCK.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+            match prev_agents {
+                Some(v) => std::env::set_var("LIBREFANG_AGENTS_DIR", v),
+                None => std::env::remove_var("LIBREFANG_AGENTS_DIR"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&home);
+
+        let matches: Vec<&AgentTemplate> = templates
+            .iter()
+            .filter(|t| t.name == "shared-name")
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one 'shared-name' entry, found {}",
+            matches.len()
+        );
+        assert_eq!(matches[0].description, "from agent-types");
     }
 
     #[test]
