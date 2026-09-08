@@ -588,9 +588,10 @@ export function useSetAgentSkills() {
  * detail Tools tab, which previously could only read MCP grant state and
  * pointed the operator at a non-existent "MCP servers tab" to change it.
  * `agentKeys.detail(id)` carries the `mcp_servers` / `mcp_servers_mode`
- * fields this tab reads, so invalidating it is what actually refreshes the
- * grant state; `agentKeys.mcpServers(id)` is invalidated too for forward
- * compatibility with a future dedicated GET hook.
+ * fields the group-level grant/revoke toggle reads, so invalidating it is
+ * what refreshes that; `agentKeys.mcpServers(id)` is invalidated too since
+ * `useAgentMcpServers` — the live GET behind this same tab's per-server
+ * detail — derives from the same PUT.
  */
 export function useSetAgentMcpServers() {
   const qc = useQueryClient();
