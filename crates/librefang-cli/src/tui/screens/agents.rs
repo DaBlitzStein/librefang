@@ -116,6 +116,10 @@ pub struct AgentSelectState {
     pub router_profile_cursor: usize,
     /// Index into [`COST_BUDGET_OPTIONS`].
     pub cost_budget_idx: usize,
+    /// The fallback profile loaded from the agent's stored routing settings.
+    /// Not editable from this screen — carried through unchanged on save so
+    /// it is not silently cleared (#7781 review).
+    pub router_default_profile: Option<String>,
 
     // Inference-parameter editor (detail view)
     pub model_params: super::model_params::ModelParamsEditor,
@@ -203,6 +207,9 @@ pub enum AgentAction {
         allowed_profiles: Vec<String>,
         /// `None` means "no cap".
         cost_budget: Option<String>,
+        /// Not editable from this screen — the value loaded from the
+        /// agent's stored settings, carried through unchanged (#7781 review).
+        default_profile: Option<String>,
     },
     /// Fetch an agent's model routing settings and the profile catalog.
     FetchAgentModelRouting(String),
@@ -258,6 +265,7 @@ impl AgentSelectState {
             router_profiles: Vec::new(),
             router_profile_cursor: 0,
             cost_budget_idx: 0,
+            router_default_profile: None,
             spawned_toml: None,
             status_msg: String::new(),
         }
@@ -283,6 +291,7 @@ impl AgentSelectState {
         self.router_profiles.clear();
         self.router_profile_cursor = 0;
         self.cost_budget_idx = 0;
+        self.router_default_profile = None;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -993,6 +1002,7 @@ impl AgentSelectState {
                         mode: self.model_mode.clone(),
                         allowed_profiles,
                         cost_budget,
+                        default_profile: self.router_default_profile.clone(),
                     };
                 }
                 self.sub = AgentSubScreen::AgentDetail;
@@ -2051,5 +2061,38 @@ mod tests {
             !toml.contains("max_llm_tokens_per_hour = 200000"),
             "template must not re-introduce the 200000 hourly cap"
         );
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// #7781 review: `default_profile` is not editable from this screen, so
+    /// saving a routing edit (Enter) must carry through whatever value was
+    /// loaded rather than silently dropping it.
+    #[test]
+    fn saving_model_routing_preserves_the_loaded_default_profile() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-1".to_string(),
+            ..AgentDetail::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_default_profile = Some("coder".to_string());
+
+        let action = state.handle_edit_model_routing(key(KeyCode::Enter));
+
+        match action {
+            AgentAction::UpdateModelRouting {
+                default_profile, ..
+            } => {
+                assert_eq!(
+                    default_profile,
+                    Some("coder".to_string()),
+                    "save must not clear the loaded default_profile"
+                );
+            }
+            _ => panic!("Enter must emit UpdateModelRouting"),
+        }
     }
 }

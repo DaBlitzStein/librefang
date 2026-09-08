@@ -344,6 +344,11 @@ pub enum AppEvent {
         mode: String,
         allowed_profiles: Vec<String>,
         cost_budget: Option<String>,
+        /// The fallback profile used when nothing else matches. Not
+        /// editable from this screen — carried through so a save that
+        /// only touches mode/allowlist/budget does not silently clear it
+        /// (#7781 review).
+        default_profile: Option<String>,
         available: Vec<String>,
     },
     /// Agent model routing updated.
@@ -2297,10 +2302,12 @@ pub fn spawn_fetch_agent_model_routing(
                         })
                         .unwrap_or_default();
                     let cost_budget = body["cost_budget"].as_str().map(String::from);
+                    let default_profile = body["default_profile"].as_str().map(String::from);
                     let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
                         mode,
                         allowed_profiles,
                         cost_budget,
+                        default_profile,
                         available,
                     });
                     return;
@@ -2344,11 +2351,13 @@ pub fn spawn_fetch_agent_model_routing(
             let cost_budget = router_override
                 .and_then(|o| o.cost_budget)
                 .map(|t| t.as_str().to_string());
+            let default_profile = router_override.and_then(|o| o.default_profile.clone());
 
             let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
                 mode,
                 allowed_profiles,
                 cost_budget,
+                default_profile,
                 available,
             });
         }
@@ -2356,12 +2365,17 @@ pub fn spawn_fetch_agent_model_routing(
 }
 
 /// Persist an agent's model routing mode and router override.
+///
+/// `default_profile` is not editable from this screen; it is the value the
+/// preceding [`spawn_fetch_agent_model_routing`] loaded, threaded through so
+/// a save of mode/allowlist/budget does not clear it (#7781 review).
 pub fn spawn_update_agent_model_routing(
     backend: BackendRef,
     agent_id: String,
     mode: String,
     allowed_profiles: Vec<String>,
     cost_budget: Option<String>,
+    default_profile: Option<String>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
@@ -2402,7 +2416,7 @@ pub fn spawn_update_agent_model_routing(
                         cost_budget: cost_budget
                             .as_deref()
                             .and_then(librefang_types::model_profile::CostTier::parse),
-                        default_profile: None,
+                        default_profile,
                     });
                 match kernel.set_agent_model_routing(aid, router_mode, router_override) {
                     Ok(()) => {

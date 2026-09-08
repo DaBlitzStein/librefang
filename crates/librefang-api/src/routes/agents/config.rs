@@ -846,6 +846,7 @@ pub async fn get_agent_model_routing(
 )]
 pub async fn set_agent_model_routing(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
@@ -866,6 +867,27 @@ pub async fn set_agent_model_routing(
     // this one writes manifest.model.mode and router_override (#7781 review).
     if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
         return refusal;
+    }
+
+    // #7781 review: an unknown agent id must not fall through to the kernel
+    // call below, which reports it as a 400 — the same shape as a malformed
+    // body. And a caller who cannot see this agent (owner scoping) must get
+    // the same 404 the GET side of this endpoint already returns, not a
+    // successful write to an agent that is invisible to them.
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
     }
 
     let mode = match body["mode"].as_str() {
@@ -933,11 +955,7 @@ pub async fn set_agent_model_routing(
         // per-agent opt-out and `default_profile` survives a save that does
         // not carry it — rebuilding the override wholesale from the body
         // dropped both, and `fixed` was not even readable through the GET.
-        let existing = state
-            .kernel
-            .agent_registry()
-            .get(agent_id)
-            .and_then(|e| e.manifest.model.router_override.clone());
+        let existing = entry.manifest.model.router_override.clone();
         let fixed = body["fixed"]
             .as_bool()
             .or(existing.as_ref().map(|o| o.fixed))

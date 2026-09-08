@@ -462,6 +462,7 @@ impl App {
                 mode,
                 allowed_profiles,
                 cost_budget,
+                default_profile,
                 available,
             } => {
                 // Populate the routing editor from the agent's real stored
@@ -479,6 +480,7 @@ impl App {
                     .iter()
                     .position(|(_, wire)| *wire == cost_budget.as_deref())
                     .unwrap_or(0);
+                self.agents.router_default_profile = default_profile;
             }
             AppEvent::AgentModelRoutingUpdated(id) => {
                 self.agents.status_msg =
@@ -1934,6 +1936,7 @@ impl App {
                 mode,
                 allowed_profiles,
                 cost_budget,
+                default_profile,
             } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_update_agent_model_routing(
@@ -1942,6 +1945,7 @@ impl App {
                         mode,
                         allowed_profiles,
                         cost_budget,
+                        default_profile,
                         self.event_tx.clone(),
                     );
                 }

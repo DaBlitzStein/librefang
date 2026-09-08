@@ -1,0 +1,3 @@
+A profile without `max_output_tokens` now clears the previous model's output cap the same way it already cleared `context_window`, instead of leaving a routed model capped at the endpoint it just switched away from.
+`PUT /api/agents/{id}/model_routing` now 404s for an agent id that does not exist or that the caller cannot see, matching the GET side of the same endpoint, instead of falling through to a 400 that reads like a malformed request body.
+The TUI's embedded (in-process) model routing editor no longer wipes an agent's `default_profile` fallback on every save — it was never loaded into the editor to begin with, so any edit through an embedded TUI silently cleared it (#7781) (@DaBlitzStein)

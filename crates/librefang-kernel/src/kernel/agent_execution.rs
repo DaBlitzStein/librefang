@@ -130,6 +130,38 @@ pub(crate) fn model_selection_path(
     }
 }
 
+/// Apply a routed [`librefang_types::model_profile::ModelProfile`] onto an
+/// agent's [`librefang_types::agent::ModelConfig`] (#7781 review).
+///
+/// Extracted out of the inline `ModelSelectionPath::Profile` branch so the
+/// endpoint-switch contract has a unit test that does not require booting a
+/// kernel or making an LLM call.
+pub(crate) fn apply_routed_profile(
+    model: &mut librefang_types::agent::ModelConfig,
+    profile: librefang_types::model_profile::ModelProfile,
+) {
+    // #7781 review: a provider change must also drop the per-agent
+    // api_key_env / base_url overrides — they described the previous
+    // provider's endpoint and would send the routed request to the
+    // wrong place with the wrong credentials. Same contract
+    // `set_agent_model` applies (`agent_state.rs:269-278`).
+    if model.provider != profile.provider {
+        model.api_key_env = None;
+        model.base_url = None;
+    }
+    model.provider = profile.provider;
+    model.model = profile.model;
+    // `context_window` / `max_output_tokens` are limits that describe
+    // what the *endpoint* can do, not preferences of the agent
+    // (`ModelConfig`'s doc, librefang-types/src/agent.rs). After
+    // routing the endpoint is a different one, so a profile that
+    // does not carry them must not leave the previous model's limits
+    // in place — that would cap the new model at the old model's
+    // window (#7781 review).
+    model.context_window = profile.context_window;
+    model.max_output_tokens = profile.max_output_tokens;
+}
+
 impl LibreFangKernel {
     // -----------------------------------------------------------------------
     // Module dispatch: WASM / Python / LLM
@@ -1133,26 +1165,7 @@ impl LibreFangKernel {
         } else if let (ModelSelectionPath::Profile, Some(profile)) =
             (selection_path, routed_profile)
         {
-            // #7781 review: a provider change must also drop the per-agent
-            // api_key_env / base_url overrides — they described the previous
-            // provider's endpoint and would send the routed request to the
-            // wrong place with the wrong credentials. Same contract
-            // `set_agent_model` applies (`agent_state.rs:269-278`).
-            let prev_provider = manifest.model.provider.clone();
-            if prev_provider != profile.provider {
-                manifest.model.api_key_env = None;
-                manifest.model.base_url = None;
-            }
-            manifest.model.provider = profile.provider;
-            manifest.model.model = profile.model;
-            // `context_window` / `max_output_tokens` are limits that describe
-            // what the *endpoint* can do, not preferences of the agent
-            // (`ModelConfig`'s doc, librefang-types/src/agent.rs). After
-            // routing the endpoint is a different one, so a profile that
-            // does not carry them must not leave the previous model's limits
-            // in place — that would cap the new model at the old model's
-            // window (#7781 review).
-            manifest.model.context_window = profile.context_window;
+            apply_routed_profile(&mut manifest.model, profile);
         } else if let (ModelSelectionPath::Tier, Some(routing_config)) =
             (selection_path, tier_routing_config)
         {
@@ -1887,6 +1900,98 @@ mod model_selection_precedence_tests {
         assert!(seen.contains(&ModelSelectionPath::Profile));
         assert!(seen.contains(&ModelSelectionPath::Tier));
         assert!(seen.contains(&ModelSelectionPath::ManifestModel));
+    }
+}
+
+/// Regression tests for `apply_routed_profile` (#7781 review): a profile
+/// switch must not leave any part of the previous endpoint's identity
+/// behind — neither its credentials nor its limits.
+#[cfg(test)]
+mod apply_routed_profile_tests {
+    use super::apply_routed_profile;
+    use librefang_types::agent::ModelConfig;
+    use librefang_types::model_profile::{CostTier, ModelProfile};
+
+    fn profile(provider: &str, model: &str) -> ModelProfile {
+        ModelProfile {
+            name: "test-profile".to_string(),
+            tags: Default::default(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            context_window: None,
+            max_output_tokens: None,
+            cost_tier: CostTier::Medium,
+            priority: 0,
+            max_complexity: 1.0,
+            description: None,
+        }
+    }
+
+    fn model_with_stale_state() -> ModelConfig {
+        ModelConfig {
+            provider: "cloudverse".to_string(),
+            model: "old-model".to_string(),
+            api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
+            base_url: Some("https://cloudverse.example/v1".to_string()),
+            context_window: Some(8_000),
+            max_output_tokens: Some(2_000),
+            ..ModelConfig::default()
+        }
+    }
+
+    /// A profile that does not carry `max_output_tokens` must clear the
+    /// previous model's value rather than leaving the old endpoint's cap in
+    /// place — the same rule already applied to `context_window`.
+    #[test]
+    fn profile_without_max_output_tokens_clears_the_stale_limit() {
+        let mut model = model_with_stale_state();
+        apply_routed_profile(&mut model, profile("openrouter", "new-model"));
+
+        assert_eq!(model.context_window, None);
+        assert_eq!(model.max_output_tokens, None);
+    }
+
+    /// A profile that does carry `max_output_tokens` overwrites the stale
+    /// value with the new endpoint's limit.
+    #[test]
+    fn profile_with_max_output_tokens_overwrites_the_stale_limit() {
+        let mut model = model_with_stale_state();
+        let mut p = profile("openrouter", "new-model");
+        p.context_window = Some(128_000);
+        p.max_output_tokens = Some(16_000);
+
+        apply_routed_profile(&mut model, p);
+
+        assert_eq!(model.context_window, Some(128_000));
+        assert_eq!(model.max_output_tokens, Some(16_000));
+    }
+
+    /// A provider change must also drop the stale per-agent credential
+    /// overrides (same contract as `set_agent_model`).
+    #[test]
+    fn provider_change_clears_stale_credential_overrides() {
+        let mut model = model_with_stale_state();
+        apply_routed_profile(&mut model, profile("openrouter", "new-model"));
+
+        assert_eq!(model.provider, "openrouter");
+        assert_eq!(model.model, "new-model");
+        assert!(model.api_key_env.is_none());
+        assert!(model.base_url.is_none());
+    }
+
+    /// Re-routing within the *same* provider must leave a legitimate
+    /// per-agent credential override alone.
+    #[test]
+    fn same_provider_reroute_preserves_credential_overrides() {
+        let mut model = model_with_stale_state();
+        apply_routed_profile(&mut model, profile("cloudverse", "another-model"));
+
+        assert_eq!(model.model, "another-model");
+        assert_eq!(model.api_key_env.as_deref(), Some("CLOUDVERSE_API_KEY"));
+        assert_eq!(
+            model.base_url.as_deref(),
+            Some("https://cloudverse.example/v1")
+        );
     }
 }
 
